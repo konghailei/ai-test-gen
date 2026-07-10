@@ -329,6 +329,19 @@ class MilvusVectorStore:
             parsed.append({"id": r["id"], "metadata": meta or {}, "document": r.get("document", "")})
         return parsed
 
+    def count_requirements(self, product_id: str | None = None) -> int:
+        """统计需求数量（Milvus 覆盖 ChromaDB 基类）。"""
+        self._ensure_connected()
+        collection = self._get_collection("requirements")
+        if product_id:
+            expr = f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"'
+            results = collection.query(expr=expr, output_fields=["id"], limit=10000)
+            return len(results)
+        try:
+            return collection.num_entities
+        except Exception:
+            return 0
+
     def delete_requirement(self, req_id: str) -> None:
         """删除需求向量。"""
         self._ensure_connected()
