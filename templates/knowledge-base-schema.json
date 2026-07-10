@@ -1,0 +1,226 @@
+{
+  "$schema": "https://ai-test-gen/knowledge-base-schema-v1.0.json",
+  "schema_version": "1.0",
+  "description": "知识库数据模型定义 — 涵盖 Vector DB 嵌入格式和 PostgreSQL 表结构",
+
+  "vector_db": {
+    "collections": {
+      "requirements": {
+        "name": "kb_requirements",
+        "description": "历史需求文档的向量存储",
+        "embedding_model": "bge-large-zh-v1.5",
+        "embedding_dim": 1024,
+        "distance_metric": "cosine",
+        "metadata_schema": {
+          "req_id": "string — 需求唯一 ID",
+          "doc_type": "const 'requirement'",
+          "product_id": "string — 产品 ID，按产品隔离",
+          "module": "string — 主模块（兼容字段，从 modules[0] 取值，用于检索过滤）",
+          "modules": "array<string> — 关联模块列表（多模块支持）",
+          "priority": "enum: P0|P1|P2|P3",
+          "version": "integer",
+          "status": "enum: active|superseded|deprecated|archived",
+          "tags": "array<string>",
+          "created_at": "ISO 8601 datetime",
+          "updated_at": "ISO 8601 datetime"
+        },
+        "text_template": "{title}\n{summary}\n前置条件: {preconditions}\n正常流程: {happy_path}\n异常流程: {alternate_flows}\n业务规则: {business_rules}\n测试关注点: {test_points_hint}"
+      },
+
+      "test_cases": {
+        "name": "kb_test_cases",
+        "description": "历史测试用例的向量存储",
+        "embedding_model": "bge-large-zh-v1.5",
+        "embedding_dim": 1024,
+        "distance_metric": "cosine",
+        "metadata_schema": {
+          "case_id": "string",
+          "req_id": "string",
+          "doc_type": "const 'test_case'",
+          "product_id": "string — 产品 ID，按产品隔离",
+          "case_type": "enum: functional|boundary|exception|security|performance|integration",
+          "priority": "enum: P0|P1|P2|P3",
+          "module": "string — 主模块（兼容字段，从 modules[0] 取值）",
+          "modules": "array<string> — 关联模块列表",
+          "status": "enum: draft|reviewed|approved|rejected",
+          "confidence": "float 0.0-1.0",
+          "acceptance_rate": "float 0.0-1.0",
+          "source_pattern": "string|null",
+          "created_at": "ISO 8601 datetime",
+          "weight": "float — 检索权重"
+        },
+        "text_template": "{title}\n{description}\n类型: {type}\n步骤: {steps}\n断言: {assertions}\n前置条件: {preconditions}"
+      },
+
+      "test_patterns": {
+        "name": "kb_test_patterns",
+        "description": "预定义测试模式的向量存储 (种子数据)",
+        "embedding_model": "bge-large-zh-v1.5",
+        "embedding_dim": 1024,
+        "distance_metric": "cosine",
+        "metadata_schema": {
+          "pattern_id": "integer",
+          "pattern_name": "string — 如 'CRUD模式'、'状态机模式'",
+          "doc_type": "const 'test_pattern'",
+          "category": "enum: crud|state_machine|auth|validation|workflow|concurrency|async|consistency",
+          "usage_count": "integer",
+          "success_rate": "float"
+        },
+        "seed_patterns": [
+          "crud_pattern",
+          "state_machine_pattern",
+          "auth_pattern",
+          "validation_pattern",
+          "pagination_pattern",
+          "concurrency_pattern",
+          "async_callback_pattern",
+          "data_consistency_pattern"
+        ]
+      },
+
+      "error_cases": {
+        "name": "kb_error_cases",
+        "description": "AI 生成失败的用例及修正记录",
+        "embedding_model": "bge-large-zh-v1.5",
+        "embedding_dim": 1024,
+        "distance_metric": "cosine",
+        "metadata_schema": {
+          "error_id": "integer",
+          "original_case_id": "string",
+          "doc_type": "const 'error_case'",
+          "error_type": "enum: missing_precondition|wrong_boundary|redundant|ambiguous|incomplete|conflicting",
+          "created_at": "ISO 8601 datetime"
+        },
+        "text_template": "原用例: {original_case_summary}\n错误类型: {error_type}\n错误详情: {error_detail}\n修正: {corrected_summary}"
+      }
+    }
+  },
+
+  "relational_db": {
+    "engine": "PostgreSQL 16",
+    "extensions": ["pgvector (可选)", "uuid-ossp", "pg_trgm (模糊搜索)"],
+
+    "tables": {
+      "requirements": {
+        "columns": [
+          {"name": "id", "type": "VARCHAR(32)", "constraints": "PRIMARY KEY"},
+          {"name": "product_id", "type": "VARCHAR(32)", "constraints": "NOT NULL — 产品 ID，按产品隔离"},
+          {"name": "title", "type": "VARCHAR(255)", "constraints": "NOT NULL"},
+          {"name": "priority", "type": "VARCHAR(4)", "constraints": "CHECK IN (P0,P1,P2,P3)"},
+          {"name": "module", "type": "VARCHAR(64)", "constraints": "NOT NULL — 主模块（兼容字段，等于 modules[0]）"},
+          {"name": "modules", "type": "TEXT[]", "constraints": "NOT NULL DEFAULT '{}' — 关联模块列表（多模块）"},
+          {"name": "tags", "type": "TEXT[]", "constraints": "DEFAULT '{}'"},
+          {"name": "version", "type": "INTEGER", "constraints": "DEFAULT 1"},
+          {"name": "status", "type": "VARCHAR(16)", "constraints": "DEFAULT 'active'"},
+          {"name": "srr_json", "type": "JSONB", "constraints": "NOT NULL"},
+          {"name": "raw_text", "type": "TEXT"},
+          {"name": "source_type", "type": "VARCHAR(32)"},
+          {"name": "source_url", "type": "TEXT"},
+          {"name": "created_by", "type": "VARCHAR(64)"},
+          {"name": "created_at", "type": "TIMESTAMPTZ", "constraints": "DEFAULT NOW()"},
+          {"name": "updated_at", "type": "TIMESTAMPTZ", "constraints": "DEFAULT NOW()"},
+          {"name": "superseded_by", "type": "VARCHAR(32)", "constraints": "FK → requirements.id"}
+        ],
+        "indexes": [
+          "idx_req_product ON requirements(product_id)",
+          "idx_req_module ON requirements(module)",
+          "idx_req_modules ON requirements USING GIN(modules)",
+          "idx_req_priority ON requirements(priority)",
+          "idx_req_status ON requirements(status)",
+          "idx_req_tags ON requirements USING GIN(tags)",
+          "idx_req_srr ON requirements USING GIN(srr_json jsonb_path_ops)"
+        ]
+      },
+
+      "test_cases": {
+        "columns": [
+          {"name": "id", "type": "VARCHAR(32)", "constraints": "PRIMARY KEY"},
+          {"name": "req_id", "type": "VARCHAR(32)", "constraints": "FK → requirements.id"},
+          {"name": "product_id", "type": "VARCHAR(32)", "constraints": "NOT NULL — 产品 ID（冗余自 requirements，便于按产品查询）"},
+          {"name": "module", "type": "VARCHAR(64)", "constraints": "— 主模块（兼容字段）"},
+          {"name": "modules", "type": "TEXT[]", "constraints": "DEFAULT '{}' — 关联模块列表（多模块）"},
+          {"name": "title", "type": "VARCHAR(255)", "constraints": "NOT NULL"},
+          {"name": "type", "type": "VARCHAR(32)", "constraints": "NOT NULL"},
+          {"name": "priority", "type": "VARCHAR(4)"},
+          {"name": "status", "type": "VARCHAR(16)", "constraints": "DEFAULT 'draft'"},
+          {"name": "case_json", "type": "JSONB", "constraints": "NOT NULL"},
+          {"name": "source", "type": "VARCHAR(32)", "constraints": "DEFAULT 'ai_generated'"},
+          {"name": "gen_batch_id", "type": "VARCHAR(64)"},
+          {"name": "confidence", "type": "NUMERIC(3,2)"},
+          {"name": "reviewed_by", "type": "VARCHAR(64)"},
+          {"name": "reviewed_at", "type": "TIMESTAMPTZ"},
+          {"name": "feedback", "type": "JSONB"},
+          {"name": "execution_count", "type": "INTEGER", "constraints": "DEFAULT 0"},
+          {"name": "last_pass_rate", "type": "NUMERIC(3,2)"},
+          {"name": "weight", "type": "NUMERIC(4,3)", "constraints": "DEFAULT 1.0"},
+          {"name": "created_at", "type": "TIMESTAMPTZ", "constraints": "DEFAULT NOW()"},
+          {"name": "updated_at", "type": "TIMESTAMPTZ", "constraints": "DEFAULT NOW()"}
+        ],
+        "indexes": [
+          "idx_case_req ON test_cases(req_id)",
+          "idx_case_product ON test_cases(product_id)",
+          "idx_case_module ON test_cases(module)",
+          "idx_case_modules ON test_cases USING GIN(modules)",
+          "idx_case_type ON test_cases(type)",
+          "idx_case_status ON test_cases(status)",
+          "idx_case_confidence ON test_cases(confidence)",
+          "idx_case_gen_batch ON test_cases(gen_batch_id)",
+          "idx_case_weight ON test_cases(weight DESC)"
+        ]
+      },
+
+      "test_patterns": {
+        "columns": [
+          {"name": "id", "type": "SERIAL", "constraints": "PRIMARY KEY"},
+          {"name": "name", "type": "VARCHAR(128)", "constraints": "NOT NULL UNIQUE"},
+          {"name": "category", "type": "VARCHAR(32)", "constraints": "NOT NULL"},
+          {"name": "pattern_json", "type": "JSONB", "constraints": "NOT NULL"},
+          {"name": "usage_count", "type": "INTEGER", "constraints": "DEFAULT 0"},
+          {"name": "success_rate", "type": "NUMERIC(3,2)"},
+          {"name": "created_at", "type": "TIMESTAMPTZ", "constraints": "DEFAULT NOW()"}
+        ]
+      },
+
+      "error_cases": {
+        "columns": [
+          {"name": "id", "type": "SERIAL", "constraints": "PRIMARY KEY"},
+          {"name": "original_case_id", "type": "VARCHAR(32)", "constraints": "FK → test_cases.id"},
+          {"name": "error_type", "type": "VARCHAR(32)", "constraints": "NOT NULL"},
+          {"name": "error_detail", "type": "TEXT"},
+          {"name": "feedback", "type": "TEXT"},
+          {"name": "corrected_json", "type": "JSONB"},
+          {"name": "created_at", "type": "TIMESTAMPTZ", "constraints": "DEFAULT NOW()"}
+        ]
+      },
+
+      "generation_batches": {
+        "description": "记录每次批量生成的元信息",
+        "columns": [
+          {"name": "id", "type": "VARCHAR(64)", "constraints": "PRIMARY KEY"},
+          {"name": "req_id", "type": "VARCHAR(32)", "constraints": "FK → requirements.id"},
+          {"name": "total_cases", "type": "INTEGER"},
+          {"name": "accepted_cases", "type": "INTEGER", "constraints": "DEFAULT 0"},
+          {"name": "rejected_cases", "type": "INTEGER", "constraints": "DEFAULT 0"},
+          {"name": "model_used", "type": "VARCHAR(64)"},
+          {"name": "prompt_version", "type": "VARCHAR(16)"},
+          {"name": "total_tokens", "type": "INTEGER"},
+          {"name": "total_cost", "type": "NUMERIC(10,4)"},
+          {"name": "duration_ms", "type": "INTEGER"},
+          {"name": "created_at", "type": "TIMESTAMPTZ", "constraints": "DEFAULT NOW()"}
+        ]
+      }
+    }
+  },
+
+  "migrations": {
+    "description": "知识库 Schema 版本迁移记录",
+    "versions": [
+      {
+        "version": "1.0",
+        "date": "2024-06-24",
+        "changes": "初始 Schema — requirements, test_cases, test_patterns, error_cases, generation_batches 五表",
+        "script": "migrations/001_initial_schema.sql"
+      }
+    ]
+  }
+}

@@ -1,0 +1,223 @@
+{
+  "$schema": "https://ai-test-gen/utcf-v1.0.json",
+  "format_version": "1.0",
+  "description": "Universal Test Case Format (UTCF) — 通用测试用例输出格式",
+
+  "metadata": {
+    "generated_at": "{{TIMESTAMP}}",
+    "generator": "ai-test-gen v1.0.0",
+    "generator_model": "{{MODEL_NAME}}",
+    "source_requirement": {
+      "id": "{{REQ_ID}}",
+      "title": "{{REQ_TITLE}}",
+      "version": 1
+    },
+    "gen_batch_id": "{{BATCH_ID}}",
+    "total_cases": 0,
+    "coverage_summary": {
+      "functional": 0,
+      "boundary": 0,
+      "exception": 0,
+      "security": 0,
+      "performance": 0,
+      "integration": 0,
+      "exploratory": 0
+    }
+  },
+
+  "test_suite": [
+    {
+      "_comment": "=== 功能测试用例示例 ===",
+      "id": "TC-AUTH-0001-0001",
+      "title": "正常登录流程验证",
+      "description": "验证用户使用正确的账号密码可以成功登录系统",
+      "type": "functional",
+      "priority": "P0",
+      "tags": ["smoke", "regression", "auth"],
+      "preconditions": [
+        "测试账号已在系统中注册",
+        "账号未处于锁定状态",
+        "数据库连接正常"
+      ],
+      "steps": [
+        {
+          "step": 1,
+          "action": "打开登录页面",
+          "expected": "页面正常加载，显示用户名、密码输入框和登录按钮",
+          "data": {}
+        },
+        {
+          "step": 2,
+          "action": "输入有效用户名和密码",
+          "expected": "输入框正常显示输入内容",
+          "data": {"username": "test_user", "password": "Test@123456"}
+        },
+        {
+          "step": 3,
+          "action": "点击登录按钮",
+          "expected": "登录成功，页面跳转到首页，顶部显示用户名",
+          "data": {}
+        }
+      ],
+      "test_data": {
+        "username": "test_user",
+        "password": "Test@123456"
+      },
+      "assertions": [
+        {"type": "status_code", "expected_value": 200, "message": "登录接口返回 200"},
+        {"type": "not_null", "target": "response.token", "message": "返回 JWT Token 不为空"},
+        {"type": "equals", "target": "response.redirect_url", "expected_value": "/home", "message": "跳转首页"}
+      ],
+      "cleanup": ["DELETE /api/logout", "清理测试 Session"],
+      "related_requirement": "{{REQ_ID}}",
+      "source_pattern": "auth_pattern",
+      "confidence": 0.95,
+      "execution": {
+        "timeout_seconds": 15,
+        "retry_count": 0,
+        "depends_on": [],
+        "skip_conditions": []
+      }
+    },
+    {
+      "_comment": "=== 边界值测试用例示例 ===",
+      "id": "TC-AUTH-0001-0002",
+      "title": "密码长度边界值测试",
+      "description": "验证密码字段的边界值校验逻辑",
+      "type": "boundary",
+      "priority": "P2",
+      "tags": ["boundary", "validation"],
+      "preconditions": ["测试账号已注册"],
+      "steps": [
+        {"step": 1, "action": "输入 5 位密码尝试登录", "expected": "前端拦截，提示'密码长度至少6位'"},
+        {"step": 2, "action": "输入 6 位密码尝试登录", "expected": "允许提交"},
+        {"step": 3, "action": "输入 128 位密码尝试登录", "expected": "允许提交"},
+        {"step": 4, "action": "输入 129 位密码尝试登录", "expected": "前端拦截，提示'密码过长'"}
+      ],
+      "test_data": {
+        "username": "test_user",
+        "password_under_min": "12345",
+        "password_min": "123456",
+        "password_max": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "password_over_max": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "assertions": [
+        {"type": "contains", "target": "error.message", "expected_value": "长度", "message": "边界超限时提示长度错误"}
+      ],
+      "cleanup": [],
+      "related_requirement": "{{REQ_ID}}",
+      "source_pattern": "validation_pattern",
+      "confidence": 0.92,
+      "execution": {
+        "timeout_seconds": 10,
+        "retry_count": 0,
+        "depends_on": [],
+        "skip_conditions": []
+      }
+    },
+    {
+      "_comment": "=== 异常测试用例示例 ===",
+      "id": "TC-AUTH-0001-0003",
+      "title": "连续登录失败锁定机制验证",
+      "description": "验证连续5次密码错误后账号锁定30分钟",
+      "type": "exception",
+      "priority": "P1",
+      "tags": ["security", "lockout"],
+      "preconditions": ["测试账号已注册", "账号未锁定"],
+      "steps": [
+        {"step": 1, "action": "连续 4 次输入错误密码", "expected": "每次提示密码错误"},
+        {"step": 2, "action": "第 5 次输入错误密码", "expected": "提示'账号已锁定，请30分钟后重试'"},
+        {"step": 3, "action": "锁定期间使用正确密码登录", "expected": "提示'账号已锁定'，拒绝登录"},
+        {"step": 4, "action": "30分钟后使用正确密码登录", "expected": "登录成功"}
+      ],
+      "test_data": {
+        "username": "test_user",
+        "wrong_password": "WrongPass123"
+      },
+      "assertions": [
+        {"type": "contains", "target": "response.message", "expected_value": "锁定", "message": "第5次失败后提示锁定"},
+        {"type": "equals", "target": "response.status", "expected_value": 423, "message": "锁定状态返回 423"}
+      ],
+      "cleanup": ["重置失败计数", "解除账号锁定"],
+      "related_requirement": "{{REQ_ID}}",
+      "source_pattern": "auth_pattern",
+      "confidence": 0.88,
+      "execution": {
+        "timeout_seconds": 30,
+        "retry_count": 0,
+        "depends_on": [],
+        "skip_conditions": ["WAIT_30_MINUTES: 本用例需要等待30分钟，CI 中可 skip 或 mock 时间"]
+      }
+    },
+    {
+      "_comment": "=== 安全测试用例示例 ===",
+      "id": "TC-AUTH-0001-0004",
+      "title": "SQL 注入防护验证",
+      "description": "验证登录接口对 SQL 注入攻击的防护",
+      "type": "security",
+      "priority": "P1",
+      "tags": ["security", "owasp", "injection"],
+      "preconditions": ["WAF/防火墙处于正常状态"],
+      "steps": [
+        {"step": 1, "action": "用户名输入 SQL 注入 payload: ' OR '1'='1", "expected": "登录失败，不泄露数据库信息"},
+        {"step": 2, "action": "密码输入 SQL 注入 payload: '; DROP TABLE users; --", "expected": "登录失败，数据库表未被删除"},
+        {"step": 3, "action": "用户名输入 XSS payload: <script>alert(1)</script>", "expected": "登录失败，脚本不被执行，输入被转义"}
+      ],
+      "test_data": {
+        "sql_injection_usernames": [
+          "' OR '1'='1",
+          "admin' --",
+          "'; DROP TABLE users; --",
+          "1' UNION SELECT * FROM users --"
+        ]
+      },
+      "assertions": [
+        {"type": "not_equals", "target": "response.status", "expected_value": 500, "message": "不应返回服务器内部错误"},
+        {"type": "equals", "target": "response.status", "expected_value": 401, "message": "注入攻击应返回认证失败"}
+      ],
+      "cleanup": ["验证数据库表结构完整性"],
+      "related_requirement": "{{REQ_ID}}",
+      "source_pattern": "security_injection_pattern",
+      "confidence": 0.85,
+      "execution": {
+        "timeout_seconds": 10,
+        "retry_count": 0,
+        "depends_on": [],
+        "skip_conditions": []
+      }
+    },
+    {
+      "_comment": "=== 性能测试用例示例 ===",
+      "id": "TC-AUTH-0001-0005",
+      "title": "登录接口并发性能验证",
+      "description": "验证登录接口在高并发下的性能表现",
+      "type": "performance",
+      "priority": "P2",
+      "tags": ["performance", "load"],
+      "preconditions": ["压测环境已隔离", "测试数据已准备"],
+      "steps": [
+        {"step": 1, "action": "100 并发用户同时发起登录请求", "expected": "P99 响应时间 < 500ms"},
+        {"step": 2, "action": "持续压测 5 分钟", "expected": "错误率 < 0.1%，无服务崩溃"}
+      ],
+      "test_data": {
+        "concurrent_users": 100,
+        "duration_seconds": 300,
+        "ramp_up_seconds": 30
+      },
+      "assertions": [
+        {"type": "lt", "target": "metrics.p99_latency_ms", "expected_value": 500, "message": "P99 延迟不超过 500ms"},
+        {"type": "lt", "target": "metrics.error_rate", "expected_value": 0.001, "message": "错误率低于 0.1%"}
+      ],
+      "cleanup": ["停止压测", "清理压测数据"],
+      "related_requirement": "{{REQ_ID}}",
+      "source_pattern": "performance_load_pattern",
+      "confidence": 0.80,
+      "execution": {
+        "timeout_seconds": 600,
+        "retry_count": 0,
+        "depends_on": [],
+        "skip_conditions": ["env == 'dev'"]
+      }
+    }
+  ]
+}

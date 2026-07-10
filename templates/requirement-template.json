@@ -1,0 +1,180 @@
+{
+  "$schema": "https://ai-test-gen/requirement-template-v1.0.json",
+  "template_version": "1.0",
+  "template_name": "标准化需求输入模板",
+  "description": "用于 ReqAgent 解析的标准化需求文档格式。支持 Markdown 编写后自动转换为 SRR JSON。",
+
+  "fields": [
+    {
+      "path": "id",
+      "label": "需求ID",
+      "type": "string",
+      "required": true,
+      "pattern": "^REQ-\\d{4}-\\d{3,}$",
+      "example": "REQ-2024-001",
+      "description": "全局唯一需求标识，格式: REQ-YYYY-NNN"
+    },
+    {
+      "path": "title",
+      "label": "需求标题",
+      "type": "string",
+      "required": true,
+      "max_length": 255,
+      "example": "用户登录功能",
+      "description": "一句话概述需求内容"
+    },
+    {
+      "path": "priority",
+      "label": "优先级",
+      "type": "enum",
+      "required": true,
+      "enum": ["P0", "P1", "P2", "P3"],
+      "description": "P0: 核心功能/阻塞; P1: 重要; P2: 一般; P3: 低优"
+    },
+    {
+      "path": "product_id",
+      "label": "产品ID",
+      "type": "string",
+      "required": true,
+      "pattern": "^PROD-\\d{3,}$",
+      "example": "PROD-001",
+      "description": "产品唯一标识，格式: PROD-NNN。同一产品下的需求和用例按 product_id 隔离"
+    },
+    {
+      "path": "product_name",
+      "label": "产品名称",
+      "type": "string",
+      "required": false,
+      "max_length": 100,
+      "example": "用户中心",
+      "description": "产品名称（可选，便于展示）"
+    },
+    {
+      "path": "modules",
+      "label": "关联模块",
+      "type": "array<string>",
+      "required": true,
+      "items": {"type": "string", "max_length": 50},
+      "min_items": 1,
+      "example": ["auth", "session"],
+      "description": "功能模块标识列表（支持多模块）。一个需求可涉及多个模块，影响分析时按模块检索关联需求"
+    },
+    {
+      "path": "source",
+      "label": "需求来源",
+      "type": "object",
+      "required": false,
+      "properties": {
+        "type": {"enum": ["jira", "prd", "user_story", "email", "conversation", "api_doc"]},
+        "url": {"type": "string"},
+        "ticket_id": {"type": "string"}
+      }
+    },
+    {
+      "path": "summary",
+      "label": "功能概述",
+      "type": "string",
+      "required": true,
+      "max_length": 500,
+      "example": "用户通过账号密码登录系统，登录成功后跳转首页，支持验证码和账号锁定机制"
+    },
+    {
+      "path": "preconditions",
+      "label": "前置条件",
+      "type": "array<string>",
+      "required": false,
+      "items": {"type": "string", "max_length": 200},
+      "example": ["用户已在系统注册", "账号未处于锁定状态"]
+    },
+    {
+      "path": "flows.happy_path",
+      "label": "正常流程",
+      "type": "array<Step>",
+      "required": true,
+      "item_schema": {
+        "order": {"type": "integer"},
+        "action": {"type": "string", "max_length": 500},
+        "expect": {"type": "string", "max_length": 500}
+      }
+    },
+    {
+      "path": "flows.alternate_flows",
+      "label": "异常流程",
+      "type": "array<AlternateFlow>",
+      "required": false,
+      "item_schema": {
+        "name": {"type": "string"},
+        "trigger": {"type": "string"},
+        "steps": {"type": "array<string>"},
+        "expect": {"type": "string"}
+      }
+    },
+    {
+      "path": "boundary_conditions",
+      "label": "边界条件",
+      "type": "array<BoundaryCondition>",
+      "required": false,
+      "item_schema": {
+        "field": {"type": "string"},
+        "condition": {"type": "string"},
+        "expect": {"type": "string"}
+      }
+    },
+    {
+      "path": "business_rules",
+      "label": "业务规则",
+      "type": "array<BusinessRule>",
+      "required": false,
+      "item_schema": {
+        "id": {"type": "string", "pattern": "^BR-\\d{2}$"},
+        "rule": {"type": "string"},
+        "type": {"enum": ["security", "validation", "workflow", "calculation", "notification"]}
+      }
+    },
+    {
+      "path": "data_constraints",
+      "label": "数据约束",
+      "type": "array<DataConstraint>",
+      "required": false,
+      "item_schema": {
+        "field": {"type": "string"},
+        "type": {"enum": ["string", "int", "float", "boolean", "datetime", "enum", "json"]},
+        "required": {"type": "boolean"},
+        "constraints": {"type": "string"},
+        "example": {}
+      }
+    },
+    {
+      "path": "non_functional",
+      "label": "非功能需求",
+      "type": "object",
+      "required": false,
+      "properties": {
+        "performance": {"type": "string"},
+        "security": {"type": "string"},
+        "compatibility": {"type": "string"},
+        "availability": {"type": "string"},
+        "scalability": {"type": "string"}
+      }
+    },
+    {
+      "path": "relationships",
+      "label": "关联需求",
+      "type": "array<Relationship>",
+      "required": false,
+      "item_schema": {
+        "target": {"type": "string"},
+        "type": {"enum": ["depends_on", "extends", "conflicts_with", "related_to"]},
+        "strength": {"enum": ["strong", "medium", "weak"]},
+        "note": {"type": "string"}
+      }
+    },
+    {
+      "path": "tags",
+      "label": "标签",
+      "type": "array<string>",
+      "required": false,
+      "example": ["login", "auth", "security", "P0"]
+    }
+  ]
+}
