@@ -76,4 +76,5 @@ frontend/dist/
 
 # ===== 本地模型权重（大体积，不入库；使用说明见 models/README.md） =====
 models/*/
+backend/models/
 !models/README.md

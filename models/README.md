@@ -39,8 +39,10 @@ EMBEDDING_DEVICE=cpu
 ## Docker 基础镜像内置（推荐，零运行时下载）
 
 基础镜像 `backend/Dockerfile.base` 在构建时直接 `COPY models/bge-large-zh-v1.5` 到
-`/app/models/bge-large-zh-v1.5`，并内置 `EMBEDDING_MODEL_NAME=/app/models/bge-large-zh-v1.5`
+`/models/bge-large-zh-v1.5`，并内置 `EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5`
 默认值；`docker-compose.yml` 的后端 `environment` 同样指向该路径。
+（修改背景：`docker-compose.yml` 中 `./backend:/app` 的 volume 挂载会覆盖镜像内 `/app/models`，
+因此将模型独立存放至 `/models` 并通过单独的 volume:ro 挂载。）
 
 - 因此 **`docker compose` 部署无需联网下载模型**，只要构建前本目录模型已就绪即可。
 - `.dockerignore` 当前**未**排除 `models/`，构建上下文会包含该模型（约 1.3GB），COPY 才能生效。

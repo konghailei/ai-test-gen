@@ -120,7 +120,7 @@ class MilvusVectorStore:
                     device = settings.EMBEDDING_DEVICE
 
                     # 1) EMBEDDING_MODEL_NAME 直接指向本地目录（基础镜像内置或宿主机挂载）
-                    #    例：/app/models/bge-large-zh-v1.5
+                    #    例：/models/bge-large-zh-v1.5
                     if os.path.isabs(model_name) and os.path.isfile(os.path.join(model_name, "config.json")):
                         logger.info("[Milvus] 加载本地模型路径: {}", model_name)
                         self._model = SentenceTransformer(model_name, device=device)

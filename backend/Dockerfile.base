@@ -16,9 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # 直接内置本地 bge 模型：构建前已下载到项目 models/ 目录，
 # 构建时 COPY 进镜像，运行时零下载（替代原来的 modelscope 在线下载）。
 # 模型约 1.3GB，请确保 models/bge-large-zh-v1.5 已就绪后再执行本构建。
-COPY models/bge-large-zh-v1.5 /app/models/bge-large-zh-v1.5
+COPY models/bge-large-zh-v1.5 /models/bge-large-zh-v1.5
 ENV EMBEDDING_MODEL_TYPE=local \
-    EMBEDDING_MODEL_NAME=/app/models/bge-large-zh-v1.5 \
+    EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5 \
     EMBEDDING_DEVICE=cpu
 
 EXPOSE 8000

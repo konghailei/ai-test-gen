@@ -46,6 +46,8 @@ services:
       - ./logs:/app/logs
       # 开发模式：挂载代码实现热重载（生产部署时注释掉）
       - ./backend:/app
+      # bge 模型：独立挂载（/app 被覆盖后模型仍可访问）
+      - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
     env_file:
       - ./backend/.env
     environment:
@@ -56,7 +58,7 @@ services:
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
       - EMBEDDING_MODEL_TYPE=local
-      - EMBEDDING_MODEL_NAME=/app/models/bge-large-zh-v1.5
+      - EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5
     command: >
       sh -c "
         if [ '${DEBUG:-true}' = 'true' ]; then

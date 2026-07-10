@@ -146,7 +146,7 @@ docker compose up -d --build
 | 向量数据 | `./milvus/milvus/` | Milvus（绑定挂载） |
 | 元数据 | `./milvus/etcd/` | etcd（绑定挂载） |
 | 对象存储 | `./milvus/minio/` | MinIO（绑定挂载） |
-| bge 模型 | 基础镜像内 `/app/models` | `Dockerfile.base` COPY 本地模型，无需挂载 |
+| bge 模型 | 基础镜像内 `/models` 或宿主机挂载 | `Dockerfile.base` COPY + `docker-compose.yml` volume:ro |
 | 日志 | `./logs/` | loguru 按天轮转 |
 
 ---
@@ -210,7 +210,7 @@ print(f'向量数: {len(v)}')
 |------|--------|------|
 | `DATABASE_URL` | `postgresql+asyncpg://...` | PostgreSQL 连接（已预配） |
 | `VECTOR_STORE` | `milvus` | 向量后端 |
-| `EMBEDDING_MODEL_NAME` | `/app/models/bge-large-zh-v1.5` | 嵌入模型（基础镜像内置本地路径） |
+| `EMBEDDING_MODEL_NAME` | `/models/bge-large-zh-v1.5` | 嵌入模型（基础镜像内置或宿主机挂载的本地路径） |
 | `DEBUG` | `true` | 热重载模式 |
 | `API_PORT` | `8000` | 后端端口 |
 | `NGINX_PORT` | `80` | 前端端口 |
