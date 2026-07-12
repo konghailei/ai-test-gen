@@ -186,11 +186,11 @@ async def main():
 
         archive_data = resp.json()["data"]
         log("5", f"归档状态: {archive_data.get('status', '')}")
-        log("5", f"KB written: {archive_data.get('kb_written', False)}")
+        log("5", f"KB written: {archive_data.get('kb_task_queued', False)}")
         if archive_data.get("kb_error"):
             log("5", f"KB error: {archive_data.get('kb_error', '')}", "ERROR")
 
-        if not archive_data.get("kb_written"):
+        if not archive_data.get("kb_task_queued"):
             log("5", "KB 写入失败，后续测试可能受影响", "WARN")
 
         # ============================================================
@@ -305,7 +305,7 @@ async def main():
         print(f"  产品 ID:        {pid}")
         print(f"  文档 1 req_id:  {req_id_1}")
         print(f"  文档 2 req_id:  {req_id_2}")
-        print(f"  文档 1 状态:    archived (KB written={archive_data.get('kb_written')})")
+        print(f"  文档 1 状态:    archived (KB written={archive_data.get('kb_task_queued')})")
         print(f"  知识问答来源:   {len(sources)} 条")
         print(f"  文档 2 KB answered: {data2.get('kb_answered', 0)}")
         print(f"  文档 2 KB total:    {data2.get('kb_total', 0)}")

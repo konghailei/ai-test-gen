@@ -44,13 +44,13 @@ def main():
     print(f"\n归档耗时: {t1 - t0:.2f}s")
 
     if result.get("success"):
-        kb_written = result.get("data", {}).get("kb_written", False)
+        kb_task_queued = result.get("data", {}).get("kb_task_queued", False)
         print(f"\n=== 归档结果 ===")
-        print(f"  kb_written: {kb_written}")
+        print(f"  kb_task_queued: {kb_task_queued}")
         print(f"  go_live_date: {result.get('data', {}).get('go_live_date')}")
         print(f"  project_version: {result.get('data', {}).get('project_version')}")
 
-        if kb_written:
+        if kb_task_queued:
             print(f"\n[OK] Celery 异步任务已派发！等待 10 秒后检查 Celery worker 日志...")
             time.sleep(10)
             print(f"\n请检查 Celery 日志: docker logs ai-test-gen-celery --tail 20")

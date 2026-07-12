@@ -471,7 +471,7 @@ export default function Settings() {
         </h2>
         <div className="grid grid-cols-2 gap-4">
           {[
-            ['版本', healthStatus?.version || '-'],
+            ['版本', healthStatus?.version ? `v${healthStatus.version}` : '-'],
             ['主供应商', healthStatus?.llm_provider || '-'],
             ['LLM 状态', healthStatus?.llm_configured ? '已配置' : '未配置'],
             ['知识库模式', healthStatus?.cold_start_mode ? '冷启动' : '正常'],

@@ -49,7 +49,7 @@ def upload_and_archive_first():
     # Archive
     r = requests.post(f"{BASE}/requirements/{req_id}/archive", headers=headers(), timeout=120)
     resp = r.json()
-    print(f"Archive: kb_written={resp['data'].get('kb_written')}, error={resp['data'].get('kb_error', '')}")
+    print(f"Archive: kb_task_queued={resp['data'].get('kb_task_queued')}, error={resp['data'].get('kb_error', '')}")
     return req_id
 
 

@@ -60,7 +60,7 @@ async def main():
 
         # 归档
         resp = await client.post(f"/requirements/{req_id_1}/archive", headers=headers)
-        log("1", f"文档1归档: kb_written={resp.json()['data'].get('kb_written')}")
+        log("1", f"文档1归档: kb_task_queued={resp.json()['data'].get('kb_task_queued')}")
 
         # 上传第二个文档（增量）
         with open(DOC2, "r", encoding="utf-8") as f:

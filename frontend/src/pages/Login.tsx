@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Sparkles, Key, Eye, EyeOff, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react'
 import { useAuth } from '../auth'
+import { health } from '../api/client'
 
 const BASE = '/api'
 
@@ -13,6 +14,14 @@ export default function Login() {
   const [showPwd, setShowPwd] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  // 版本号统一取自后端 /health 接口（app.__version__），避免硬编码导致与其它页面不一致
+  const [version, setVersion] = useState('')
+
+  useEffect(() => {
+    health()
+      .then((h) => setVersion(h.version || ''))
+      .catch(() => {})
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -123,7 +132,7 @@ export default function Login() {
 
         {/* Footer */}
         <p className="text-center text-xs text-slate-500 mt-6">
-          AI-Test-Gen v1.0.0 — 安全审计版本
+          AI-Test-Gen{version ? ` v${version}` : ''} — 安全审计版本
         </p>
       </div>
     </div>

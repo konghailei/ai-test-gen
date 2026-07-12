@@ -207,7 +207,7 @@ def test_archive(req_id: str):
         "message": resp.get("message"),
         "req_id": data.get("req_id"),
         "status": data.get("status"),
-        "kb_written": data.get("kb_written"),
+        "kb_task_queued": data.get("kb_task_queued"),
         "kb_error": data.get("kb_error", ""),
     })
 
@@ -222,7 +222,7 @@ def test_archive(req_id: str):
         "kb_empty": health.get("kb_empty"),
     })
 
-    return data.get("kb_written", False)
+    return data.get("kb_task_queued", False)
 
 
 def test_knowledge_qa():
@@ -379,10 +379,10 @@ def main():
         sys.exit(1)
 
     # 2. Archive first document
-    kb_written = test_archive(req_id_1)
+    kb_task_queued = test_archive(req_id_1)
 
     # 3. Knowledge QA
-    if kb_written:
+    if kb_task_queued:
         qa_ok, qa_record_id = test_knowledge_qa()
         pp("QA Verification", {
             "sources_found": qa_ok,

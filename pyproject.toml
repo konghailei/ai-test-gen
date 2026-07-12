@@ -15,7 +15,9 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "ai-test-gen"
-version = "1.1.0"
+# 版本号唯一来源：backend/app/__init__.py 的 __version__
+# 此处不再硬编码，避免与运行时 /health 下发的版本号漂移
+dynamic = ["version"]
 description = "AI 驱动测试用例自动生成系统"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -97,3 +99,18 @@ ignore = ["E501"]  # 行长度由 formatter 处理
 
 [tool.ruff.format]
 quote-style = "double"
+
+# 版本号动态派生自 backend/app/VERSION（纯文本，仅含版本号）
+# 该文件是版本唯一来源：app/__init__.py 运行时读取它，pyproject 打包时也读取它
+[tool.setuptools.dynamic]
+version = {file = ["backend/app/VERSION"]}
+
+# 显式声明包发现路径：app 包位于 backend/ 下（backend 本身不是包，无 __init__.py）
+# 默认从仓库根自动发现会得到空列表，导致打包时遗漏 app 包
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+# 将 VERSION 文件随 app 包一起打进 wheel
+# 否则非 editable 安装时 __init__.py 运行时从同目录读取 VERSION 会找不到该文件
+[tool.setuptools.package-data]
+app = ["VERSION"]
