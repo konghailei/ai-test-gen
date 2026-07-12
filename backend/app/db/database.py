@@ -80,7 +80,7 @@ async def init_db() -> None:
                 ("change_type", "VARCHAR(16)", "change_type"),
                 ("change_summary", "TEXT NOT NULL DEFAULT ''", "change_summary"),
                 ("diff_json", "JSON NOT NULL DEFAULT '{}'", "diff_json"),
-                ("go_live_date", "DATE", "go_live_date"),
+                ("go_live_date", "TIMESTAMP", "go_live_date"),
             ],
             "projects": [
                 ("version", "VARCHAR(32) DEFAULT '1.0'", "version"),
@@ -217,6 +217,26 @@ async def init_db() -> None:
                         sp.rollback()
                         logger.warning("DB 迁移: {}.{} BM25 设置失败（已跳过，不影响启动）: {}",
                                        table, vec_col, str(mig_e)[:120])
+
+            # Step 6: go_live_date 列类型升级 DATE → TIMESTAMP（上线时间精确到时分秒）
+            if inspector.has_table("requirements"):
+                req_cols = {c["name"]: c for c in inspector.get_columns("requirements")}
+                col_info = req_cols.get("go_live_date")
+                if col_info:
+                    col_type_str = str(col_info.get("type", "")).upper()
+                    if "DATE" in col_type_str and "TIMESTAMP" not in col_type_str:
+                        try:
+                            sp = conn_sync.begin_nested()
+                            conn_sync.execute(text(
+                                "ALTER TABLE requirements "
+                                "ALTER COLUMN go_live_date TYPE TIMESTAMP "
+                                "USING go_live_date::timestamp"
+                            ))
+                            sp.commit()
+                            logger.info("DB 迁移: requirements.go_live_date DATE → TIMESTAMP 升级完成")
+                        except Exception as mig_e:
+                            sp.rollback()
+                            logger.warning("DB 迁移: go_live_date 类型升级失败: {}", str(mig_e)[:120])
 
         await conn.run_sync(_migrate)
     logger.info("数据库表创建完成")

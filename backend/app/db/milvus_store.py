@@ -23,6 +23,7 @@ Collection 设计（5 个，>10w 条优化策略）：
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from typing import Any
@@ -93,6 +94,7 @@ class MilvusVectorStore:
     def __init__(self):
         self._model: SentenceTransformer | None = None
         self._connected = False
+        self._model_error = ""
         self._connect_lock = threading.Lock()
         self._model_lock = threading.Lock()
 
@@ -119,24 +121,50 @@ class MilvusVectorStore:
             self._connected = True
             self._ensure_collections()
 
+    @staticmethod
+    def _model_dir_valid(model_dir: str) -> bool:
+        """判断本地模型目录是否包含可加载的权重文件。
+
+        需同时具备 config.json 与至少一个权重文件（兼容 pytorch_model.bin / model.safetensors）。
+        """
+        if not os.path.isdir(model_dir):
+            return False
+        if not os.path.isfile(os.path.join(model_dir, "config.json")):
+            return False
+        weights = ("pytorch_model.bin", "model.safetensors", "pytorch_model.bin.index.json", "model.safetensors.index.json")
+        return any(os.path.isfile(os.path.join(model_dir, w)) for w in weights)
+
     def _ensure_model(self) -> SentenceTransformer:
         """确保嵌入模型已加载（线程安全，避免并发重复加载）。
 
-        优先加载本地预置模型，避免运行时联网下载。
+        加载优先级：
+        1) EMBEDDING_MODEL_NAME 为绝对路径 → 视为本地模型目录（基础镜像内置或宿主机 bind mount）。
+           若目录不完整，**明确报错**（不再误走 HuggingFace 下载，避免网络不通时给出混淆报错）。
+        2) 兼容旧版缓存目录结构（早期预下载遗留）。
+        3) 否则按 HuggingFace 仓库名联网下载。
         """
         if self._model is None:
             with self._model_lock:
                 if self._model is None:
-                    import os
                     model_name = settings.EMBEDDING_MODEL_NAME
                     device = settings.EMBEDDING_DEVICE
+                    self._model_error = ""
 
-                    # 1) EMBEDDING_MODEL_NAME 直接指向本地目录（基础镜像内置或宿主机挂载）
-                    #    例：/models/bge-large-zh-v1.5
-                    if os.path.isabs(model_name) and os.path.isfile(os.path.join(model_name, "config.json")):
-                        logger.info("[Milvus] 加载本地模型路径: {}", model_name)
-                        self._model = SentenceTransformer(model_name, device=device)
-                        return self._model
+                    # 1) 绝对路径 → 本地模型目录
+                    if os.path.isabs(model_name):
+                        if self._model_dir_valid(model_name):
+                            logger.info("[Milvus] 加载本地模型: {} (device={})", model_name, device)
+                            self._model = SentenceTransformer(model_name, device=device)
+                            return self._model
+                        # 本地目录缺失/不完整 → 明确报错，不回退到联网下载
+                        self._model_error = (
+                            f"本地嵌入模型未就绪：未在 {model_name} 找到完整的模型文件"
+                            f"（需 config.json + pytorch_model.bin / model.safetensors）。"
+                            f"请确认该目录已挂载到容器且权重文件已下载；"
+                            f"若模型目录是容器启动后新增的，请重启后端与 celery_worker 以重新建立 bind mount。"
+                        )
+                        logger.error("[Milvus] {}", self._model_error)
+                        raise FileNotFoundError(self._model_error)
 
                     # 2) 兼容旧版缓存目录结构（早期 modelscope 预下载遗留）
                     local_paths = [
@@ -145,17 +173,40 @@ class MilvusVectorStore:
                     ]
                     local_model = None
                     for p in local_paths:
-                        if os.path.isfile(os.path.join(p, "config.json")):
+                        if self._model_dir_valid(p):
                             local_model = p
                             break
 
                     if local_model:
-                        logger.info("[Milvus] 加载预置模型: {}", local_model)
+                        logger.info("[Milvus] 加载预置模型: {} (device={})", local_model, device)
                         self._model = SentenceTransformer(local_model, device=device)
-                    else:
-                        logger.info("[Milvus] 下载模型: {} (device={})", model_name, device)
-                        self._model = SentenceTransformer(model_name, device=device)
+                        return self._model
+
+                    # 3) HuggingFace 仓库名 → 联网下载
+                    logger.info("[Milvus] 下载模型: {} (device={})", model_name, device)
+                    self._model = SentenceTransformer(model_name, device=device)
         return self._model
+
+    def model_status(self) -> dict:
+        """返回嵌入模型就绪状态与诊断信息（供 /knowledge/model-status 使用）。
+
+        与 is_model_ready() 不同，此处会捕获并返回具体错误，便于前端展示“为什么未就绪”。
+        """
+        try:
+            self._ensure_model()
+            return {
+                "ready": True,
+                "path": settings.EMBEDDING_MODEL_NAME,
+                "device": settings.EMBEDDING_DEVICE,
+                "error": "",
+            }
+        except Exception as e:
+            return {
+                "ready": False,
+                "path": settings.EMBEDDING_MODEL_NAME,
+                "device": settings.EMBEDDING_DEVICE,
+                "error": str(e)[:300],
+            }
 
     def _collection_name(self, name: str) -> str:
         """生成带前缀的 Collection 名称。"""
@@ -427,6 +478,34 @@ class MilvusVectorStore:
     def delete_requirement_from_kb(self, req_id: str) -> None:
         """从知识库删除需求（与 delete_requirement 同）。"""
         self.delete_requirement(req_id)
+
+    def update_requirement_metadata(self, req_id: str, metadata_updates: dict) -> None:
+        """更新需求向量的元数据（如 go_live_date 变更）。
+
+        Milvus 不支持原地更新 metadata，需查询现有记录 → 合并新 metadata → 重新 upsert。
+        会重新计算 embedding，但操作频率低（仅修改上线时间时触发），可接受。
+        """
+        self._ensure_connected()
+        collection = self._get_collection("requirements")
+        results = collection.query(
+            expr=f'id == "{_safe_id(req_id, "req_id")}"',
+            output_fields=["id", "metadata", "document"],
+            limit=1,
+        )
+        if not results:
+            logger.warning("[Milvus] 更新元数据失败: 需求 {} 不在向量库中", req_id)
+            return
+
+        record = results[0]
+        existing_meta = record.get("metadata", {})
+        if isinstance(existing_meta, str):
+            existing_meta = json.loads(existing_meta)
+        existing_meta = existing_meta or {}
+        existing_meta.update(metadata_updates)
+
+        doc = record.get("document", "")
+        self._upsert("requirements", [req_id], [doc], [existing_meta])
+        logger.info("[Milvus] 需求 {} 元数据已更新: {}", req_id, list(metadata_updates.keys()))
 
     def requirement_exists(self, req_id: str) -> bool:
         """检查指定需求是否已存在于向量库。"""

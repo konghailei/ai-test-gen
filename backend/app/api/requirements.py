@@ -674,6 +674,8 @@ async def list_requirements(
     product_id: str | None = Query(default=None, description="按产品 ID 筛选"),
     project_id: str | None = Query(default=None, description="按项目 ID 筛选"),
     priority: str | None = Query(default=None, description="按优先级筛选 P0-P3"),
+    status: str | None = Query(default=None, description="按状态筛选 draft/active/archived"),
+    search: str | None = Query(default=None, description="按标题模糊搜索"),
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页条数，最大 100"),
     session: AsyncSession = Depends(get_session),
@@ -684,6 +686,8 @@ async def list_requirements(
         product_id: 按产品 ID 筛选（可选）
         project_id: 按项目/版本 ID 筛选（可选）
         priority: 按优先级筛选（可选）
+        status: 按状态筛选（可选）
+        search: 按标题模糊搜索（可选）
         page: 页码，从 1 开始
         page_size: 每页条数
         session: 数据库会话
@@ -698,6 +702,10 @@ async def list_requirements(
         conditions.append(Requirement.project_id == project_id)
     if priority:
         conditions.append(Requirement.priority == priority)
+    if status:
+        conditions.append(Requirement.status == status)
+    if search:
+        conditions.append(Requirement.title.ilike(f"%{search}%"))
 
     # 计算总数
     count_stmt = select(func.count(Requirement.id))
@@ -1377,7 +1385,6 @@ class ArchiveRequest(BaseModel):
     """归档请求体。"""
     go_live_date: str | None = None
 
-
 @router.post("/{req_id}/archive", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def archive_requirement(
     req_id: str,
@@ -1391,11 +1398,11 @@ async def archive_requirement(
     - draft 状态 → 拒绝归档（需先完成澄清）
     - archived / deprecated 状态 → 拒绝归档（已归档或已废弃）
     - 归档后数据写入向量知识库，供后续需求检索参考
-    - 上线日期（go_live_date）用于 KB 检索时区分最新需求
+    - 上线时间（go_live_date）用于 KB 检索时区分最新需求
 
     Args:
         req_id: 需求 ID
-        body: 归档请求体，含 go_live_date（YYYY-MM-DD）
+        body: 归档请求体，含 go_live_date（YYYY-MM-DDTHH:MM 或 YYYY-MM-DD）
         session: 数据库会话
 
     Returns:
@@ -1426,16 +1433,21 @@ async def archive_requirement(
             detail="已废弃的需求无法归档",
         )
 
-    # 解析上线日期
+    # 解析上线时间（支持 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD）
     parsed_go_live = None
     if body and body.go_live_date:
         try:
-            parsed_go_live = date.fromisoformat(body.go_live_date)
+            # 尝试解析为 datetime（含时分）
+            parsed_go_live = datetime.fromisoformat(body.go_live_date)
         except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"上线日期格式不正确: {body.go_live_date}，需为 YYYY-MM-DD",
-            )
+            try:
+                # 降级为 date（补零时时间）
+                parsed_go_live = datetime.fromisoformat(body.go_live_date + "T00:00:00")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"上线时间格式不正确: {body.go_live_date}，需为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD",
+                )
 
     # 查询项目版本号（用于 KB 检索版本溯源）
     project_version = ""
@@ -1454,7 +1466,9 @@ async def archive_requirement(
     await session.commit()
 
     # 写入向量知识库（供后续需求检索参考）
-    kb_written = False
+    # 注意：向量化是异步任务（Celery）。此处仅“派发”任务，不代表向量已落库。
+    # 因此字段命名为 kb_task_queued（而非 kb_written），避免误导“已写入”。
+    kb_task_queued = False
     kb_error = ""
     milvus_meta = {
         "product_id": record.product_id,
@@ -1475,11 +1489,11 @@ async def archive_requirement(
                 args=[record.id, record.srr_json or {}, milvus_meta],
                 queue="embedding",
             )
-            kb_written = True
+            kb_task_queued = True
             logger.info("[API/requirements] 异步写入任务已派发: req_id={}, go_live_date={}, project_version={}",
                         req_id, milvus_meta["go_live_date"], project_version)
         else:
-            # Celery 未安装/未配置 → 降级为同步写入
+            # Celery 未安装/未配置 → 降级为同步写入（同步即已落库）
             from app.db.milvus_store import vector_store
             await asyncio.to_thread(
                 vector_store.add_requirement,
@@ -1487,26 +1501,120 @@ async def archive_requirement(
                 srr_json=record.srr_json or {},
                 metadata=milvus_meta,
             )
-            kb_written = True
+            kb_task_queued = True
             logger.info("[API/requirements] 已写入知识库(同步降级): req_id={}, go_live_date={}, project_version={}",
                         req_id, milvus_meta["go_live_date"], project_version)
     except Exception as e:
         kb_error = str(e)[:300]
         logger.warning("[API/requirements] 知识库写入失败（不阻断）: req_id={}, error={}", req_id, kb_error[:200])
 
-    logger.info("[API/requirements] 归档成功: req_id={}, old_status={}, kb_written={}", req_id, old_status, kb_written)
+    logger.info("[API/requirements] 归档成功: req_id={}, old_status={}, kb_task_queued={}", req_id, old_status, kb_task_queued)
 
-    message = "需求已归档，数据已导入知识库" if kb_written else "需求已归档，但知识库写入失败（不影响归档状态）"
+    message = "需求已归档，知识库写入任务已异步派发" if kb_task_queued else "需求已归档，但知识库写入任务派发失败（请检查 Celery 是否运行 / 嵌入模型是否就绪）"
     return ApiResponse(
         success=True,
         message=message,
         data={
             "req_id": req_id,
             "status": "archived",
-            "kb_written": kb_written,
-            "kb_error": kb_error if not kb_written else "",
+            "kb_task_queued": kb_task_queued,
+            "kb_error": kb_error if not kb_task_queued else "",
             "go_live_date": parsed_go_live.isoformat() if parsed_go_live else "",
             "project_version": project_version,
+        },
+    )
+
+
+# ============================================================================
+# 8.5 修改上线时间（已归档需求）
+# ============================================================================
+
+class UpdateGoLiveDateRequest(BaseModel):
+    """修改上线时间请求体。"""
+    go_live_date: str
+
+
+@router.patch("/{req_id}/go-live-date", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def update_go_live_date(
+    req_id: str,
+    body: UpdateGoLiveDateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """修改已归档需求的上线时间。
+
+    上线时间随时可能变更，此接口允许修改已归档需求的 go_live_date，
+    并同步更新 Milvus 向量库中的元数据（用于 KB 检索时按上线时间排序）。
+
+    Args:
+        req_id: 需求 ID
+        body: 含 go_live_date（YYYY-MM-DDTHH:MM 或 YYYY-MM-DD）
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: data 含 req_id / go_live_date / milvus_updated
+    """
+    stmt = select(Requirement).where(Requirement.id == req_id)
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    if record.status != "archived":
+        raise HTTPException(
+            status_code=409,
+            detail=f"仅已归档需求可修改上线时间（当前状态: {record.status}）",
+        )
+
+    # 解析上线时间
+    try:
+        parsed_go_live = datetime.fromisoformat(body.go_live_date)
+    except ValueError:
+        try:
+            parsed_go_live = datetime.fromisoformat(body.go_live_date + "T00:00:00")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"上线时间格式不正确: {body.go_live_date}，需为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD",
+            )
+
+    old_go_live = record.go_live_date
+    record.go_live_date = parsed_go_live
+    await session.commit()
+
+    logger.info(
+        "[API/requirements] 上线时间已修改: req_id={}, {} → {}",
+        req_id,
+        old_go_live.isoformat() if old_go_live else "(空)",
+        parsed_go_live.isoformat(),
+    )
+
+    # 同步更新 Milvus 向量库中的元数据
+    milvus_updated = False
+    milvus_error = ""
+    try:
+        from app.db.milvus_store import vector_store
+        await asyncio.to_thread(
+            vector_store.update_requirement_metadata,
+            req_id,
+            {"go_live_date": parsed_go_live.isoformat()},
+        )
+        milvus_updated = True
+    except Exception as e:
+        milvus_error = str(e)[:300]
+        logger.warning(
+            "[API/requirements] Milvus 元数据更新失败（不阻断）: req_id={}, error={}",
+            req_id, milvus_error[:200],
+        )
+
+    return ApiResponse(
+        success=True,
+        message="上线时间已更新" + ("，向量库元数据已同步" if milvus_updated else "，但向量库元数据同步失败"),
+        data={
+            "req_id": req_id,
+            "go_live_date": parsed_go_live.isoformat(),
+            "milvus_updated": milvus_updated,
+            "milvus_error": milvus_error if not milvus_updated else "",
         },
     )
 

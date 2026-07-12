@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2 } from 'lucide-react'
+import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2, Search, X } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Requirement, Product, ClarifyQuestion, Module } from '../types'
@@ -30,6 +30,9 @@ export default function Requirements() {
 
   // 项目筛选（产品由顶部栏全局控制）
   const [filterProject, setFilterProject] = useState('')
+  const [filterStatus, setFilterStatus] = useState('')
+  const [filterPriority, setFilterPriority] = useState('')
+  const [searchKeyword, setSearchKeyword] = useState('')
   const [projects, setProjects] = useState<Record<string, { id: string; name: string }[]>>({})
 
   // Upload modal
@@ -88,13 +91,23 @@ export default function Requirements() {
 
   const loadReqs = () => {
     setLoading(true)
-    reqApi.list(page, 20, selectedProductId || undefined, filterProject || undefined).then(r => {
+    reqApi.list(page, 20, selectedProductId || undefined, filterProject || undefined, {
+      status: filterStatus || undefined,
+      priority: filterPriority || undefined,
+      search: searchKeyword || undefined,
+    }).then(r => {
       setReqs(r.items || [])
       setTotal(r.total || 0)
     }).catch(() => {}).finally(() => setLoading(false))
   }
 
-  useEffect(() => { loadReqs() }, [page, selectedProductId, filterProject])
+  useEffect(() => { loadReqs() }, [page, selectedProductId, filterProject, filterStatus, filterPriority])
+
+  // 搜索防抖
+  useEffect(() => {
+    const t = setTimeout(() => { setPage(1); loadReqs() }, 400)
+    return () => clearTimeout(t)
+  }, [searchKeyword])
 
   // 清理 progress timer
   useEffect(() => {
@@ -334,7 +347,7 @@ export default function Requirements() {
         </button>
       </div>
 
-      {/* 项目筛选栏（产品由顶部栏全局控制） */}
+      {/* 查询条件栏（产品由顶部栏全局控制） */}
       <div className="card py-3 px-5">
         <div className="flex items-center gap-3 flex-wrap">
           <Filter className="w-4 h-4 text-slate-400" />
@@ -344,12 +357,45 @@ export default function Requirements() {
               : '提示：请在顶部栏选择产品'}
           </span>
           <select value={filterProject} onChange={e => { setFilterProject(e.target.value); setPage(1) }}
-            className="select-field text-sm max-w-[200px]" disabled={!selectedProductId}>
+            className="select-field text-sm max-w-[160px]" disabled={!selectedProductId}>
             <option value="">全部项目</option>
             {(projects[selectedProductId] || []).map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
+          <select value={filterStatus} onChange={e => { setFilterStatus(e.target.value); setPage(1) }}
+            className="select-field text-sm max-w-[120px]">
+            <option value="">全部状态</option>
+            <option value="draft">待澄清</option>
+            <option value="active">已就绪</option>
+            <option value="archived">已归档</option>
+            <option value="superseded">已替代</option>
+            <option value="deprecated">已废弃</option>
+          </select>
+          <select value={filterPriority} onChange={e => { setFilterPriority(e.target.value); setPage(1) }}
+            className="select-field text-sm max-w-[100px]">
+            <option value="">全部优先级</option>
+            <option value="P0">P0</option>
+            <option value="P1">P1</option>
+            <option value="P2">P2</option>
+            <option value="P3">P3</option>
+          </select>
+          <div className="relative flex-1 min-w-[180px] max-w-xs">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+            <input
+              type="text"
+              value={searchKeyword}
+              onChange={e => setSearchKeyword(e.target.value)}
+              placeholder="搜索需求标题..."
+              className="input-field text-sm pl-8 py-1.5"
+            />
+            {searchKeyword && (
+              <button onClick={() => setSearchKeyword('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
           <span className="text-xs text-slate-400">共 {total} 条</span>
         </div>
       </div>

@@ -4,7 +4,7 @@
 import type {
   ApiResponse, Requirement, RequirementDetail, TestCase, TestPattern,
   KnowledgeStats, ClarifyQuestion, PaginatedData, LLMConfig, HealthStatus, KbFlowback, KbEntry, KbQAAskResponse, KbQAReference, KbQARecord,
-  KbAugmentation, FieldConflict, ClarifyHistoryEntry, KbDiagnostics,
+  KbAugmentation, FieldConflict, ClarifyHistoryEntry, KbDiagnostics, KbModelStatus,
 } from '../types'
 
 const BASE = '/api'
@@ -96,10 +96,13 @@ export const health = () => request<HealthStatus>('/health')
 // 需求管理
 // ============================================================
 export const requirements = {
-  list: (page = 1, pageSize = 20, productId?: string, projectId?: string) => {
+  list: (page = 1, pageSize = 20, productId?: string, projectId?: string, filters?: { status?: string; priority?: string; search?: string }) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
     if (productId) params.set('product_id', productId)
     if (projectId) params.set('project_id', projectId)
+    if (filters?.status) params.set('status', filters.status)
+    if (filters?.priority) params.set('priority', filters.priority)
+    if (filters?.search) params.set('search', filters.search)
     return request<PaginatedData<Requirement>>(`/requirements?${params}`)
   },
   get: (id: string) => request<RequirementDetail>(`/requirements/${id}`),
@@ -179,9 +182,15 @@ export const requirements = {
       method: 'DELETE',
     }),
   archive: (id: string, goLiveDate?: string) =>
-    request<{ req_id: string; status: string; kb_written?: boolean }>(`/requirements/${id}/archive`, {
+    request<{ req_id: string; status: string; kb_task_queued?: boolean }>(`/requirements/${id}/archive`, {
       method: 'POST',
       body: JSON.stringify({ go_live_date: goLiveDate || null }),
+    }),
+  /** 修改已归档需求的上线时间 */
+  updateGoLiveDate: (id: string, goLiveDate: string) =>
+    request<{ req_id: string; go_live_date: string; milvus_updated: boolean }>(`/requirements/${id}/go-live-date`, {
+      method: 'PATCH',
+      body: JSON.stringify({ go_live_date: goLiveDate }),
     }),
   /** v2.7: KB 已解答 → 确认生成最终 SRR */
   finalize: (id: string) =>
@@ -288,10 +297,12 @@ export const knowledge = {
     if (category) params.set('category', category)
     return request<PaginatedData<TestPattern>>(`/knowledge/patterns?${params}`)
   },
-  listEntries: (productId?: string, type?: string) => {
+  listEntries: (productId?: string, type?: string, filters?: { search?: string; vectorized?: string }) => {
     const params = new URLSearchParams()
     if (productId) params.set('product_id', productId)
     if (type) params.set('type', type)
+    if (filters?.search) params.set('search', filters.search)
+    if (filters?.vectorized) params.set('vectorized', filters.vectorized)
     return request<{ items: KbEntry[]; total: number }>(`/knowledge/entries?${params}`)
   },
   deleteEntry: (entryId: string, entryType: string) =>
@@ -299,6 +310,11 @@ export const knowledge = {
       method: 'DELETE',
     }),
   diagnostics: () => request<KbDiagnostics>('/knowledge/diagnostics'),
+  modelStatus: () => request<KbModelStatus>('/knowledge/model-status'),
+  revectorize: (entryId: string) =>
+    request<{ req_id: string; queued: boolean; message?: string }>(`/knowledge/entries/${entryId}/revectorize`, { method: 'POST' }),
+  revectorizeMissing: () =>
+    request<{ total_archived: number; missing: number; queued: number; failed: number; message?: string }>('/knowledge/revectorize-missing', { method: 'POST' }),
 }
 
 // ============================================================

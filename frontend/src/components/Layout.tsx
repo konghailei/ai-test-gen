@@ -152,17 +152,18 @@ export default function Layout() {
           </div>
         </div>
 
-        {/* 用户手册 */}
-        <button
-          onClick={() => navigate('/manual')}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-all text-sm text-slate-600"
-          title="用户手册"
-        >
-          <BookOpen className="w-4 h-4" />
-          <span className="hidden sm:inline">用户手册</span>
-        </button>
+        {/* 右侧：用户手册 + 用户信息 */}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => navigate('/manual')}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-all text-sm text-slate-600"
+            title="用户手册"
+          >
+            <BookOpen className="w-4 h-4" />
+            <span className="hidden sm:inline">用户手册</span>
+          </button>
 
-        {/* 用户信息 */}
+          {/* 用户信息 */}
         <div className="relative">
           <button
             onClick={() => setShowUserMenu(!showUserMenu)}
@@ -223,6 +224,7 @@ export default function Layout() {
               </div>
             </>
           )}
+        </div>
         </div>
       </header>
 

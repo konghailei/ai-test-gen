@@ -17,15 +17,67 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user, require_admin
+from app.core.auth import get_current_user, require_admin, require_write
 from app.db.database import get_session
-from app.db.models import GenerationBatch, Requirement, TestCase, TestPattern
+from app.db.models import GenerationBatch, Project, Requirement, TestCase, TestPattern
 from app.db.milvus_store import vector_store
 from app.models.api_schemas import ApiResponse, KnowledgeStats
 from app.utils.logger import logger
 
 
 router = APIRouter()
+
+
+# ============================================================================
+# 辅助：构建需求向量化元数据 + 派发异步嵌入任务
+# ============================================================================
+
+def _build_requirement_kb_meta(record: Requirement, project_version: str) -> dict:
+    """为已归档需求构建 Milvus 写入元数据（与归档接口保持一致）。"""
+    ts = record.updated_at or record.created_at
+    return {
+        "product_id": record.product_id,
+        "modules": ",".join(record.modules or []),
+        "priority": record.priority,
+        "status": "archived",
+        "archived_at": ts.isoformat() if ts else "",
+        "go_live_date": record.go_live_date.isoformat() if record.go_live_date else "",
+        "project_version": project_version,
+    }
+
+
+def _dispatch_embedding_task(req_id: str, srr_json: dict, meta: dict) -> bool:
+    """派发需求向量化异步任务；Celery 不可用时降级为同步写入。
+
+    返回 True 表示任务已派发/已同步写入；False 表示派发与同步均失败
+    （如模型未就绪）。注意：True 仅代表“已提交”，不保证 Milvus 已落库。
+    """
+    try:
+        from app.tasks.celery_app import celery_app
+
+        if celery_app is not None:
+            celery_app.send_task(
+                "app.tasks.embedding_tasks.embed_and_store_requirement",
+                args=[req_id, srr_json, meta],
+                queue="embedding",
+            )
+            return True
+        # Celery 不可用 → 同步写入（会真正加载模型并写入 Milvus）
+        vector_store.add_requirement(req_id, srr_json, metadata=meta)
+        return True
+    except Exception as e:
+        logger.warning("[API/knowledge] 向量化任务派发失败: req_id={}, error={}", req_id, str(e)[:200])
+        return False
+
+
+async def _project_version(session: AsyncSession, project_id: str | None) -> str:
+    if not project_id:
+        return ""
+    try:
+        row = (await session.execute(select(Project.version).where(Project.id == project_id))).scalar_one_or_none()
+        return row or ""
+    except Exception:
+        return ""
 
 
 # ============================================================================
@@ -153,6 +205,8 @@ async def list_patterns(
 async def list_kb_entries(
     product_id: str | None = Query(default=None, description="按产品 ID 筛选"),
     type_filter: str | None = Query(default=None, alias="type", description="按类型筛选 requirement / test_case"),
+    search: str | None = Query(default=None, description="按标题模糊搜索"),
+    vectorized: str | None = Query(default=None, description="按向量化状态筛选: true / false"),
     limit: int = Query(default=100, ge=1, le=500, description="每页条数"),
     offset: int = Query(default=0, ge=0, description="偏移量"),
     session: AsyncSession = Depends(get_session),
@@ -160,11 +214,15 @@ async def list_kb_entries(
     """获取知识库中的条目列表。
 
     从 PostgreSQL 中读取已归档的需求和从向量库读取测试用例。
-    支持按产品 ID 和类型筛选。
+    支持按产品 ID、类型、标题搜索、向量化状态筛选。
 
     Args:
         product_id: 按产品 ID 筛选（可选）
         type_filter: 按类型筛选 requirement / test_case（可选）
+        search: 按标题模糊搜索（可选）
+        vectorized: 按向量化状态筛选 true/false（可选，仅对 requirement 有效）
+        limit: 每页条数
+        offset: 偏移量
         session: 数据库会话
 
     Returns:
@@ -180,15 +238,29 @@ async def list_kb_entries(
     except Exception as e:
         logger.warning("[API/knowledge] 获取向量库需求列表失败: {}", str(e)[:100])
 
+    # 解析向量化筛选参数
+    vectorized_filter: bool | None = None
+    if vectorized is not None:
+        if vectorized.lower() in ("true", "1", "yes"):
+            vectorized_filter = True
+        elif vectorized.lower() in ("false", "0", "no"):
+            vectorized_filter = False
+
     # 从 PostgreSQL 读取已归档的需求（status='archived'）
     if not type_filter or type_filter == "requirement":
         stmt = select(Requirement).where(Requirement.status == "archived").order_by(Requirement.updated_at.desc())
         if product_id:
             stmt = stmt.where(Requirement.product_id == product_id)
+        if search:
+            stmt = stmt.where(Requirement.title.ilike(f"%{search}%"))
         stmt = stmt.limit(limit).offset(offset)
         result = await session.execute(stmt)
         reqs = result.scalars().all()
         for r in reqs:
+            is_vectorized = r.id in vectorized_ids
+            # 向量化状态过滤
+            if vectorized_filter is not None and is_vectorized != vectorized_filter:
+                continue
             summary = ""
             srr = r.srr_json or {}
             req_data = srr.get("requirement", {})
@@ -203,7 +275,8 @@ async def list_kb_entries(
                 "priority": r.priority,
                 "summary": summary,
                 "archived_at": r.updated_at.isoformat() if r.updated_at else "",
-                "vectorized": r.id in vectorized_ids,
+                "go_live_date": r.go_live_date.isoformat() if r.go_live_date else "",
+                "vectorized": is_vectorized,
                 "created_at": r.created_at.isoformat() if r.created_at else "",
             })
 
@@ -213,6 +286,8 @@ async def list_kb_entries(
         if product_id:
             # 测试用例表自带 product_id 列，直接按产品隔离过滤
             stmt = stmt.where(TestCase.product_id == product_id)
+        if search:
+            stmt = stmt.where(TestCase.title.ilike(f"%{search}%"))
         stmt = stmt.limit(limit).offset(offset)
         result = await session.execute(stmt)
         cases = result.scalars().all()
@@ -344,7 +419,9 @@ async def get_kb_diagnostics() -> ApiResponse:
     }
     try:
         diag["vector_db"]["connected"] = True
-        diag["vector_db"]["model_ready"] = await asyncio.to_thread(vector_store.is_model_ready)
+        model_status = await asyncio.to_thread(vector_store.model_status)
+        diag["vector_db"]["model_ready"] = model_status["ready"]
+        diag["vector_db"]["model_error"] = model_status["error"]
         diag["vector_db"]["collections"] = await asyncio.to_thread(vector_store.get_collection_stats)
     except Exception as e:
         diag["vector_db"]["error"] = str(e)[:200]
@@ -354,4 +431,91 @@ async def get_kb_diagnostics() -> ApiResponse:
         success=True,
         message="ok",
         data=diag,
+    )
+
+
+# ============================================================================
+# 3.1 嵌入模型就绪状态（供前端展示“为什么未向量化”）
+# ============================================================================
+
+@router.get("/model-status", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_model_status() -> ApiResponse:
+    """返回嵌入模型就绪状态与诊断信息。
+
+    前端在知识库页面据此展示横幅：模型未就绪时给出明确原因
+    （如本地模型目录未挂载 / 权重缺失 / 需重启容器以重新建立 bind mount）。
+    """
+    status = await asyncio.to_thread(vector_store.model_status)
+    return ApiResponse(success=True, message="ok", data=status)
+
+
+# ============================================================================
+# 3.2 重新向量化（补偿归档时写入失败 / Celery 曾宕机导致的历史欠账）
+# ============================================================================
+
+@router.post("/entries/{entry_id}/revectorize", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def reverctorize_requirement(entry_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
+    """对单条已归档需求重新派发向量化任务。
+
+    用于「已归档但未向量化」的需求补救。仅接受 status=archived 的需求。
+    """
+    stmt = select(Requirement).where(Requirement.id == entry_id, Requirement.status == "archived")
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"需求 {entry_id} 不存在或未归档")
+
+    project_version = await _project_version(session, record.project_id)
+    meta = _build_requirement_kb_meta(record, project_version)
+    queued = _dispatch_embedding_task(record.id, record.srr_json or {}, meta)
+    return ApiResponse(
+        success=True,
+        message="已重新派发向量化任务（异步）" if queued else "向量化任务派发失败：请检查 Celery 是否运行或嵌入模型是否就绪",
+        data={"req_id": entry_id, "queued": queued},
+    )
+
+
+@router.post("/revectorize-missing", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def reverctorize_missing(session: AsyncSession = Depends(get_session)) -> ApiResponse:
+    """批量补向量化：对所有「已归档但未在 Milvus 中」的需求重新派发任务。
+
+    返回统计：total_archived / missing / queued / failed。
+    """
+    # 1) 取 Milvus 已向量化集合
+    # 注意：Milvus query 的 (offset+limit) 上限为 16384，超出会抛错。
+    # get_all_requirements 不支持 offset 分页，故此处限额取 16384（需求规模远小于此，完全准确；
+    # 极端超量时仅会多派发已向量化项，幂等无害）。
+    vectorized_ids: set[str] = set()
+    try:
+        all_reqs = vector_store.get_all_requirements(None, 16384)
+        vectorized_ids = {r["id"] for r in all_reqs}
+    except Exception as e:
+        logger.warning("[API/knowledge] 获取向量库列表失败: {}", str(e)[:100])
+
+    # 2) 取全部已归档需求，筛选缺失项
+    stmt = select(Requirement).where(Requirement.status == "archived")
+    records = (await session.execute(stmt)).scalars().all()
+
+    queued = 0
+    failed = 0
+    for r in records:
+        if r.id in vectorized_ids:
+            continue
+        project_version = await _project_version(session, r.project_id)
+        meta = _build_requirement_kb_meta(r, project_version)
+        if _dispatch_embedding_task(r.id, r.srr_json or {}, meta):
+            queued += 1
+        else:
+            failed += 1
+
+    missing = len(records) - len(vectorized_ids)
+    return ApiResponse(
+        success=True,
+        message=f"已补向量化 {queued} 条，失败 {failed} 条",
+        data={
+            "total_archived": len(records),
+            "missing": max(missing, 0),
+            "queued": queued,
+            "failed": failed,
+        },
     )

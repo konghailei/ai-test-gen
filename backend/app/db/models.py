@@ -56,8 +56,8 @@ class Requirement(Base):
     change_summary: Mapped[str] = mapped_column(Text, default="")
     diff_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
-    # 上线日期：归档时填写，用于 KB 检索时区分最新需求（同功能以靠后日期为准）
-    go_live_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # 上线时间：归档时填写，用于 KB 检索时区分最新需求（同功能以靠后时间为准）
+    go_live_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
         Index("idx_req_product_module", "product_id", "module"),

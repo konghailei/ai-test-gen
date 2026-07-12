@@ -9,6 +9,7 @@ export interface Requirement {
   source_type?: string
   modules?: string[]
   created_at: string
+  go_live_date?: string
 }
 
 export interface RequirementDetail extends Requirement {
@@ -283,6 +284,7 @@ export interface KbEntry {
   priority?: string
   summary?: string
   archived_at?: string
+  go_live_date?: string
   vectorized?: boolean
   created_at?: string
 }
@@ -300,6 +302,13 @@ export interface KbDiagnostics {
     object_storage: string
     coordination: string
   }
+}
+
+export interface KbModelStatus {
+  ready: boolean
+  path: string
+  device: string
+  error: string
 }
 
 // ============================================================

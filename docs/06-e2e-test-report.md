@@ -207,14 +207,14 @@
 
 1. 调用 `POST /api/requirements/{id}/archive`，body 含 `go_live_date`
 2. 测量 API 响应耗时（应 < 2s，PG 同步写）
-3. 检查响应中 `kb_written` 字段
+3. 检查响应中 `kb_task_queued` 字段
 4. 等待 10s 后检查 Celery worker 日志，确认异步任务完成
 5. 使用 [scripts/test_archive.py](file:///e:/git-down/ai-test-gen/scripts/test_archive.py) 自动化执行
 
 ### 6.2 测试结果
 
 - 归档 API 响应耗时：**0.30 秒**（PG 同步写入完成）
-- 响应中 `kb_written=true`（Celery 任务已派发）
+- 响应中 `kb_task_queued=true`（Celery 任务已派发）
 - Celery worker 在 11.57 秒后完成 embedding + Milvus 写入
 - Milvus `requirements` collection 向量数 +1
 
@@ -222,7 +222,7 @@
 
 ```
 T=0.00s   API 收到归档请求
-T=0.30s   API 返回 {kb_written: true}（PG 已更新 status=archived）
+T=0.30s   API 返回 {kb_task_queued: true}（PG 已更新 status=archived）
 T=0.31s   Celery 任务入队（embedding 队列）
 T=0.35s   Celery worker 拾取任务
 T=11.57s  Celery worker 完成：bge-large-zh embedding + Milvus upsert
