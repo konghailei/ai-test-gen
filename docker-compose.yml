@@ -50,8 +50,6 @@ services:
       - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
       # bge-reranker-base 重排模型：独立挂载
       - ./models/bge-reranker-base:/models/bge-reranker-base:ro
-    env_file:
-      - ./backend/.env
     environment:
       - APP_PORT=8000
       - DEBUG=${DEBUG:-true}
@@ -84,6 +82,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
     networks:
       - ai-test-gen-net
     restart: unless-stopped
@@ -106,8 +108,6 @@ services:
       # bge 模型：独立挂载（/app 被覆盖后模型仍可访问）
       - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
       - ./models/bge-reranker-base:/models/bge-reranker-base:ro
-    env_file:
-      - ./backend/.env
     environment:
       - DATABASE_URL=postgresql+asyncpg://aitestgen:aitestgen123@postgres:5432/ai_test_gen
       - VECTOR_STORE=milvus
@@ -130,6 +130,8 @@ services:
       redis:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      milvus:
         condition: service_healthy
     networks:
       - ai-test-gen-net

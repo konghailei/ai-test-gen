@@ -3,7 +3,7 @@
 # fetch-deps.py — 预下载 AI-Test-Gen 本地模型（Windows / Linux 通用）
 #
 # 背景：
-#   - Python 依赖（torch / sentence-transformers / pymilvus / FlagEmbedding 等）
+#   - Python 依赖（torch / sentence-transformers / pymilvus 等）
 #     在镜像构建时由 Dockerfile 直接 `pip install -r requirements.txt` 在线安装，
 #     Docker 层缓存已能加速重复构建，无需（也不再支持）预先下载轮子缓存。
 #   - 本脚本只需下载「无法用 pip 获取、且运行时以 bind mount 方式挂载进容器」
