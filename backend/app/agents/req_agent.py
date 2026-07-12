@@ -22,7 +22,7 @@ import json
 from typing import Any
 
 from app.core.llm_client import llm_client
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.models.srr import SRR
 from app.prompts import req_agent as prompts
 from app.core import prompt_manager
@@ -120,7 +120,12 @@ class ReqAgent:
                     list(srr.keys()) if isinstance(srr, dict) else type(srr).__name__,
                     srr.get("requirement", {}).get("title", "") if isinstance(srr, dict) else "")
 
-        # 防御：LLM 偶尔返回非 dict（如 list 或字符串），统一转为 dict
+        # 防御：LLM 偶尔返回 list（如 [{...}]），取首个 dict 元素
+        if isinstance(srr, list) and srr and isinstance(srr[0], dict):
+            logger.warning("[ReqAgent] LLM 返回 list（len={}），取首个 dict 元素", len(srr))
+            srr = srr[0]
+
+        # 防御：LLM 偶尔返回非 dict（如字符串），报错
         if not isinstance(srr, dict):
             logger.error("[ReqAgent] LLM 返回非 dict 结构: type={}", type(srr).__name__)
             raise RuntimeError(
@@ -220,9 +225,12 @@ class ReqAgent:
             logger.warning("[ReqAgent] SRR.requirement 非 dict: type={}, 重置为空dict", type(req).__name__)
             req = {}
             srr["requirement"] = req
-        # 需求 ID：缺失则自动生成
-        if not req.get("id"):
-            req["id"] = gen_requirement_id()
+        # 需求 ID：始终生成新的唯一 ID（不信任 LLM 返回的 ID，因为 LLM 可能
+        # 从文档中复制硬编码的 ID 如 "REQ-2024-001"，导致重复键冲突）
+        llm_id = req.get("id", "")
+        if llm_id:
+            req["reference_id"] = llm_id  # 保留 LLM 返回的 ID 作为参考
+        req["id"] = gen_requirement_id()
         # 产品 ID：调用方传入优先
         if product_id:
             req["product_id"] = product_id
@@ -320,7 +328,8 @@ class ReqAgent:
     FIELD_NAME_MAP: dict[str, str] = {
         # DataConstraint 字段别名
         "field_name": "field", "column_name": "field", "col": "field", "column": "field",
-        "name": "field",
+        # 注：不再把通用 key "name" 映射为 "field"。AlternateFlow.name / ExternalDependency.name
+        # 等子对象以 name 作为合法标识符，全局映射会误伤并导致下游生成丢失名称信息（见 Bug 1）。
         "data_type": "type", "field_type": "type", "dtype": "type",
         "nullable": "required", "mandatory": "required",
         "validation": "constraints", "format": "constraints",
@@ -482,19 +491,28 @@ class ReqAgent:
                 if t in biz_type_map:
                     rule["type"] = biz_type_map[t]
 
-        # AcceptanceCriterion.type 映射（未识别值 → functional）
-        ac_type_map = {
-            "usability": "usability",
-            "compatibility": "compatibility",
-            "reliability": "reliability",
+        # AcceptanceCriterion.type 规范化（合法值见 srr.py AcceptanceCriterion.type Literal）
+        #   functional / performance / security / usability / compatibility / reliability
+        # 保留合法值；非规范别名（availability/maintainability/portability）归一；
+        # 空值或无法识别的值默认 functional（保证下游 Pydantic Literal 校验通过）。
+        # 注意：performance / security 为合法值，必须保留，不得误重置为 functional（见 Bug 2）。
+        AC_TYPE_VALID = {
+            "functional", "performance", "security",
+            "usability", "compatibility", "reliability",
+        }
+        AC_TYPE_ALIAS = {
             "availability": "reliability",
             "maintainability": "compatibility",
             "portability": "compatibility",
         }
         for ac in srr.get("acceptance_criteria", []):
-            if isinstance(ac, dict) and ac.get("type"):
-                t = ac["type"].lower().strip()
-                if t not in ac_type_map:
+            if isinstance(ac, dict):
+                t = (ac.get("type") or "").lower().strip()
+                if t in AC_TYPE_VALID:
+                    ac["type"] = t
+                elif t in AC_TYPE_ALIAS:
+                    ac["type"] = AC_TYPE_ALIAS[t]
+                else:
                     ac["type"] = "functional"
 
 

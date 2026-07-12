@@ -56,9 +56,9 @@ if %errorlevel% neq 0 (
     echo [完成] 依赖安装完成
 )
 
-:: 检查 ChromaDB ONNX 模型
-echo [4/4] 预热 ChromaDB 嵌入模型...
-python -c "import chromadb; chromadb.DefaultEmbeddingFunction()" 2>nul
+:: 校验 Milvus 依赖
+echo [4/4] 校验 Milvus 依赖...
+python -c "import pymilvus" 2>nul || echo 警告: pymilvus 未安装
 echo [完成] 环境初始化完成
 
 echo.

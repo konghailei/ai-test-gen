@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_admin
 from app.db.database import get_session
 from app.db.models import GenerationBatch, Requirement, TestCase, TestPattern
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.models.api_schemas import ApiResponse, KnowledgeStats
 from app.utils.logger import logger
 
@@ -60,9 +60,8 @@ async def get_knowledge_stats(
     kb_empty = False
     try:
         kb_empty = await asyncio.to_thread(vector_store.is_empty)
-    except Exception:
-        # 向量库未就绪时默认非空（不影响统计展示）
-        pass
+    except Exception as e:
+        logger.warning("[API/knowledge] 向量库状态检查失败（默认非空）: {}", str(e)[:150])
 
     stats = KnowledgeStats(
         total_requirements=total_reqs,
@@ -160,7 +159,7 @@ async def list_kb_entries(
 ) -> ApiResponse:
     """获取知识库中的条目列表。
 
-    从 SQLite 中读取已归档的需求和从向量库读取测试用例。
+    从 PostgreSQL 中读取已归档的需求和从向量库读取测试用例。
     支持按产品 ID 和类型筛选。
 
     Args:
@@ -173,7 +172,15 @@ async def list_kb_entries(
     """
     items: list[dict] = []
 
-    # 从 SQLite 读取已归档的需求（status='archived'）
+    # 批量获取已向量化的 req_id 集合（避免 N+1 查询）
+    vectorized_ids: set[str] = set()
+    try:
+        all_reqs = await asyncio.to_thread(vector_store.get_all_requirements, None, 1000)
+        vectorized_ids = {r["id"] for r in all_reqs}
+    except Exception as e:
+        logger.warning("[API/knowledge] 获取向量库需求列表失败: {}", str(e)[:100])
+
+    # 从 PostgreSQL 读取已归档的需求（status='archived'）
     if not type_filter or type_filter == "requirement":
         stmt = select(Requirement).where(Requirement.status == "archived").order_by(Requirement.updated_at.desc())
         if product_id:
@@ -195,15 +202,18 @@ async def list_kb_entries(
                 "modules": ",".join(r.modules or []),
                 "priority": r.priority,
                 "summary": summary,
+                "archived_at": r.updated_at.isoformat() if r.updated_at else "",
+                "vectorized": r.id in vectorized_ids,
                 "created_at": r.created_at.isoformat() if r.created_at else "",
             })
 
-    # 从 SQLite 读取测试用例
+    # 从 PostgreSQL 读取测试用例
     if not type_filter or type_filter == "test_case":
-        stmt = select(TestCase).order_by(TestCase.created_at.desc()).limit(limit).offset(offset)
+        stmt = select(TestCase).order_by(TestCase.created_at.desc())
         if product_id:
-            # 通过需求关联过滤（测试用例表有 req_id 字段）
-            pass  # 暂不过滤产品
+            # 测试用例表自带 product_id 列，直接按产品隔离过滤
+            stmt = stmt.where(TestCase.product_id == product_id)
+        stmt = stmt.limit(limit).offset(offset)
         result = await session.execute(stmt)
         cases = result.scalars().all()
         for c in cases:
@@ -211,7 +221,7 @@ async def list_kb_entries(
                 "id": c.id,
                 "title": c.title,
                 "type": "test_case",
-                "product_id": "",
+                "product_id": c.product_id,
                 "summary": f"类型: {c.type} / 优先级: {c.priority}" if c.type else "",
                 "created_at": c.created_at.isoformat() if c.created_at else "",
             })
@@ -243,8 +253,15 @@ async def delete_kb_entry(
 
     删除策略：
     - requirement: 恢复为 active 状态（退出知识库）+ 从向量库移除
-    - test_case: 从 SQLite 删除 + 从向量库移除
+    - test_case: 从 PG 删除 + 从向量库移除
+
+    返回值包含 db_deleted（关系库）和 kb_deleted（向量库）分离状态，
+    便于前端精确展示删除结果。
     """
+    db_deleted = False
+    kb_deleted = False
+    kb_error = ""
+
     if entry_type == "requirement":
         # 恢复为 active 状态，退出知识库
         stmt = select(Requirement).where(Requirement.id == entry_id, Requirement.status == "archived")
@@ -254,16 +271,19 @@ async def delete_kb_entry(
             raise HTTPException(status_code=404, detail=f"需求 {entry_id} 不存在或未归档")
         record.status = "active"
         await session.commit()
+        db_deleted = True
         logger.info("[API/knowledge] 需求退出知识库: id={}", entry_id)
 
         # 从向量库移除
         try:
             await asyncio.to_thread(vector_store.delete_requirement_from_kb, entry_id)
+            kb_deleted = True
         except Exception as e:
-            logger.warning("[API/knowledge] 向量库删除失败(不阻断): {}", str(e)[:100])
+            kb_error = str(e)[:300]
+            logger.warning("[API/knowledge] 向量库删除失败: req_id={}, error={}", entry_id, kb_error[:200])
 
     elif entry_type == "test_case":
-        # 从 SQLite 删除测试用例
+        # 从 PG 删除测试用例
         stmt = select(TestCase).where(TestCase.id == entry_id)
         result = await session.execute(stmt)
         record = result.scalar_one_or_none()
@@ -271,19 +291,67 @@ async def delete_kb_entry(
             raise HTTPException(status_code=404, detail=f"测试用例 {entry_id} 不存在")
         await session.delete(record)
         await session.commit()
+        db_deleted = True
         logger.info("[API/knowledge] 测试用例已删除: id={}", entry_id)
 
         # 从向量库移除
         try:
             await asyncio.to_thread(vector_store.delete_test_case_from_kb, entry_id)
+            kb_deleted = True
         except Exception as e:
-            logger.warning("[API/knowledge] 向量库删除失败(不阻断): {}", str(e)[:100])
+            kb_error = str(e)[:300]
+            logger.warning("[API/knowledge] 向量库删除失败: case_id={}, error={}", entry_id, kb_error[:200])
 
     else:
         raise HTTPException(status_code=400, detail=f"不支持的条目类型: {entry_type}")
 
+    message = f"已从知识库删除 {entry_type} {entry_id}"
+    if db_deleted and not kb_deleted:
+        message += "（向量库删除失败，请检查 Milvus 状态）"
+
     return ApiResponse(
         success=True,
-        message=f"已从知识库删除 {entry_type} {entry_id}",
-        data={"entry_id": entry_id, "deleted": True},
+        message=message,
+        data={
+            "entry_id": entry_id,
+            "deleted": True,
+            "db_deleted": db_deleted,
+            "kb_deleted": kb_deleted,
+            "kb_error": kb_error,
+        },
+    )
+
+
+# ============================================================================
+# 5. 知识库诊断（管理员）
+# ============================================================================
+
+@router.get("/diagnostics", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def get_kb_diagnostics() -> ApiResponse:
+    """知识库诊断信息（管理员）。
+
+    返回向量库连接状态、各 Collection 计数、嵌入模型状态、架构说明。
+    供管理页面展示知识库健康度与组件角色（含 MinIO 说明）。
+    """
+    diag: dict = {
+        "vector_db": {"connected": False, "model_ready": False, "collections": {}, "error": ""},
+        "architecture": {
+            "relational_db": "PostgreSQL — 存储需求/用例/模式元数据与 SRR JSON",
+            "vector_db": "Milvus — 向量检索引擎，存储 1024 维语义向量",
+            "object_storage": "MinIO — Milvus 的存储后端，存储向量数据文件（非独立 KB 管理器）",
+            "coordination": "etcd — Milvus 的协调服务",
+        },
+    }
+    try:
+        diag["vector_db"]["connected"] = True
+        diag["vector_db"]["model_ready"] = await asyncio.to_thread(vector_store.is_model_ready)
+        diag["vector_db"]["collections"] = await asyncio.to_thread(vector_store.get_collection_stats)
+    except Exception as e:
+        diag["vector_db"]["error"] = str(e)[:200]
+        logger.warning("[API/knowledge] 诊断失败: {}", str(e)[:200])
+
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data=diag,
     )

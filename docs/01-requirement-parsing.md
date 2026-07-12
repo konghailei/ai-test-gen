@@ -2037,8 +2037,8 @@ QUALITY_GATE_STRICT_MODE=false
 
 # 数据库连接
 DATABASE_URL=postgresql://user:pass@localhost:5432/ai_test_gen
-VECTOR_DB_TYPE=chromadb
-CHROMADB_HOST=localhost
+VECTOR_DB_TYPE=milvus
+MILVUS_HOST=localhost
 CHROMADB_PORT=8000
 
 # 日志
@@ -2085,7 +2085,7 @@ class AppConfig(BaseModel):
     
     # 数据库
     database_url: str = "postgresql://localhost/ai_test_gen"
-    vector_db_type: str = "chromadb"  # chromadb | milvus | pgvector
+    vector_db_type: str = "milvus"  # 统一使用 Milvus（ChromaDB 已弃用）
     
     # 日志
     log_level: str = "INFO"
@@ -2113,7 +2113,7 @@ def load_config() -> AppConfig:
             strict_mode=os.getenv("QUALITY_GATE_STRICT_MODE", "false").lower() == "true",
         ),
         database_url=os.getenv("DATABASE_URL", "postgresql://localhost/ai_test_gen"),
-        vector_db_type=os.getenv("VECTOR_DB_TYPE", "chromadb"),
+        vector_db_type=os.getenv("VECTOR_DB_TYPE", "milvus"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         log_file=os.getenv("LOG_FILE"),
     )

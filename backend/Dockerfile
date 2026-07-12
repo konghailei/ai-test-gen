@@ -7,12 +7,14 @@
 ARG BASE_IMAGE=ai-test-gen-base:latest
 FROM ${BASE_IMAGE}
 
-# 兜底安装关键依赖（基础镜像已含时跳过，仅耗时 1-2 秒）
+# 兜底安装关键依赖（基础镜像已含时跳过，仅耗时数秒）
 RUN pip install --no-cache-dir \
     asyncpg==0.30.0 \
     psycopg2-binary==2.9.10 \
     "marshmallow==3.25.0" \
-    setuptools==75.8.0
+    setuptools==75.8.0 \
+    "celery[redis]==5.4.0" \
+    redis==5.0.1
 
 COPY backend/ .
 

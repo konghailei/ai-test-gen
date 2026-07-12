@@ -30,7 +30,7 @@ import json
 from typing import Any
 
 from app.core.llm_client import llm_client
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.models.utcf import ReviewReport
 from app.prompts import review_agent as prompts
 from app.core import prompt_manager
@@ -432,7 +432,7 @@ class ReviewAgent:
         reviewed_cases: list[dict],
         report: dict,
     ) -> dict:
-        """将审核通过的用例回流到知识库（SQLite + Vector DB 双写）。
+        """将审核通过的用例回流到知识库（PG + Vector DB 双写）。
 
         对应 docs/02 §4.1 闭环回流流程：
         - 高置信度 (≥0.85) → 自动入库，标记 approved
@@ -585,6 +585,7 @@ class ReviewAgent:
                                 error_type="incomplete",
                                 error_detail=f"置信度过低: confidence={confidence:.3f}",
                                 corrected_json=case,
+                                product_id=product_id,
                             )
                         except Exception as ve:
                             logger.warning(

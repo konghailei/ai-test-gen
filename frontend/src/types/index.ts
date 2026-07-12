@@ -51,11 +51,59 @@ export interface ClarifyQuestion {
   id: string
   field: string
   question: string
-  priority: string
+  priority: 'critical' | 'important' | 'optional'
+  category?: 'completeness' | 'ambiguity' | 'gap' | 'conflict' | 'cold_start'
   context: string
   default_answer?: string
   input_type?: 'text' | 'select' | 'multi_select'
   options?: string[]
+  source?: string  // cold_start_xxx 等
+}
+
+export interface KbAugmentation {
+  field: string
+  value: any
+  similarity: number
+  source_req_id?: string
+  _is_baseline?: boolean
+}
+
+export interface FieldConflict {
+  field: string
+  existing_value: any
+  existing_source: string
+  suggested_value: any
+  suggested_source: string
+  kb_similarity: number
+  kb_source_req_id?: string
+  resolution: 'pending_human' | 'resolved'
+}
+
+export interface ClarifyState {
+  questions: ClarifyQuestion[]
+  previous_answers: Record<string, string>
+  quality_report: {
+    overall_score: number
+    completeness_score?: number
+    ambiguity_score?: number
+    summary?: string
+  }
+  kb_status: { kb_empty: boolean; product_first_requirement: boolean }
+  auto_augmentations: KbAugmentation[]
+  field_conflicts?: FieldConflict[]
+}
+
+export interface ClarifyHistoryEntry {
+  timestamp: string
+  action: 'clarify' | 'regenerate'
+  questions?: ClarifyQuestion[]
+  answers?: Record<string, string>
+  extra_notes?: string
+  auto_augmentations?: KbAugmentation[]
+  field_conflicts?: FieldConflict[]
+  quality_report?: { overall_score: number; summary?: string }
+  previous_title?: string
+  new_title?: string
 }
 
 export interface TestCase {
@@ -159,6 +207,12 @@ export interface HealthStatus {
   cold_start_mode: boolean
   db_type?: string
   vector_store?: string
+  vector_db?: {
+    connected: boolean
+    model_ready: boolean
+    collections: Record<string, number>
+    error: string
+  }
 }
 
 export interface KbFlowback {
@@ -181,6 +235,7 @@ export interface Project {
   product_id: string
   name: string
   description: string
+  version: string
   created_at: string
 }
 
@@ -227,6 +282,24 @@ export interface KbEntry {
   modules?: string
   priority?: string
   summary?: string
+  archived_at?: string
+  vectorized?: boolean
+  created_at?: string
+}
+
+export interface KbDiagnostics {
+  vector_db: {
+    connected: boolean
+    model_ready: boolean
+    collections: Record<string, { num_entities: number; description?: string; error?: string }>
+    error: string
+  }
+  architecture: {
+    relational_db: string
+    vector_db: string
+    object_storage: string
+    coordination: string
+  }
 }
 
 // ============================================================

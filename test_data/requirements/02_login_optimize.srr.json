@@ -1,0 +1,83 @@
+{
+  "srr_version": "1.0",
+  "requirement": {
+    "id": "REQ-2024-003",
+    "product_id": "PROD-001",
+    "product_name": "用户中心",
+    "title": "登录优化（增加图形验证码）",
+    "priority": "P1",
+    "modules": ["auth"],
+    "summary": "在 V1.0 登录功能基础上增加图形验证码机制，提升防爆破能力",
+    "change_type": "optimized",
+    "supersedes": "REQ-2024-001"
+  },
+  "preconditions": ["用户已注册", "登录页已加载图形验证码"],
+  "flows": {
+    "happy_path": {
+      "steps": [
+        {"order": 1, "action": "打开登录页", "expect": "显示表单与图形验证码、刷新按钮"},
+        {"order": 2, "action": "输入账号、密码与正确验证码后点击登录", "expect": "系统先校验验证码，再校验凭证"}
+      ]
+    },
+    "alternate_flows": [
+      {"name": "验证码为空", "trigger": "未输入验证码即提交", "expect": "提示「请输入验证码」，禁止提交"},
+      {"name": "验证码错误", "trigger": "验证码不匹配", "expect": "提示「验证码错误」，刷新验证码（不计入账号锁定计数）"},
+      {"name": "验证码过期", "trigger": "验证码超过 5 分钟或错误超 5 次", "expect": "提示「验证码已过期，请刷新后重试」"}
+    ]
+  },
+  "boundary_conditions": [
+    {"field": "captcha", "condition": "长度 != 4 或含非数字字母", "expect": "前端校验拦截"}
+  ],
+  "business_rules": [
+    {"id": "BR-04", "rule": "验证码由服务端生成，前端仅展示图片，答案不下发到客户端", "type": "security"},
+    {"id": "BR-05", "rule": "同一验证码错误超过 5 次或存活超过 5 分钟即失效", "type": "security"}
+  ],
+  "data_constraints": [
+    {"field": "captcha", "type": "string", "required": true, "constraints": "长度 4，数字+字母", "example": "A3F9"},
+    {"field": "captcha_token", "type": "string", "required": true, "constraints": "绑定本次验证码会话，防重放", "example": "tok_abc123"}
+  ],
+  "non_functional": {
+    "performance": "验证码生成与校验接口 P99 < 200ms",
+    "security": "验证码答案仅服务端持有",
+    "compatibility": "",
+    "accessibility": ""
+  },
+  "relationships": [],
+  "test_points_hint": [
+    {"category": "security", "point": "验证码生成与校验正确性"},
+    {"category": "security", "point": "验证码过期与错误次数失效策略"},
+    {"category": "performance", "point": "验证码接口性能"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-06", "description": "未输入或输入错误验证码时拒绝登录", "type": "security"},
+    {"id": "AC-07", "description": "验证码答案仅服务端持有，客户端无法通过接口直接获取", "type": "security"},
+    {"id": "AC-08", "description": "验证码生成与校验接口 P99 < 200ms", "type": "performance"}
+  ],
+  "api_definitions": [],
+  "user_roles": [],
+  "dependencies": [
+    {"name": "图形验证码服务", "type": "内部服务", "description": "生成与校验图形验证码", "impact_if_unavailable": "登录页无法展示验证码，登录受阻"}
+  ],
+  "ui_rules": [],
+  "data_model": [],
+  "assumptions": [
+    {"description": "验证码样式与具体生成算法由验证码服务决定"}
+  ],
+  "additional_details": "",
+  "field_conflicts": [],
+  "optimization_context": {
+    "original_requirement": {"id": "REQ-2024-001", "title": "用户登录功能", "version": 1},
+    "original_test_cases": [],
+    "diff": {"added": ["图形验证码机制", "captcha/captcha_token 数据约束"], "removed": [], "modified": ["登录失败锁定计数不计入验证码错误"]},
+    "generation_guidance": {"regression_scope": ["登录失败锁定策略", "账号密码校验"], "note": "回归 V1.0 主流程，增量补充验证码相关用例"}
+  },
+  "_is_incremental": true,
+  "_baseline_gaps": [
+    "账号密码登录主流程",
+    "密码复杂度与长度规则",
+    "登录失败锁定策略",
+    "登录错误提示规范",
+    "会话有效期与会话过期处理"
+  ],
+  "_raw_text": "本文档仅描述对登录功能（V1.0，REQ-2024-001）的增量优化（增加图形验证码），完整上下文请参见 REQ-2024-001。"
+}

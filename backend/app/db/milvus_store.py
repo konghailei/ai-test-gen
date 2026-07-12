@@ -1,18 +1,23 @@
 """Milvus 向量存储适配器。
 
-实现与 ChromaDB VectorStore 相同的接口，通过 pymilvus 连接 Milvus Standalone。
-配合 bge-large-zh-v1.5 嵌入模型，1024 维中文语义向量。
+通过 pymilvus 连接 Milvus Standalone，统一作为系统唯一向量库后端
+（ChromaDB 已弃用）。配合 bge-large-zh-v1.5 嵌入模型，1024 维中文语义向量。
 
 设计依据：
 - docs/05-technical-selection.md §4（向量数据库选型）
 - docs/05-technical-selection.md §5.1（bge-large-zh-v1.5 推荐）
 - docs/02-knowledge-base.md §2（双引擎存储架构）
+- docs/02-knowledge-base.md §9（大规模检索优化：HNSW + 分区）
 
-Collection 设计：
+Collection 设计（5 个，>10w 条优化策略）：
 - aitestgen_requirements  — 需求向量（ID: requirement ID）
 - aitestgen_test_cases    — 用例向量（ID: test case ID）
 - aitestgen_patterns      — 测试模式向量（ID: pattern ID）
+- aitestgen_req_pats      — 需求模式向量（ID: requirement pattern ID）
 - aitestgen_errors        — 错误案例向量（ID: error case ID）
+
+索引：HNSW（M=16, efConstruction=200, ef=64），适合 >10w 向量
+分区：按模块分区（auth/payment/user/order/system/_default），检索时缩小扫描范围
 """
 
 from __future__ import annotations
@@ -52,11 +57,18 @@ COLLECTION_CONFIGS = {
         "description": "测试模式向量",
         "dim": 1024,
     },
+    "req_pats": {
+        "description": "需求模式向量",
+        "dim": 1024,
+    },
     "errors": {
         "description": "错误案例向量",
         "dim": 1024,
     },
 }
+
+# 按模块分区，检索时只扫描目标分区，延迟降低 5-10 倍（docs/02 §9.2）
+MODULE_PARTITIONS = ["auth", "payment", "user", "order", "system", "_default"]
 
 # 进入 Milvus 表达式的标识白名单（防止引号注入 / 表达式解析失败）
 _ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
@@ -76,7 +88,7 @@ def _safe_id(value: str, field: str) -> str:
 
 
 class MilvusVectorStore:
-    """Milvus 向量存储，兼容原 ChromaDB VectorStore 接口。"""
+    """Milvus 向量存储（系统唯一向量库后端）。"""
 
     def __init__(self):
         self._model: SentenceTransformer | None = None
@@ -86,7 +98,7 @@ class MilvusVectorStore:
 
     @property
     def test_patterns(self):
-        """兼容 ChromaDB API 的属性访问，用于预热向量库。"""
+        """语义检索预热时访问 patterns Collection 的属性。"""
         return self._get_collection("patterns")
 
     # ========================================================================
@@ -151,12 +163,16 @@ class MilvusVectorStore:
         return f"{prefix}_{name}"
 
     def _ensure_collections(self) -> None:
-        """确保所有 Collection 已创建。"""
+        """确保所有 Collection 已创建（含分区）。"""
         for coll_key, cfg in COLLECTION_CONFIGS.items():
             coll_name = self._collection_name(coll_key)
             if not utility.has_collection(coll_name):
                 self._create_collection(coll_name, cfg["dim"])
-                logger.info("[Milvus] 创建 Collection: {}", coll_name)
+                self._create_partitions(coll_name)
+                logger.info("[Milvus] 创建 Collection + 分区: {}", coll_name)
+            else:
+                self._migrate_index_if_needed(coll_name)
+                self._create_partitions(coll_name)
 
     def _create_collection(self, coll_name: str, dim: int) -> None:
         """创建 Collection（id + vector + metadata + document）。"""
@@ -168,15 +184,58 @@ class MilvusVectorStore:
         ]
         schema = CollectionSchema(fields, description=coll_name)
 
-        # 创建 IVF_FLAT 索引（适合 < 10 万向量）
+        # HNSW 索引（适合 >10w 向量，docs/02 §9.3）
         index_params = {
             "metric_type": "COSINE",
-            "index_type": "IVF_FLAT",
-            "params": {"nlist": 128},
+            "index_type": "HNSW",
+            "params": {"M": 16, "efConstruction": 200},
         }
         collection = Collection(coll_name, schema)
         collection.create_index("vector", index_params)
         collection.load()
+
+    def _create_partitions(self, coll_name: str) -> None:
+        """为 Collection 创建模块分区（docs/02 §9.2）。"""
+        collection = Collection(coll_name)
+        existing_partitions = [p.name for p in collection.partitions]
+        for partition_name in MODULE_PARTITIONS:
+            if partition_name not in existing_partitions:
+                try:
+                    collection.create_partition(partition_name)
+                except Exception:
+                    pass
+
+    def _get_partition_name(self, metadata: dict) -> str:
+        """根据 metadata 中的模块信息选择分区名。"""
+        modules = metadata.get("modules", "")
+        if isinstance(modules, str) and modules:
+            first_module = modules.split(",")[0].strip().lower()
+            if first_module in MODULE_PARTITIONS:
+                return first_module
+        return "_default"
+
+    def _migrate_index_if_needed(self, coll_name: str) -> None:
+        """对已存在的 Collection 检查索引类型，若为 IVF_FLAT 则重建为 HNSW。"""
+        try:
+            collection = Collection(coll_name)
+            indexes = collection.indexes
+            for idx in indexes:
+                idx_info = idx.params
+                if idx_info.get("index_type") == "IVF_FLAT":
+                    logger.info("[Milvus] 索引迁移: {} IVF_FLAT → HNSW", coll_name)
+                    collection.release()
+                    collection.drop_index()
+                    new_index_params = {
+                        "metric_type": "COSINE",
+                        "index_type": "HNSW",
+                        "params": {"M": 16, "efConstruction": 200},
+                    }
+                    collection.create_index("vector", new_index_params)
+                    collection.load()
+                    logger.info("[Milvus] 索引迁移完成: {}", coll_name)
+                    break
+        except Exception as e:
+            logger.warning("[Milvus] 索引迁移检查失败: {} error={}", coll_name, str(e)[:200])
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
         """批量文本 → 向量。"""
@@ -193,20 +252,26 @@ class MilvusVectorStore:
         return collection
 
     def _upsert(self, coll_key: str, ids: list[str], docs: list[str], metadatas: list[dict]) -> None:
-        """写入/更新向量。"""
+        """写入/更新向量（按模块分区写入）。"""
         if not ids:
             return
         collection = self._get_collection(coll_key)
         vectors = self._embed(docs)
 
-        # Upsert：先删后插
-        collection.delete(f'id in [{",".join(repr(i) for i in ids)}]')
+        # Upsert：先删后插。Milvus expr 字符串字面量须用双引号；
+        # repr() 生成单引号会导致解析失败，故用 json.dumps 生成双引号字面量。
+        collection.delete(f'id in [{",".join(json.dumps(i, ensure_ascii=False) for i in ids)}]')
+        # metadata 列为 JSON 类型，必须直接传入 dict——若传入 json.dumps 字符串，
+        # Milvus 会将其存储为 JSON 字符串值（而非 JSON 对象），
+        # 导致 metadata["product_id"] 等表达式过滤失效（始终返回 0 条）。
+        # 按模块分区写入（docs/02 §9.2），检索时只扫描目标分区
+        partition_name = self._get_partition_name(metadatas[0]) if metadatas else "_default"
         collection.insert([
             ids,
             vectors,
-            [json.dumps(m, ensure_ascii=False) for m in metadatas],
+            metadatas,
             docs,
-        ])
+        ], partition_name=partition_name)
         collection.flush()
 
     def _search(
@@ -231,7 +296,8 @@ class MilvusVectorStore:
         collection = self._get_collection(coll_key)
         query_vector = self._embed([query])[0]
 
-        search_params = {"metric_type": "COSINE", "params": {"nprobe": 16}}
+        # HNSW 检索参数（docs/02 §9.3）
+        search_params = {"metric_type": "COSINE", "params": {"ef": 64}}
 
         results = collection.search(
             data=[query_vector],
@@ -245,13 +311,25 @@ class MilvusVectorStore:
         formatted = []
         for hits in results:
             for hit in hits:
-                meta_raw = hit.entity.get("metadata", "{}")
-                meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+                # pymilvus Entity.get() 在某些版本不支持默认值参数，
+                # 使用 try/except 安全访问各字段。
+                meta_raw = "{}"
+                doc_raw = ""
+                try:
+                    meta_raw = hit.entity.get("metadata")
+                except Exception:
+                    pass
+                try:
+                    doc_raw = hit.entity.get("document")
+                except Exception:
+                    pass
+                if isinstance(meta_raw, str):
+                    meta_raw = json.loads(meta_raw)
                 formatted.append({
                     "id": hit.id,
                     "similarity": round(hit.distance, 4),
-                    "metadata": meta or {},
-                    "document": hit.entity.get("document", ""),
+                    "metadata": meta_raw or {},
+                    "document": doc_raw or "",
                 })
         return formatted
 
@@ -266,7 +344,17 @@ class MilvusVectorStore:
         meta = metadata or {}
         meta["req_id"] = req_id
         meta["doc_type"] = "requirement"
-        # srr_json 可能超过 Milvus VARCHAR(65535) 限制，存入 document 字段而非 metadata
+        # 产品隔离：优先使用传入 metadata 的 product_id，否则从 SRR 提取；兜底 PROD-DEFAULT。
+        # 保证无论调用方是否显式传入，向量库 metadata 都带 product_id，
+        # 使 search/get_all/count 的 product_id 过滤一致生效。
+        meta["product_id"] = (
+            meta.get("product_id")
+            or (srr_json.get("requirement", {}) or {}).get("product_id", "")
+            or "PROD-DEFAULT"
+        )
+        # srr_json 作为 metadata 中的字符串字段存储（JSON 编码后的完整 SRR），
+        # 供 ClarifyAgent KB 自动补全经 meta.get("srr_json") + json.loads 提取字段值。
+        meta["srr_json"] = json.dumps(srr_json, ensure_ascii=False)
         self._upsert("requirements", [req_id], [text], [meta])
 
     def search_similar_requirements(
@@ -299,7 +387,7 @@ class MilvusVectorStore:
         where_filter = " && ".join(conditions) if conditions else None
 
         # modules 无法用 Milvus expr 直接过滤（以逗号分隔字符串存储于 metadata），
-        # 放大召回量后在内存中按模块过滤，与 ChromaDB 版本保持一致。
+        # 放大召回量后在内存中按模块过滤，保持行为一致。
         fetch_k = top_k * 5 if modules else top_k
         formatted = self._search("requirements", query, top_k=fetch_k, where_filter=where_filter)
 
@@ -319,7 +407,8 @@ class MilvusVectorStore:
         """获取所有需求向量（product_id 为空时不过滤，避免空表达式报错）。"""
         self._ensure_connected()
         collection = self._get_collection("requirements")
-        expr = f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"' if product_id else None
+        # Milvus query 要求 expr 为 string 类型；无过滤条件时传空字符串
+        expr = f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"' if product_id else ""
         results = collection.query(expr=expr, output_fields=["id", "metadata", "document"], limit=limit)
         parsed = []
         for r in results:
@@ -328,19 +417,6 @@ class MilvusVectorStore:
                 meta = json.loads(meta)
             parsed.append({"id": r["id"], "metadata": meta or {}, "document": r.get("document", "")})
         return parsed
-
-    def count_requirements(self, product_id: str | None = None) -> int:
-        """统计需求数量（Milvus 覆盖 ChromaDB 基类）。"""
-        self._ensure_connected()
-        collection = self._get_collection("requirements")
-        if product_id:
-            expr = f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"'
-            results = collection.query(expr=expr, output_fields=["id"], limit=10000)
-            return len(results)
-        try:
-            return collection.num_entities
-        except Exception:
-            return 0
 
     def delete_requirement(self, req_id: str) -> None:
         """删除需求向量。"""
@@ -352,17 +428,50 @@ class MilvusVectorStore:
         """从知识库删除需求（与 delete_requirement 同）。"""
         self.delete_requirement(req_id)
 
+    def requirement_exists(self, req_id: str) -> bool:
+        """检查指定需求是否已存在于向量库。"""
+        self._ensure_connected()
+        collection = self._get_collection("requirements")
+        results = collection.query(
+            expr=f'id == "{_safe_id(req_id, "req_id")}"',
+            output_fields=["id"],
+            limit=1,
+        )
+        return len(results) > 0
+
+    def get_collection_stats(self) -> dict:
+        """获取所有 Collection 的统计信息（num_entities + 描述）。"""
+        self._ensure_connected()
+        stats: dict[str, dict] = {}
+        for coll_key, cfg in COLLECTION_CONFIGS.items():
+            try:
+                collection = self._get_collection(coll_key)
+                stats[coll_key] = {
+                    "num_entities": collection.num_entities,
+                    "description": cfg["description"],
+                }
+            except Exception as e:
+                stats[coll_key] = {"num_entities": -1, "error": str(e)[:100]}
+        return stats
+
     # ========================================================================
     # 用例向量操作
     # ========================================================================
 
-    def add_test_case(self, case_id: str, case_json: dict, metadata: dict | None = None) -> None:
-        """添加用例到向量库。"""
+    def add_test_case(self, case_id: str, case_json: dict, metadata: dict | None = None,
+                      product_id: str | None = None) -> None:
+        """添加用例到向量库。
+
+        Args:
+            product_id: 产品 ID（显式传入以强制产品隔离；缺省时回退 metadata 中的 product_id）
+        """
         self._ensure_connected()
         text = json.dumps(case_json, ensure_ascii=False)
         meta = metadata or {}
         meta["case_id"] = case_id
         meta["doc_type"] = "test_case"
+        # 产品隔离：显式 product_id 优先，否则取 metadata 中的；兜底 PROD-DEFAULT
+        meta["product_id"] = product_id or meta.get("product_id", "") or "PROD-DEFAULT"
         self._upsert("test_cases", [case_id], [text], [meta])
 
     def search_similar_cases(self, query: str, top_k: int = 5,
@@ -393,7 +502,8 @@ class MilvusVectorStore:
         """获取所有用例向量（product_id 为空时不过滤，避免空表达式报错）。"""
         self._ensure_connected()
         collection = self._get_collection("test_cases")
-        expr = f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"' if product_id else None
+        # Milvus query 要求 expr 为 string 类型；无过滤条件时传空字符串
+        expr = f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"' if product_id else ""
         results = collection.query(expr=expr, output_fields=["id", "metadata", "document"], limit=limit)
         parsed = []
         for r in results:
@@ -445,14 +555,67 @@ class MilvusVectorStore:
         return self.search_patterns(query, top_k=top_k)
 
     # ========================================================================
+    # 需求模式向量操作（doc-02 §6 需求模式库）
+    # ========================================================================
+
+    def add_req_pattern(self, pattern_id: str, name: str, pattern_json: dict,
+                        modules: list[str] | None = None) -> None:
+        """添加需求模式到向量库。
+
+        Args:
+            pattern_id: 模式 ID
+            name: 模式名称
+            pattern_json: 模式 JSON 数据
+            modules: 适用的模块列表
+        """
+        self._ensure_connected()
+        text = f"{name}: {json.dumps(pattern_json, ensure_ascii=False)}"
+        meta = {
+            "name": name,
+            "doc_type": "req_pattern",
+            "modules": ",".join(modules) if modules else "",
+        }
+        self._upsert("req_pats", [pattern_id], [text], [meta])
+
+    def search_req_patterns(self, query: str, top_k: int = 3,
+                            module: str | None = None) -> list[dict]:
+        """检索需求模式。
+
+        Args:
+            query: 查询文本
+            top_k: Top-K
+            module: 按模块过滤（可选）
+        """
+        self._ensure_connected()
+        where_filter = None  # modules 以逗号分隔字符串存储，无法用 expr 直接过滤
+        results = self._search("req_pats", query, top_k=top_k, where_filter=where_filter)
+        if module:
+            results = [
+                r for r in results
+                if module in (r.get("metadata", {}).get("modules", "") or "").split(",")
+            ]
+        return results
+
+    def delete_req_pattern(self, pattern_id: str) -> None:
+        """删除需求模式。"""
+        self._ensure_connected()
+        collection = self._get_collection("req_pats")
+        collection.delete(f'id == "{_safe_id(pattern_id, "pattern_id")}"')
+
+    # ========================================================================
     # 错误案例操作
     # ========================================================================
 
     def add_error_case(self, error_id: str, original_case_id: str,
                        error_type: str, error_detail: str,
                        corrected_json: dict | None = None,
-                       metadata: dict | None = None) -> None:
-        """添加错误案例。"""
+                       metadata: dict | None = None,
+                       product_id: str | None = None) -> None:
+        """添加错误案例。
+
+        Args:
+            product_id: 产品 ID（显式传入以强制产品隔离；缺省时回退 metadata 中的 product_id）
+        """
         self._ensure_connected()
         text = error_detail
         meta = metadata or {}
@@ -462,6 +625,8 @@ class MilvusVectorStore:
             "error_type": error_type,
             "doc_type": "error_case",
         })
+        # 产品隔离：显式 product_id 优先，否则取 metadata 中的；兜底 PROD-DEFAULT
+        meta["product_id"] = product_id or meta.get("product_id", "") or "PROD-DEFAULT"
         self._upsert("errors", [error_id], [text], [meta])
 
     def search_similar_errors(self, query: str, top_k: int = 3,
@@ -541,7 +706,7 @@ class MilvusVectorStore:
         return self.count_requirements(product_id) == 0
 
     def _srr_to_text(self, srr_json: dict) -> str:
-        """SRR JSON → 嵌入文本（与 ChromaDB 版本保持一致）。"""
+        """SRR JSON → 嵌入文本。"""
         parts = []
         req = srr_json.get("requirement", {})
         if req.get("title"):
@@ -572,3 +737,6 @@ class MilvusVectorStore:
 
 # 全局单例
 milvus_store = MilvusVectorStore()
+# 兼容别名：上游模块统一通过 `from app.db.milvus_store import vector_store` 引用。
+# ChromaDB 已弃用（已由 Milvus 完全替代），这里 vector_store 指向同一 Milvus 单例。
+vector_store = milvus_store

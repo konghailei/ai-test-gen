@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from app.core.llm_client import llm_client
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.prompts import gen_agent as prompts
 from app.utils.id_gen import gen_test_case_id, gen_batch_id
 from app.utils.logger import logger
@@ -105,6 +105,7 @@ class GenAgent:
                 system_prompt=prompts.SYSTEM_PROMPT,
                 schema_hint={"test_suite": list} if False else None,
                 temperature=0.4,  # 用例生成需要一定创造性
+                max_tokens=8192,  # 限制生成长度，防止 LLM 退化（连续重复字符）
             )
         except Exception as e:
             logger.error("[GenAgent] LLM 调用失败: {}", str(e)[:200])

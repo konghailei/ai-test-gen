@@ -36,7 +36,7 @@ router = APIRouter()
 
 
 def _is_unique_violation(exc: Exception, constraint_name: str) -> bool:
-    """检测 SQLite/SQLAlchemy 唯一约束冲突。"""
+    """检测 PostgreSQL/SQLAlchemy 唯一约束冲突。"""
     msg = str(exc.orig) if hasattr(exc, "orig") else str(exc)
     return constraint_name.lower() in msg.lower() or "UNIQUE constraint failed" in msg
 
@@ -64,6 +64,7 @@ class CreateProjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="项目名称")
     description: str = Field(default="", max_length=1024, description="项目描述")
     id: str | None = Field(default=None, max_length=64, description="项目 ID（可选）")
+    version: str = Field(default="1.0", max_length=32, description="项目版本号")
 
 
 class CreateModuleRequest(BaseModel):
@@ -176,7 +177,7 @@ async def delete_product(pid: str, session: AsyncSession = Depends(get_session))
     # 同步删除向量库中该产品所有需求的记录
     for req_id in req_ids:
         try:
-            from app.db.vector_store import vector_store
+            from app.db.milvus_store import vector_store
             await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
         except Exception as e:
             logger.warning("[API/products] 向量库删除失败(不阻断): req_id={}, error={}", req_id, str(e)[:100])
@@ -197,7 +198,7 @@ async def list_projects(pid: str, session: AsyncSession = Depends(get_session)):
     rows = result.scalars().all()
     return ApiResponse(success=True, message="ok", data=[{
         "id": r.id, "product_id": r.product_id, "name": r.name,
-        "description": r.description,
+        "description": r.description, "version": r.version or "1.0",
         "created_at": r.created_at.isoformat() if r.created_at else "",
     } for r in rows])
 
@@ -214,6 +215,7 @@ async def create_project(pid: str, body: CreateProjectRequest, session: AsyncSes
 
     record = Project(
         id=proj_id, product_id=pid, name=body.name, description=body.description,
+        version=body.version or "1.0",
     )
     session.add(record)
     try:
@@ -230,7 +232,7 @@ async def create_project(pid: str, body: CreateProjectRequest, session: AsyncSes
 async def delete_project(proj_id: str, session: AsyncSession = Depends(get_session)):
     """删除项目及关联的需求、用例（级联），并清理向量库。
 
-    SQLite 默认未启用外键约束（ondelete=CASCADE 不生效），需应用层显式级联。
+    PostgreSQL 原生支持外键约束（ondelete=CASCADE），但为确保跨表级联完整性，仍显式处理。
     """
     # 先收该项目下所有需求 ID，用于删除用例与清理向量库
     req_result = await session.execute(
@@ -247,7 +249,7 @@ async def delete_project(proj_id: str, session: AsyncSession = Depends(get_sessi
     # 同步清理向量库
     for req_id in req_ids:
         try:
-            from app.db.vector_store import vector_store
+            from app.db.milvus_store import vector_store
             await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
         except Exception as e:
             logger.warning("[API/products] 向量库删除失败(不阻断): req_id={}, error={}", req_id, str(e)[:100])
@@ -297,8 +299,8 @@ async def create_module(pid: str, body: CreateModuleRequest, session: AsyncSessi
 async def delete_module(mod_id: str, session: AsyncSession = Depends(get_session)):
     """删除模块及关联的依赖边（级联）。
 
-    SQLite 默认未启用外键约束（ModuleDependency 的 ondelete=CASCADE 不生效），
-    需应用层显式删除指向该模块的依赖边，否则留下孤儿边导致图谱查到已删模块。
+    PostgreSQL 原生支持外键约束（ModuleDependency 的 ondelete=CASCADE），
+    但为确保依赖图谱完整性，仍显式删除指向该模块的依赖边。
     """
     await session.execute(
         delete(ModuleDependency).where(

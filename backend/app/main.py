@@ -34,7 +34,7 @@ from app.config import settings
 from app.core.auth import auth_middleware, get_default_token
 from app.core.rate_limiter import rate_limit_middleware
 from app.db.database import init_db
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.models.api_schemas import ApiResponse
 from app.utils.logger import logger, setup_logger
 
@@ -63,8 +63,8 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("AI-Test-Gen v{} 启动中...", __version__)
     logger.info("LLM 提供商: {}", settings.LLM_PROVIDER)
-    logger.info("SQLite: {}", settings.SQLITE_PATH)
-    logger.info("ChromaDB: {}", settings.CHROMA_PATH)
+    logger.info("数据库: PostgreSQL")
+    logger.info("向量存储后端: {}", settings.VECTOR_STORE)
     logger.info("限流: {} RPM", settings.API_RPM_LIMIT)
     logger.info("DEBUG 模式: {}", settings.DEBUG)
     logger.info("=" * 60)
@@ -89,23 +89,26 @@ async def lifespan(app: FastAPI):
     try:
         # 初始化数据库（建表 + 种子数据）
         await init_db()
+    except Exception as e:
+        logger.error("init_db 失败（应用将以降级模式启动）: {}", str(e))
+        logger.warning("数据库初始化异常，但 LLM 配置加载仍将尝试")
 
-        # 从 DB 加载持久化的 LLM 配置（覆盖 .env 默认值）
-        try:
-            from app.api.settings import load_db_config_to_settings
-            from app.db.database import async_session
-            async with async_session() as session:
-                await load_db_config_to_settings(session)
-        except Exception as e:
-            logger.warning("从 DB 加载 LLM 配置失败（使用 .env 默认值）: {}", str(e)[:120])
+    # 从 DB 加载持久化的 LLM 配置（覆盖 .env 默认值）
+    # 独立于 init_db 执行：即使建表/迁移失败，也要确保 LLM 配置可用
+    try:
+        from app.api.settings import load_db_config_to_settings
+        from app.db.database import async_session
+        async with async_session() as session:
+            await load_db_config_to_settings(session)
+    except Exception as e:
+        logger.warning("从 DB 加载 LLM 配置失败（使用 .env 默认值）: {}", str(e)[:120])
 
+    try:
         # 预热向量库（懒加载触发客户端创建）
         _ = await asyncio.to_thread(lambda: vector_store.test_patterns)
         logger.info("向量库已就绪")
     except Exception as e:
-        logger.error("启动初始化失败: {}", str(e))
-        # 不抛出异常，允许应用以降级模式启动（API 仍可访问，LLM 功能不可用）
-        logger.warning("应用将以降级模式启动，请检查配置")
+        logger.warning("向量库预热失败（不影响启动）: {}", str(e)[:120])
 
     logger.info("AI-Test-Gen 启动完成，监听端口 {}", settings.APP_PORT)
 
@@ -254,6 +257,51 @@ def _check_llm_configured() -> bool:
     return bool(pk and pk != "sk-dummy")
 
 
+def _check_vector_store() -> dict:
+    """检查向量库（Milvus）连接状态和集合统计。
+
+    返回结构：
+        {
+            "connected": bool,
+            "error": str,           # 连接失败时的错误信息
+            "model_ready": bool,     # 嵌入模型是否已加载
+            "collections": {         # 各 Collection 的记录数
+                "requirements": int,
+                "test_cases": int,
+                "patterns": int,
+                "errors": int,
+            },
+            "kb_empty": bool,        # 所有 Collection 均为空
+        }
+    """
+    result = {
+        "connected": False,
+        "error": "",
+        "model_ready": False,
+        "collections": {},
+        "kb_empty": True,
+    }
+    try:
+        result["connected"] = True
+        result["model_ready"] = vector_store.is_model_ready()
+        counts = {}
+        all_empty = True
+        for coll_key in ("requirements", "test_cases", "patterns", "req_pats", "errors"):
+            try:
+                collection = vector_store._get_collection(coll_key)
+                count = collection.num_entities
+                counts[coll_key] = count
+                if count > 0:
+                    all_empty = False
+            except Exception:
+                counts[coll_key] = -1
+        result["collections"] = counts
+        result["kb_empty"] = all_empty
+    except Exception as e:
+        result["error"] = str(e)[:200]
+    return result
+
+
 @app.get("/api/health", tags=["系统"])
 async def health_check() -> ApiResponse:
     """健康检查端点。
@@ -261,14 +309,9 @@ async def health_check() -> ApiResponse:
     返回应用基本信息与运行状态，供前端/负载均衡探活。
 
     Returns:
-        ApiResponse: 包含 version / llm_provider / kb_empty 等状态信息
+        ApiResponse: 包含 version / llm_provider / kb_empty / vector_db 等状态信息
     """
-    kb_empty = False
-    try:
-        kb_empty = await asyncio.to_thread(vector_store.is_empty)
-    except Exception:
-        # 向量库未就绪时默认非空（不影响健康检查通过）
-        pass
+    vs_status = await asyncio.to_thread(_check_vector_store)
 
     return ApiResponse(
         success=True,
@@ -277,10 +320,16 @@ async def health_check() -> ApiResponse:
             "version": __version__,
             "llm_provider": settings.LLM_PROVIDER,
             "llm_configured": _check_llm_configured(),
-            "kb_empty": kb_empty,
-            "cold_start_mode": kb_empty,
-            "db_type": "postgresql" if settings.is_pg else "sqlite",
-            "vector_store": os.getenv("VECTOR_STORE", "chromadb"),
+            "kb_empty": vs_status["kb_empty"],
+            "cold_start_mode": vs_status["kb_empty"],
+            "db_type": "postgresql",
+            "vector_store": os.getenv("VECTOR_STORE", "milvus"),
+            "vector_db": {
+                "connected": vs_status["connected"],
+                "error": vs_status["error"],
+                "model_ready": vs_status["model_ready"],
+                "collections": vs_status["collections"],
+            },
         },
     )
 

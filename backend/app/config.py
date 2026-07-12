@@ -5,7 +5,7 @@
 
 设计依据：
 - LLM 配置：docs/05-technical-selection.md §2（DeepSeek 主力 + OpenAI 备用）
-- 数据库路径：docs/05-technical-selection.md §11（MVP 用 SQLite + ChromaDB）
+- 数据库：docs/05-technical-selection.md §11（PostgreSQL + Milvus）
 - 知识库配置：docs/02-knowledge-base.md §2.5（知识库维护 + 检索配置）
 - 质量门禁阈值：docs/01-requirement-parsing.md §5.2（冷启动 0.60 / 正常 0.75）
 - 最大澄清轮次：docs/01-requirement-parsing.md §5.3（最多 3 轮）
@@ -78,16 +78,13 @@ class Settings(BaseSettings):
     """OpenAI 默认模型"""
     OPENAI_MODEL: str = "gpt-4o"
 
-    # ========== MVP 数据库配置 ==========
-    """SQLite 数据库文件路径（相对 backend 目录）"""
-    SQLITE_PATH: str = "./data/aitestgen.db"
+    # ========== 数据目录配置 ==========
+    """数据目录路径（相对 backend 目录，存放日志、密钥等持久化文件）"""
+    DATA_DIR: str = "./data"
 
-    """ChromaDB 向量库持久化目录"""
-    CHROMA_PATH: str = "./data/chroma"
-
-    # ========== 向量存储（chromadb / milvus） ==========
-    """向量存储后端：chromadb（开发/回退）| milvus（生产）"""
-    VECTOR_STORE: str = "chromadb"
+    # ========== 向量存储（Milvus，系统唯一向量库后端） ==========
+    """向量存储后端：milvus（ChromaDB 已弃用，统一使用 Milvus）"""
+    VECTOR_STORE: str = "milvus"
 
     """Milvus 服务地址（仅 VECTOR_STORE=milvus 时生效）"""
     MILVUS_HOST: str = "localhost"
@@ -98,8 +95,8 @@ class Settings(BaseSettings):
     """Milvus Collection 名称前缀（按环境隔离）"""
     MILVUS_COLLECTION_PREFIX: str = "aitestgen"
 
-    # ========== 生产数据库配置（PostgreSQL） ==========
-    """PostgreSQL 连接字符串（设置后自动切换到 PG，替代 SQLite）"""
+    # ========== 数据库配置（PostgreSQL，系统唯一关系数据库后端） ==========
+    """PostgreSQL 连接字符串（必填，格式：postgresql://user:pass@host:port/dbname）"""
     DATABASE_URL: str = ""
 
     """PG 连接池大小"""
@@ -112,8 +109,9 @@ class Settings(BaseSettings):
     LLM_TIMEOUT: int = 0
 
     # ========== 嵌入模型配置 ==========
-    """嵌入模型类型：chroma_default（默认ONNX）| local（sentence-transformers）"""
-    EMBEDDING_MODEL_TYPE: str = "chroma_default"
+    """嵌入模型类型：local（sentence-transformers，默认）| cloud（远程 API 嵌入）。
+    注：ChromaDB 已弃用，chroma_default 选项不再可用；模型实际加载由 EMBEDDING_MODEL_NAME 决定。"""
+    EMBEDDING_MODEL_TYPE: str = "local"
 
     """本地嵌入模型名称（仅 EMBEDDING_MODEL_TYPE=local 时生效）"""
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-large-zh-v1.5"
@@ -149,6 +147,19 @@ class Settings(BaseSettings):
 
     """是否启用图谱扩展"""
     MATCH_ENABLE_GRAPH: bool = False
+
+    # ========== 重排器配置 ==========
+    """是否启用 Cross-Encoder 重排（bge-reranker-base）"""
+    RERANKER_ENABLED: bool = True
+
+    """重排模型名称（本地路径或 HuggingFace ID）"""
+    RERANKER_MODEL_NAME: str = "BAAI/bge-reranker-base"
+
+    """重排模型计算设备"""
+    RERANKER_DEVICE: str = "cpu"
+
+    """重排 Top-N 数量（超过此数量才触发重排）"""
+    RERANKER_THRESHOLD: int = 5
 
     # ========== 质量门禁配置 ==========
     """正常模式质量评分通过阈值（docs/01 §5.2）"""
@@ -189,6 +200,13 @@ class Settings(BaseSettings):
     """LLM 每分钟最大 Token 数"""
     LLM_TPM_LIMIT: int = 100000
 
+    # ========== Celery 配置 ==========
+    """Celery broker URL（Redis）"""
+    CELERY_BROKER_URL: str = ""
+
+    """Celery result backend URL（Redis）"""
+    CELERY_RESULT_BACKEND: str = ""
+
     # ========== 限流配置 ==========
     """全局 API 每分钟最大请求数（内存 Token Bucket 限流）"""
     API_RPM_LIMIT: int = 60
@@ -207,29 +225,6 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     @property
-    def sqlite_url(self) -> str:
-        """获取 SQLAlchemy 异步连接字符串。
-
-        Returns:
-            str: 形如 sqlite+aiosqlite:///./data/aitestgen.db
-
-        Note:
-            使用 aiosqlite 异步驱动，配合 FastAPI 的异步特性。
-            若配置了 DATABASE_URL（PostgreSQL），本属性仍返回 SQLite URL，
-            数据库选择由 is_pg 属性和 database.py 中的逻辑决定。
-        """
-        return f"sqlite+aiosqlite:///{self.SQLITE_PATH}"
-
-    @property
-    def is_pg(self) -> bool:
-        """判断是否配置为 PostgreSQL 模式。
-
-        Returns:
-            bool: True 表示配置了 DATABASE_URL，应使用 PostgreSQL
-        """
-        return bool(self.DATABASE_URL)
-
-    @property
     def pg_async_url(self) -> str:
         """获取 PostgreSQL 异步连接字符串。
 
@@ -240,7 +235,7 @@ class Settings(BaseSettings):
             ValueError: 未配置 DATABASE_URL 时抛出
         """
         if not self.DATABASE_URL:
-            raise ValueError("DATABASE_URL 未配置，无法生成 PG 连接字符串")
+            raise ValueError("DATABASE_URL 未配置，PostgreSQL 连接字符串为必填项")
         # 替换 postgresql:// 为 postgresql+asyncpg://
         return self.DATABASE_URL.replace(
             "postgresql://",
@@ -248,6 +243,30 @@ class Settings(BaseSettings):
         ).replace(
             "postgres://",
             "postgresql+asyncpg://"
+        )
+
+    @property
+    def pg_sync_url(self) -> str:
+        """获取 PostgreSQL 同步连接字符串（供 prompt_store 等同步场景使用）。
+
+        Returns:
+            str: 同步 PG URL（使用 psycopg2 驱动）
+
+        Raises:
+            ValueError: 未配置 DATABASE_URL 时抛出
+        """
+        if not self.DATABASE_URL:
+            raise ValueError("DATABASE_URL 未配置，PostgreSQL 连接字符串为必填项")
+        # 替换为 psycopg2 同步驱动
+        return self.DATABASE_URL.replace(
+            "postgresql+asyncpg://",
+            "postgresql+psycopg2://"
+        ).replace(
+            "postgresql://",
+            "postgresql+psycopg2://"
+        ).replace(
+            "postgres://",
+            "postgresql+psycopg2://"
         )
 
     @property
@@ -311,11 +330,9 @@ class Settings(BaseSettings):
     def ensure_data_dirs(self) -> None:
         """确保数据目录存在。
 
-        在应用启动时调用，创建 SQLite 和 ChromaDB 所需的目录结构。
+        在应用启动时调用，创建数据所需的目录结构（密钥、日志等）。
         """
-        sqlite_dir = Path(self.SQLITE_PATH).parent
-        sqlite_dir.mkdir(parents=True, exist_ok=True)
-        Path(self.CHROMA_PATH).mkdir(parents=True, exist_ok=True)
+        Path(self.DATA_DIR).mkdir(parents=True, exist_ok=True)
 
     def validate_security(self) -> list[str]:
         """启动时安全校验，返回警告列表（空列表表示无警告）。

@@ -1,80 +1,94 @@
-"""提示词持久化存储 — 基于 SQLite 的简单 key-value store。
+"""提示词持久化存储 — 基于 PostgreSQL 的简单 key-value store。
 
 每个模块的每个提示词标识为一个 key（如 "req_agent.SYSTEM_PROMPT"），
 value 为提示词文本。default_value 保存初始默认值，支持一键恢复。
+
+使用 SQLAlchemy 同步 engine（psycopg2 驱动），保持同步接口，
+供 prompt_manager 在 Agent 初始化和 API 路由中同步调用。
 """
 
 from __future__ import annotations
 
-import sqlite3
-import os
-from datetime import datetime
+from datetime import datetime, timezone
 
-# 提示词持久化目录：与 aitestgen.db / Chroma 同处 /app/data（容器内映射到
-# 宿主机 ./data，已绑定挂载，可持久化）。
-# __file__ = /app/app/db/prompt_store.py → 上两层到 /app → /app/data/prompts.db
-# ⚠️ 注意：原先写成上三层（落到容器根 /data），未挂载，容器重建即丢失，
-#    导致管理页手动改过的提示词回退。现修正为 /app/data。
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "prompts.db")
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.config import settings
+from app.db.models import PromptOverride
+from app.utils.logger import logger
 
 
-def _get_conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# 同步 engine（延迟初始化，避免循环导入）
+_sync_engine = None
+_SyncSession = None
 
 
-def _init_table():
-    conn = _get_conn()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS prompt_overrides (
-            id TEXT PRIMARY KEY,
-            module TEXT NOT NULL,
-            name TEXT NOT NULL,
-            value TEXT NOT NULL,
-            default_value TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            updated_at TEXT NOT NULL
+def _get_sync_session() -> Session:
+    """获取同步 Session（延迟初始化）。"""
+    global _sync_engine, _SyncSession
+    if _sync_engine is None:
+        _sync_engine = create_engine(
+            settings.pg_sync_url,
+            echo=False,
+            pool_size=5,
+            pool_timeout=10,
         )
-    """)
-    conn.commit()
-    conn.close()
+        _SyncSession = sessionmaker(_sync_engine, expire_on_commit=False)
+        logger.info("[PromptStore] 同步 PG engine 已初始化")
+    return _SyncSession()
 
 
-# 启动时初始化
-_init_table()
+def _ensure_table() -> None:
+    """确保 prompt_overrides 表存在（首次调用时建表）。"""
+    global _sync_engine
+    if _sync_engine is None:
+        _get_sync_session()
+    from app.db.database import Base
+    Base.metadata.create_all(_sync_engine, tables=[PromptOverride.__table__])
 
 
 def get_all_prompts() -> list[dict]:
     """获取所有提示词（含覆盖状态）。"""
-    _init_table()
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT id, module, name, value, default_value, description, updated_at FROM prompt_overrides ORDER BY module, name"
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    _ensure_table()
+    with _get_sync_session() as session:
+        rows = session.execute(
+            select(PromptOverride).order_by(PromptOverride.module, PromptOverride.name)
+        ).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "module": r.module,
+                "name": r.name,
+                "value": r.value,
+                "default_value": r.default_value,
+                "description": r.description,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else "",
+            }
+            for r in rows
+        ]
 
 
 def get_prompt(module: str, name: str) -> str | None:
     """获取指定提示词的当前值（有覆盖返回覆盖值，否则返回 None 表示用默认）。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT value FROM prompt_overrides WHERE id = ?", (f"{module}.{name}",)
-    ).fetchone()
-    conn.close()
-    return row["value"] if row else None
+    _ensure_table()
+    pid = f"{module}.{name}"
+    with _get_sync_session() as session:
+        row = session.execute(
+            select(PromptOverride).where(PromptOverride.id == pid)
+        ).scalar_one_or_none()
+        return row.value if row else None
 
 
 def get_prompt_default(module: str, name: str) -> str | None:
     """获取默认值。"""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT default_value FROM prompt_overrides WHERE id = ?", (f"{module}.{name}",)
-    ).fetchone()
-    conn.close()
-    return row["default_value"] if row else None
+    _ensure_table()
+    pid = f"{module}.{name}"
+    with _get_sync_session() as session:
+        row = session.execute(
+            select(PromptOverride).where(PromptOverride.id == pid)
+        ).scalar_one_or_none()
+        return row.default_value if row else None
 
 
 def register_default(
@@ -84,53 +98,64 @@ def register_default(
     description: str = "",
 ) -> None:
     """注册/更新默认值（不会覆盖已有的用户自定义 value）。"""
-    _init_table()
-    conn = _get_conn()
+    _ensure_table()
     pid = f"{module}.{name}"
-    existing = conn.execute("SELECT value, default_value FROM prompt_overrides WHERE id = ?", (pid,)).fetchone()
+    now = datetime.now(timezone.utc)
+    with _get_sync_session() as session:
+        existing = session.execute(
+            select(PromptOverride).where(PromptOverride.id == pid)
+        ).scalar_one_or_none()
 
-    if existing:
-        # 已有记录：更新 default_value 和 description，但不覆盖用户自定义的 value
-        if existing["value"] == existing["default_value"]:
-            # 如果当前值等于旧默认值，同步更新为新默认值
-            conn.execute(
-                "UPDATE prompt_overrides SET default_value = ?, value = ?, description = ?, updated_at = ? WHERE id = ?",
-                (default_value, default_value, description, datetime.now().isoformat(), pid),
-            )
+        if existing:
+            if existing.value == existing.default_value:
+                existing.default_value = default_value
+                existing.value = default_value
+                existing.description = description
+                existing.updated_at = now
+            else:
+                existing.default_value = default_value
+                existing.description = description
+                existing.updated_at = now
         else:
-            # 用户已自定义，只更新 default 和 description
-            conn.execute(
-                "UPDATE prompt_overrides SET default_value = ?, description = ? WHERE id = ?",
-                (default_value, description, pid),
-            )
-    else:
-        conn.execute(
-            "INSERT INTO prompt_overrides (id, module, name, value, default_value, description, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (pid, module, name, default_value, default_value, description, datetime.now().isoformat()),
-        )
-    conn.commit()
-    conn.close()
+            session.add(PromptOverride(
+                id=pid,
+                module=module,
+                name=name,
+                value=default_value,
+                default_value=default_value,
+                description=description,
+                updated_at=now,
+            ))
+        session.commit()
 
 
 def update_prompt(module: str, name: str, value: str) -> None:
     """更新用户自定义的提示词。"""
-    conn = _get_conn()
+    _ensure_table()
     pid = f"{module}.{name}"
-    conn.execute(
-        "UPDATE prompt_overrides SET value = ?, updated_at = ? WHERE id = ?",
-        (value, datetime.now().isoformat(), pid),
-    )
-    conn.commit()
-    conn.close()
+    now = datetime.now(timezone.utc)
+    with _get_sync_session() as session:
+        row = session.execute(
+            select(PromptOverride).where(PromptOverride.id == pid)
+        ).scalar_one_or_none()
+        if row:
+            row.value = value
+            row.updated_at = now
+            session.commit()
+        else:
+            logger.warning("[PromptStore] 更新失败：提示词 {} 不存在，请先 register_default", pid)
 
 
 def reset_prompt(module: str, name: str) -> None:
     """恢复默认值。"""
-    conn = _get_conn()
+    _ensure_table()
     pid = f"{module}.{name}"
-    conn.execute(
-        "UPDATE prompt_overrides SET value = default_value, updated_at = ? WHERE id = ?",
-        (datetime.now().isoformat(), pid),
-    )
-    conn.commit()
-    conn.close()
+    now = datetime.now(timezone.utc)
+    with _get_sync_session() as session:
+        row = session.execute(
+            select(PromptOverride).where(PromptOverride.id == pid)
+        ).scalar_one_or_none()
+        if row:
+            row.value = row.default_value
+            row.updated_at = now
+            session.commit()

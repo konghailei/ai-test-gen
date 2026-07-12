@@ -75,12 +75,12 @@
 
 | 方案 | 适用阶段 | 特点 |
 |------|---------|------|
-| **ChromaDB** | 开发/小规模 | 轻量、Python 原生、零配置、< 10w 向量 |
+| **ChromaDB（已弃用）** | 开发/小规模 | 轻量、Python 原生、零配置、< 10w 向量 |
 | **Milvus** | 生产/大规模 | 分布式、十亿级向量、混合检索、GPU 加速 |
 | **pgvector** | 已有 PG 基础设施 | PostgreSQL 扩展、统一运维、中等规模 |
 | **Qdrant** | 中等规模 | Rust 实现、高性能、过滤能力强 |
 
-**推荐路径**：ChromaDB (原型) → pgvector/milvus (生产)
+**推荐路径**：Milvus（统一向量库后端，ChromaDB 已弃用移除）
 
 **向量存储结构**：
 
@@ -122,7 +122,9 @@
 
 ### 2.1.1 Vector DB 完整操作示例
 
-以下以 ChromaDB 为例，展示知识库的完整操作链路。
+> ⚠️ **已废弃示例（历史保留）**：以下代码为早期 ChromaDB 用法示例，当前版本已移除 ChromaDB、统一使用 Milvus 作为唯一向量库后端，本节代码**不可直接运行**。当前接口与调用方式请以 `backend/app/db/milvus_store.py` 及各 Agent 中的 `vector_store` 单例为准。
+
+以下以 ChromaDB 为例，展示知识库的完整操作链路（历史参考）。
 
 #### 初始化与存入
 
@@ -465,7 +467,7 @@ CREATE INDEX idx_trace_req ON traceability(requirement_id);
 
 ```bash
 # ── Vector DB 配置 ──
-VECTOR_DB_TYPE=chromadb  # chromadb | milvus | pgvector
+VECTOR_DB_TYPE=milvus  # 统一使用 Milvus（ChromaDB 已弃用）
 CHROMADB_HOST=localhost
 CHROMADB_PORT=8000
 MILVUS_HOST=localhost
@@ -503,7 +505,7 @@ from typing import Optional
 
 class VectorDBConfig(BaseModel):
     """Vector DB 配置"""
-    type: str = Field(default="chromadb", pattern="^(chromadb|milvus|pgvector)$")
+    type: str = Field(default="milvus", pattern="^(milvus|pgvector)$")
     host: str = "localhost"
     port: int = 8000
     collection_name: str = "requirements"
@@ -548,7 +550,7 @@ import os
 def load_kb_config() -> KnowledgeBaseConfig:
     return KnowledgeBaseConfig(
         vector_db=VectorDBConfig(
-            type=os.getenv("VECTOR_DB_TYPE", "chromadb"),
+            type=os.getenv("VECTOR_DB_TYPE", "milvus"),
             host=os.getenv("CHROMADB_HOST", "localhost"),
             port=int(os.getenv("CHROMADB_PORT", "8000")),
         ),
@@ -1106,6 +1108,21 @@ def auto_discover_dependencies(new_req_srr: dict, pg_conn, embedding_model) -> l
                  └─────────────┘
 ```
 
+**实际实现**（`backend/app/db/hybrid_search.py`）：
+
+1. **向量检索**：Milvus HNSW（M=16, efConstruction=200, ef=64），返回 Top-K×2
+2. **BM25 检索**：PostgreSQL tsvector + zhparser 中文分词 + GIN 索引
+   - SQL: `WHERE search_vec @@ plainto_tsquery('chinese', :q)`
+   - 排序: `ts_rank(search_vec, query) DESC`
+3. **RRF 融合**：k=60，`score(d) = Σ 1/(k + rank_i(d))`
+4. **Cross-Encoder 重排**：bge-reranker-base（FlagEmbedding），对 RRF Top-K×2 重排为 Top-N
+5. **多级缓存**：L1 Redis（TTL 24h）+ L2 LRU（进程内 1000 条），key = MD5(query|product_id|coll_type)
+
+**内部降级**（检索质量优化，非系统降级）：
+- 向量检索失败 → 仅用 BM25
+- BM25 检索失败 → 仅用向量
+- 两者都失败 → 返回空（上层静默跳过，见 §2.6 降级策略）
+
 ### 3.2 检索维度
 
 | 维度 | 检索目标 | 实现方式 |
@@ -1142,9 +1159,9 @@ def auto_discover_dependencies(new_req_srr: dict, pg_conn, embedding_model) -> l
 
 | 错误类型 | 来源 | 处理策略 | 用户感知 |
 |---------|------|---------|---------|
-| **Vector DB 连接失败** | 写入/检索时 | 重试 3 次 → 降级到 PG 全文检索 | 检索质量略降，功能正常 |
-| **PG 连接失败** | 写入/查询时 | 连接池重试 → 降级到只读缓存 | 写入失败，读取正常 |
-| **Embedding 模型失败** | 生成嵌入时 | 重试 3 次 → 降级到规则哈希 | 语义相似度精度下降 |
+| **Vector DB 连接失败** | 写入/检索时 | 重试 3 次 → 静默跳过 KB（生成流水线正常生成，人工澄清兜底） | 检索质量略降，功能正常 |
+| **PG 连接失败** | 写入/查询时 | 连接池重试 → 报错（PG 是主库，无降级） | 操作失败，提示重试 |
+| **Embedding 模型失败** | 生成嵌入时 | Celery 任务重试 3 次 → 记录日志（不阻断归档） | 归档成功，KB 写入延迟 |
 | **磁盘空间不足** | 写入 Vector DB 时 | 立即告警 → 拒绝新写入 | "知识库已满，请联系管理员" |
 | **数据不一致** | Vector DB 与 PG 数据不匹配 | 记录不一致 → 后台异步修复 | 无感知（后台修复中） |
 
@@ -1289,21 +1306,41 @@ class KnowledgeBase:
             )
 ```
 
-#### 降级策略详细
+#### 降级策略（简化版）
 
-当某层失败时，系统按以下优先级降级：
+**设计原则**：KB 是增强项，不是阻断项。KB 不可用时静默跳过，正常生成，人工澄清兜底。绝不因 KB 降级逻辑本身污染生成结果（如向 Prompt 注入诊断提示）。
 
 ```
-Level 0 (全能力): Vector DB + PG 双引擎正常工作
-    ↓ Vector DB 故障
-Level 1 (PG 备用): 仅使用 PG 全文检索 + JSONB 查询
-    ↓ PG 故障
-Level 2 (只读缓存): 使用 Redis 缓存的最近检索结果
-    ↓ Redis 故障
-Level 3 (静态规则): 基于关键词匹配的简化检索
-    ↓ 规则匹配失败
-Level 4 (拒绝服务): 返回 503，提示"知识库暂时不可用"
+KB 查询（向量 + BM25 混合检索）
+    │
+    ├─ 成功 → 返回检索结果 → 增强 Prompt → 生成
+    │
+    └─ 失败（向量+BM25 均失败）
+         │
+         └─ 静默跳过 → 返回空列表 → 生成无 KB 增强
+                                        │
+                                        └─ 人工澄清兜底（QualityGate + ClarifyLoopGuard 3 轮）
 ```
+
+**各模块降级行为**：
+
+| 模块 | KB 失败时行为 | 兜底机制 |
+|------|-------------|---------|
+| ClarifyAgent | `matched=[]` → 不补全答案 → 生成澄清问题 | 人工澄清 3 轮 |
+| retrieve_node | `few_shot_context` 为空 → GenAgent 无 few-shot 生成 | ReviewAgent + 人工审核 |
+| GenAgent | 空 few-shot → 正常生成 | ReviewAgent + 人工审核 |
+| knowledge_qa | KB 完全不可用 → 不调用 LLM → 返回错误响应 | 用户稍后重试 |
+
+**内部降级**（`hybrid_searcher` 内部，检索质量优化，非系统降级）：
+- 向量检索失败 → 仅用 BM25
+- BM25 检索失败 → 仅用向量
+- 两者都失败 → 返回空（上层静默跳过）
+
+**已废弃的多级降级**（旧版 L0-L4 方案已删除）：
+- ❌ L1 PG 备用降级 — PG BM25 已在 `hybrid_searcher` 内部作为并列检索源，不是降级路径
+- ❌ L2 Redis 只读缓存降级 — Redis 是性能优化，非降级路径
+- ❌ L3 静态规则降级 — 不存在规则引擎，删除虚构设计
+- ❌ L4 拒绝服务 503 — KB 不可用永不阻断生成流水线
 
 #### 错误日志格式
 
@@ -1487,14 +1524,14 @@ ClarifyAgent 检测到缺口
 
 ## 9. 大规模检索优化（>10 万条）
 
-> 当知识库向量数超过 10 万条后，ChromaDB 的检索延迟会显著上升（P95 > 500ms），需要迁移到 Milvus 并实施分层优化策略。
+> 当知识库向量数超过 10 万条后，需对 Milvus 实施分区/分片与分层优化策略（Milvus 为当前唯一向量库后端，已统一替代 ChromaDB）。
 
 ### 9.1 迁移路径与触发条件
 
 | 阶段 | 向量规模 | 推荐引擎 | 触发条件 |
 |------|---------|---------|---------|
-| MVP | < 1 万 | ChromaDB（嵌入式） | 零配置启动 |
-| 成长期 | 1 万 ~ 10 万 | pgvector（复用 PG） | ChromaDB 检索 P95 > 200ms |
+| MVP | < 1 万 | Milvus（单机/嵌入式） | 零配置启动 |
+| 成长期 | 1 万 ~ 10 万 | Milvus（单机优化） | 检索 P95 > 200ms 时启用分区 |
 | **成熟期** | **> 10 万** | **Milvus（分布式）** | **pgvector 检索 P95 > 500ms 或向量数 > 10 万** |
 | 超大规模 | > 1000 万 | Milvus 集群 + 分片 | 单节点内存不足 |
 
@@ -1556,21 +1593,27 @@ search_params = {
 
 ### 9.4 多级缓存
 
+**实际实现**：`backend/app/db/kb_cache.py`（`KbCache` 类）
+
 ```
-请求 → L1 Redis 缓存 (语义缓存, 相似度>0.95)
-         ├── 命中 → 直接返回 (延迟 <1ms)
-         └── 未命中 → L2 本地缓存 (LRU, 最近 1000 次查询)
-                      ├── 命中 → 返回 (延迟 <0.1ms)
-                      └── 未命中 → L3 Milvus 检索
+请求 → L2 本地 LRU 缓存 (OrderedDict, 最近 1000 次)
+         ├── 命中 → move_to_end → 返回 (延迟 <0.1ms)
+         └── 未命中 → L1 Redis 缓存 (精确 key 匹配, TTL 24h)
+                      ├── 命中 → 回填 L2 → 返回 (延迟 <1ms)
+                      └── 未命中 → hybrid_searcher 检索 (向量 + BM25 + RRF + 重排)
                                    ├── 返回结果
                                    └── 写入 L2 + L1 缓存
 ```
 
 | 缓存层 | 实现 | 容量 | TTL | 命中率预期 |
 |--------|------|------|-----|-----------|
-| L1 语义缓存 | Redis + 向量相似度 | 最近 5000 次查询 | 24h | 15-25% |
-| L2 本地缓存 | Python LRU Dict | 最近 1000 次查询 | 进程生命周期 | 10-15% |
-| L3 向量检索 | Milvus | 全量 | — | 60-75% |
+| L2 本地缓存 | Python OrderedDict + threading.Lock | 最近 1000 次查询 | 进程生命周期 | 10-15% |
+| L1 Redis 缓存 | Redis GET/SETEX（`decode_responses=True`） | 最近 5000 次查询 | 24h（`SETEX key 86400 value`） | 15-25% |
+| 检索层 | hybrid_searcher（Milvus + PG BM25） | 全量 | — | 60-75% |
+
+**缓存 key 设计**：`kb_cache:{MD5(query|product_id|coll_type)}`，MD5 避免长查询字符串和特殊字符问题。
+
+**降级**：Redis 不可用时自动降级为 L2 LRU-only（`_get_redis()` 返回 None，`get/set` 仅操作 L2）。
 
 ### 9.5 Re-rank 优化
 
@@ -1609,54 +1652,47 @@ ALERT_THRESHOLDS = {
 
 > **问题**：Vector DB 和 PG 不支持分布式事务，可能出现数据不一致。
 
+**实际实现**：
+- `backend/app/tasks/celery_app.py` — Celery 应用，broker/backend 用 Redis，JSON 序列化，`task_acks_late=True`，queue routing
+- `backend/app/tasks/embedding_tasks.py` — 两个异步任务
+- 归档端点（`requirements.py` + `knowledge_qa.py`）：PG commit → `celery_app.send_task` 派发 → Celery Worker 异步 Embedding + Milvus 写入
+
 ```python
-# 方案：PG 先写（主），Vector DB 异步写（从）
-async def store_to_kb(req_id: str, srr: dict, pg_conn, celery_app):
-    """
-    异步双写：PG 同步写入 → Celery 异步计算 Embedding → 写入 Vector DB
-    """
-    # Step 1: 同步写入 PG（事务保证）
-    with pg_conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO requirements (id, title, product_id, modules, srr_json, created_at)
-            VALUES (%s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (id) DO UPDATE SET srr_json = EXCLUDED.srr_json,
-                                           product_id = EXCLUDED.product_id,
-                                           modules = EXCLUDED.modules
-        """, (req_id, srr["requirement"]["title"],
-              srr["requirement"].get("product_id", ""),
-              srr["requirement"].get("modules", []), json.dumps(srr)))
-        pg_conn.commit()
+# 归档端点（backend/app/api/requirements.py）
+# Step 1: PG 同步写入（FastAPI 路由内，事务保证）
+record.status = "archived"
+record.go_live_date = parsed_go_live
+await session.commit()  # PG 已落库
 
-    # Step 2: 异步写入 Vector DB（通过 Celery 任务）
+# Step 2: 异步写入 Milvus（Celery 任务派发）
+from app.tasks.celery_app import celery_app
+if celery_app is not None:
     celery_app.send_task(
-        'tasks.embed_and_store',
-        args=[req_id, srr],
-        queue='embedding',
-        # 失败重试 3 次，最终写入 DLQ
-        retry_kwargs={'max_retries': 3, 'countdown': 5}
+        "app.tasks.embedding_tasks.embed_and_store_requirement",
+        args=[record.id, record.srr_json or {}, milvus_meta],
+        queue="embedding",
     )
-    # 注意：刚写入的需求不能被立即检索（需等异步 Embedding 完成，约 1-5s）
+else:
+    # Celery 不可用 → 降级为同步写入
+    await asyncio.to_thread(vector_store.add_requirement, ...)
 
 
-# 一致性修复：定期对账（每小时执行）
-def sync_check(pg_conn, vector_client):
-    """对账：PG 有但 Vector DB 没有的记录 → 补写"""
-    cur = pg_conn.cursor()
-    cur.execute("SELECT id, srr_json FROM requirements WHERE updated_at > NOW() - INTERVAL '2 hours'")
-    for row in cur.fetchall():
-        collection = vector_client.get_collection("requirements")
-        existing = collection.get(ids=[row['id']])
-        if not existing['ids']:
-            # Vector DB 缺失 → 补写
-            embedding = embedding_model.encode(build_semantic_text(row['srr_json']))
-            collection.add(ids=[row['id']], embeddings=[embedding.tolist()])
+# Celery 任务（backend/app/tasks/embedding_tasks.py）
+@celery_app.task(name="app.tasks.embedding_tasks.embed_and_store_requirement",
+                 bind=True, max_retries=3, default_retry_delay=5)
+def embed_and_store_requirement(self, req_id: str, srr_json: dict, metadata: dict):
+    try:
+        vector_store.add_requirement(req_id, srr_json, metadata=metadata)
+    except Exception as exc:
+        raise self.retry(exc=exc)  # 失败重试 3 次，间隔 5s
 ```
+
+**注意**：刚写入的需求不能被立即检索（需等异步 Embedding 完成，约 1-5s）。
 
 | 方案 | MVP | 生产环境 | 一致性保证 |
 |------|-----|---------|-----------|
-| **同步双写**（当前 doc-02 §2.6） | ✅ 推荐 | ❌ 延迟高 | PG 失败回滚 Vector DB |
-| **异步双写**（本节） | ❌ 复杂 | ✅ 推荐 | PG 先成功 → 异步 Embedding → 定期对账修复 |
+| **同步双写** | ✅ 推荐 | ❌ 延迟高 | PG 失败回滚 Vector DB |
+| **异步双写**（已实现） | ❌ 复杂 | ✅ 推荐 | PG 先成功 → Celery 异步 Embedding → 失败重试 3 次 → Celery 不可用时降级同步 |
 
 ---
 
@@ -1850,11 +1886,11 @@ AUTO_ADD_FIRST_REQ = True  # 第一个需求完成后自动入库（默认 True�
 
 ## 11. 实施建议
 
-1. **先用 ChromaDB + JSON 文件存储跑通 MVP**，再迁移到生产级方案
+1. **统一使用 Milvus 跑通 MVP**（当前唯一向量库后端，ChromaDB 已移除），再按需扩展至分布式
 2. **Embedding 模型要支持中文**：推荐 `bge-large-zh-v1.5` 或 `m3e-large`
 3. **定期评估检索质量**：用 Recall@K、MRR 指标监控，人工标注 Ground Truth
 4. **冷启动支持从零开始**：知识库为空时，ClarifyAgent 自动切换深度澄清模式（详见 §10.6）
 5. **知识库版本化**：每次 Schema 变更记录迁移脚本，保留回滚能力
-6. **大规模检索优化分阶段实施**：MVP 不优化 → 10 万条迁 pgvector → 50 万条迁 Milvus（详见 §9）
+6. **大规模检索优化分阶段实施**：MVP 即用 Milvus 单机 → 10 万条启用分区/分片 → 1000 万条启用 Milvus 集群（详见 §9）
 7. **入库 Pipeline 支持断点续传**：大批量入库时可能中断，需支持从断点恢复（详见 §10.3）
 8. **异步双写 + 定期对账**：生产环境用异步双写降低延迟，每小时对账修复不一致（详见 §9.7）

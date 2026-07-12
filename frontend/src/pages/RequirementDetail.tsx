@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2 } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
-import type { RequirementDetail, ClarifyQuestion, Product } from '../types'
+import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -100,11 +100,17 @@ export default function RequirementDetail() {
 
   // 归档
   const [archiving, setArchiving] = useState(false)
+  const [showArchiveModal, setShowArchiveModal] = useState(false)
+  const [archiveDate, setArchiveDate] = useState('')
   // 确认生成最终SRR
   const [finalizing, setFinalizing] = useState(false)
 
-  // Tab 切换：'srr' | 'raw' | 'kb' | 'impact'
-  const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact'>('srr')
+  // Tab 切换：'srr' | 'raw' | 'kb' | 'impact' | 'history'
+  const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact' | 'history'>('srr')
+
+  // 澄清历史
+  const [clarifyHistory, setClarifyHistory] = useState<ClarifyHistoryEntry[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
 
   // 影响分析
   const [impactLoading, setImpactLoading] = useState(false)
@@ -176,6 +182,14 @@ export default function RequirementDetail() {
     if (activeTab === 'impact' && !impactData && id) {
       loadImpact()
     }
+    if (activeTab === 'history' && id) {
+      setHistoryLoading(true)
+      reqApi.getClarifyHistory(id).then(data => {
+        setClarifyHistory(data?.items || [])
+      }).catch(() => {
+        setClarifyHistory([])
+      }).finally(() => setHistoryLoading(false))
+    }
   }, [activeTab])
 
   const submitClarify = async () => {
@@ -225,12 +239,16 @@ export default function RequirementDetail() {
   // 归档需求
   const handleArchive = async () => {
     if (!id || !req) return
-    if (!confirm('确认归档该需求？归档后数据将导入知识库，不可再编辑。')) return
+    if (!archiveDate) {
+      alert('请选择上线日期')
+      return
+    }
     setArchiving(true)
     try {
-      await reqApi.archive(id)
+      await reqApi.archive(id, archiveDate)
       const updated = await reqApi.get(id)
       setReq(updated)
+      setShowArchiveModal(false)
     } catch (e: any) {
       alert('归档失败: ' + e.message)
     } finally {
@@ -578,7 +596,7 @@ export default function RequirementDetail() {
       similar_cases: FileText,
       patterns: Search,
       check_kb_status: Database,
-      sqlite_enrich: Database,
+      pg_enrich: Database,
       kb_augment: BookOpen,
       kb_query: Search,
       kb_unresolved: AlertCircle,
@@ -868,13 +886,19 @@ export default function RequirementDetail() {
                   <MessageCircle className="w-4 h-4" /> 人工填写补充
                 </button>
               )}
+              {/* active → 可补充信息重新生成 */}
+              {detail.status === 'active' && (
+                <button onClick={() => navigate(`/requirements/${id}/clarify`)} className="btn-secondary">
+                  <RefreshCw className="w-4 h-4" /> 补充重新生成
+                </button>
+              )}
               {detail.status !== 'archived' && (
                 <button onClick={startEditing} className="btn-secondary">
                   <Edit3 className="w-4 h-4" /> 编辑 SRR
                 </button>
               )}
               {detail.status === 'active' && (
-                <button onClick={handleArchive} disabled={archiving} className="btn-secondary">
+                <button onClick={() => { setArchiveDate(new Date().toISOString().slice(0, 10)); setShowArchiveModal(true) }} disabled={archiving} className="btn-secondary">
                   {archiving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
                   归档
                 </button>
@@ -988,6 +1012,22 @@ export default function RequirementDetail() {
             <GitBranch className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
             影响分析
           </button>
+          <button
+            onClick={() => setActiveTab('history')}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-all duration-150 ${
+              activeTab === 'history'
+                ? 'border-primary-500 text-primary-700'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <History className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
+            澄清历史
+            {clarifyHistory.length > 0 && (
+              <span className="ml-1.5 px-1.5 py-0.5 bg-slate-100 text-slate-500 rounded text-[10px] font-mono">
+                {clarifyHistory.length}条
+              </span>
+            )}
+          </button>
         </div>
 
         {/* Tab 内容 */}
@@ -1024,9 +1064,16 @@ export default function RequirementDetail() {
             renderRawText()
           ) : activeTab === 'kb' ? (
             renderKbLogs()
-          ) : (
+          ) : activeTab === 'impact' ? (
             renderImpactAnalysis()
-          )}
+          ) : activeTab === 'history' ? (
+            <ClarifyHistoryTab
+              history={clarifyHistory}
+              loading={historyLoading}
+              onNavigateToClarify={() => navigate(`/requirements/${id}/clarify`)}
+              status={detail.status}
+            />
+          ) : null}
         </div>
       </div>
 
@@ -1147,6 +1194,200 @@ export default function RequirementDetail() {
           </div>
         </div>
       )}
+
+      {/* 归档弹窗 */}
+      {showArchiveModal && (
+        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !archiving && setShowArchiveModal(false)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center">
+                <Archive className="w-5 h-5 text-amber-600" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-slate-800">归档需求</h2>
+                <p className="text-xs text-slate-400">归档后数据将导入知识库，不可再编辑</p>
+              </div>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="label">上线日期 <span className="text-red-500">*</span></label>
+                <input
+                  type="date"
+                  value={archiveDate}
+                  onChange={e => setArchiveDate(e.target.value)}
+                  className="input-field text-sm"
+                  autoFocus
+                />
+              </div>
+              <div className="p-3 bg-blue-50 rounded-lg text-xs text-blue-700 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                <span>上线日期用于知识库检索时区分最新需求。同一功能检索出多个需求时，以靠后日期为准。</span>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 mt-5">
+              <button onClick={() => setShowArchiveModal(false)} className="btn-secondary" disabled={archiving}>
+                <X className="w-4 h-4" /> 取消
+              </button>
+              <button onClick={handleArchive} disabled={!archiveDate || archiving} className="btn-primary">
+                {archiving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />} 确认归档
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ============================================================================
+// 澄清历史 Tab 组件
+// ============================================================================
+
+function ClarifyHistoryTab({
+  history,
+  loading,
+  onNavigateToClarify,
+  status,
+}: {
+  history: ClarifyHistoryEntry[]
+  loading: boolean
+  onNavigateToClarify: () => void
+  status: string
+}) {
+  if (loading) {
+    return (
+      <div className="text-center py-12">
+        <Loader2 className="w-8 h-8 mx-auto mb-3 text-primary-400 animate-spin" />
+        <p className="text-slate-500 font-medium">正在加载澄清历史...</p>
+      </div>
+    )
+  }
+
+  if (history.length === 0) {
+    return (
+      <div className="text-center py-12">
+        <History className="w-12 h-12 mx-auto mb-3 text-slate-300" />
+        <p className="text-slate-500 font-medium">暂无澄清历史</p>
+        <p className="text-sm text-slate-400 mt-1">
+          {status === 'draft'
+            ? '提交澄清答案后，历史记录将显示在此处'
+            : '如需补充信息重新生成需求分析，点击下方按钮'}
+        </p>
+        {status === 'active' && (
+          <button onClick={onNavigateToClarify} className="mt-4 btn-secondary text-sm">
+            <RefreshCw className="w-4 h-4" /> 补充重新生成
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* 顶部操作栏 */}
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-slate-500">共 {history.length} 条记录</p>
+        {status === 'active' && (
+          <button onClick={onNavigateToClarify} className="btn-secondary text-sm">
+            <RefreshCw className="w-4 h-4" /> 补充重新生成
+          </button>
+        )}
+      </div>
+
+      {/* 时间线 */}
+      <div className="space-y-3">
+        {history.map((entry, idx) => {
+          const isClarify = entry.action === 'clarify'
+          const date = new Date(entry.timestamp)
+          const timeStr = date.toLocaleString('zh-CN', {
+            month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+          })
+
+          return (
+            <div key={idx} className="card p-4">
+              {/* 头部 */}
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  {isClarify ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-600 rounded text-xs font-medium">
+                      <MessageCircle className="w-3 h-3" /> 人工澄清
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 text-purple-600 rounded text-xs font-medium">
+                      <RefreshCw className="w-3 h-3" /> 重新生成
+                    </span>
+                  )}
+                  {entry.quality_report && (
+                    <span className="text-xs text-slate-400">
+                      质量分: {(entry.quality_report.overall_score * 100).toFixed(0)}%
+                    </span>
+                  )}
+                </div>
+                <span className="text-xs text-slate-400 font-mono">{timeStr}</span>
+              </div>
+
+              {/* 澄清记录：Q&A 列表 */}
+              {isClarify && entry.questions && entry.questions.length > 0 && (
+                <div className="space-y-2 mb-3">
+                  {entry.questions.map((q, qi) => {
+                    const answer = entry.answers?.[q.id] || ''
+                    return (
+                      <div key={qi} className="bg-slate-50 rounded-lg p-3">
+                        <div className="flex items-start gap-2">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
+                            q.priority === 'critical' ? 'bg-red-100 text-red-600' :
+                            q.priority === 'important' ? 'bg-amber-100 text-amber-600' :
+                            'bg-slate-100 text-slate-500'
+                          }`}>
+                            {q.priority === 'critical' ? '关键' : q.priority === 'important' ? '重要' : q.priority === 'optional' ? '可选' : q.priority}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-slate-700 font-medium">{q.question}</p>
+                            {answer && (
+                              <p className="text-sm text-slate-600 mt-1 pl-3 border-l-2 border-slate-200">
+                                {answer}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* 重新生成记录：标题变化 */}
+              {!isClarify && entry.previous_title && entry.new_title && (
+                <div className="bg-slate-50 rounded-lg p-3 mb-3">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="text-slate-500 line-through">{entry.previous_title}</span>
+                    <span className="text-slate-400">→</span>
+                    <span className="text-slate-700 font-medium">{entry.new_title}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* 补充说明 */}
+              {entry.extra_notes && (
+                <div className="bg-amber-50 border border-amber-100 rounded-lg p-3 mb-3">
+                  <p className="text-xs text-amber-600 font-medium mb-1">补充说明</p>
+                  <p className="text-sm text-amber-800 whitespace-pre-wrap">{entry.extra_notes}</p>
+                </div>
+              )}
+
+              {/* KB 自动补全摘要 */}
+              {isClarify && entry.auto_augmentations && entry.auto_augmentations.length > 0 && (
+                <div className="flex items-center gap-2 text-xs text-emerald-600">
+                  <CheckCircle2 className="w-3 h-3" />
+                  <span>KB 自动补全 {entry.auto_augmentations.length} 项字段</span>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

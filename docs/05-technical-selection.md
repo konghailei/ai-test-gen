@@ -11,7 +11,7 @@
 | LLM 推理 | DeepSeek-V4 (主力) + GPT-4o (复杂场景) | 成本/效果平衡、中文优化 |
 | LLM 多提供商路由 | LiteLLM | 统一接口、故障转移、100+提供商支持 |
 | Agent 编排 | LangGraph | 状态管理、DAG 流程、可观测性 |
-| 向量数据库 | ChromaDB → Milvus | 渐进式迁移，MVP 快速验证 |
+| 向量数据库 | Milvus | 统一向量库后端（ChromaDB 已弃用） |
 | 关系数据库 | PostgreSQL 16 + pgvector | 成熟稳定、JSONB 支持、向量扩展 |
 | 嵌入模型 | bge-large-zh-v1.5 | 中文语义、开源、1024维 |
 | 后端框架 | FastAPI (Python) | AI 生态、异步支持、开发效率 |
@@ -287,7 +287,7 @@ PostgreSQL (业务指标)
 # 核心
 langgraph>=0.2.0
 langchain>=0.3.0
-chromadb>=0.5.0
+pymilvus>=2.4.0
 fastapi>=0.115.0
 pydantic>=2.0
 uvicorn[standard]>=0.30.0

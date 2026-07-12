@@ -25,9 +25,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 import asyncio
 from typing import Any
+from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from sqlalchemy import func, select
@@ -38,10 +39,11 @@ from app.agents.clarify_agent import clarify_agent
 from app.utils.id_gen import gen_requirement_id
 from app.agents.req_agent import req_agent
 from app.db.database import get_session
-from app.db.models import Requirement
+from app.db.models import Requirement, Project
 from app.models.api_schemas import (
     ApiResponse,
     ClarifyAnswerRequest,
+    RegenerateRequest,
     RequirementSummary,
     RequirementUpdateRequest,
     RequirementUploadRequest,
@@ -200,6 +202,8 @@ async def upload_requirement(
                 "auto_augmentations": clarify_result.get("auto_augmentations", []),
                 "kb_status": clarify_result.get("kb_status", {}),
                 "quality_report": clarify_result.get("quality_report", {}),
+                # v2.12: 字段冲突列表（docs/01 §4.4.1），供前端展示人工确认
+                "field_conflicts": clarify_result.get("field_conflicts", []),
             }
             kb_logs = clarify_result.get("kb_access_log", [])
             if kb_logs:
@@ -240,6 +244,8 @@ async def upload_requirement(
                 final_srr_data["_kb_query_logs"] = kb_logs
 
         final_srr_data.pop("_clarify_state", None)
+        # v2.12: 清理临时字段来源标记（不写入正式 SRR Schema）
+        final_srr_data.pop("_field_sources", None)
         status = "active"
         srr_json_data = final_srr_data
 
@@ -606,6 +612,8 @@ async def upload_requirement_multi(
             "auto_augmentations": clarify_result.get("auto_augmentations", []),
             "kb_status": clarify_result.get("kb_status", {}),
             "quality_report": clarify_result.get("quality_report", {}),
+            # v2.12: 字段冲突列表（docs/01 §4.4.1）
+            "field_conflicts": clarify_result.get("field_conflicts", []),
         }
         kb_logs = clarify_result.get("kb_access_log", [])
         if kb_logs:
@@ -837,6 +845,8 @@ async def get_clarify_questions(
             "quality_report": clarify_state.get("quality_report", {}),
             "kb_status": clarify_state.get("kb_status", {}),
             "auto_augmentations": clarify_state.get("auto_augmentations", []),
+            # v2.12: 字段冲突列表（docs/01 §4.4.1），供前端展示人工确认
+            "field_conflicts": clarify_state.get("field_conflicts", []),
         },
     )
 
@@ -884,6 +894,20 @@ async def submit_clarify_answers(
     clarify_state = srr_json.get("_clarify_state", {}) or {}
     questions = clarify_state.get("questions", []) or []
 
+    # ===== ⓪ 保存澄清历史快照（在 re-parse 前留存 Q&A 记录） =====
+    history_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": "clarify",
+        "questions": questions,
+        "answers": dict(req.answers),
+        "extra_notes": req.extra_notes or "",
+        "auto_augmentations": clarify_state.get("auto_augmentations", []),
+        "field_conflicts": clarify_state.get("field_conflicts", []),
+        "quality_report": clarify_state.get("quality_report", {}),
+    }
+    clarify_history = list(srr_json.get("_clarify_history", []))
+    clarify_history.append(history_entry)
+
     # ===== ① 构建增强后的需求文本（原始文本 + Q&A 补充 + 额外说明） =====
     enhanced_parts = [raw_text]
 
@@ -896,6 +920,20 @@ async def submit_clarify_answers(
             question_text = q.get("question", "")
             field = q.get("field", "")
             qa_pairs.append(f"- 【{field}】{question_text}\n  回答：{answer}")
+
+    # v2.12: 处理字段冲突解决答案（conflict_<field> 键）
+    # 用户在前端对字段冲突选择"采用 KB"/"自定义"后，答案以 conflict_<field> 键提交
+    field_conflicts = clarify_state.get("field_conflicts", []) or []
+    for c in field_conflicts:
+        c_field = c.get("field", "")
+        conflict_answer = req.answers.get(f"conflict_{c_field}", "").strip()
+        if conflict_answer:
+            existing_src = c.get("existing_source", "")
+            suggested_src = c.get("suggested_source", "")
+            qa_pairs.append(
+                f"- 【{c_field}】字段冲突解决（原文来源:{existing_src} / KB建议来源:{suggested_src}）\n"
+                f"  最终采用值：{conflict_answer}"
+            )
 
     if qa_pairs:
         enhanced_parts.append("\n\n## 补充信息（用户澄清）\n")
@@ -936,6 +974,7 @@ async def submit_clarify_answers(
         # 移除澄清状态标记
         final_srr.pop("_clarify_state", None)
         final_srr.pop("clarify_answers", None)
+        final_srr.pop("_field_sources", None)
         # 标记为降级
         final_srr["_clarify_degraded"] = True
         logger.warning("[API/requirements] 降级使用原有 SRR: req_id={}", req_id)
@@ -945,9 +984,12 @@ async def submit_clarify_answers(
     # 移除临时状态标记
     final_data.pop("_clarify_state", None)
     final_data.pop("clarify_answers", None)
+    final_data.pop("_field_sources", None)
     # 保留 KB 查询日志（不在 re-parse 中丢失）
     if original_kb_logs := (dict(record.srr_json or {}).get("_kb_query_logs")):
         final_data["_kb_query_logs"] = original_kb_logs
+    # 保留澄清历史（re-parse 生成的新 SRR 不含 _clarify_history，需手动迁移）
+    final_data["_clarify_history"] = clarify_history
     # 合并旧 SRR 的 KB 基线补全内容（_baseline_context / additional_details）
     # re-parse 后是新 SRR，KB 已补全的结构化上下文需手动迁移
     old_srr = dict(record.srr_json or {})
@@ -1038,12 +1080,16 @@ async def finalize_requirement(
         final_srr = dict(srr)
         final_srr.pop("_clarify_state", None)
         final_srr.pop("clarify_answers", None)
+        final_srr.pop("_field_sources", None)
         final_srr["_finalize_degraded"] = True
 
     # 保留 KB 日志
     final_data = dict(final_srr)
     if original_logs := (dict(record.srr_json or {}).get("_kb_query_logs")):
         final_data["_kb_query_logs"] = original_logs
+    # 保留澄清历史（finalize 也可能在已有历史的需求上执行）
+    if existing_history := (dict(record.srr_json or {}).get("_clarify_history")):
+        final_data["_clarify_history"] = existing_history
     # 合并旧 SRR 的 KB 基线补全内容
     old_srr = dict(record.srr_json or {})
     for field in ("_baseline_context", "additional_details"):
@@ -1056,6 +1102,7 @@ async def finalize_requirement(
                 final_data[field] = old_val
     final_data.pop("_clarify_state", None)
     final_data.pop("clarify_answers", None)
+    final_data.pop("_field_sources", None)
 
     record.srr_json = final_data
     record.status = "active"
@@ -1067,6 +1114,151 @@ async def finalize_requirement(
         success=True,
         message="KB 已解答全部问题，最终 SRR 已生成",
         data={"req_id": req_id, "status": "active", "srr": final_data},
+    )
+
+
+# ============================================================================
+# 5c. 澄清历史 + 重新生成
+# ============================================================================
+
+@router.get("/{req_id}/clarify/history", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_clarify_history(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """获取需求的澄清与重新生成历史。
+
+    返回 _clarify_history 数组（按时间正序），每条记录含 timestamp / action /
+    questions / answers / extra_notes / auto_augmentations / quality_report 等。
+    """
+    stmt = select(Requirement).where(Requirement.id == req_id)
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    history = list((record.srr_json or {}).get("_clarify_history", []))
+    history.reverse()  # 前端展示倒序（最新在前）
+
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data={"items": history, "total": len(history)},
+    )
+
+
+@router.post("/{req_id}/regenerate", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def regenerate_requirement(
+    req_id: str,
+    req: RegenerateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """补充信息后重新生成需求分析（SRR）。
+
+    允许在 status=active（已澄清/已确认）后调用，用户通过 extra_notes 提供补充
+    说明，系统将原始文本 + 已有 KB 补全 + 补充说明拼接后重新调用 ReqAgent 解析，
+    生成新的 SRR。操作记录追加到 _clarify_history。
+
+    Args:
+        req_id: 需求 ID
+        req: 含 extra_notes（用户补充说明）
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: data 含 req_id / srr（新 SRR）/ status
+    """
+    extra_notes = req.extra_notes.strip()
+    if not extra_notes:
+        raise HTTPException(status_code=400, detail="补充说明不能为空")
+
+    stmt = select(Requirement).where(Requirement.id == req_id)
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    raw_text = record.raw_text or ""
+    old_srr = dict(record.srr_json or {})
+    previous_title = (old_srr.get("requirement", {}) or {}).get("title", record.title)
+
+    # 构建增强文本：原始文本 + 已有 KB 补全 + 用户补充说明
+    enhanced_parts = [raw_text]
+
+    kb_augments = (old_srr.get("_clarify_state", {}) or {}).get("auto_augmentations", [])
+    if kb_augments:
+        enhanced_parts.append("\n\n## KB 自动补全信息\n")
+        for aug in kb_augments:
+            enhanced_parts.append(f"- {aug.get('field', '')}: {str(aug.get('value', ''))[:300]}")
+
+    enhanced_parts.append(f"\n\n## 补充说明（重新生成）\n{extra_notes}")
+    enhanced_raw = "\n".join(enhanced_parts)
+
+    logger.info(
+        "[API/requirements] 重新生成 SRR: req_id={}, extra_notes_len={}, enhanced_len={}",
+        req_id, len(extra_notes), len(enhanced_raw),
+    )
+
+    # 调用 ReqAgent 重新解析
+    try:
+        final_srr = await req_agent.parse(
+            raw_requirement=enhanced_raw,
+            product_id=record.product_id,
+        )
+        logger.info("[API/requirements] 重新生成 SRR 成功: req_id={}", req_id)
+    except Exception as e:
+        logger.error("[API/requirements] 重新生成 SRR 失败: {}", str(e)[:200])
+        raise HTTPException(status_code=500, detail=f"重新生成失败: {str(e)[:200]}")
+
+    # 记录历史
+    new_title = (final_srr.get("requirement", {}) or {}).get("title", "")
+    history_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": "regenerate",
+        "extra_notes": extra_notes,
+        "previous_title": previous_title,
+        "new_title": new_title,
+    }
+    clarify_history = list(old_srr.get("_clarify_history", []))
+    clarify_history.append(history_entry)
+
+    # 更新 DB
+    final_data = dict(final_srr)
+    # 保留 KB 查询日志
+    if original_logs := old_srr.get("_kb_query_logs"):
+        final_data["_kb_query_logs"] = original_logs
+    # 保留澄清历史
+    final_data["_clarify_history"] = clarify_history
+    # 迁移 KB 基线补全内容
+    for field in ("_baseline_context", "additional_details"):
+        old_val = old_srr.get(field)
+        if old_val:
+            if field == "additional_details":
+                existing = final_data.get("additional_details", "")
+                final_data["additional_details"] = str(old_val) + "\n" + str(existing)
+            else:
+                final_data[field] = old_val
+
+    record.srr_json = final_data
+    # 重新生成后更新标题
+    if new_title:
+        record.title = new_title
+    await session.commit()
+
+    logger.info(
+        "[API/requirements] 重新生成完成: req_id={}, title={}->{}",
+        req_id, previous_title, new_title,
+    )
+
+    return ApiResponse(
+        success=True,
+        message="需求分析已重新生成",
+        data={
+            "req_id": req_id,
+            "srr": final_data,
+            "status": record.status,
+            "previous_title": previous_title,
+            "new_title": new_title,
+        },
     )
 
 
@@ -1164,7 +1356,7 @@ async def delete_requirement(
 
     # 同步删除向量库中的记录（避免产生孤儿向量）
     try:
-        from app.db.vector_store import vector_store
+        from app.db.milvus_store import vector_store
         await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
         logger.info("[API/requirements] 已同步删除向量库记录: req_id={}", req_id)
     except Exception as e:
@@ -1181,9 +1373,15 @@ async def delete_requirement(
 # 8. 归档需求（active → archived，数据导入知识库）
 # ============================================================================
 
+class ArchiveRequest(BaseModel):
+    """归档请求体。"""
+    go_live_date: str | None = None
+
+
 @router.post("/{req_id}/archive", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def archive_requirement(
     req_id: str,
+    body: ArchiveRequest | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """归档需求。
@@ -1193,9 +1391,11 @@ async def archive_requirement(
     - draft 状态 → 拒绝归档（需先完成澄清）
     - archived / deprecated 状态 → 拒绝归档（已归档或已废弃）
     - 归档后数据写入向量知识库，供后续需求检索参考
+    - 上线日期（go_live_date）用于 KB 检索时区分最新需求
 
     Args:
         req_id: 需求 ID
+        body: 归档请求体，含 go_live_date（YYYY-MM-DD）
         session: 数据库会话
 
     Returns:
@@ -1226,37 +1426,88 @@ async def archive_requirement(
             detail="已废弃的需求无法归档",
         )
 
-    # 更新状态
+    # 解析上线日期
+    parsed_go_live = None
+    if body and body.go_live_date:
+        try:
+            parsed_go_live = date.fromisoformat(body.go_live_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"上线日期格式不正确: {body.go_live_date}，需为 YYYY-MM-DD",
+            )
+
+    # 查询项目版本号（用于 KB 检索版本溯源）
+    project_version = ""
+    if record.project_id:
+        proj_result = await session.execute(
+            select(Project.version).where(Project.id == record.project_id)
+        )
+        proj_row = proj_result.scalar_one_or_none()
+        if proj_row:
+            project_version = proj_row
+
+    # 更新状态 + 上线日期
     old_status = record.status
     record.status = "archived"
+    record.go_live_date = parsed_go_live
     await session.commit()
 
     # 写入向量知识库（供后续需求检索参考）
+    kb_written = False
+    kb_error = ""
+    milvus_meta = {
+        "product_id": record.product_id,
+        "modules": ",".join(record.modules or []),
+        "priority": record.priority,
+        "status": "archived",
+        "archived_at": datetime.now(timezone.utc).isoformat(),
+        "go_live_date": parsed_go_live.isoformat() if parsed_go_live else "",
+        "project_version": project_version,
+    }
     try:
-        from app.db.vector_store import vector_store
+        from app.tasks.celery_app import celery_app
 
-        await asyncio.to_thread(
-            vector_store.add_requirement,
-            req_id=record.id,
-            srr_json=record.srr_json or {},
-            metadata={
-                "product_id": record.product_id,
-                "modules": ",".join(record.modules or []),
-                "priority": record.priority,
-                "status": "archived",
-                "archived_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-        logger.info("[API/requirements] 已写入知识库: req_id={}", req_id)
+        if celery_app is not None:
+            # 异步双写：PG 已 commit，Celery 异步计算 Embedding + 写入 Milvus
+            celery_app.send_task(
+                "app.tasks.embedding_tasks.embed_and_store_requirement",
+                args=[record.id, record.srr_json or {}, milvus_meta],
+                queue="embedding",
+            )
+            kb_written = True
+            logger.info("[API/requirements] 异步写入任务已派发: req_id={}, go_live_date={}, project_version={}",
+                        req_id, milvus_meta["go_live_date"], project_version)
+        else:
+            # Celery 未安装/未配置 → 降级为同步写入
+            from app.db.milvus_store import vector_store
+            await asyncio.to_thread(
+                vector_store.add_requirement,
+                req_id=record.id,
+                srr_json=record.srr_json or {},
+                metadata=milvus_meta,
+            )
+            kb_written = True
+            logger.info("[API/requirements] 已写入知识库(同步降级): req_id={}, go_live_date={}, project_version={}",
+                        req_id, milvus_meta["go_live_date"], project_version)
     except Exception as e:
-        logger.warning("[API/requirements] 知识库写入失败（不阻断）: {}", str(e)[:200])
+        kb_error = str(e)[:300]
+        logger.warning("[API/requirements] 知识库写入失败（不阻断）: req_id={}, error={}", req_id, kb_error[:200])
 
-    logger.info("[API/requirements] 归档成功: req_id={}, old_status={}", req_id, old_status)
+    logger.info("[API/requirements] 归档成功: req_id={}, old_status={}, kb_written={}", req_id, old_status, kb_written)
 
+    message = "需求已归档，数据已导入知识库" if kb_written else "需求已归档，但知识库写入失败（不影响归档状态）"
     return ApiResponse(
         success=True,
-        message="需求已归档，数据已导入知识库",
-        data={"req_id": req_id, "status": "archived"},
+        message=message,
+        data={
+            "req_id": req_id,
+            "status": "archived",
+            "kb_written": kb_written,
+            "kb_error": kb_error if not kb_written else "",
+            "go_live_date": parsed_go_live.isoformat() if parsed_go_live else "",
+            "project_version": project_version,
+        },
     )
 
 

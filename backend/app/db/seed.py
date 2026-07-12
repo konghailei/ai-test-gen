@@ -1,6 +1,6 @@
 """种子数据初始化。
 
-写入预定义的通用测试模式到 SQLite 与 ChromaDB，为系统提供冷启动基础：
+写入预定义的通用测试模式到 PostgreSQL 与 Milvus 向量库，为系统提供冷启动基础：
 - ClarifyAgent 遗漏检测：对比同类需求模式，发现缺失维度
 - GenAgent 模式复用：基于历史模式生成更贴合规范的用例
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from app.db.database import async_session
 from app.db.models import TestPattern
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.utils.logger import logger
 from sqlalchemy import select
 
@@ -226,8 +226,8 @@ async def seed_patterns() -> None:
 
     流程：
     1. 遍历 SEED_PATTERNS，按 name 查询是否已存在
-    2. 不存在则插入 SQLite test_patterns 表
-    3. 同步入 ChromaDB test_patterns Collection（用于语义检索）
+    2. 不存在则插入 PG test_patterns 表
+    3. 同步入 Milvus test_patterns Collection（用于语义检索）
     """
     inserted = 0
     async with async_session() as session:
@@ -238,7 +238,7 @@ async def seed_patterns() -> None:
             existing = result.scalar_one_or_none()
 
             if existing is not None:
-                # 已存在则跳过 SQLite 写入，但仍同步向量库（向量库可能缺失）
+                # 已存在则跳过 PG 写入，但仍同步向量库（向量库可能缺失）
                 pattern_id_str = str(existing.id)
             else:
                 # 新增模式记录
@@ -263,7 +263,7 @@ async def seed_patterns() -> None:
                     category=pattern["category"],
                 )
             except Exception as e:
-                # 向量库写入失败不阻塞启动（ChromaDB 可能冷启动慢）
+                # 向量库写入失败不阻塞启动（Milvus 可能连接慢）
                 logger.warning("模式 {} 写入向量库失败: {}", pattern["name"], str(e)[:120])
 
         await session.commit()

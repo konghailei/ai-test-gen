@@ -108,6 +108,7 @@ async def generate_test_cases(req: GenerateRequest):
                 product_id=requirement.product_id,
                 product_name=srr_json.get("requirement", {}).get("product_name", ""),
                 clarify_answers=clarify_answers,
+                existing_req_id=req.req_id,
             ):
                 # orchestrator 产出的事件为 dict，序列化为 JSON 字符串作为 SSE data
                 yield {

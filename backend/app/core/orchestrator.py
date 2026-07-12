@@ -58,7 +58,7 @@ from app.agents.review_agent import review_agent
 from app.config import settings
 from app.core.channel_selector import select_channel
 from app.core.quality_gate import quality_gate
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.utils.logger import logger
 
 
@@ -79,6 +79,7 @@ class PipelineState(TypedDict, total=False):
         product_id: 产品 ID（可选，传入则注入到 SRR）
         product_name: 产品名称（可选）
         clarify_answers: 交互式澄清答案（可选，首轮不传）
+        existing_req_id: 已有需求 ID（可选，复用避免 test_cases FK 违反）
 
         # ---- 各节点输出 ----
         srr: ReqAgent 解析后的 SRR JSON
@@ -107,6 +108,7 @@ class PipelineState(TypedDict, total=False):
     product_id: str
     product_name: str
     clarify_answers: dict
+    existing_req_id: str
 
     # 节点输出
     srr: dict
@@ -330,6 +332,17 @@ class Orchestrator:
 
         srr = await req_agent.parse(raw, product_id, product_name)
         req_id = srr.get("requirement", {}).get("id", "")
+
+        # 如果传入了已有 req_id（从 DB 取的需求），覆盖新解析的 req_id
+        # 避免重新解析生成新 req_id 导致 test_cases 外键违反
+        existing_req_id = state.get("existing_req_id", "")
+        if existing_req_id:
+            logger.info(
+                "[Orchestrator] 使用已有 req_id 覆盖新解析 req_id: {} → {}",
+                req_id, existing_req_id,
+            )
+            req_id = existing_req_id
+            srr.setdefault("requirement", {})["id"] = existing_req_id
 
         logger.info(
             "[Orchestrator] ◀ 节点 parse 完成 ▶ 下一节点 select_channel: "
@@ -744,7 +757,7 @@ class Orchestrator:
         """节点 8：ReviewAgent 用例审核 → 知识库回流闭环。
 
         对应 docs/00 §3 阶段⑥ + 阶段⑧（回流存储）。
-        审核完成后自动将高置信度用例回流到知识库（SQLite + Vector DB 双写）。
+        审核完成后自动将高置信度用例回流到知识库（PG + Vector DB 双写）。
 
         Returns:
             dict: state 更新，含 review_result / reviewed_cases / kb_flowback
@@ -954,6 +967,7 @@ class Orchestrator:
         product_id: str = "",
         product_name: str = "",
         clarify_answers: dict | None = None,
+        existing_req_id: str = "",
     ) -> AsyncGenerator[dict, None]:
         """运行完整流水线，流式 yield SSE 事件。
 
@@ -965,6 +979,8 @@ class Orchestrator:
             product_id: 产品 ID（可选）
             product_name: 产品名称（可选）
             clarify_answers: 交互式澄清答案（可选，首轮不传；D2 决策 API 驱动）
+            existing_req_id: 已有需求 ID（可选，从 DB 取的需求）。传入时复用此 ID，
+                避免重新解析生成新 req_id 导致 test_cases 外键违反。
 
         Yields:
             dict: SSE 事件，格式：
@@ -985,6 +1001,7 @@ class Orchestrator:
             "clarify_answers": clarify_answers or {},
             "clarify_iteration": 0,
             "start_time": time.time(),
+            "existing_req_id": existing_req_id,
         }
 
         # 节点名 → SSE stage 映射

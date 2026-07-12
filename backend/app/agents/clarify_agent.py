@@ -35,10 +35,24 @@ from typing import Any
 
 from app.config import settings
 from app.core.llm_client import llm_client
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.prompts import clarify_agent as prompts
 from app.core import prompt_manager
+from app.agents.requirement_patterns import pattern_matcher
 from app.utils.logger import logger
+
+
+# ============================================================================
+# 字段冲突优先级（docs/01 §4.4.1）
+# ============================================================================
+# 从高到低：用户原文 > 人工回答 > KB 补全 > 模式默认 > LLM 推断
+FIELD_PRIORITY: dict[str, int] = {
+    "USER_INPUT": 0,
+    "HUMAN_ANSWERED": 1,
+    "KB_INFERRED": 2,
+    "PATTERN_DEFAULT": 3,
+    "LLM_INFERRED": 4,
+}
 
 
 class ClarifyAgent:
@@ -70,7 +84,7 @@ class ClarifyAgent:
 
         Args:
             srr: SRR JSON 字典
-            session: SQLite 异步会话（v2.6: 用于关系型数据增强）
+            session: PG 异步会话（v2.6: 用于关系型数据增强）
 
         Returns:
             dict: 澄清结果，格式如下（与 QualityGate §5.2 输入对齐）：
@@ -138,17 +152,44 @@ class ClarifyAgent:
             logger.debug("[ClarifyAgent] 歧义详情: types={}",
                          [a["type"] for a in ambiguities])
 
+        # ②b 需求模式库匹配（docs/01 §4.3.3 遗漏检测 + §6 需求模式库）
+        # 对比同类需求模式，发现当前需求缺失的维度，作为规则层遗漏检测的补充。
+        # KB 查询前执行，让 KB 查询能覆盖模式缺失维度。
+        pattern_context: dict | None = None
+        try:
+            matched_pattern = pattern_matcher.match_pattern(srr)
+            if matched_pattern:
+                missing_dims = pattern_matcher.detect_missing_dimensions(srr, matched_pattern)
+                if missing_dims:
+                    # 将缺失维度加入 important_missing，供 KB 查询和 LLM 问题生成覆盖
+                    for dim in missing_dims:
+                        completeness["important_missing"].append({
+                            "field": f"pattern_gap.{dim}",
+                            "description": f"同类需求（{matched_pattern['name']}）普遍包含但当前缺失：{dim}",
+                        })
+                    logger.info("[ClarifyAgent] 模式库遗漏检测: pattern={}, missing_dims={}",
+                                matched_pattern["pattern_id"], missing_dims)
+                pattern_context = {
+                    "pattern_id": matched_pattern["pattern_id"],
+                    "pattern_name": matched_pattern["name"],
+                    "common_boundary": matched_pattern["common_boundary"],
+                    "risk_points": matched_pattern["risk_points"],
+                    "missing_dimensions": missing_dims,
+                }
+        except Exception as e:
+            logger.warning("[ClarifyAgent] 需求模式库匹配异常（已降级跳过）: {}", str(e)[:200])
+
         # ③ KB 检索：以每个缺失字段和歧义点为问题，向知识库提问
         import time, copy
         augmented_srr = copy.deepcopy(srr)
 
-        # ③a 用需求摘要做全局搜索，供 SQLite 增强和问题查询复用
+        # ③a 用需求摘要做全局搜索，供 PG 增强和问题查询复用
         summary = srr.get("requirement", {}).get("summary", "")
         global_similar = await asyncio.to_thread(self._search_similar_requirements, srr)
 
-        # ③b SQLite 关系增强（先跑，供后续 Q&A 查询使用）
+        # ③b PG 关系增强（先跑，供后续 Q&A 查询使用）
         _t_sql = time.time()
-        sqlite_context = await self._enrich_with_sqlite(session, srr, global_similar) if session else {}
+        pg_context = await self._enrich_with_pg(session, srr, global_similar) if session else {}
         _d_sql = int((time.time() - _t_sql) * 1000)
 
         _t3 = time.time()
@@ -173,10 +214,10 @@ class ClarifyAgent:
         _d3 = int((time.time() - _t3) * 1000)
         logger.info("[ClarifyAgent] 生成 KB 问题: count={}", len(kb_questions))
 
-        # ④ 对每个问题查询 KB + SQLite，获取答案
+        # ④ 对每个问题查询 KB + PG，获取答案
         _t4 = time.time()
         kb_answers: list[dict] = await self._query_kb_for_answers(
-            session, srr, kb_questions, global_similar, sqlite_context,
+            session, srr, kb_questions, global_similar, pg_context,
         )
         _d4 = int((time.time() - _t4) * 1000)
         logger.info("[ClarifyAgent] KB 回答: answered={}, unanswered={}, duration={}ms",
@@ -184,11 +225,12 @@ class ClarifyAgent:
                     sum(1 for a in kb_answers if not a.get("answered")),
                     _d4)
 
-        # ⑤ 应用 KB 答案 → 自动补全 SRR
+        # ⑤ 应用 KB 答案 → 自动补全 SRR（含字段冲突处理，docs/01 §4.4.1）
         _t5 = time.time()
-        augmented_srr, augmentations = self._apply_kb_answers(augmented_srr, kb_answers)
+        augmented_srr, augmentations, field_conflicts = self._apply_kb_answers(augmented_srr, kb_answers)
         _d5 = int((time.time() - _t5) * 1000)
-        logger.info("[ClarifyAgent] KB 应用: augmentations={}", len(augmentations))
+        logger.info("[ClarifyAgent] KB 应用: augmentations={}, field_conflicts={}",
+                    len(augmentations), len(field_conflicts))
 
         # ⑥ 将 Q&A 记录为 KB 查询日志（供前端展示）
         for qa in kb_answers:
@@ -237,6 +279,21 @@ class ClarifyAgent:
             )
         else:
             questions = []
+
+        # ⑧b 需求模式库缺失维度（docs/01 §4.3.3 遗漏检测）
+        # 模式库检测出的缺失维度已在步骤②b 加入 completeness["important_missing"]，
+        # 并通过步骤③的 LLM KB 查询生成器做了"原文已覆盖则跳过"过滤。
+        # 能被 KB 回答的已在步骤⑤补全，不能被 KB 回答的已在步骤⑧转为人工问题。
+        # 因此此处不再重复转为问题——避免绕过 LLM 过滤产生误报提问。
+        # pattern_context 仍保留用于质量报告和前端展示。
+        if pattern_context and pattern_context.get("missing_dimensions"):
+            logger.debug("[ClarifyAgent] 模式库缺口已通过KB路径处理: pattern={}, dims={}",
+                         pattern_context.get("pattern_id"),
+                         pattern_context.get("missing_dimensions"))
+
+        # ⑨ 冷启动深度问题已移除：不再生成固定的模块/边界/依赖问题，
+        # 只提问基于需求文档实际分析产生的问题（KB 查询、缺失维度、字段冲突等）。
+
         logger.info("[ClarifyAgent] KB已回答: {}, 待人工澄清(LLM精炼): {}",
                     sum(1 for a in kb_answers if a.get("answered")), len(questions))
 
@@ -244,11 +301,14 @@ class ClarifyAgent:
         quality_score = self._calc_quality_score(completeness, ambiguities, {"questions": questions, "quality_report": {}})
 
         # 判定状态：仍有需人工澄清的问题 → needs_clarification；否则 passed
+        # 修正 Bug3：状态严格由「是否存在待人工回答的问题」驱动，
+        # 不再因 optional 字段缺失致质量分跌破阈值而误判 needs_clarification（导致 draft 卡死）。
+        # 质量门禁(QualityGate)在下游独立把关，clarify 阶段只负责收集必要澄清问题。
         threshold = self.PASS_THRESHOLD
-        if not questions and quality_score >= threshold:
-            status = "passed"
-        else:
+        if questions:
             status = "needs_clarification"
+        else:
+            status = "passed"
 
         kb_answered_count = sum(1 for a in kb_answers if a.get("answered"))
         result = {
@@ -272,6 +332,8 @@ class ClarifyAgent:
             "kb_total_count": len(kb_answers),
             # ⭐ v2.1 新增：KB 访问日志
             "kb_access_log": kb_access_log[:settings.KB_ACCESS_LOG_MAX_ENTRIES],
+            # ⭐ v2.12 新增：字段冲突列表（docs/01 §4.4.1），供前端展示人工确认
+            "field_conflicts": field_conflicts,
         }
 
         logger.info("[ClarifyAgent] ◀ 澄清完成 ▶ 下一节点 QualityGate: status={}, "
@@ -380,10 +442,11 @@ class ClarifyAgent:
         modules = srr.get("requirement", {}).get("modules", [])
         try:
             return vector_store.search_similar_requirements(
-                query=summary, product_id=product_id, modules=modules, top_k=5
+                query=summary, product_id=product_id, modules=modules,
+                top_k=5, status="archived",
             )
         except Exception as e:
-            logger.debug("[ClarifyAgent] KB 检索相似需求失败（不阻断）: {}", str(e)[:120])
+            logger.warning("[ClarifyAgent] KB 检索相似需求失败（不阻断）: {}", str(e)[:200])
             return []
 
     def _search_patterns(self, srr: dict) -> list[dict]:
@@ -400,7 +463,7 @@ class ClarifyAgent:
     # ========================================================================
     # 替代固定模板 _formulate_kb_questions / _formulate_baseline_kb_questions。
     # 固定模板（如「XX的正常操作流程是怎样的？」）不带具体场景上下文，
-    # 导致 ChromaDB 语义检索命中率偏低，尤其对于增量文档、MFA/SSO 等细分场景。
+    # 导致向量库语义检索命中率偏低，尤其对于增量文档、MFA/SSO 等细分场景。
     # LLM 生成的查询包含功能名、关键特征、技术术语，检索更精准。
     # ========================================================================
 
@@ -410,7 +473,7 @@ class ClarifyAgent:
         """构建 KB 查询生成的用户指令。
 
         将需求上下文 + 缺口信息组织成 prompt，让 LLM 生成具体、上下文感知的
-        查询文本（直接用作 ChromaDB 语义检索 query），而非固定模板。
+        查询文本（直接用作向量库语义检索 query），而非固定模板。
         """
         req = srr.get("requirement", {}) or {}
         title = req.get("title", "当前需求")
@@ -501,6 +564,12 @@ class ClarifyAgent:
             f"SRR 已覆盖的也跳过。\n"
             f"只对原始文档和 SRR 都未覆盖的缺口生成自然语言查询（以「？」结尾，8-25字）。\n"
             f"宁可漏查也不要重复提问——不确定是否覆盖的，一律跳过。\n"
+            f"\n"
+            f"⚠️ 增量文档特殊规则：如果缺口标记了 _is_baseline=true，说明该缺口是"
+            f"增量文档声明需要从历史版本（知识库）补全的基础维度。增量文档可能只是"
+            f"「引用」了历史版本（如'请参见V1.0'）但并未包含具体内容——"
+            f"**引用不等于覆盖**。对于 _is_baseline=true 的缺口，只要原始文档中没有"
+            f"该维度的具体内容描述（仅有引用语句不算），就必须生成 KB 查询。\n"
             f"仅输出 JSON，不要包含其他解释。"
         )
 
@@ -611,28 +680,87 @@ class ClarifyAgent:
                 block[k] = v
         return block
 
+    @staticmethod
+    def _format_baseline_summary(block: dict, max_chars: int = 800) -> str:
+        """将基线上下文块格式化为可读文本摘要，供 answer_text 展示。
+
+        Args:
+            block: _extract_baseline_block 返回的 dict，含 happy_path/alternate_flows/
+                   data_constraints/business_rules/preconditions 等维度
+            max_chars: 摘要最大字符数（防止过长）
+
+        Returns:
+            str: 可读的多行摘要文本
+        """
+        parts: list[str] = []
+
+        hp = block.get("happy_path")
+        if isinstance(hp, dict) and hp.get("steps"):
+            steps = hp["steps"][:5]
+            parts.append("【正常流程】")
+            for s in steps:
+                parts.append(f"  {s.get('order','')}. {s.get('action','')} → {s.get('expect','')}")
+
+        af = block.get("alternate_flows")
+        if isinstance(af, list) and af:
+            parts.append("【异常/边界流程】")
+            for a in af[:3]:
+                if isinstance(a, dict):
+                    parts.append(f"  · {a.get('trigger','')} → {a.get('expect','')}")
+                else:
+                    parts.append(f"  · {str(a)[:80]}")
+
+        br = block.get("business_rules")
+        if isinstance(br, list) and br:
+            parts.append("【业务规则】")
+            for r in br[:5]:
+                if isinstance(r, dict):
+                    parts.append(f"  · {r.get('id','')} {r.get('rule', r.get('description',''))}")
+                else:
+                    parts.append(f"  · {str(r)[:80]}")
+
+        dc = block.get("data_constraints")
+        if isinstance(dc, list) and dc:
+            parts.append("【数据约束】")
+            for d in dc[:5]:
+                if isinstance(d, dict):
+                    parts.append(f"  · {d.get('field','')}: {d.get('constraints', d.get('constraint',''))}")
+                else:
+                    parts.append(f"  · {str(d)[:80]}")
+
+        pc = block.get("preconditions")
+        if isinstance(pc, list) and pc:
+            parts.append("【前置条件】")
+            for p in pc[:3]:
+                parts.append(f"  · {p if isinstance(p, str) else str(p)[:80]}")
+
+        summary = "\n".join(parts)
+        if len(summary) > max_chars:
+            summary = summary[:max_chars] + "\n  ...(更多内容请展开来源详情)"
+        return summary
+
     async def _query_kb_for_answers(
         self,
         session,
         srr: dict,
         questions: list[dict],
         all_similar_reqs: list[dict],
-        sqlite_context: dict,
+        pg_context: dict,
     ) -> list[dict]:
         """对每个问题查询知识库并尝试获取答案。
 
         流程:
-        1. 用问题文本搜索 ChromaDB → 相似需求
-        2. 用 SQLite 关联查询 → 模块依赖、测试用例、追溯矩阵
+        1. 用问题文本搜索向量库 → 相似需求
+        2. 用 PG 关联查询 → 模块依赖、测试用例、追溯矩阵
         3. 从搜索结果中提取答案
         4. 记录 Q&A 对
 
         Args:
-            session: SQLite 会话
+            session: PG 会话
             srr: 当前需求 SRR
             questions: _formulate_kb_questions 生成的问题列表
             all_similar_reqs: 全局搜索的相似需求（复用）
-            sqlite_context: SQLite 增强上下文
+            pg_context: PG 增强上下文
 
         Returns:
             list[dict]: [{question, answer, answered, sources, field, priority, auto_filled}, ...]
@@ -659,26 +787,61 @@ class ClarifyAgent:
                 })
                 continue
 
-            # 搜索相关需求
+            # 搜索相关需求 — 使用 hybrid_searcher 混合检索（向量 + BM25 + RRF + 重排）
             try:
-                matched = await asyncio.to_thread(
-                    vector_store.search_similar_requirements,
-                    query=q["question"], top_k=3,
-                    product_id=srr.get("requirement", {}).get("product_id", ""),
-                )
-            except Exception:
+                from app.db.hybrid_search import hybrid_searcher
+                # 若无 PG session，临时创建一个供 BM25 使用
+                if session is None:
+                    from app.db.database import async_session
+                    async with async_session() as tmp_session:
+                        matched = await hybrid_searcher.search_requirements(
+                            query=q["question"], top_k=5,
+                            product_id=srr.get("requirement", {}).get("product_id", ""),
+                            status="archived", session=tmp_session,
+                        )
+                else:
+                    matched = await hybrid_searcher.search_requirements(
+                        query=q["question"], top_k=5,
+                        product_id=srr.get("requirement", {}).get("product_id", ""),
+                        status="archived", session=session,
+                    )
+            except Exception as e:
+                # 降级策略：KB 不可用 → 静默跳过 → 继续生成澄清问题 → 人工澄清兜底
+                # 不影响生成流程，不注入诊断信息到 Prompt
+                logger.warning("[ClarifyAgent] KB 查询失败: q={!r} error={}", q.get("question", "")[:80], str(e)[:200])
                 matched = []
+
+            if matched:
+                sims = [round(m.get("similarity", 0), 3) for m in matched]
+                logger.info("[ClarifyAgent] KB 命中: q={!r} count={} sims={}", q.get("question", "")[:60], len(matched), sims)
+
+            # 按 go_live_date 降序排序：同一功能多个匹配时，上线日期靠后的优先
+            matched.sort(
+                key=lambda m: (m.get("metadata", {}) or {}).get("go_live_date", ""),
+                reverse=True,
+            )
 
             # 从匹配需求中提取答案
             answer_text = ""
             sources = []
             for m in matched:
-                if m.get("similarity", 0) < 0.65:
+                # 问题→文档语义匹配阈值 0.40。
+                # bge-large-zh 归一化向量下，具体问题与整篇 SRR 文本的余弦相似度
+                # 天然偏低（典型 0.40-0.65），0.85/0.70 会误杀几乎所有有效结果。
+                # 后续有 _verify_kb_answers 的 LLM 校验作为第二道质量关卡。
+                if m.get("similarity", 0) < 0.40:
                     continue
                 doc = m.get("document", "") or ""
                 meta = m.get("metadata", {}) or {}
                 req_id = meta.get("req_id", m.get("id", ""))
                 srr_json_str = meta.get("srr_json", "")
+                # 上线日期 + 项目版本（用于 KB 检索版本溯源）
+                go_live = meta.get("go_live_date", "")
+                proj_ver = meta.get("project_version", "")
+                ver_tag = f"v{proj_ver}" if proj_ver else ""
+                date_tag = f"上线: {go_live}" if go_live else ""
+                meta_tags = ", ".join(t for t in [ver_tag, date_tag] if t)
+                meta_suffix = f"（{meta_tags}, 相似度 {m.get('similarity',0):.2f}）" if meta_tags else f"（相似度 {m.get('similarity',0):.2f}）"
 
                 # 尝试从 SRR 中提取答案
                 field_val = None
@@ -695,18 +858,21 @@ class ClarifyAgent:
                         pass
 
                 if baseline_block:
+                    summary = self._format_baseline_summary(baseline_block)
                     answer_text += (
-                        f"• {req_id}（相似度 {m.get('similarity',0):.2f}）："
-                        f"已检索到基础上下文（happy_path/data_constraints/business_rules 等）\n"
+                        f"• {req_id}{meta_suffix}：\n"
+                        f"{summary}\n"
                     )
                     sources.append({
                         "id": req_id,
                         "similarity": round(m.get("similarity", 0), 3),
                         "field": q["field"],
                         "value": baseline_block,
+                        "go_live_date": go_live,
+                        "project_version": proj_ver,
                     })
                 elif field_val:
-                    answer_text += f"• {req_id}（相似度 {m.get('similarity',0):.2f}）：{str(field_val)[:300]}\n"
+                    answer_text += f"• {req_id}{meta_suffix}：{str(field_val)[:300]}\n"
                     # ⚠️ 保留结构化原始值（不转字符串、不截断），供 _apply_kb_answers
                     # 写回 SRR 时维持字段类型；仅 answer_text 用于展示时截断。
                     sources.append({
@@ -714,6 +880,8 @@ class ClarifyAgent:
                         "similarity": round(m.get("similarity", 0), 3),
                         "field": q["field"],
                         "value": field_val,
+                        "go_live_date": go_live,
+                        "project_version": proj_ver,
                     })
 
             answered = len(sources) > 0
@@ -724,6 +892,9 @@ class ClarifyAgent:
                 "context": q.get("missing_desc", ""),
                 "priority": q.get("priority", "important"),
                 "question": q["question"],
+                # 透传基线补全标志，供 _apply_kb_answers 命中基线合并分支（修复 Bug 4）
+                "_is_baseline": q.get("_is_baseline", False),
+                "_gap_keys": q.get("_gap_keys", []),
                 "answer": answer_text.strip() if answered else "知识库中未找到相关信息，需要人工补充",
                 "answered": answered,
                 "sources": sources,
@@ -824,19 +995,84 @@ class ClarifyAgent:
 
         return answers
 
+    def _resolve_field_conflict(
+        self,
+        existing_value: Any,
+        existing_source: str,
+        kb_value: Any,
+        kb_similarity: float,
+        field: str,
+        kb_source_req_id: str = "",
+    ) -> tuple[Any, str, dict | None]:
+        """字段冲突解决：返回 (final_value, final_source, conflict_record)。
+
+        对应 docs/01-requirement-parsing.md §4.4.1 决策矩阵。
+
+        Args:
+            existing_value: 字段当前值
+            existing_source: 字段当前来源标记（USER_INPUT/HUMAN_ANSWERED/KB_INFERRED/...）
+            kb_value: KB 补全建议值
+            kb_similarity: KB 检索相似度
+            field: 字段路径（用于冲突记录）
+            kb_source_req_id: KB 来源需求 ID
+
+        Returns:
+            tuple: (最终值, 最终来源标记, 冲突记录或None)
+        """
+        # 字段为空 → 直接填充
+        if existing_value is None or existing_value == "" or existing_value == []:
+            return kb_value, "KB_INFERRED", None
+
+        # 值相同 → 合并来源，提升置信
+        if existing_value == kb_value:
+            merged_source = f"{existing_source}+KB_CORROBORATED"
+            return existing_value, merged_source, None
+
+        # 值不同 → 按优先级处理
+        existing_priority = FIELD_PRIORITY.get(existing_source, 0)
+        if existing_priority <= FIELD_PRIORITY["HUMAN_ANSWERED"]:
+            # 用户输入或人工回答 → 不覆盖，记录冲突待人工
+            conflict = {
+                "field": field,
+                "existing_value": existing_value,
+                "existing_source": existing_source,
+                "suggested_value": kb_value,
+                "suggested_source": "KB_INFERRED",
+                "kb_similarity": kb_similarity,
+                "kb_source_req_id": kb_source_req_id,
+                "resolution": "pending_human",
+            }
+            return existing_value, existing_source, conflict
+        elif existing_source == "KB_INFERRED":
+            # 已有 KB 值 vs 新 KB 值 → 相似度更高的胜出，避免抖动
+            return kb_value, "KB_INFERRED", None
+        else:
+            # PATTERN_DEFAULT / LLM_INFERRED → KB 优先
+            return kb_value, "KB_INFERRED", None
+
     def _apply_kb_answers(
         self, srr: dict, kb_answers: list[dict]
-    ) -> tuple[dict, list[dict]]:
-        """将 KB 答案应用到 SRR 中。
+    ) -> tuple[dict, list[dict], list[dict]]:
+        """将 KB 答案应用到 SRR 中（含字段冲突处理）。
+
+        v2.12: 新增字段冲突优先级处理（docs/01 §4.4.1）。
+        - 字段为空 → 直接填充，标记 KB_INFERRED
+        - 字段已有值且来源优先级高（USER_INPUT/HUMAN_ANSWERED）→ 不覆盖，记录冲突
+        - 字段已有值且来源优先级低（PATTERN_DEFAULT/LLM_INFERRED）→ KB 覆盖
 
         Args:
             srr: 当前 SRR（已拷贝）
             kb_answers: _query_kb_for_answers 返回的答案列表
 
         Returns:
-            tuple[dict, list[dict]]: (更新后的 SRR, 补全记录列表)
+            tuple[dict, list[dict], list[dict]]:
+                (更新后的 SRR, 补全记录列表, 字段冲突列表)
         """
-        augmentations = []
+        augmentations: list[dict] = []
+        field_conflicts: list[dict] = []
+        # 字段来源标记（临时字段，不写入正式 SRR Schema）
+        field_sources: dict[str, str] = srr.setdefault("_field_sources", {})
+
         for a in kb_answers:
             if not a["answered"] or not a["sources"]:
                 continue
@@ -870,19 +1106,36 @@ class ClarifyAgent:
                 })
                 continue
 
+            # 字段冲突优先级处理（docs/01 §4.4.1）
+            existing_value = self._get_nested_value(srr, field)
+            existing_source = field_sources.get(field, "USER_INPUT" if existing_value else "")
+            final_value, final_source, conflict = self._resolve_field_conflict(
+                existing_value, existing_source, value, best.get("similarity", 0),
+                field, best.get("id", ""),
+            )
+
+            if conflict:
+                # 有冲突 → 不覆盖，记录冲突待人工确认
+                field_conflicts.append(conflict)
+                logger.info("[ClarifyAgent] 字段冲突: field={}, existing={}({}) vs kb={}({:.2f})",
+                            field, str(existing_value)[:50], existing_source,
+                            str(value)[:50], best.get("similarity", 0))
+                continue
+
             try:
-                self._set_nested_value(srr, field, value)
+                self._set_nested_value(srr, field, final_value)
+                field_sources[field] = final_source
                 a["auto_filled"] = True
                 augmentations.append({
                     "field": field,
                     "source_req_id": best["id"],
                     "similarity": best["similarity"],
-                    "value": value,
+                    "value": final_value,
                 })
             except Exception:
                 pass
 
-        return srr, augmentations
+        return srr, augmentations, field_conflicts
 
     # ========================================================================
     # KB 自动补全（docs/01 §4.4）— 旧版，保留兼容
@@ -950,13 +1203,13 @@ class ClarifyAgent:
         return augmented_srr, augmentations
 
     # ========================================================================
-    # SQLite 关系型数据增强（v2.6）
+    # PG 关系型数据增强（v2.6）
     # ========================================================================
 
-    async def _enrich_with_sqlite(
+    async def _enrich_with_pg(
         self, session, srr: dict, similar_reqs: list[dict]
     ) -> dict:
-        """从 SQLite 关系型数据补充上下文，增强 KB 补全效果。
+        """从 PG 关系型数据补充上下文，增强 KB 补全效果。
 
         利用产品/项目/模块/标签/依赖图谱/追溯矩阵等关系信息，
         为 KB 自动补全和 LLM 问题生成提供更丰富的上下文。
@@ -964,7 +1217,7 @@ class ClarifyAgent:
         Args:
             session: SQLAlchemy AsyncSession
             srr: 当前需求的 SRR
-            similar_reqs: ChromaDB 检索到的相似需求列表
+            similar_reqs: 向量库检索到的相似需求列表
 
         Returns:
             dict: {
@@ -995,7 +1248,7 @@ class ClarifyAgent:
         current_modules = srr.get("requirement", {}).get("modules", []) or []
         product_id = srr.get("requirement", {}).get("product_id", "")
 
-        # 1. 查询当前需求的 SQLite 记录，获取 project_id 和 tags
+        # 1. 查询当前需求的 PG 记录，获取 project_id 和 tags
         try:
             stmt = select(Requirement).where(Requirement.id == current_req_id)
             result = await session.execute(stmt)
@@ -1116,7 +1369,7 @@ class ClarifyAgent:
         ambiguities: list[dict],
         similar_reqs: list[dict],
         augmentations: list[dict],
-        sqlite_context: dict | None = None,
+        pg_context: dict | None = None,
     ) -> dict:
         """调用 LLM 生成针对性澄清问题。
 
@@ -1129,7 +1382,7 @@ class ClarifyAgent:
             ambiguities: 歧义检测结果
             similar_reqs: 同类需求列表
             augmentations: KB 已补全的字段列表
-            sqlite_context: SQLite 关系型增强上下文（v2.6）
+            pg_context: PG 关系型增强上下文（v2.6）
 
         Returns:
             dict: {issues_detected: [...], questions: [...], quality_report: {...}}
@@ -1191,6 +1444,146 @@ class ClarifyAgent:
                 guarded.append(qa)
                 logger.debug("[ClarifyAgent] critical 守卫补回问题: field={}", qa.get("field"))
         return guarded
+
+    # ========================================================================
+    # 冷启动深度问题（docs/01 §4.5 _generate_cold_start_questions）
+    # ========================================================================
+
+    def _generate_cold_start_questions(self, srr: dict) -> list[dict]:
+        """冷启动模式：生成深度澄清问题（影响范围、边界条件、依赖确认）。
+
+        新产品第一个需求或知识库为空时，没有历史用例可以参考，需要更多人工确认。
+        对应 docs/01-requirement-parsing.md §4.5 的 _generate_cold_start_questions。
+
+        v2.13: 检查 SRR 已有内容，已有信息的不再重复提问（遵循"原文为尊"原则）。
+
+        Args:
+            srr: SRR JSON 字典
+
+        Returns:
+            list[dict]: 冷启动深度问题列表，每项含 category="cold_start" 和 source 标记
+        """
+        questions: list[dict] = []
+        req = srr.get("requirement", {})
+        title = req.get("title", "该需求")
+        modules = req.get("modules", []) or []
+        boundary_conditions = srr.get("boundary_conditions", []) or []
+        dependencies = srr.get("dependencies", []) or []
+        non_functional = srr.get("non_functional", {}) or {}
+
+        # 1. 模块确认（critical）：模块是知识库隔离和影响分析的基础
+        # 已有模块 → 跳过
+        if not modules:
+            questions.append({
+                "priority": "critical",
+                "category": "cold_start",
+                "source": "cold_start_modules",
+                "field": "requirement.modules",
+                "question": "这个需求涉及哪些模块？（可多选）例如：auth、payment、order 等",
+                "context": "模块是知识库隔离和影响分析的基础，必须明确。",
+                "default_answer": "",
+                "input_type": "multi_select",
+                "options": [
+                    "auth（认证/登录/注册）",
+                    "user（用户管理）",
+                    "order（订单）",
+                    "payment（支付/退款）",
+                    "product（商品/库存）",
+                    "search（搜索/推荐）",
+                    "notification（通知/消息）",
+                    "admin（后台管理）",
+                    "permission（权限/角色）",
+                    "其他（请在下方补充）",
+                ],
+            })
+
+        # 2. 影响范围确认（important）：新产品首个需求无历史用例参考
+        # 影响范围通常不在需求文档中描述，总是提问
+        questions.append({
+            "priority": "important",
+            "category": "cold_start",
+            "source": "cold_start_impact",
+            "field": "impact_scope",
+            "question": f"「{title}」这个功能的上线，会影响哪些已有功能？请列出所有受影响的功能模块。",
+            "context": "新产品的第一个需求，没有历史用例可以参考，需要明确影响范围以确保测试覆盖。",
+            "default_answer": "",
+            "input_type": "text",
+            "options": [],
+        })
+
+        # 3. 边界条件确认（important）：边界条件是 bug 高发区
+        # 已有边界条件 → 跳过
+        if not boundary_conditions:
+            questions.append({
+                "priority": "important",
+                "category": "cold_start",
+                "source": "cold_start_boundary",
+                "field": "boundary_conditions",
+                "question": "需求的边界条件是什么？比如：最大最小值、空值处理、并发上限、权限边界等。",
+                "context": "边界条件往往是 bug 高发区，需要明确以确保测试用例覆盖。",
+                "default_answer": "",
+                "input_type": "multi_select",
+                "options": [
+                    "数值范围限制（最大/最小值）",
+                    "空值/null 处理",
+                    "并发上限/线程安全",
+                    "权限边界（越权访问）",
+                    "时间/超时限制",
+                    "输入长度/格式限制",
+                    "状态流转边界",
+                    "无特殊边界条件",
+                ],
+            })
+
+        # 4. 依赖系统确认（optional）：依赖系统异常会影响本功能
+        # 已有依赖 → 跳过
+        if not dependencies:
+            questions.append({
+                "priority": "optional",
+                "category": "cold_start",
+                "source": "cold_start_dependency",
+                "field": "dependencies",
+                "question": "这个功能依赖哪些外部系统或服务？（如：数据库、第三方 API、消息队列、缓存等）",
+                "context": "依赖系统的异常往往会影响本功能，需要确认以设计集成测试。",
+                "default_answer": "",
+                "input_type": "multi_select",
+                "options": [
+                    "数据库（MySQL/PostgreSQL）",
+                    "缓存（Redis/Memcached）",
+                    "消息队列（Kafka/RabbitMQ）",
+                    "第三方 API（支付/短信/地图等）",
+                    "对象存储（MinIO/OSS/S3）",
+                    "搜索引擎（Elasticsearch）",
+                    "CDN/静态资源服务",
+                    "无外部依赖",
+                ],
+            })
+
+        return questions
+
+    def _merge_cold_start_questions(
+        self,
+        questions: list[dict],
+        cold_start_questions: list[dict],
+    ) -> list[dict]:
+        """将冷启动深度问题合并到主问题列表，避免与 LLM 问题重复。
+
+        策略：按 field 去重，冷启动问题仅当同 field 未被 LLM 问题覆盖时才加入。
+        合并后重新编号 Q001/Q002...
+        """
+        existing_fields = {q.get("field") for q in questions if q.get("field")}
+        merged = list(questions)
+        for cq in cold_start_questions:
+            field = cq.get("field", "")
+            # impact_scope / boundary_conditions / dependencies 等冷启动专用 field 直接加入
+            if field and field not in existing_fields:
+                merged.append(cq)
+            elif not field:
+                merged.append(cq)
+        # 重新编号
+        for i, q in enumerate(merged, 1):
+            q["id"] = q.get("id") or f"Q{i:03d}"
+        return merged
 
     # ========================================================================
     # 质量评分计算

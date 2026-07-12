@@ -1,0 +1,77 @@
+{
+  "srr_version": "1.0",
+  "requirement": {
+    "id": "REQ-2024-001",
+    "product_id": "PROD-001",
+    "product_name": "用户中心",
+    "title": "用户登录功能",
+    "priority": "P0",
+    "modules": ["auth", "session"],
+    "summary": "用户通过账号密码登录系统，登录成功后建立会话并跳转首页，需保证凭证安全与防爆破",
+    "change_type": "new",
+    "supersedes": null
+  },
+  "preconditions": ["用户已在系统注册", "用户未处于锁定状态", "客户端与服务器建立 TLS 连接"],
+  "flows": {
+    "happy_path": {
+      "steps": [
+        {"order": 1, "action": "打开登录页", "expect": "显示登录表单（账号、密码、记住我、登录按钮）"},
+        {"order": 2, "action": "输入正确的账号与密码，点击登录", "expect": "系统校验凭证"},
+        {"order": 3, "action": "凭证校验通过", "expect": "创建会话，跳转首页，显示用户昵称"}
+      ]
+    },
+    "alternate_flows": [
+      {"name": "账号不存在", "trigger": "输入未注册账号提交", "expect": "提示「账号或密码错误」"},
+      {"name": "密码错误", "trigger": "凭证不匹配", "expect": "提示「账号或密码错误」，失败次数 +1"},
+      {"name": "账号锁定", "trigger": "连续失败达 5 次", "expect": "提示「账号已锁定，请 30 分钟后再试」"},
+      {"name": "会话过期", "trigger": "访问受保护页面时会话失效", "expect": "跳转登录页并携带回跳地址"}
+    ]
+  },
+  "boundary_conditions": [
+    {"field": "password", "condition": "长度 < 6", "expect": "前端校验拦截，禁止提交"},
+    {"field": "username", "condition": "含非法字符", "expect": "提示格式错误"}
+  ],
+  "business_rules": [
+    {"id": "BR-01", "rule": "密码不得以明文存储，必须使用 bcrypt 等单向哈希加盐", "type": "security"},
+    {"id": "BR-02", "rule": "同一账号连续登录失败 5 次锁定 30 分钟，期间禁止登录", "type": "security"},
+    {"id": "BR-03", "rule": "登录成功后 Session 有效期 30 分钟，无操作超时自动失效", "type": "session"}
+  ],
+  "data_constraints": [
+    {"field": "username", "type": "string", "required": true, "constraints": "长度 3-50", "example": "john_doe"},
+    {"field": "password", "type": "string", "required": true, "constraints": "长度 6-128，存储须加盐哈希(bcrypt)", "example": "******"},
+    {"field": "remember_me", "type": "boolean", "required": false, "constraints": "默认 false", "example": "false"}
+  ],
+  "non_functional": {
+    "performance": "登录接口 P99 响应 < 500ms",
+    "security": "全链路 TLS 1.3；密码哈希计算可承受离线爆破",
+    "compatibility": "支持最新版 Chrome / Edge / Firefox / Safari",
+    "accessibility": ""
+  },
+  "relationships": [],
+  "test_points_hint": [
+    {"category": "functional", "point": "正常登录流程"},
+    {"category": "security", "point": "密码加密存储与校验"},
+    {"category": "security", "point": "连续失败锁定策略"},
+    {"category": "functional", "point": "错误提示不泄露具体错误字段"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-01", "description": "正确的账号密码组合可成功登录并跳转首页", "type": "functional"},
+    {"id": "AC-02", "description": "错误的账号或密码给出统一错误提示，不泄露具体是账号还是密码错误", "type": "functional"},
+    {"id": "AC-03", "description": "登录接口 P99 < 500ms", "type": "performance"},
+    {"id": "AC-04", "description": "密码在数据库中以加盐哈希存储，不可还原明文", "type": "security"},
+    {"id": "AC-05", "description": "连续失败 5 次后账号锁定 30 分钟", "type": "security"}
+  ],
+  "api_definitions": [],
+  "user_roles": [],
+  "dependencies": [
+    {"name": "短信服务", "type": "第三方服务", "description": "（预留）用于后续安全验证场景", "impact_if_unavailable": "本期不影响登录主流程"}
+  ],
+  "ui_rules": [],
+  "data_model": [],
+  "assumptions": [
+    {"description": "本期不做单点登录（同一账号多地登录互不踢下线）"}
+  ],
+  "additional_details": "",
+  "field_conflicts": [],
+  "optimization_context": null
+}

@@ -22,6 +22,7 @@ interface ChatMessage {
   correctedContent?: string
   correctionNotes?: string
   isFollowUp?: boolean
+  kbStatus?: { search_ok: boolean; error: string; total: number }
 }
 
 export default function KnowledgeQA() {
@@ -118,20 +119,26 @@ export default function KnowledgeQA() {
       const decoder = new TextDecoder()
       let eventType = ''
       let dataLines: string[] = []
+      let lineBuffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
         const chunk = decoder.decode(value, { stream: true })
-        const lines = chunk.split('\n')
+        // 将新 chunk 追加到缓冲区，然后按行分割
+        // 最后一段可能不完整（不含换行符），保留在 lineBuffer 中等下次拼接
+        const combined = lineBuffer + chunk
+        const lines = combined.split('\n')
+        lineBuffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            eventType = line.slice(7).trim()
-          } else if (line.startsWith('data: ')) {
-            dataLines.push(line.slice(6))
-          } else if (line === '' && dataLines.length > 0) {
+          const trimmed = line.replace(/\r$/, '')
+          if (trimmed.startsWith('event: ')) {
+            eventType = trimmed.slice(7).trim()
+          } else if (trimmed.startsWith('data: ')) {
+            dataLines.push(trimmed.slice(6))
+          } else if (trimmed === '' && dataLines.length > 0) {
             // Empty line = end of an SSE event
             const payload = dataLines.join('\n')
             dataLines = []
@@ -147,7 +154,12 @@ export default function KnowledgeQA() {
                 const doneData = JSON.parse(payload)
                 setActiveRecordId(doneData.id)
                 setMessages(prev => prev.map(m =>
-                  m.id === asstId ? { ...m, isStreaming: false, recordId: doneData.id } : m
+                  m.id === asstId ? {
+                    ...m,
+                    isStreaming: false,
+                    recordId: doneData.id,
+                    kbStatus: doneData.kb_status,
+                  } : m
                 ))
                 setLoading(false)
               } catch {}
@@ -291,6 +303,26 @@ export default function KnowledgeQA() {
                           ))}
                         </div>
                       </div>
+                    )}
+
+                    {/* KB status warning */}
+                    {msg.kbStatus && !msg.isStreaming && (
+                      !msg.kbStatus.search_ok ? (
+                        <div className="mt-3 flex items-start gap-2 text-xs text-amber-600 bg-amber-50 rounded-md px-3 py-2">
+                          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                          <span>
+                            知识库检索失败：{msg.kbStatus.error || '未知错误'}。
+                            请检查 Milvus 服务是否正常运行。
+                          </span>
+                        </div>
+                      ) : msg.kbStatus.total === 0 && (!msg.sources || msg.sources.length === 0) ? (
+                        <div className="mt-3 flex items-start gap-2 text-xs text-slate-500 bg-slate-50 rounded-md px-3 py-2">
+                          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                          <span>
+                            知识库中暂无已归档的需求或测试用例。请先归档需求后再进行问答，以获得更准确的参考。
+                          </span>
+                        </div>
+                      ) : null
                     )}
 
                     {/* Action bar */}

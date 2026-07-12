@@ -292,8 +292,9 @@ class LLMClient:
         schema_hint: dict | None = None,
         temperature: float = 0.2,
         model: str | None = None,
-    ) -> dict:
-        """调用 LLM 并解析为 JSON 对象。
+        max_tokens: int | None = None,
+    ) -> dict | list:
+        """调用 LLM 并解析为 JSON 对象或数组。
 
         Args:
             prompt: 用户提示词（应明确要求返回 JSON）
@@ -301,6 +302,7 @@ class LLMClient:
             schema_hint: 期望的 JSON 结构提示（用于校验关键字段存在性）。如 {"id": str, "steps": list}
             temperature: 采样温度。默认 0.2（JSON 输出需更稳定）
             model: 指定模型名
+            max_tokens: 最大生成 token 数。None 表示不限（长 JSON 建议设置以防止 LLM 退化）
 
         Returns:
             dict: 解析后的 JSON 对象
@@ -325,6 +327,7 @@ class LLMClient:
             temperature=temperature,
             response_format="json",
             model=model,
+            max_tokens=max_tokens,
         )
         return self._parse_json(text, schema_hint)
 
@@ -553,20 +556,34 @@ class LLMClient:
         Raises:
             LLMJsonParseError: 解析失败或字段校验不通过
         """
+        # 预处理：去除 BOM、首尾空白、零宽字符
+        cleaned = text.strip().lstrip("\ufeff").replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
+
         # 尝试直接解析
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError as e1:
+            logger.debug("[LLM/parse] 直接解析失败: {}, text_len={}, first80={!r}, last80={!r}",
+                         str(e1)[:100], len(cleaned), cleaned[:80], cleaned[-80:] if len(cleaned) > 80 else "")
             # 容忍：提取首个 {...} 或 [...] 块
-            data = _extract_json_block(text)
+            data = _extract_json_block(cleaned)
             if data is None:
-                raise LLMJsonParseError(f"LLM 输出无法解析为 JSON: {text[:200]}")
+                # 最后尝试：修复常见 JSON 问题（尾随逗号、单引号）
+                data = _try_repair_json(cleaned)
+            if data is None:
+                raise LLMJsonParseError(f"LLM 输出无法解析为 JSON (len={len(cleaned)}): {cleaned[:200]}")
 
         if not isinstance(data, dict):
-            raise LLMJsonParseError(f"LLM 输出非 JSON 对象: {type(data).__name__}")
+            # 容忍 LLM 返回 list（如 GenAgent 的 [{"test_suite": [...]}] 或直接用例数组）
+            # 调用方（req_agent/gen_agent）有自己的类型防御逻辑
+            if isinstance(data, list):
+                elem_types = [type(e).__name__ for e in data[:3]]
+                logger.debug("[LLM/parse] LLM 返回 list: len={}, elem_types={}", len(data), elem_types)
+            else:
+                raise LLMJsonParseError(f"LLM 输出非 JSON 对象/数组: {type(data).__name__}")
 
-        # schema_hint 校验：仅检查键是否存在
-        if schema_hint:
+        # schema_hint 校验：仅对 dict 检查键是否存在
+        if schema_hint and isinstance(data, dict):
             missing = [k for k in schema_hint if k not in data]
             if missing:
                 logger.warning("JSON 输出缺失字段: {}", missing)
@@ -620,7 +637,117 @@ def _extract_json_block(text: str) -> dict | None:
     try:
         return json.loads(text[start : end + 1])
     except json.JSONDecodeError:
-        return None
+        # 尝试修复后解析
+        return _try_repair_json(text[start : end + 1])
+
+
+def _try_repair_json(text: str) -> dict | None:
+    """尝试修复常见 JSON 格式问题后解析。
+
+    修复项：
+    1. 尾随逗号（}, ] 前的逗号）
+    2. 单引号 → 双引号
+    3. 截断的 JSON（补全缺失的右括号，按 LIFO 顺序）
+
+    Args:
+        text: 可能可修复的 JSON 文本
+
+    Returns:
+        dict | None: 修复后解析成功返回 dict；否则 None
+    """
+    import re
+
+    # 1. 去除尾随逗号
+    repaired = re.sub(r",\s*([}\]])", r"\1", text)
+
+    # 2. 尝试解析
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. 补全截断的 JSON（LLM 输出被 max_tokens 截断时常见）
+    # 用栈记录打开的括号类型，按 LIFO 顺序补全对应的右括号
+    stack: list[str] = []  # 记录 '{' 或 '['
+    in_string = False
+    escape = False
+    for ch in repaired:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            stack.append("{")
+        elif ch == "}":
+            if stack and stack[-1] == "{":
+                stack.pop()
+        elif ch == "[":
+            stack.append("[")
+        elif ch == "]":
+            if stack and stack[-1] == "[":
+                stack.pop()
+
+    if stack:
+        # 截断在字符串内部时，先闭合字符串
+        if in_string:
+            repaired += '"'
+            # 字符串闭合后可能需要补一个逗号分隔符的容错（不影响后续括号闭合）
+        # 按 LIFO 顺序补全右括号
+        closing = {"{": "}", "[": "]"}
+        repaired += "".join(closing[c] for c in reversed(stack))
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            # 进一步容错：字符串闭合后可能缺少值结尾，尝试在字符串后补 }
+            # 再试一次：截断在对象某个字段值中间时，丢弃最后一个不完整的字段
+            pass
+
+    # 4. 终极容错：截断在对象字段值中间，尝试丢弃最后一个不完整的键值对
+    # 找到最后一个完整的 } 或 ]，截断到那里
+    last_complete = max(repaired.rfind("}"), repaired.rfind("]"))
+    if last_complete > 0:
+        truncated = repaired[: last_complete + 1]
+        # 重新用栈补全
+        stk2: list[str] = []
+        in_str2 = False
+        esc2 = False
+        for ch in truncated:
+            if esc2:
+                esc2 = False
+                continue
+            if ch == "\\":
+                esc2 = True
+                continue
+            if ch == '"':
+                in_str2 = not in_str2
+                continue
+            if in_str2:
+                continue
+            if ch == "{":
+                stk2.append("{")
+            elif ch == "}":
+                if stk2 and stk2[-1] == "{":
+                    stk2.pop()
+            elif ch == "[":
+                stk2.append("[")
+            elif ch == "]":
+                if stk2 and stk2[-1] == "[":
+                    stk2.pop()
+        if stk2:
+            truncated += "".join(closing[c] for c in reversed(stk2))
+        try:
+            return json.loads(truncated)
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 # ============================================================================

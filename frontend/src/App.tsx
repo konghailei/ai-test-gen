@@ -21,6 +21,7 @@ import UserManagement from './pages/UserManagement'
 import RoleManagement from './pages/RoleManagement'
 import AdminDashboard from './pages/AdminDashboard'
 import AdminKnowledgeBase from './pages/AdminKnowledgeBase'
+import UserManual from './pages/UserManual'
 
 /** 路由守卫：未登录 → 登录页 */
 function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -90,6 +91,7 @@ export default function App() {
           <Route path="/knowledge-qa" element={<KnowledgeQA />} />
           <Route path="/dependency-graph" element={<DependencyGraph />} />
           <Route path="/projects-modules" element={<ProjectsModules />} />
+          <Route path="/manual" element={<UserManual />} />
           <Route path="/settings" element={<Navigate to="/admin/settings" replace />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>

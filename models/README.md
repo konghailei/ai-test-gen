@@ -13,10 +13,10 @@
 
 ## 默认行为说明
 
-- 后端 `EMBEDDING_MODEL_TYPE` 默认值为 `chroma_default`：
-  使用 ChromaDB 内置 ONNX 模型 `all-MiniLM-L6-v2`（英文优化，自动下载到 `~/.cache/chroma/`）。
-- 中文需求场景下**推荐**改用本地 `bge-large-zh-v1.5`（中文优化、效果更好）：
-  需将 `EMBEDDING_MODEL_TYPE` 改为 `local`。
+- 后端 `EMBEDDING_MODEL_TYPE` 默认值为 `local`（sentence-transformers 本地嵌入模型）：
+  使用 `EMBEDDING_MODEL_NAME` 指向的本地模型（默认 `BAAI/bge-large-zh-v1.5`，中文优化）。
+  > 注：ChromaDB 已弃用，`chroma_default` 选项不再可用；原先的 ChromaDB 内置 ONNX 模型 `all-MiniLM-L6-v2` 已不再使用。
+- 中文需求场景默认即使用本地 `bge-large-zh-v1.5`（中文优化、效果更好），无需额外切换；如需更换嵌入模型，仅修改 `EMBEDDING_MODEL_NAME` 即可。
 
 ## 如何让项目使用本目录的本地模型
 

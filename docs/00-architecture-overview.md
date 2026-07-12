@@ -70,7 +70,7 @@
 │                    数据层 (Data Layer)                              │
 │  ┌────────────┐  ┌─────────────┐  ┌────────────┐                   │
 │  │ Vector DB  │  │ PostgreSQL  │  │ Object Store│                   │
-│  │ChromaDB/   │  │ + pgvector  │  │ MinIO/S3   │                   │
+│  │  Milvus    │  │ + pgvector  │  │ MinIO/S3   │                   │
 │  │Milvus     │  │             │  │             │                   │
 │  │            │  │ Collections:│  │             │                   │
 │  │- 需求嵌入  │  │ - reqs      │  │- 原始需求   │                   │
@@ -80,7 +80,7 @@
 │  │            │  │ - trace     │  │             │                   │
 │  └────────────┘  └─────────────┘  └────────────┘                   │
 │                                                                     │
-│  🔒 L4 防护: 死信队列(DLQ) | 死锁预防(幂等守卫) | 优雅降级(5级)     │
+│  🔒 L4 防护: 死信队列(DLQ) | 死锁预防(幂等守卫) | KB 静默跳过(人工澄清兜底) │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -295,11 +295,11 @@ sequenceDiagram
 ### 6.4 稳定性保障 (Stability & Reliability)
 - 所有外部依赖（LLM API、向量DB、关系DB）必须假设会失败
 - 四层防护：接入限速 → 编排断路器 → 引擎质量监控 → 数据死信队列
-- 优雅降级：5 级策略（全能力 → 降配模型 → 语义缓存 → 静态兜底 → 延迟处理）
+- 优雅降级：KB 是增强项不是阻断项，KB 不可用时静默跳过，正常生成，人工澄清兜底（详见 docs/02 §2.6）
 
 ### 6.5 可插拔架构 (Pluggable Architecture)
 - LLM 提供商可替换（DeepSeek / GPT-4o / 本地 vLLM），通过 LiteLLM 统一接口
-- 向量数据库可替换（ChromaDB / Milvus / pgvector）
+- 向量数据库：系统统一使用 Milvus（ChromaDB 已弃用移除）
 - 测试框架适配层可扩展（pytest / JUnit / TestNG / Robot Framework）
 
 ### 6.6 可观测性 (Observability)
@@ -315,7 +315,7 @@ sequenceDiagram
 |------|---------|------|------------|
 | LLM 推理 | DeepSeek-V4 (主力) + GPT-4o (复杂) | Claude 3.5 / Qwen2.5 / vLLM | LiteLLM 多提供商统一接口 |
 | Agent 框架 | LangGraph | CrewAI / AutoGen | 内置状态管理 + 检查点恢复 |
-| 向量数据库 | ChromaDB → pgvector → Milvus (三阶段渐进迁移) | Qdrant | 断路器保护；迁移路径详见 [doc-02 §9.1](./02-knowledge-base.md#91-迁移路径与触发条件) |
+| 向量数据库 | Milvus（统一向量库后端） | Qdrant | 断路器保护（ChromaDB 已弃用） |
 | 关系数据库 | PostgreSQL 16 | MySQL 8.0 | 连接池 + 重试 |
 | 嵌入模型 | bge-large-zh-v1.5 | text-embedding-3-large / m3e | - |
 | 后端 | FastAPI (Python 3.11+) | Spring Boot (Java) | 中间件 + 依赖注入 |
@@ -355,10 +355,11 @@ sequenceDiagram
               │        ├── 断路器 (状态机)
               │        ├── 特性开关 (Feature Flags)
               │        ├── 死信队列 (DLQ)
-              │        └── 语义缓存 (降级用)
+              │        ├── Celery broker (异步双写)
+              │        └── 检索缓存 (L1, 性能优化)
               │
         ┌─────▼───────────────────────▼─────┐
-        │ ChromaDB / Milvus                      │
+        │ Milvus (向量检索 + 断路器保护)         │
         │ (向量检索 + 断路器保护)                │
         └──────────────────────────────────────┘
 ```
@@ -374,7 +375,7 @@ Phase 1: MVP（先跑通生成链路）(4-6 周)
 ├── ReqAgent: Markdown → SRR JSON
 ├── QualityGate: 质量门禁（Schema 校验 + 必填字段检查，纯规则）
 ├── GenAgent: 功能测试用例生成（单类型，1-2 次 LLM 批量生成）
-├── KB: ChromaDB（向量检索 Top-K 代替测试模式库）
+├── KB: Milvus（向量检索 Top-K 代替测试模式库）
 ├── 稳定性 P0: 断路器 + 限速 + Schema校验（简化版，无 DLQ）
 ├── Output: UTCF JSON
 └── Review: 人工审核 + 高置信度自动通过（采样 5% LLM 复核）

@@ -48,6 +48,8 @@ services:
       - ./backend:/app
       # bge 模型：独立挂载（/app 被覆盖后模型仍可访问）
       - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
+      # bge-reranker-base 重排模型：独立挂载
+      - ./models/bge-reranker-base:/models/bge-reranker-base:ro
     env_file:
       - ./backend/.env
     environment:
@@ -59,6 +61,12 @@ services:
       - MILVUS_PORT=19530
       - EMBEDDING_MODEL_TYPE=local
       - EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5
+      - RERANKER_ENABLED=true
+      - RERANKER_MODEL_NAME=/models/bge-reranker-base
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
     command: >
       sh -c "
         if [ '${DEBUG:-true}' = 'true' ]; then
@@ -73,16 +81,68 @@ services:
       timeout: 10s
       retries: 10
       start_period: 60s
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - ai-test-gen-net
     restart: unless-stopped
 
   # ==========================================================================
-  # PostgreSQL 16（关系数据库，替代 SQLite）
+  # Celery Worker（异步嵌入计算 + 知识库双写）
+  # ==========================================================================
+  celery_worker:
+    container_name: ai-test-gen-celery
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        BASE_IMAGE: ai-test-gen-base:latest
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # 开发模式：挂载代码（与 backend 一致）
+      - ./backend:/app
+      # bge 模型：独立挂载（/app 被覆盖后模型仍可访问）
+      - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
+      - ./models/bge-reranker-base:/models/bge-reranker-base:ro
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://aitestgen:aitestgen123@postgres:5432/ai_test_gen
+      - VECTOR_STORE=milvus
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - EMBEDDING_MODEL_TYPE=local
+      - EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=2 --queues=embedding
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app.celery_app inspect ping -d celery@$$HOSTNAME --timeout=10 || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - ai-test-gen-net
+    restart: unless-stopped
+
+  # ==========================================================================
+  # PostgreSQL 16 + pgvector + zhparser（关系数据库 + BM25 中文全文检索）
   # ==========================================================================
   postgres:
     container_name: ai-test-gen-pg
-    image: pgvector/pgvector:pg16
+    build:
+      context: .
+      dockerfile: docker/postgres.Dockerfile
     environment:
       POSTGRES_DB: ai_test_gen
       POSTGRES_USER: aitestgen
@@ -93,6 +153,26 @@ services:
       - ./data/pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U aitestgen -d ai_test_gen"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-test-gen-net
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Redis（L1 缓存 + Celery broker）
+  # ==========================================================================
+  redis:
+    container_name: ai-test-gen-redis
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5

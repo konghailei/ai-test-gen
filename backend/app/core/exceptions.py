@@ -43,7 +43,7 @@ class DatabaseError(Exception):
 
 
 class DatabaseLockError(DatabaseError):
-    """数据库锁定（SQLite 并发写入冲突）。"""
+    """数据库锁定（并发写入冲突）。"""
     pass
 
 

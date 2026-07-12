@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Plus, Trash2, FolderOpen, Puzzle, Loader2, Edit3, Save, X, FolderTree } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
+import { Plus, Trash2, FolderOpen, Puzzle, Loader2, Edit3, Save, X, FolderTree, Search } from 'lucide-react'
 import { products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Project, Module } from '../types'
@@ -48,11 +48,12 @@ function EditModal({
 function AddForm({
   type, onAdd, onCancel, adding
 }: {
-  type: 'project' | 'module'; onAdd: (name: string, desc: string) => Promise<void>;
+  type: 'project' | 'module'; onAdd: (name: string, desc: string, version: string) => Promise<void>;
   onCancel: () => void; adding: boolean
 }) {
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
+  const [version, setVersion] = useState('1.0')
   return (
     <div className="flex items-start gap-2 mb-4 p-3 bg-slate-50 rounded-xl">
       <span className="badge bg-primary-100 text-primary-600 text-xs shrink-0 mt-1">
@@ -64,9 +65,13 @@ function AddForm({
           placeholder={type === 'project' ? '项目名称' : '模块名称'} autoFocus />
         <input value={desc} onChange={e => setDesc(e.target.value)}
           className="input-field text-sm py-1.5" placeholder="描述（可选）" />
+        {type === 'project' && (
+          <input value={version} onChange={e => setVersion(e.target.value)}
+            className="input-field text-sm py-1.5" placeholder="版本号，如 1.0、2.1.0" />
+        )}
       </div>
       <div className="flex gap-1 shrink-0 mt-1">
-        <button onClick={() => onAdd(name, desc)} disabled={!name.trim() || adding}
+        <button onClick={() => onAdd(name, desc, version)} disabled={!name.trim() || adding}
           className="btn-primary text-xs py-1.5">确定</button>
         <button onClick={onCancel} className="btn-ghost text-xs py-1.5">取消</button>
       </div>
@@ -80,6 +85,13 @@ export default function ProjectsModulesPage() {
   const [projects, setProjects] = useState<Record<string, Project[]>>({})
   const [modules, setModules] = useState<Record<string, Module[]>>({})
   const [loading, setLoading] = useState(false)
+
+  // 标签页：'project' | 'module'
+  const [activeTab, setActiveTab] = useState<'project' | 'module'>('project')
+
+  // 搜索（两个 Tab 各自独立）
+  const [projectSearch, setProjectSearch] = useState('')
+  const [moduleSearch, setModuleSearch] = useState('')
 
   // 添加状态
   const [addTarget, setAddTarget] = useState<{ pid: string; type: 'project' | 'module' } | null>(null)
@@ -113,13 +125,13 @@ export default function ProjectsModulesPage() {
     setLoading(false)
   }
 
-  const handleAdd = async (name: string, desc: string) => {
+  const handleAdd = async (name: string, desc: string, version: string) => {
     if (!addTarget || !name.trim()) return
     setAdding(true)
     try {
       const pid = addTarget.pid
       if (addTarget.type === 'project') {
-        await prodApi.createProject(pid, name.trim(), desc.trim())
+        await prodApi.createProject(pid, name.trim(), desc.trim(), version.trim() || '1.0')
       } else {
         await prodApi.createModule(pid, name.trim(), desc.trim())
       }
@@ -152,6 +164,28 @@ export default function ProjectsModulesPage() {
     setSaving(false)
   }
 
+  // 搜索过滤
+  const filteredProjects = useMemo(() => {
+    const all = projects[activeProductId || ''] || []
+    if (!projectSearch.trim()) return all
+    const q = projectSearch.toLowerCase()
+    return all.filter(p =>
+      p.name.toLowerCase().includes(q) ||
+      (p.description || '').toLowerCase().includes(q) ||
+      (p.version || '').toLowerCase().includes(q)
+    )
+  }, [projects, activeProductId, projectSearch])
+
+  const filteredModules = useMemo(() => {
+    const all = modules[activeProductId || ''] || []
+    if (!moduleSearch.trim()) return all
+    const q = moduleSearch.toLowerCase()
+    return all.filter(m =>
+      m.name.toLowerCase().includes(q) ||
+      (m.description || '').toLowerCase().includes(q)
+    )
+  }, [modules, activeProductId, moduleSearch])
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -178,12 +212,57 @@ export default function ProjectsModulesPage() {
               {selectedProduct?.name || activeProductId}
               <span className="text-sm font-normal text-slate-400">— 项目与模块</span>
             </h2>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setAddTarget({ pid: activeProductId, type: 'project' })}
-                className="btn-ghost text-xs"><Plus className="w-3 h-3" /> 添加项目</button>
-              <button onClick={() => setAddTarget({ pid: activeProductId, type: 'module' })}
-                className="btn-ghost text-xs"><Plus className="w-3 h-3" /> 添加模块</button>
+          </div>
+
+          {/* 标签页 */}
+          <div className="flex items-center gap-1 mb-4 border-b border-slate-200">
+            <button
+              onClick={() => setActiveTab('project')}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-all ${
+                activeTab === 'project'
+                  ? 'border-primary-500 text-primary-600'
+                  : 'border-transparent text-slate-400 hover:text-slate-600'
+              }`}
+            >
+              <FolderOpen className="w-4 h-4" />
+              项目
+              <span className="text-xs text-slate-400 font-normal">
+                ({(projects[activeProductId] || []).length})
+              </span>
+            </button>
+            <button
+              onClick={() => setActiveTab('module')}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium border-b-2 transition-all ${
+                activeTab === 'module'
+                  ? 'border-primary-500 text-primary-600'
+                  : 'border-transparent text-slate-400 hover:text-slate-600'
+              }`}
+            >
+              <Puzzle className="w-4 h-4" />
+              模块
+              <span className="text-xs text-slate-400 font-normal">
+                ({(modules[activeProductId] || []).length})
+              </span>
+            </button>
+          </div>
+
+          {/* 搜索 + 添加按钮 */}
+          <div className="flex items-center gap-2 mb-4">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                value={activeTab === 'project' ? projectSearch : moduleSearch}
+                onChange={e => activeTab === 'project' ? setProjectSearch(e.target.value) : setModuleSearch(e.target.value)}
+                className="input-field text-sm py-1.5 pl-9"
+                placeholder={activeTab === 'project' ? '搜索项目名称、描述或版本号...' : '搜索模块名称或描述...'}
+              />
             </div>
+            <button
+              onClick={() => setAddTarget({ pid: activeProductId, type: activeTab })}
+              className="btn-primary text-xs whitespace-nowrap"
+            >
+              <Plus className="w-3 h-3" /> {activeTab === 'project' ? '添加项目' : '添加模块'}
+            </button>
           </div>
 
           {/* 添加表单 */}
@@ -198,72 +277,69 @@ export default function ProjectsModulesPage() {
 
           {loading ? (
             <div className="flex items-center justify-center py-10"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
+          ) : activeTab === 'project' ? (
+            /* 项目列表 */
+            filteredProjects.length === 0 ? (
+              <p className="text-xs text-slate-400 py-8 text-center bg-slate-50 rounded-xl">
+                {projectSearch ? '未找到匹配的项目' : '暂无项目'}
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {filteredProjects.map(proj => (
+                  <div key={proj.id} className="flex items-center justify-between p-3 rounded-xl hover:bg-amber-50/50 transition-colors group border border-transparent hover:border-amber-100">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <FolderOpen className="w-4 h-4 text-amber-500 flex-shrink-0" />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-slate-700 truncate">{proj.name}</p>
+                          {proj.version && (
+                            <span className="text-xs px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded font-mono">
+                              v{proj.version}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-slate-400 truncate">{proj.description || proj.id}</p>
+                      </div>
+                    </div>
+                    <button onClick={() => handleDelete('project', proj.id, activeProductId)}
+                      className="btn-ghost p-1 text-slate-300 opacity-0 group-hover:opacity-100 hover:text-red-500 flex-shrink-0">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* 项目列表 */}
-              <div>
-                <h3 className="text-sm font-semibold text-slate-600 flex items-center gap-2 mb-3">
-                  <FolderOpen className="w-4 h-4 text-amber-500" />
-                  项目 <span className="text-xs text-slate-400 font-normal">({(projects[activeProductId] || []).length})</span>
-                </h3>
-                {(projects[activeProductId] || []).length === 0 ? (
-                  <p className="text-xs text-slate-400 py-4 text-center bg-slate-50 rounded-xl">暂无项目</p>
-                ) : (
-                  <div className="space-y-1.5">
-                    {(projects[activeProductId] || []).map(proj => (
-                      <div key={proj.id} className="flex items-center justify-between p-2.5 rounded-xl hover:bg-amber-50/50 transition-colors group">
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <FolderOpen className="w-4 h-4 text-amber-500 flex-shrink-0" />
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium text-slate-700 truncate">{proj.name}</p>
-                            <p className="text-xs text-slate-400 truncate">{proj.description || proj.id}</p>
-                          </div>
-                        </div>
-                        <button onClick={() => handleDelete('project', proj.id, activeProductId)}
-                          className="btn-ghost p-1 text-slate-300 opacity-0 group-hover:opacity-100 hover:text-red-500 flex-shrink-0">
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+            /* 模块列表 */
+            filteredModules.length === 0 ? (
+              <p className="text-xs text-slate-400 py-8 text-center bg-slate-50 rounded-xl">
+                {moduleSearch ? '未找到匹配的模块' : '暂无模块'}
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {filteredModules.map(mod => (
+                  <div key={mod.id} className="flex items-center justify-between p-3 rounded-xl hover:bg-emerald-50/50 transition-colors group border border-transparent hover:border-emerald-100">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <Puzzle className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-700 truncate">{mod.name}</p>
+                        <p className="text-xs text-slate-400 truncate">{mod.description || mod.id}</p>
                       </div>
-                    ))}
+                    </div>
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={() => setEditModal({ type: 'module', id: mod.id, name: mod.name, description: mod.description })}
+                        className="btn-ghost p-1 text-slate-300 hover:text-slate-600">
+                        <Edit3 className="w-3 h-3" />
+                      </button>
+                      <button onClick={() => handleDelete('module', mod.id, activeProductId)}
+                        className="btn-ghost p-1 text-slate-300 hover:text-red-500">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
-                )}
+                ))}
               </div>
-
-              {/* 模块列表 */}
-              <div>
-                <h3 className="text-sm font-semibold text-slate-600 flex items-center gap-2 mb-3">
-                  <Puzzle className="w-4 h-4 text-emerald-500" />
-                  模块 <span className="text-xs text-slate-400 font-normal">({(modules[activeProductId] || []).length})</span>
-                </h3>
-                {(modules[activeProductId] || []).length === 0 ? (
-                  <p className="text-xs text-slate-400 py-4 text-center bg-slate-50 rounded-xl">暂无模块</p>
-                ) : (
-                  <div className="space-y-1.5">
-                    {(modules[activeProductId] || []).map(mod => (
-                      <div key={mod.id} className="flex items-center justify-between p-2.5 rounded-xl hover:bg-emerald-50/50 transition-colors group">
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <Puzzle className="w-4 h-4 text-emerald-500 flex-shrink-0" />
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium text-slate-700 truncate">{mod.name}</p>
-                            <p className="text-xs text-slate-400 truncate">{mod.description || mod.id}</p>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button onClick={() => setEditModal({ type: 'module', id: mod.id, name: mod.name, description: mod.description })}
-                            className="btn-ghost p-1 text-slate-300 hover:text-slate-600">
-                            <Edit3 className="w-3 h-3" />
-                          </button>
-                          <button onClick={() => handleDelete('module', mod.id, activeProductId)}
-                            className="btn-ghost p-1 text-slate-300 hover:text-red-500">
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
+            )
           )}
         </div>
       )}

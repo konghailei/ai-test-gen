@@ -31,7 +31,7 @@ from app.utils.logger import logger
 
 
 # 密钥文件路径（放在 data 目录下，随 Docker 持久卷保留）
-_KEY_DIR = Path(settings.SQLITE_PATH).resolve().parent / ".keys"
+_KEY_DIR = Path(settings.DATA_DIR).resolve() / ".keys"
 _KEY_FILE = _KEY_DIR / "master.key"
 
 # 可通过环境变量注入密钥（覆盖文件密钥，优先级最高）

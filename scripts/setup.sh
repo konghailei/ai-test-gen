@@ -12,7 +12,7 @@
 #   1. 检查 Python 3.11+
 #   2. 创建 .env（如不存在）
 #   3. 创建 venv 并安装依赖
-#   4. 预热 ChromaDB ONNX 模型
+#   4. 校验 Milvus 依赖
 
 set -e
 
@@ -73,11 +73,11 @@ source venv/bin/activate
 pip install -r requirements.txt --quiet
 echo "[OK] 依赖安装完成"
 
-# 4. 预热 ONNX 模型
+# 4. 校验 Milvus 依赖
 echo ""
-echo "[4/4] 预热 ChromaDB 嵌入模型..."
-$PYTHON -c "import chromadb; chromadb.DefaultEmbeddingFunction()" 2>/dev/null || true
-echo "[OK] 预热完成"
+echo "[4/4] 校验 Milvus 依赖..."
+$PYTHON -c "import pymilvus" 2>/dev/null || echo "警告: pymilvus 未安装，向量库功能不可用"
+echo "[OK] 依赖校验完成"
 
 echo ""
 echo "============================================"

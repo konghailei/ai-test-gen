@@ -5,6 +5,8 @@
 > 方法：自动化 thorough 扫描 + 关键项源码逐行复核
 > 标记说明：`[已核实]` = 本人读源码确认；`[扫描]` = 来自自动扫描，建议复查
 
+> **⚠️ 文档历史声明（2026-07-10 更新）**：本报告撰写时后端仍存在 ChromaDB 实现 `backend/app/db/vector_store.py`，文中多处行号（如 `vector_store.py:50-51 / :139 / :156 / :758`）指向该文件。**该文件已于 2026-07-10 随「ChromaDB 移除」工作被删除**，统一由 `backend/app/db/milvus_store.py` 作为唯一向量库后端；相关行号仅作历史参考。报告内 H1（`chroma_default`/`chromadb` 静默回退）的前提已不成立（见 §四 标注 N/A）；H3 中「`os.getenv("VECTOR_STORE","chromadb")` 统一改为 `settings.VECTOR_STORE`」的待清理项**已完成**。
+
 ---
 
 ## 一、Critical（会导致启动失败 / 数据不可逆损坏）

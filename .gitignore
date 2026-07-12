@@ -35,7 +35,7 @@ yarn-error.log*
 pnpm-debug.log*
 
 # ===== 数据持久化目录（Docker 绑定挂载，含敏感数据） =====
-# SQLite 数据库 + ChromaDB 向量库 + Fernet 加密密钥
+# PostgreSQL 数据 + Milvus 向量库 + Fernet 加密密钥
 data/
 # 构建缓存（pip / Docker BuildKit）
 .cache/
@@ -78,3 +78,10 @@ frontend/dist/
 models/*/
 backend/models/
 !models/README.md
+
+# ===== 临时分析报告 / 截图 / 工具缓存（不入库） =====
+BUG_ANALYSIS_REPORT.md
+REQ_FLOW_ALIGNMENT_REPORT.md
+*.png
+.playwright-cli/
+.workbuddy/

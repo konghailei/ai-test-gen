@@ -1,7 +1,7 @@
 """LLM 配置管理路由（多供应商 + 加密存储）。
 
 配置存 database，重启不丢失。
-API Key 使用 Fernet 对称加密后存入 SQLite，防止明文泄露。
+API Key 使用 Fernet 对称加密后存入 PostgreSQL，防止明文泄露。
 
 支持功能：
 1. 多供应商配置（DeepSeek / OpenAI / 通义千问 / GLM / Claude / 自定义）
@@ -231,10 +231,12 @@ async def load_db_config_to_settings(session: AsyncSession) -> None:
 
         if primary_config:
             settings.LLM_PROVIDER = primary_config["provider"]
-            _apply_config_to_settings(primary_config)
+            # 应用所有供应商配置到 _all_provider_configs（供 llm_client 故障转移使用）
+            for cfg in all_configs:
+                _apply_config_to_settings(cfg)
             logger.info(
-                "[settings] 已从 DB 加载 LLM 配置: provider={}, model={}",
-                primary_config["provider"], primary_config["model"],
+                "[settings] 已从 DB 加载 LLM 配置: 主供应商={}, model={}, 共 {} 个供应商",
+                primary_config["provider"], primary_config["model"], len(all_configs),
             )
         else:
             logger.info("[settings] DB 中有配置但无有效 API Key，使用 .env 默认值")

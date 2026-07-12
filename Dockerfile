@@ -15,7 +15,7 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
-# 安装系统依赖（ChromaDB ONNX 需要）
+# 安装系统依赖（构建 wheels 需要 gcc）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
@@ -40,7 +40,7 @@ ENV PATH=/root/.local/bin:$PATH
 # 复制应用代码
 COPY backend/ .
 
-# 创建数据目录（SQLite + ChromaDB 持久化）
+# 创建数据目录（日志 / 向量库元数据）
 RUN mkdir -p /app/data
 
 # 暴露端口

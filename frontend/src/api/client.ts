@@ -3,7 +3,8 @@
  */
 import type {
   ApiResponse, Requirement, RequirementDetail, TestCase, TestPattern,
-  KnowledgeStats, ClarifyQuestion, PaginatedData, LLMConfig, HealthStatus, KbFlowback, KbEntry, KbQAAskResponse, KbQAReference, KbQARecord
+  KnowledgeStats, ClarifyQuestion, PaginatedData, LLMConfig, HealthStatus, KbFlowback, KbEntry, KbQAAskResponse, KbQAReference, KbQARecord,
+  KbAugmentation, FieldConflict, ClarifyHistoryEntry, KbDiagnostics,
 } from '../types'
 
 const BASE = '/api'
@@ -156,12 +157,16 @@ export const requirements = {
     )
     return Array.isArray(res?.questions) ? res.questions : []
   },
-  /** v2.3: 获取完整澄清状态（含历史问题 + 前次答案） */
+  /** v2.3: 获取完整澄清状态（含历史问题 + 前次答案 + KB 补全 + 字段冲突） */
   getClarifyState: async (id: string) => {
     return request<{
       questions: ClarifyQuestion[]
       previous_answers: Record<string, string>
       status: string
+      quality_report: { overall_score: number; completeness_score?: number; ambiguity_score?: number; summary?: string }
+      kb_status: { kb_empty: boolean; product_first_requirement: boolean }
+      auto_augmentations: KbAugmentation[]
+      field_conflicts: FieldConflict[]
     }>(`/requirements/${id}/clarify/questions`)
   },
   submitClarify: (id: string, answers: Record<string, string>, extraNotes = '') =>
@@ -173,15 +178,25 @@ export const requirements = {
     request<{ deleted: boolean; status: string; message: string }>(`/requirements/${id}`, {
       method: 'DELETE',
     }),
-  archive: (id: string) =>
-    request<{ req_id: string; status: string }>(`/requirements/${id}/archive`, {
+  archive: (id: string, goLiveDate?: string) =>
+    request<{ req_id: string; status: string; kb_written?: boolean }>(`/requirements/${id}/archive`, {
       method: 'POST',
+      body: JSON.stringify({ go_live_date: goLiveDate || null }),
     }),
   /** v2.7: KB 已解答 → 确认生成最终 SRR */
   finalize: (id: string) =>
     request<{ req_id: string; status: string }>(`/requirements/${id}/finalize`, {
       method: 'POST',
     }),
+  /** 获取澄清与重新生成历史 */
+  getClarifyHistory: (id: string) =>
+    request<{ items: ClarifyHistoryEntry[]; total: number }>(`/requirements/${id}/clarify/history`),
+  /** 补充信息后重新生成需求分析（status=active 也可调用） */
+  regenerate: (id: string, extraNotes: string) =>
+    request<{ req_id: string; srr: Record<string, unknown>; status: string; previous_title: string; new_title: string }>(
+      `/requirements/${id}/regenerate`,
+      { method: 'POST', body: JSON.stringify({ extra_notes: extraNotes }) },
+    ),
   /** 运行影响分析（基于需求关联模块的依赖图谱 BFS 遍历） */
   analyzeImpact: (reqId: string) =>
     request<{
@@ -280,9 +295,10 @@ export const knowledge = {
     return request<{ items: KbEntry[]; total: number }>(`/knowledge/entries?${params}`)
   },
   deleteEntry: (entryId: string, entryType: string) =>
-    request<{ entry_id: string; deleted: boolean }>(`/knowledge/entries/${entryId}?entry_type=${entryType}`, {
+    request<{ entry_id: string; deleted: boolean; db_deleted?: boolean; kb_deleted?: boolean; kb_error?: string }>(`/knowledge/entries/${entryId}?entry_type=${entryType}`, {
       method: 'DELETE',
     }),
+  diagnostics: () => request<KbDiagnostics>('/knowledge/diagnostics'),
 }
 
 // ============================================================
@@ -442,9 +458,9 @@ export const products = {
     request(`/products/products/${id}`, { method: 'DELETE' }),
   listProjects: (pid: string) =>
     request<import('../types').Project[]>(`/products/products/${pid}/projects`),
-  createProject: (pid: string, name: string, desc = '') =>
+  createProject: (pid: string, name: string, desc = '', version = '1.0') =>
     request(`/products/products/${pid}/projects`, {
-      method: 'POST', body: JSON.stringify({ name, description: desc }),
+      method: 'POST', body: JSON.stringify({ name, description: desc, version }),
     }),
   deleteProject: (id: string) =>
     request(`/products/projects/${id}`, { method: 'DELETE' }),

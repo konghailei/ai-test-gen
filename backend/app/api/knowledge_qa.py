@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import func, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +29,7 @@ from app.core.auth import get_current_user, require_write
 from app.core.llm_client import llm_client
 from app.db.database import get_session
 from app.db.models import KnowledgeQA, Requirement, TestCase, Product
-from app.db.vector_store import vector_store
+from app.db.milvus_store import vector_store
 from app.models.api_schemas import (
     ApiResponse,
     KbQAAskRequest,
@@ -65,14 +66,14 @@ def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: li
     Args:
         question: 用户问题
         kb_results: 向量检索原始结果（含完整文档）
-        enriched_sources: 经过 SQLite 过滤的来源列表（已在 _enrich_sources 中过滤孤儿记录）
+        enriched_sources: 经过 PG 过滤的来源列表（已在 _enrich_sources 中过滤孤儿记录）
 
     Returns:
         str: 组装后的 Prompt
     """
     # 用 enriched_sources 的 id 集合过滤 kb_results，去除孤儿向量
     valid_ids = {s["id"] for s in enriched_sources}
-    # 同时建立 id -> title 映射（enriched_sources 中有 SQLite 查询到的真实标题）
+    # 同时建立 id -> title 映射（enriched_sources 中有 PG 查询到的真实标题）
     id_to_title = {s["id"]: s["title"] for s in enriched_sources}
     valid_results = [r for r in kb_results if r.get("id") in valid_ids]
 
@@ -84,8 +85,13 @@ def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: li
             # 优先使用 enriched_sources 中的真实标题（产品名·需求名），其次用 metadata 中的 title
             title = id_to_title.get(source_id) or r.get("metadata", {}).get("title") or source_id
             doc = r.get("document", "")
+            meta = r.get("metadata", {}) or {}
+            go_live = meta.get("go_live_date", "")
+            proj_ver = meta.get("project_version", "")
+            ver_info = f" | 版本: v{proj_ver}" if proj_ver else ""
+            date_info = f" | 上线日期: {go_live}" if go_live else ""
             context_parts.append(
-                f"[来源 {i}] ID: {source_id} | 类型: {source_type} | 标题: {title}\n"
+                f"[来源 {i}] ID: {source_id} | 类型: {source_type} | 标题: {title}{ver_info}{date_info}\n"
                 f"内容: {doc[:800]}\n"
             )
         context_text = "\n---\n".join(context_parts)
@@ -100,6 +106,8 @@ def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: li
         f"{question}\n\n"
         f"---\n\n"
         f"请基于以上知识库上下文，回答用户的问题。"
+        f"如果同一功能检索到多个版本的需求，请以上线日期靠后的最新版本为准，"
+        f"并在回答中注明参考的版本和上线日期。"
         f"引用来源时请使用「来源类型: 来源标题」格式。"
         f"绝对不要编造任何不存在的 ID、编号或需求号。"
         f"如果上下文不足以完整回答，请基于已有信息给出最佳推断，并说明信息局限性。"
@@ -128,7 +136,7 @@ def _record_to_dict(record: KnowledgeQA) -> dict:
 async def _enrich_sources(
     kb_sources: list[dict], session: AsyncSession
 ) -> list[dict]:
-    """丰富参考来源信息：从 SQLite 查询产品名称和需求标题。
+    """丰富参考来源信息：从 PG 查询产品名称和需求标题。
 
     Args:
         kb_sources: 向量检索结果
@@ -170,7 +178,7 @@ async def _enrich_sources(
         result = await session.execute(stmt)
         product_names = {row[0]: row[1] for row in result.all()}
 
-    # 构建丰富后的来源列表（过滤掉 SQLite 中不存在的孤儿记录）
+    # 构建丰富后的来源列表（过滤掉 PG 中不存在的孤儿记录）
     enriched = []
     for src in kb_sources:
         src_type = src.get("type", "")
@@ -191,7 +199,7 @@ async def _enrich_sources(
             title = case_map[src_id]["title"]
             found = True
 
-        # 跳过未在 SQLite 中找到的孤儿向量记录
+        # 跳过未在 PG 中找到的孤儿向量记录
         if not found and src_type == "requirement":
             logger.warning("[API/knowledge-qa] 跳过孤儿向量: id={}, type={}", src_id, src_type)
             continue
@@ -220,19 +228,32 @@ async def _stream_qa_answer(
     kb_sources: list[dict],
     product_id: str | None,
     session: AsyncSession,
+    kb_status: dict | None = None,
 ):
     """流式生成问答回答（SSE 事件流）。
 
     流程：检索 → 构建 Prompt → 流式 LLM 输出。
+
+    Args:
+        kb_status: 知识库检索状态诊断信息，含:
+            - search_ok: bool  检索是否成功执行（Milvus 可用）
+            - error: str       检索失败时的错误信息
+            - total: int       检索到的来源数
     """
-    # 按相似度排序
-    kb_sources.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+    # 按 go_live_date 降序 + 相似度降序排序（上线日期靠后的优先）
+    kb_sources.sort(
+        key=lambda x: (
+            (x.get("metadata", {}) or {}).get("go_live_date", ""),
+            x.get("similarity", 0),
+        ),
+        reverse=True,
+    )
     kb_sources = kb_sources[:8]
 
     # 丰富来源信息（查询产品名+标题），同时过滤孤儿向量
     reference_sources = await _enrich_sources(kb_sources, session)
 
-    # 发送来源信息作为第一条事件
+    # 发送来源信息作为第一条事件（保持数组格式，前端兼容）
     yield {
         "event": "sources",
         "data": json.dumps(reference_sources, ensure_ascii=False),
@@ -240,6 +261,11 @@ async def _stream_qa_answer(
 
     # 构建 Prompt（传入过滤后的 reference_sources 以避免孤儿向量被用作 LLM 上下文）
     prompt = _build_qa_prompt(question, kb_sources, reference_sources)
+
+    # 降级策略（简化版）：KB 不可用时不向 Prompt 注入诊断信息，避免污染 LLM 输出。
+    # KB 完全不可用的拦截在 kqa_ask 端点中提前返回（不进入此流式函数）。
+    # kb_status 仅用于 done 事件返回（前端展示诊断信息）。
+
     full_answer = ""
 
     try:
@@ -268,6 +294,7 @@ async def _stream_qa_answer(
             "question": question,
             "answer_full": full_answer,
             "reference_sources": reference_sources,
+            "kb_status": kb_status or {"search_ok": True, "error": "", "total": len(reference_sources)},
         }, ensure_ascii=False),
     }
 
@@ -316,17 +343,23 @@ async def kqa_ask(
     logger.info("[API/knowledge-qa] 流式问答: question={}, product_id={}", question[:100], product_id)
 
     # 1. 检索知识库（带产品隔离 + 仅已归档需求）
+    #    需求检索走 hybrid_searcher（向量 + BM25 + RRF + 重排）
+    #    用例检索保持直接调用 vector_store（hybrid_searcher 暂未支持 test_cases）
     kb_sources: list[dict[str, Any]] = []
+    search_errors: list[str] = []
     try:
-        req_results = await asyncio.to_thread(
-            vector_store.search_similar_requirements,
-            question, product_id=product_id, top_k=5, status="archived",
+        from app.db.hybrid_search import hybrid_searcher
+        req_results = await hybrid_searcher.search_requirements(
+            query=question, product_id=product_id, top_k=5,
+            status="archived", session=session,
         )
         for r in req_results:
             r["type"] = "requirement"
             kb_sources.append(r)
     except Exception as e:
-        logger.warning("[API/knowledge-qa] 检索需求失败: {}", str(e)[:100])
+        err_msg = str(e)[:200]
+        search_errors.append(f"需求检索: {err_msg}")
+        logger.warning("[API/knowledge-qa] 检索需求失败: {}", err_msg[:100])
 
     try:
         case_results = await asyncio.to_thread(vector_store.search_similar_cases, question, top_k=5)
@@ -335,11 +368,36 @@ async def kqa_ask(
             if not any(s.get("id") == r.get("id") and s.get("type") == "test_case" for s in kb_sources):
                 kb_sources.append(r)
     except Exception as e:
-        logger.warning("[API/knowledge-qa] 检索用例失败: {}", str(e)[:100])
+        err_msg = str(e)[:200]
+        search_errors.append(f"用例检索: {err_msg}")
+        logger.warning("[API/knowledge-qa] 检索用例失败: {}", err_msg[:100])
 
-    logger.info("[API/knowledge-qa] 检索到 {} 条知识库参考", len(kb_sources))
+    # 构建知识库检索状态诊断
+    kb_status = {
+        "search_ok": len(search_errors) == 0,
+        "error": "; ".join(search_errors) if search_errors else "",
+        "total": len(kb_sources),
+    }
 
-    return EventSourceResponse(_stream_qa_answer(question, kb_sources, product_id, session))
+    logger.info(
+        "[API/knowledge-qa] 检索完成: sources={}, search_ok={}, errors={}",
+        len(kb_sources), kb_status["search_ok"], len(search_errors),
+    )
+
+    # 降级策略（简化版）：KB 完全不可用（两路检索都失败且无结果）→ 不调用 LLM，直接返回错误。
+    # 避免空上下文幻觉；KB 可用但 0 结果时正常调用 LLM（LLM 会回答"未找到相关信息"）。
+    if not kb_status["search_ok"] and kb_status["total"] == 0:
+        logger.warning("[API/knowledge-qa] KB 完全不可用，跳过 LLM 调用: errors={}", search_errors)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "message": "知识库检索暂时不可用，请稍后重试",
+                "data": {"kb_status": kb_status},
+            },
+        )
+
+    return EventSourceResponse(_stream_qa_answer(question, kb_sources, product_id, session, kb_status))
 
 
 # ============================================================================
@@ -534,18 +592,18 @@ async def kqa_archive(
         )
         session.add(new_req)
 
-        # 同步到向量库
+        # 异步双写向量库（Celery 不可用时降级为同步）
         try:
-            await asyncio.to_thread(
-                vector_store.add_requirement,
-                archived_id,
-                new_req.srr_json,
-                metadata={
-                    "title": title,
-                    "type": "knowledge_qa",
-                    "qa_id": req.id,
-                },
-            )
+            from app.tasks.celery_app import celery_app
+            archive_meta = {"title": title, "type": "knowledge_qa", "qa_id": req.id, "product_id": "PROD-DEFAULT"}
+            if celery_app is not None:
+                celery_app.send_task(
+                    "app.tasks.embedding_tasks.embed_and_store_requirement",
+                    args=[archived_id, new_req.srr_json, archive_meta],
+                    queue="embedding",
+                )
+            else:
+                await asyncio.to_thread(vector_store.add_requirement, archived_id, new_req.srr_json, metadata=archive_meta)
         except Exception as e:
             logger.warning("[API/knowledge-qa] 向量库归档失败: {}", str(e)[:100])
 
@@ -572,18 +630,18 @@ async def kqa_archive(
         )
         session.add(new_case)
 
-        # 同步到向量库
+        # 异步双写向量库（Celery 不可用时降级为同步）
         try:
-            await asyncio.to_thread(
-                vector_store.add_test_case,
-                archived_id,
-                new_case.case_json,
-                metadata={
-                    "title": title,
-                    "type": "knowledge_qa",
-                    "qa_id": req.id,
-                },
-            )
+            from app.tasks.celery_app import celery_app
+            archive_meta = {"title": title, "type": "knowledge_qa", "qa_id": req.id, "product_id": "PROD-DEFAULT"}
+            if celery_app is not None:
+                celery_app.send_task(
+                    "app.tasks.embedding_tasks.embed_and_store_test_case",
+                    args=[archived_id, new_case.case_json, archive_meta],
+                    queue="embedding",
+                )
+            else:
+                await asyncio.to_thread(vector_store.add_test_case, archived_id, new_case.case_json, metadata=archive_meta)
         except Exception as e:
             logger.warning("[API/knowledge-qa] 向量库归档失败: {}", str(e)[:100])
 

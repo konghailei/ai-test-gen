@@ -4,7 +4,7 @@ import Sidebar from './Sidebar'
 import { health } from '../api/client'
 import { useAuth } from '../auth'
 import { useProduct } from '../store/ProductContext'
-import { Menu, LogOut, User as UserIcon, Settings, ChevronDown, Building2, ShieldCheck, Key, X, Loader2, Save, Package } from 'lucide-react'
+import { Menu, LogOut, User as UserIcon, Settings, ChevronDown, Building2, ShieldCheck, Key, X, Loader2, Save, Package, BookOpen } from 'lucide-react'
 
 export default function Layout() {
   const { user, isLoggedIn, logout } = useAuth()
@@ -151,6 +151,16 @@ export default function Layout() {
             )}
           </div>
         </div>
+
+        {/* 用户手册 */}
+        <button
+          onClick={() => navigate('/manual')}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-all text-sm text-slate-600"
+          title="用户手册"
+        >
+          <BookOpen className="w-4 h-4" />
+          <span className="hidden sm:inline">用户手册</span>
+        </button>
 
         {/* 用户信息 */}
         <div className="relative">

@@ -1,11 +1,7 @@
 """SQLAlchemy ORM 模型。
 
 将 templates/knowledge-base-schema.json 的表结构转为 SQLAlchemy 模型。
-SQLite 兼容处理：
-- TEXT[] → JSON（SQLite 不支持原生数组）
-- JSONB → JSON
-- TIMESTAMPTZ → DateTime
-- GIN 索引 → 普通索引
+PostgreSQL 原生支持 JSON/JSONB/TEXT[]/TIMESTAMPTZ/GIN 索引。
 
 设计依据：
 - templates/knowledge-base-schema.json（5 张核心表）
@@ -13,9 +9,9 @@ SQLite 兼容处理：
 """
 
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from sqlalchemy import (
-    String, Integer, Float, Text, DateTime, Boolean, ForeignKey, Index, JSON,
+    String, Integer, Float, Text, DateTime, Date, Boolean, ForeignKey, Index, JSON,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -59,6 +55,9 @@ class Requirement(Base):
     change_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     change_summary: Mapped[str] = mapped_column(Text, default="")
     diff_json: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # 上线日期：归档时填写，用于 KB 检索时区分最新需求（同功能以靠后日期为准）
+    go_live_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     __table_args__ = (
         Index("idx_req_product_module", "product_id", "module"),
@@ -445,4 +444,59 @@ class User(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+# ============================================================================
+# 13. 提示词覆盖表（prompt_overrides，供 prompt_store 使用）
+# ============================================================================
+
+class PromptOverride(Base):
+    """提示词持久化覆盖表。
+
+    每个模块的每个提示词标识为一个 key（如 "req_agent.SYSTEM_PROMPT"），
+    value 为用户自定义的提示词文本，default_value 保存初始默认值。
+    支持一键恢复默认值。
+    """
+    __tablename__ = "prompt_overrides"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, comment="主键，格式: module.name")
+    module: Mapped[str] = mapped_column(String(64), index=True, comment="模块名: req_agent/clarify_agent 等")
+    name: Mapped[str] = mapped_column(String(64), comment="提示词名: SYSTEM_PROMPT 等")
+    value: Mapped[str] = mapped_column(Text, comment="当前提示词值（用户自定义或默认）")
+    default_value: Mapped[str] = mapped_column(Text, comment="代码中的默认值")
+    description: Mapped[str] = mapped_column(Text, default="", comment="提示词描述")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+# ============================================================================
+# 14. 需求模式表（req_patterns，doc-02 §6 需求模式库）
+# ============================================================================
+
+class ReqPattern(Base):
+    """需求模式库表。
+
+    对应 docs/02-knowledge-base.md §6。
+    存储同类需求的抽象维度集合，供 ClarifyAgent 遗漏检测使用。
+    与 Milvus req_pats collection 配合，支持语义检索同类需求模式。
+    """
+    __tablename__ = "req_patterns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True, comment="模式名称")
+    modules: Mapped[list] = mapped_column(JSON, default=list, comment="适用模块列表")
+    required_dimensions: Mapped[list] = mapped_column(JSON, default=list, comment="该类需求的必备维度")
+    common_boundary: Mapped[list] = mapped_column(JSON, default=list, comment="常见边界条件")
+    risk_points: Mapped[list] = mapped_column(JSON, default=list, comment="常见风险点")
+    pattern_json: Mapped[dict] = mapped_column(JSON, default=dict, comment="完整模式定义")
+    usage_count: Mapped[int] = mapped_column(Integer, default=0, comment="被引用次数")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
     )
