@@ -1,25 +1,23 @@
 # ============================================================================
 # AI-Test-Gen 基础镜像
-# 
-# 含全部 Python 依赖 + bge 模型，构建一次，日常不重建。
+#
+# 含全部 Python 依赖。默认**在线安装**（`pip install -r requirements.txt`），
+# 重复构建由 Docker 层缓存加速；无需（也不再支持）预先下载轮子缓存。
+#
 # 构建命令：docker compose -f docker-compose.base.yml build base
+#
+# 注：bge 模型（嵌入 / 重排）通过 docker-compose.yml 的 bind mount
+# 从宿主机 ./models 挂载进容器，不烘焙进镜像，因此本镜像不再 COPY 模型目录。
+# 模型需预先下载到 ./models（见 README 的「下载本地模型」章节）。
 # ============================================================================
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# 系统依赖 + Python 依赖（合并为一层，减少镜像体积）
+# 复制依赖清单并在线安装（无需本地轮子缓存；Docker 层缓存加速重复构建）
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && mkdir -p /app/data
-
-# 直接内置本地 bge 模型：构建前已下载到项目 models/ 目录，
-# 构建时 COPY 进镜像，运行时零下载（替代原来的 modelscope 在线下载）。
-# 模型约 1.3GB，请确保 models/bge-large-zh-v1.5 已就绪后再执行本构建。
-COPY models/bge-large-zh-v1.5 /models/bge-large-zh-v1.5
-ENV EMBEDDING_MODEL_TYPE=local \
-    EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5 \
-    EMBEDDING_DEVICE=cpu
 
 EXPOSE 8000
 

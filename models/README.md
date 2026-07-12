@@ -7,9 +7,11 @@
 | 模型 | 说明 | 维度 | 体积（约） | 来源 |
 |------|------|------|-----------|------|
 | `bge-large-zh-v1.5/` | BAAI 中文语义嵌入模型（推荐，中文优化） | 1024 | 1.3 GB | [BAAI/bge-large-zh-v1.5](https://huggingface.co/BAAI/bge-large-zh-v1.5) |
+| `bge-reranker-base/` | BAAI 跨编码器重排模型（`RERANKER_ENABLED=true` 时启用） | 768 | 0.4 GB | [BAAI/bge-reranker-base](https://huggingface.co/BAAI/bge-reranker-base) |
 
-> 本项目只有一个本地模型依赖：嵌入模型。LLM（DeepSeek / 通义千问）走 API，不在此处；
-> 也没有本地 rerank / 跨编码器模型。
+> 本项目有**两个**本地模型依赖：嵌入模型（必选）+ 重排模型（`RERANKER_ENABLED=true` 时启用，
+> `requirements.txt` 中 `FlagEmbedding==1.4.0` 即 bge-reranker-base 的封装）。LLM（DeepSeek / 通义千问）走 API，不在此处。
+> 注意：`FlagEmbedding` 需在 **1.4.0+**（提供 `py3-none-any` 轮子）；1.2.x 仅有 sdist，Python 3.12 下无法二进制安装。
 
 ## 默认行为说明
 
@@ -36,17 +38,19 @@ EMBEDDING_DEVICE=cpu
 > 注意：`.env` 中的相对路径以 `backend/` 为工作目录解析，因此用 `../models/bge-large-zh-v1.5`
 > 或上面的绝对路径均可。
 
-## Docker 基础镜像内置（推荐，零运行时下载）
+## 通过宿主机 bind mount 挂载（当前部署方式，零运行时下载）
 
-基础镜像 `backend/Dockerfile.base` 在构建时直接 `COPY models/bge-large-zh-v1.5` 到
-`/models/bge-large-zh-v1.5`，并内置 `EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5`
-默认值；`docker-compose.yml` 的后端 `environment` 同样指向该路径。
-（修改背景：`docker-compose.yml` 中 `./backend:/app` 的 volume 挂载会覆盖镜像内 `/app/models`，
-因此将模型独立存放至 `/models` 并通过单独的 volume:ro 挂载。）
+模型**不烘焙进镜像**，而是由 `docker-compose.yml` 以 `volume:ro` 从宿主机
+`./models/...` 挂载进容器（后端 `EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5`、
+`RERANKER_MODEL_NAME=/models/bge-reranker-base`）。
+（背景：`./backend:/app` 的 volume 会覆盖镜像内 `/app/models`，故模型独立存放于宿主机
+`/models` 并通过单独挂载。）
 
-- 因此 **`docker compose` 部署无需联网下载模型**，只要构建前本目录模型已就绪即可。
-- `.dockerignore` 当前**未**排除 `models/`，构建上下文会包含该模型（约 1.3GB），COPY 才能生效。
-  切勿把 `models/` 加入 `.dockerignore`，否则镜像内将没有模型、运行时仍会去下载。
+- 因此 **`docker compose` 部署需在构建前先把模型落到本目录**（见下方「重新下载」），
+  容器启动后直接读取宿主机文件，运行时不再联网下载。
+- **两个模型目录都必须存在且非空**：`bge-large-zh-v1.5`（嵌入，必选）与
+  `bge-reranker-base`（重排，`RERANKER_ENABLED=true` 时启用）；任一缺失/为空都会导致
+  对应模型加载失败、容器启动异常。
 
 ## 运行依赖
 
@@ -62,18 +66,30 @@ pip install sentence-transformers==3.1.1 torch==2.4.0
 
 ## 重新下载 / 切换源
 
-下载脚本：`scripts/download_model.py`
+### 统一入口（推荐）：`scripts/fetch-deps.py`
+
+该脚本会下载**两个模型**到 `./models/`（Python 依赖由镜像构建时在线安装，无需预下载轮子）：
 
 ```bash
-# 默认走国内 HuggingFace 镜像（hf-mirror.com），自动落盘到 models/bge-large-zh-v1.5
+python scripts/fetch-deps.py --models-only     # 仅下载两个模型（推荐）
+python scripts/fetch-deps.py                   # 模型 + 预热基础设施镜像
+```
+
+### 单独下载某个模型
+
+底层仍调用 `scripts/download_model.py`（通过 `MODEL_REPO` / `LOCAL_DIR` 环境变量指定）：
+
+```bash
+# 嵌入模型（默认）
 python scripts/download_model.py
 
-# 可选环境变量
-HF_ENDPOINT=https://hf-mirror.com \      # 镜像源（国内加速）
-MODEL_REPO=BAAI/bge-large-zh-v1.5 \      # 模型仓库
-LOCAL_DIR=D:/git_down/ai-test-gen/models/bge-large-zh-v1.5 \   # 落盘目录
+# 重排模型
+MODEL_REPO=BAAI/bge-reranker-base \
+LOCAL_DIR=models/bge-reranker-base \
 python scripts/download_model.py
 ```
+
+> 默认走国内 HuggingFace 镜像（`hf-mirror.com`）；如需切换源可用 `HF_ENDPOINT` 覆盖。
 
 也可用 ModelScope 源（国内更稳定）：
 
@@ -81,6 +97,8 @@ python scripts/download_model.py
 pip install modelscope
 python -c "from modelscope import snapshot_download; \
 snapshot_download('BAAI/bge-large-zh-v1.5', cache_dir='D:/git_down/ai-test-gen/models')"
+python -c "from modelscope import snapshot_download; \
+snapshot_download('BAAI/bge-reranker-base', cache_dir='D:/git_down/ai-test-gen/models')"
 ```
 
 ## 代理环境备注（Windows + 本地 HTTP 代理）

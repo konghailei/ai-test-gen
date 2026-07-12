@@ -4,7 +4,7 @@
 # 一次性构建，日常不需要跑。
 #
 # 用法：
-#   docker compose -f docker-compose.base.yml build base   # 构建基础镜像（首次 15-25 min）
+#   docker compose -f docker-compose.base.yml build base   # 构建基础镜像（首次在线安装依赖，约 15-25 min）
 #   docker compose -f docker-compose.base.yml up -d        # 启动基础设施
 #   docker compose up -d --build                           # 启动应用（秒级）
 # ============================================================================

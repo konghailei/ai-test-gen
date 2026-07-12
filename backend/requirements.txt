@@ -87,7 +87,8 @@ markdown==3.7.0                   # .md 文件解析
 # ============================================================================
 # 知识库增强（重排 + 缓存 + 异步双写）
 # ============================================================================
-FlagEmbedding==1.2.10             # bge-reranker-base Cross-Encoder 重排
+# 注：重排使用 sentence-transformers.CrossEncoder（已在嵌入模型依赖中安装），
+# 无需 FlagEmbedding（Python 3.12 下无 wheel，安装失败）
 redis==5.0.1                      # L1 语义缓存 + Celery broker
 celery[redis]==5.4.0              # 异步任务队列（嵌入计算 + 知识库双写）
 

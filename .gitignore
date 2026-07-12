@@ -37,8 +37,6 @@ pnpm-debug.log*
 # ===== 数据持久化目录（Docker 绑定挂载，含敏感数据） =====
 # PostgreSQL 数据 + Milvus 向量库 + Fernet 加密密钥
 data/
-# 构建缓存（pip / Docker BuildKit）
-.cache/
 # 本地开发时 backend/data 也排除（与 Docker 挂载的 ./data 同源）
 backend/data/
 # 日志文件

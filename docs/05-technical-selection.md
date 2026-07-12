@@ -296,8 +296,8 @@ uvicorn[standard]>=0.30.0
 openai>=1.50.0  # GPT-4o API + DeepSeek (兼容接口)
 litellm>=1.50.0  # 多提供商路由 + 故障转移
 
-# 嵌入
-FlagEmbedding>=1.2.0  # bge-large-zh
+# 嵌入 + 重排
+sentence-transformers>=3.0.0  # bge-large-zh 嵌入 + CrossEncoder 重排（bge-reranker-base）
 
 # 数据库
 psycopg[binary]>=3.2.0

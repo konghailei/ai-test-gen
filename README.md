@@ -59,17 +59,40 @@ docker compose up -d
 | **Docker Engine** (Linux) | 24+ |
 | **系统内存** | 推荐 **8GB** 以上 |
 | **磁盘空间** | 至少 **20GB** 空闲（基础镜像约 14GB） |
-| **网络** | 需外网（拉取镜像 + 首次构建下载依赖） |
+| **网络** | 首次需外网（拉取镜像 + 安装 Python 依赖 + 下载本地模型）；模型需先落到 ./models/ |
 
 ### 首次部署（约 20-30 分钟）
 
 项目采用 **双 Compose + 双 Dockerfile** 架构——基础镜像含所有重量级依赖（构建一次），应用镜像只复制业务代码（日常秒级重建）。
 
 ```
-Dockerfile.base  →  ai-test-gen-base:latest    (pip install + COPY 本地 bge 模型，约 14GB，构建一次)
+Dockerfile.base  →  ai-test-gen-base:latest    (pip install 全部 Python 依赖，构建一次)
        │
        └──→ Dockerfile  →  ai-test-gen-backend  (只 COPY 代码，< 10 秒)
 ```
+
+### 下载本地模型（必需，需先完成）
+
+运行时模型以**宿主机 bind mount** 方式挂载进容器（`docker-compose.yml` 中
+`./models/bge-large-zh-v1.5` 与 `./models/bge-reranker-base` 以 `volume:ro` 挂载），
+**镜像内不含模型**，因此构建前必须先把模型落到本地 `./models/`：
+
+```bash
+# 跨平台统一入口（Windows / Linux / macOS 相同，只要 python 在 PATH）：
+python scripts/fetch-deps.py --models-only
+
+# 跳过镜像预热、仅下载模型；完整版（含预热基础设施镜像）用：
+#   python scripts/fetch-deps.py
+```
+
+- **模型落盘目录**：`./models/bge-large-zh-v1.5`（嵌入，必选）、`./models/bge-reranker-base`（重排，`RERANKER_ENABLED=true` 时启用）。
+- 模型下载为纯 Python（`huggingface_hub`），无需 Docker / WSL；若 HuggingFace 不可达，
+  脚本会给出代理/手动放置指引，放置好后重跑会幂等跳过。
+- **Windows 用户**：直接 `python scripts/fetch-deps.py` 即可（或双击 `scripts\fetch-deps.bat`）；用 `bash scripts/fetch-deps.sh` 请走 **Git Bash**，不要用已损坏的 WSL 发行版。
+
+> Python 依赖（torch / sentence-transformers / pymilvus 等）由镜像构建时
+> 直接 `pip install -r requirements.txt` **在线安装**，无需预先下载轮子缓存；
+> Docker 层缓存已能加速重复构建（仅当 `requirements.txt` 变更时才重新下载）。
 
 **第 1 步：启动基础设施**
 
@@ -85,9 +108,10 @@ docker compose -f docker-compose.base.yml up -d etcd minio milvus
 docker compose -f docker-compose.base.yml build base --no-cache
 ```
 
-耗时约 15-25 分钟，包含：
-- pip install 全部 Python 依赖（torch、sentence-transformers、pymilvus 等）
-- COPY 本地 models/bge-large-zh-v1.5（约 1.3GB，构建前需先下载到项目 models/ 目录，不再联网下载）
+首次在线安装全部 Python 依赖（torch、sentence-transformers、pymilvus 等；受网络与镜像源影响，
+通常 15-25 分钟；`requirements.txt` 不变时 Docker 层缓存可跳过此步），包含：
+- pip install 全部 Python 依赖（在线 `pip install -r requirements.txt`，无需本地轮子缓存）
+- 模型已在上一节下载到 ./models/，由 docker-compose.yml 以 bind mount 挂载进容器（镜像内不含模型）
 
 > **仅首次或 requirements.txt 变更时需要**。后续日常开发跳过此步。
 
