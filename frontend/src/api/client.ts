@@ -310,11 +310,6 @@ export const knowledge = {
     request<{ entry_id: string; deleted: boolean; db_deleted?: boolean; kb_deleted?: boolean; kb_error?: string }>(`/knowledge/entries/${entryId}?entry_type=${entryType}`, {
       method: 'DELETE',
     }),
-  updateArchiveTime: (entryId: string, entryType: string, archiveTime: string) =>
-    request<{ entry_id: string; archive_time: string; milvus_updated?: boolean; milvus_error?: string }>(
-      `/knowledge/entries/${entryId}/archive-time?entry_type=${entryType}`,
-      { method: 'PATCH', body: JSON.stringify({ archive_time: archiveTime }) },
-    ),
   diagnostics: () => request<KbDiagnostics>('/knowledge/diagnostics'),
   modelStatus: () => request<KbModelStatus>('/knowledge/model-status'),
   revectorize: (entryId: string) =>

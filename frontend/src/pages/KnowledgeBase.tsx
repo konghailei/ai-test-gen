@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, memo } from 'react'
-import { Database, FileText, TestTube, Trash2, Filter, Loader2, CheckCircle2, AlertTriangle, Clock, RefreshCw, Search, Calendar, X, Save, Layers } from 'lucide-react'
+import { Database, FileText, TestTube, Trash2, Filter, Loader2, CheckCircle2, AlertTriangle, RefreshCw, Search, Calendar, X, Save, Layers } from 'lucide-react'
 import { knowledge, requirements as reqApi, products as prodApi } from '../api/client'
 import type { KbEntry, KbModelStatus, Module } from '../types'
 import { useProduct } from '../store/ProductContext'
@@ -123,84 +123,6 @@ const GoLiveEditModal = memo(function GoLiveEditModal({
   )
 })
 
-const ArchiveTimeEditModal = memo(function ArchiveTimeEditModal({
-  entry,
-  onClose,
-  onSaved,
-  toast,
-}: {
-  entry: KbEntry
-  onClose: () => void
-  onSaved: (id: string, newTime: string) => void
-  toast: (t: { type: 'success' | 'error' | 'warning'; msg: string }) => void
-}) {
-  const [editValue, setEditValue] = useState(isoToDatetimeLocal(entry.archived_at))
-  const [saving, setSaving] = useState(false)
-
-  const handleSave = async () => {
-    if (!editValue) return
-    setSaving(true)
-    try {
-      const isoTime = datetimeLocalToISO(editValue)
-      const r = await knowledge.updateArchiveTime(entry.id, entry.type, isoTime)
-      onSaved(entry.id, r.archive_time)  // 更新父列表
-      toast({
-        type: r.milvus_updated ? 'success' : 'warning',
-        msg: entry.type === 'requirement'
-          ? (r.milvus_updated
-            ? `「${entry.title}」归档时间已更新，向量库元数据已同步`
-            : `「${entry.title}」归档时间已更新，但向量库元数据同步失败`)
-          : `「${entry.title}」归档时间已更新`,
-      })
-      onClose()
-    } catch (e: any) {
-      const errBody = e?.data?.detail || e?.detail || e?.message || ''
-      toast({ type: 'error', msg: `修改归档时间失败：${errBody || '未知错误'}` })
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !saving && onClose()}>
-      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center gap-3 mb-4">
-          <Clock className="w-5 h-5 text-primary-500" />
-          <div>
-            <h2 className="text-lg font-semibold text-slate-800">修改归档时间</h2>
-            <p className="text-xs text-slate-400 truncate max-w-[240px]">{entry.title}</p>
-          </div>
-        </div>
-        <div className="space-y-3">
-          <div>
-            <label className="label">归档时间</label>
-            <input
-              type="datetime-local"
-              value={editValue}
-              onChange={e => setEditValue(e.target.value)}
-              className="input-field text-sm"
-              autoFocus
-            />
-            <p className="text-xs text-slate-400 mt-1">
-              {entry.type === 'requirement'
-                ? '需求修改时同步更新 Milvus 向量库元数据，保证 KB 检索排序一致'
-                : '测试用例的归档时间，仅记录在关系库'}
-            </p>
-          </div>
-        </div>
-        <div className="flex justify-end gap-3 mt-5">
-          <button onClick={onClose} className="btn-secondary" disabled={saving}>
-            <X className="w-4 h-4" /> 取消
-          </button>
-          <button onClick={handleSave} disabled={!editValue || saving} className="btn-primary">
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} 确认修改
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-})
-
 export default function KnowledgeBase() {
   const { selectedProductId, products } = useProduct()
   const [entries, setEntries] = useState<KbEntry[]>([])
@@ -217,9 +139,6 @@ export default function KnowledgeBase() {
 
   // 修改上线时间弹窗 — 只保留 entry 引用（日期/保存状态由 memo 组件内部管理）
   const [editingEntry, setEditingEntry] = useState<KbEntry | null>(null)
-
-  // 修改归档时间弹窗 — 同上
-  const [editingArchiveEntry, setEditingArchiveEntry] = useState<KbEntry | null>(null)
 
   // KB 专属 LLM 选择器
   const [kbLlmProvider, setKbLlmProvider] = useState('')
@@ -347,12 +266,6 @@ export default function KnowledgeBase() {
 
   const onSavedGoLive = useCallback((id: string, newDate: string) => {
     setEntries(prev => prev.map(e => e.id === id ? { ...e, go_live_date: newDate } : e))
-  }, [])
-
-  const handleEditArchiveTime = (entry: KbEntry) => setEditingArchiveEntry(entry)
-
-  const onSavedArchiveTime = useCallback((id: string, newTime: string) => {
-    setEntries(prev => prev.map(e => e.id === id ? { ...e, archived_at: newTime } : e))
   }, [])
 
   if (loading && entries.length === 0) return <LoadingSpinner text="加载知识库..." />
@@ -551,11 +464,6 @@ export default function KnowledgeBase() {
                   </div>
                   <p className="text-xs text-slate-400 mt-0.5 truncate flex items-center gap-1">
                     {entry.product_id && (products.find(p => p.id === entry.product_id)?.name || entry.product_id)}
-                    {entry.archived_at && (
-                      <span className="flex items-center gap-0.5">
-                        · <Clock className="w-2.5 h-2.5" /> 归档于 {formatDate(entry.archived_at)}
-                      </span>
-                    )}
                     {entry.summary ? ` · ${entry.summary}` : ''}
                   </p>
                   {entry.go_live_date && (
@@ -574,13 +482,6 @@ export default function KnowledgeBase() {
                       <Calendar className="w-3.5 h-3.5" />
                     </button>
                   )}
-                  <button
-                    onClick={() => handleEditArchiveTime(entry)}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-primary-500 hover:bg-primary-50 transition-all"
-                    title="修改归档时间"
-                  >
-                    <Clock className="w-3.5 h-3.5" />
-                  </button>
                   <button onClick={() => handleDeleteEntry(entry)}
                     className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all"
                     title="从知识库删除">
@@ -599,16 +500,6 @@ export default function KnowledgeBase() {
           entry={editingEntry}
           onClose={() => setEditingEntry(null)}
           onSaved={onSavedGoLive}
-          toast={t => setToast(t)}
-        />
-      )}
-
-      {/* 修改归档时间弹窗（React.memo 隔离） */}
-      {editingArchiveEntry && (
-        <ArchiveTimeEditModal
-          entry={editingArchiveEntry}
-          onClose={() => setEditingArchiveEntry(null)}
-          onSaved={onSavedArchiveTime}
           toast={t => setToast(t)}
         />
       )}

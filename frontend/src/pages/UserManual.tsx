@@ -163,7 +163,7 @@ const SECTIONS: ManualSection[] = [
       },
       {
         step: '向量化',
-        detail: 'bge-large-zh 将 SRR 文本编码为 1024 维向量写入 Milvus 的 4 个集合：requirements / test_cases / patterns / errors',
+        detail: 'bge-large-zh 将 SRR 文本编码为 1024 维向量写入 Milvus 的 5 个集合：requirements / test_cases / patterns / req_pats / errors',
       },
     ],
     config: [
@@ -185,7 +185,9 @@ const SECTIONS: ManualSection[] = [
       { label: 'KB 检索补全', desc: '自动检索知识库中相似历史需求，补全缺失字段（问答匹配 > 0.40，字段基线补全 > 0.85）' },
       { label: '人工澄清', desc: '系统动态生成需人工确认的问题（KB 查询、缺失维度、字段冲突），用户回答后重新生成 SRR' },
       { label: '重新生成', desc: '在澄清页面可补充备注并重新解析需求，操作记录保存在澄清历史中' },
-      { label: '归档', desc: '需求完成后归档入库，需填写上线日期，同时写入 PostgreSQL 与 Milvus，供后续 KB 检索' },
+      { label: '归档', desc: '需求完成后归档入库，需填写上线时间（精确到分钟），同时写入 PostgreSQL 与 Milvus，供后续 KB 检索' },
+      { label: '修改上线时间', desc: '已归档需求可随时修改上线时间，同步更新 Milvus 元数据，保证版本排序准确' },
+      { label: '搜索筛选', desc: '需求列表支持按状态（draft/active/archived）/优先级筛选 + 标题模糊搜索，快速定位目标需求' },
     ],
     logic: [
       {
@@ -205,8 +207,8 @@ const SECTIONS: ManualSection[] = [
         detail: 'POST /requirements/{id}/regenerate — 即使 status=active 也可调用，传入 extra_notes 补充信息 → ReqAgent 重新解析 → 操作记录存入 srr_json._clarify_history 数组（{timestamp, action:"regenerate", ...}），跨 re-parse/finalize/regenerate 保留',
       },
       {
-        step: '归档入库（双写）',
-        detail: 'POST /requirements/{id}/archive — 接收 ArchiveRequest（含 go_live_date YYYY-MM-DD）→ 设置 status=archived → 查询项目 version → 写入 Milvus 元数据：{product_id, modules, priority, status, archived_at, go_live_date, project_version} → vector_store.add_requirement() 写入 Milvus requirements 集合（此时才进入 KB 可检索范围）',
+        step: '归档入库（Celery 异步双写）',
+        detail: 'POST /requirements/{id}/archive — 接收 ArchiveRequest（含 go_live_date YYYY-MM-DDTHH:MM）→ 设置 status=archived → 查询项目 version → 派发 Celery 异步任务计算 Embedding 并写入 Milvus 元数据：{product_id, modules, priority, status, go_live_date, project_version} → API 即时返回（kb_task_queued=true），Celery Worker 异步完成向量写入',
       },
     ],
     config: [
@@ -300,9 +302,12 @@ const SECTIONS: ManualSection[] = [
       { label: '归档入库', desc: '需求归档后写入 Milvus 向量库，同时 PostgreSQL 保留结构化数据，供后续检索增强' },
       { label: '知识问答', desc: '基于知识库的自然语言问答，支持 SSE 流式输出和追问' },
       { label: '状态指示', desc: '绿色"已归档"= PostgreSQL 已存储；蓝色"已向量化"= Milvus 已索引' },
-      { label: '检索规则', desc: '同一功能检索出多个需求时，按上线日期靠后的为准（最新版本优先）' },
+      { label: '检索规则', desc: '同一功能检索出多个需求时，按上线时间靠后的为准（最新版本优先）' },
       { label: '版本标注', desc: '检索结果中标注来源项目的版本号，便于识别需求变更来源' },
       { label: '产品隔离', desc: '所有 add_* 方法强制写入 product_id，检索按 product_id 过滤，跨产品不串扰' },
+      { label: 'KB 专属 LLM', desc: '知识库页面可配置专属 LLM 供应商，与主 LLM 独立，优化问答成本与质量' },
+      { label: '搜索筛选', desc: 'KB 条目列表支持标题模糊搜索 + 向量化状态筛选（已向量化/未向量化）' },
+      { label: '修改上线时间', desc: '每条已归档需求可点击日历图标修改上线时间，同步更新 Milvus 元数据' },
     ],
     logic: [
       {
@@ -310,8 +315,8 @@ const SECTIONS: ManualSection[] = [
         detail: 'Milvus（向量检索引擎）+ MinIO（Milvus 的 S3 兼容存储后端，存储向量数据文件）+ etcd（Milvus 元数据：集合结构、段信息、节点状态）+ PostgreSQL（结构化数据：需求/项目/模块/用户/模式）。MinIO/etcd 是 Milvus 的内部依赖，向量检索由 Milvus 提供',
       },
       {
-        step: '归档入库流程（双写）',
-        detail: '需求归档 → bge-large-zh 将 SRR 文本编码为 1024 维向量 → vector_store.add_requirement() 写入 Milvus requirements 集合 → 元数据含 product_id / modules / priority / status / archived_at / go_live_date / project_version；同时 PostgreSQL requirements 表更新结构化字段',
+        step: '归档入库流程（Celery 异步双写）',
+        detail: '需求归档 → API 即时写入 PostgreSQL 并设置 status=archived → 派发 Celery 异步任务 → bge-large-zh 将 SRR 文本编码为 1024 维向量 → vector_store.add_requirement() 写入 Milvus requirements 集合 → 元数据含 product_id / modules / priority / status / go_live_date / project_version；Celery 不可用时降级为同步写入',
       },
       {
         step: '知识问答 SSE 流式',
@@ -319,7 +324,7 @@ const SECTIONS: ManualSection[] = [
       },
       {
         step: '去重规则',
-        detail: '同一功能检索出多个需求时，按 go_live_date 降序排序（上线日期靠后的优先）→ answer_text 标注"（v2.1, 上线: 2026-07-11, 相似度 0.55）" → LLM 提示"以上线日期靠后的最新版本为准"',
+        detail: '同一功能检索出多个需求时，按 go_live_date 降序排序（上线时间靠后的优先）→ answer_text 标注"（v2.1, 上线: 2026-07-11, 相似度 0.55）" → LLM 提示"以上线时间靠后的最新版本为准"',
       },
       {
         step: '双状态指示',
@@ -328,7 +333,7 @@ const SECTIONS: ManualSection[] = [
     ],
     config: [
       { key: 'Embedding 模型', value: 'bge-large-zh', note: '本地部署，基础镜像内置 /models 目录' },
-      { key: 'Milvus 集合', value: 'requirements / test_cases / patterns / errors', note: '共 4 个独立集合' },
+      { key: 'Milvus 集合', value: 'requirements / test_cases / patterns / req_pats / errors', note: '共 5 个独立集合' },
       { key: 'MinIO + etcd', value: 'Milvus 存储后端', note: 'S3 兼容对象存储 + 元数据，非独立向量库' },
       { key: '诊断端点', value: 'GET /knowledge/diagnostics', note: '管理员可查看连接状态、集合数量' },
     ],
@@ -380,6 +385,7 @@ const SECTIONS: ManualSection[] = [
       { label: '系统设置', desc: '配置 LLM 供应商、API Key、模型名称；配置自动持久化到数据库' },
       { label: '提示词管理', desc: '管理各 Agent 的 Prompt 模板，支持版本控制' },
       { label: '知识库管理', desc: '管理员可查看向量库诊断信息（Milvus 连接状态、集合数量）' },
+      { label: 'KB 专属 LLM', desc: '可为知识库问答配置独立 LLM 供应商，与主 LLM 隔离，优化问答成本与质量' },
     ],
     logic: [
       {
@@ -392,7 +398,7 @@ const SECTIONS: ManualSection[] = [
       },
       {
         step: '提示词版本控制',
-        detail: 'PromptManager 管理 5 个 Agent 的 Prompt 模板（req_agent / clarify_agent / gen_agent / review_agent / impact_agent）→ 支持编辑、保存、恢复默认 → 修改后即时生效（下次 Agent 调用使用新 Prompt）',
+        detail: 'PromptManager 管理 6 个模块的 Prompt 模板（req_agent / clarify_agent / gen_agent / review_agent / impact_agent / knowledge_qa）→ 支持编辑、保存、恢复默认 → 修改后即时生效（下次 Agent 调用使用新 Prompt）→ knowledge_qa 模块含 QA_SYSTEM_PROMPT（主问答）和 CHAT_SYSTEM_PROMPT（追问）',
       },
       {
         step: 'KB 诊断面板',
@@ -402,27 +408,30 @@ const SECTIONS: ManualSection[] = [
     config: [
       { key: '默认管理员', value: 'admin / 888888', note: '首次启动 seed_admin_user() 创建' },
       { key: 'LLM 配置', value: '管理后台 → 系统设置', note: '多供应商 + 主备模式' },
-      { key: 'Prompt 管理', value: '管理后台 → 提示词管理', note: '5 个 Agent 模板，支持恢复默认' },
+      { key: 'Prompt 管理', value: '管理后台 → 提示词管理', note: '6 个模块模板，支持恢复默认' },
+      { key: 'KB LLM 配置', value: '知识库页面 → KB LLM 选择器', note: 'GET/PUT /knowledge/kb-llm' },
     ],
   },
   {
     id: 'kb-rules',
     icon: Search,
     title: 'KB 检索规则',
-    subtitle: 'Embedding + 阈值 + 二次校验 + 版本去重',
+    subtitle: '混合检索 + 阈值 + 二次校验 + 版本去重',
     color: 'text-indigo-600 bg-indigo-50',
     features: [
-      { label: '上线日期优先', desc: '当知识库中同一功能检索出两个内容不同的需求时，以上线日期靠后的为准' },
+      { label: '上线时间优先', desc: '当知识库中同一功能检索出两个内容不同的需求时，以上线时间靠后的为准' },
       { label: '版本溯源', desc: '检索结果标注来源项目版本号，清晰区分哪个版本新增或变更了需求' },
       { label: '问答相似度阈值', desc: '问句→文档语义匹配阈值为 0.40（bge-large-zh），低于此值不采纳' },
       { label: '基线补全阈值', desc: '字段→已归档 SRR 精确匹配阈值为 0.85，用于增量需求基线补全' },
+      { label: '混合检索', desc: 'Milvus 向量检索 + PostgreSQL BM25 关键词检索 → RRF 融合 → CrossEncoder 重排，兼顾语义和精确召回' },
       { label: '二次校验', desc: 'LLM 对 KB 检索结果进行二次校验，过滤误匹配' },
       { label: '状态过滤', desc: '仅检索 status=archived 的已归档需求，草稿状态不参与检索' },
+      { label: '降级策略', desc: 'KB 不可用时静默跳过、正常生成；向量/BM25 互为降级，重排失败回退 RRF 排序' },
     ],
     logic: [
       {
-        step: 'Embedding 编码',
-        detail: 'bge-large-zh 模型（本地部署，基础镜像内置 /models 目录）将问题文本编码为 1024 维向量 → Milvus collection.search() 在 requirements 集合中做近似最近邻搜索 → 返回 top-K 结果（含 cosine 相似度）',
+        step: '混合检索（向量 + BM25 + RRF + 重排）',
+        detail: 'bge-large-zh 模型（本地部署）将问题编码为 1024 维向量 → Milvus collection.search() 向量检索 top-K → 同时 PostgreSQL tsvector BM25 关键词检索 → RRF（Reciprocal Rank Fusion, k=60）融合两路结果 → CrossEncoder（bge-reranker-base）对融合结果重排 → 返回最终 top-K（含 cosine 相似度）',
       },
       {
         step: '问答相似度阈值过滤',
@@ -434,19 +443,27 @@ const SECTIONS: ManualSection[] = [
       },
       {
         step: '版本去重排序',
-        detail: 'matched.sort(key=lambda m: m.metadata.go_live_date, reverse=True) → 上线日期靠后的优先 → answer_text 标注"（v{project_version}, 上线: {go_live_date}, 相似度 {score:.2f}）" → LLM 提示"以上线日期靠后的最新版本为准"',
+        detail: 'matched.sort(key=lambda m: m.metadata.go_live_date, reverse=True) → 上线时间靠后的优先 → answer_text 标注"（v{project_version}, 上线: {go_live_date}, 相似度 {score:.2f}）" → LLM 提示"以上线时间靠后的最新版本为准"',
       },
       {
         step: '状态过滤',
         detail: 'Milvus 检索时 expr="status == \\"archived\\""（注意 expr 必须是字符串，不能是 None，否则 DataTypeNotMatchException）→ 草稿状态（active/draft）的需求不参与检索',
       },
+      {
+        step: '降级策略',
+        detail: 'KB 完全不可用时（Milvus 连接失败）→ 静默跳过 KB 检索，正常生成内容，人工澄清兜底 → 向量检索失败时仅用 BM25 → BM25 失败时仅用向量 → CrossEncoder 重排失败时回退 RRF 排序 → 不向用户注入诊断信息，不影响内容生成质量',
+      },
     ],
     config: [
       { key: 'Embedding 模型', value: 'bge-large-zh', note: '1024 维向量，本地部署' },
+      { key: 'Reranker 模型', value: 'bge-reranker-base', note: 'CrossEncoder 重排，sentence_transformers 加载' },
+      { key: 'BM25 检索', value: 'PostgreSQL tsvector', note: 'zhparser 中文分词，不可用时降级 simple' },
+      { key: 'RRF 融合', value: 'k=60', note: 'Reciprocal Rank Fusion 融合向量+BM25 结果' },
       { key: '问答阈值', value: '0.40', note: '问句→文档典型范围 0.40-0.65' },
       { key: '基线补全阈值', value: '0.85', note: '字段→已归档 SRR 精确匹配' },
       { key: '状态过滤', value: 'status=archived', note: 'Milvus expr 字符串' },
-      { key: '排序规则', value: 'go_live_date DESC → similarity DESC', note: '同功能多版本时靠后日期优先' },
+      { key: '排序规则', value: 'go_live_date DESC → similarity DESC', note: '同功能多版本时靠后时间优先' },
+      { key: 'KB LLM', value: 'kb_settings 表 llm_provider', note: '知识库专属 LLM，与主 LLM 独立' },
       { key: 'KB 查询日志', value: 'srr_json._kb_query_logs', note: '顶层 key，记录每次检索的查询和结果' },
     ],
   },

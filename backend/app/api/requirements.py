@@ -1476,7 +1476,6 @@ async def archive_requirement(
         "modules": ",".join(record.modules or []),
         "priority": record.priority,
         "status": "archived",
-        "archived_at": record.archived_at.isoformat() if record.archived_at else "",
         "go_live_date": parsed_go_live.isoformat() if parsed_go_live else "",
         "project_version": project_version,
     }

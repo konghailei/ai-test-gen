@@ -30,25 +30,17 @@ from app.utils.logger import logger
 router = APIRouter()
 
 
-class UpdateArchiveTimeRequest(BaseModel):
-    """修改归档时间请求体。"""
-    archive_time: str = Field(..., description="归档时间，格式 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD")
-
-
 # ============================================================================
 # 辅助：构建需求向量化元数据 + 派发异步嵌入任务
 # ============================================================================
 
 def _build_requirement_kb_meta(record: Requirement, project_version: str) -> dict:
     """为已归档需求构建 Milvus 写入元数据（与归档接口保持一致）。"""
-    # 优先使用真实 archived_at，未设置时回退到 updated_at（兼容历史数据）
-    archived_ts = record.archived_at or record.updated_at or record.created_at
     return {
         "product_id": record.product_id,
         "modules": ",".join(record.modules or []),
         "priority": record.priority,
         "status": "archived",
-        "archived_at": archived_ts.isoformat() if archived_ts else "",
         "go_live_date": record.go_live_date.isoformat() if record.go_live_date else "",
         "project_version": project_version,
     }
@@ -423,85 +415,6 @@ async def delete_kb_entry(
             "db_deleted": db_deleted,
             "kb_deleted": kb_deleted,
             "kb_error": kb_error,
-        },
-    )
-
-
-# ============================================================================
-# 4b. 修改归档时间
-# ============================================================================
-
-@router.patch("/entries/{entry_id}/archive-time", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def update_archive_time(
-    entry_id: str,
-    body: UpdateArchiveTimeRequest,
-    entry_type: str = Query(..., description="条目类型 requirement / test_case"),
-    session: AsyncSession = Depends(get_session),
-) -> ApiResponse:
-    """修改已归档条目的归档时间。
-
-    支持需求与测试用例两种类型。需求修改时同步更新 Milvus 向量库元数据，
-    保证 KB 检索时按归档时间排序的一致性。测试用例无向量库元数据同步需求。
-    """
-    if entry_type not in ("requirement", "test_case"):
-        raise HTTPException(status_code=400, detail=f"不支持的条目类型: {entry_type}")
-
-    model_cls = Requirement if entry_type == "requirement" else TestCase
-    stmt = select(model_cls).where(model_cls.id == entry_id)
-    record = (await session.execute(stmt)).scalar_one_or_none()
-    if not record:
-        raise HTTPException(status_code=404, detail=f"{entry_type} {entry_id} 不存在")
-
-    # 解析时间（沿用 update_go_live_date 的两级解析模式）
-    try:
-        parsed = datetime.fromisoformat(body.archive_time)
-    except ValueError:
-        try:
-            parsed = datetime.fromisoformat(body.archive_time + "T00:00:00")
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"归档时间格式不正确: {body.archive_time}，需为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD",
-            )
-
-    old_archive_time = record.archived_at
-    record.archived_at = parsed
-    await session.commit()
-
-    logger.info(
-        "[API/knowledge] 归档时间已修改: id={}, type={}, {} → {}",
-        entry_id, entry_type,
-        old_archive_time.isoformat() if old_archive_time else "(空)",
-        parsed.isoformat(),
-    )
-
-    # 同步 Milvus 向量库元数据（仅需求有元数据；用例元数据不区分归档时间）
-    milvus_updated = False
-    milvus_error = ""
-    if entry_type == "requirement":
-        try:
-            await asyncio.to_thread(
-                vector_store.update_requirement_metadata,
-                entry_id,
-                {"archived_at": parsed.isoformat()},
-            )
-            milvus_updated = True
-        except Exception as e:
-            milvus_error = str(e)[:300]
-            logger.warning(
-                "[API/knowledge] Milvus 元数据更新失败（不阻断）: req_id={}, error={}",
-                entry_id, milvus_error[:200],
-            )
-
-    return ApiResponse(
-        success=True,
-        message="归档时间已更新" + ("，向量库元数据已同步" if milvus_updated else "（仅关系库；向量库同步失败）"),
-        data={
-            "entry_id": entry_id,
-            "entry_type": entry_type,
-            "archive_time": parsed.isoformat(),
-            "milvus_updated": milvus_updated,
-            "milvus_error": milvus_error if not milvus_updated else "",
         },
     )
 
