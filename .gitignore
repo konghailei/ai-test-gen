@@ -33,6 +33,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+*.tsbuildinfo
 
 # ===== 数据持久化目录（Docker 绑定挂载，含敏感数据） =====
 # PostgreSQL 数据 + Milvus 向量库 + Fernet 加密密钥

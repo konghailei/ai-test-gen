@@ -339,6 +339,17 @@ git pull                                  # 或用离线包覆盖
 docker compose up -d --build              # 基于已有基础镜像，秒级重建应用层
 ```
 
+> **前端修改后必读**：前端构建流程为 `tsc -b && vite build`（先 TypeScript 类型检查，再 Vite 打包）。
+> TypeScript 使用 `strict: true` + `jsx: "react-jsx"` 模式，以下规则必须遵守，否则 `docker compose build` 会报错：
+>
+> | 规则 | 正确 | 错误 |
+> |------|------|------|
+> | React Hooks | `import { useState, memo } from 'react'` → `memo(...)` | `React.memo(...)`（未导入 React 默认导出） |
+> | 类型标注 | 显式标注 props 类型，`strict` 模式不接受隐式 `any` | `function Foo(props)` 无类型 |
+> | 未使用变量 | 已关闭 `noUnusedLocals`/`noUnusedParameters`，但仍建议清理 | — |
+>
+> **提交前本地验证**：`cd frontend && npm run build` 通过后再推送，避免 CI/Docker 构建失败。
+
 ### 9.4 依赖更新（requirements.txt 变更后）
 
 ```bash
@@ -367,6 +378,8 @@ docker compose -f docker-compose.base.yml down -v
 | 端口冲突（80 / 5432 / 19530 被占用） | 宿主已有服务占用 | 修改 `docker-compose.yml` 对应端口映射 |
 | PostgreSQL 连接失败 | 密码 / 网络不匹配 | 确认 `DATABASE_URL` 与 PG 容器密码一致 |
 | 前端白屏 / 旧版本 | 前端缓存或镜像未重建 | `docker compose build frontend && docker compose up -d frontend` |
+| 前端构建报 `TS2686: 'React' refers to a UMD global` | 代码中使用了 `React.memo()` 等但未导入 React | 改用命名导入 `import { memo } from 'react'` 并调用 `memo()`，不要用 `React.memo()`（项目启用 `jsx: "react-jsx"` 自动运行时，无需默认导入 React） |
+| 前端构建报 `error TS2xxx` 类型错误 | TypeScript 类型检查未通过 | 本地先执行 `cd frontend && npm run build` 排查，修复后再 Docker 构建 |
 | `DEBUG=false` 启动失败 | 未设 `MASTER_KEY` / JWT 密钥 | 配置第 7 节所述密钥后重启 |
 | zhparser 不可用 | PG16 镜像无此包 | 自动降级为 `simple` 配置，不影响功能（中文分词精度略降，由重排补偿） |
 

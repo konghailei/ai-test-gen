@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, memo } from 'react'
 import { Database, FileText, TestTube, Trash2, Filter, Loader2, CheckCircle2, AlertTriangle, Clock, RefreshCw, Search, Calendar, X, Save, Layers } from 'lucide-react'
 import { knowledge, requirements as reqApi, products as prodApi } from '../api/client'
 import type { KbEntry, KbModelStatus, Module } from '../types'
@@ -49,7 +49,7 @@ function isoToDatetimeLocal(iso?: string): string {
 // 弹窗组件（React.memo 隔离 — 避免 datetime-local onChange 触发整页重渲染）
 // ============================================================================
 
-const GoLiveEditModal = React.memo(function GoLiveEditModal({
+const GoLiveEditModal = memo(function GoLiveEditModal({
   entry,
   onClose,
   onSaved,
@@ -123,7 +123,7 @@ const GoLiveEditModal = React.memo(function GoLiveEditModal({
   )
 })
 
-const ArchiveTimeEditModal = React.memo(function ArchiveTimeEditModal({
+const ArchiveTimeEditModal = memo(function ArchiveTimeEditModal({
   entry,
   onClose,
   onSaved,

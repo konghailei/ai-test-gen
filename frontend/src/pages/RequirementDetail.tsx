@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, memo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
@@ -80,7 +80,7 @@ function Table({ children, ...props }: any) {
 // 归档弹窗（React.memo 隔离，避免页面重渲染卡顿）
 // ============================================================================
 
-const ArchiveModal = React.memo(function ArchiveModal({
+const ArchiveModal = memo(function ArchiveModal({
   reqId,
   onClose,
   onArchived,
