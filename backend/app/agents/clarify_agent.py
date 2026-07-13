@@ -113,6 +113,15 @@ class ClarifyAgent:
         title = srr.get("requirement", {}).get("title", "")
         logger.info("[ClarifyAgent] ▶ 开始澄清: req_id={}, title={}", req_id, title)
 
+        # 读取知识库专属 LLM 供应商（若已设置），KB 相关 LLM 调用使用该供应商
+        kb_provider: str | None = None
+        if session is not None:
+            try:
+                from app.api.knowledge import get_kb_llm_provider
+                kb_provider = await get_kb_llm_provider(session)
+            except Exception:
+                pass
+
         # 初始化 KB 访问日志（v2.1 新增）
         kb_access_log: list[dict] = []
 
@@ -208,7 +217,7 @@ class ClarifyAgent:
                 if raw:
                     srr["_raw_text"] = raw
         kb_questions = await self._generate_kb_queries(
-            srr, completeness, srr.get("_is_incremental", False)
+            srr, completeness, srr.get("_is_incremental", False), kb_provider=kb_provider
         )
 
         _d3 = int((time.time() - _t3) * 1000)
@@ -277,6 +286,9 @@ class ClarifyAgent:
             questions = self._ensure_critical_questions(
                 questions, unresolved_qa, completeness,
             )
+            # ⭐ 精炼：为 KB 未答转人工的澄清问题补充可选项（input_type/options），
+            # 降低用户回答成本。LLM 失败则保留原 text + 空选项降级。
+            questions = await self._refine_unresolved_to_questions(questions, augmented_srr, kb_provider=kb_provider)
         else:
             questions = []
 
@@ -574,7 +586,8 @@ class ClarifyAgent:
         )
 
     async def _generate_kb_queries(
-        self, srr: dict, completeness: dict, is_incremental: bool
+        self, srr: dict, completeness: dict, is_incremental: bool,
+        kb_provider: str | None = None,
     ) -> list[dict]:
         """用 LLM 动态生成上下文感知的 KB 搜索查询。
 
@@ -599,9 +612,10 @@ class ClarifyAgent:
         try:
             result = await self._llm.call_json(
                 prompt=user_prompt,
-                system_prompt=prompts.KB_QUERY_GENERATOR_SYSTEM_PROMPT,
+                system_prompt=prompt_manager.get("clarify_agent", "KB_QUERY_GENERATOR_SYSTEM_PROMPT"),
                 schema_hint={"queries": list},
                 temperature=0.3,
+                provider=kb_provider,
             )
             queries = result.get("queries", [])
             if queries:
@@ -868,6 +882,9 @@ class ClarifyAgent:
                         "similarity": round(m.get("similarity", 0), 3),
                         "field": q["field"],
                         "value": baseline_block,
+                        # 整篇 SRR 文档（截断），供 _verify_kb_answers 的 LLM
+                        # 从中提取「针对问题的具体片段」，而非返回整字段/整块
+                        "document_full": json.dumps(src_srr, ensure_ascii=False)[:3000] if src_srr else "",
                         "go_live_date": go_live,
                         "project_version": proj_ver,
                     })
@@ -880,6 +897,8 @@ class ClarifyAgent:
                         "similarity": round(m.get("similarity", 0), 3),
                         "field": q["field"],
                         "value": field_val,
+                        # 整篇 SRR 文档（截断），供 LLM 提取针对性片段
+                        "document_full": json.dumps(src_srr, ensure_ascii=False)[:3000] if src_srr else "",
                         "go_live_date": go_live,
                         "project_version": proj_ver,
                     })
@@ -905,12 +924,13 @@ class ClarifyAgent:
             })
 
         # v2.11：LLM 校验检索结果质量（判断相关性、拒绝不相关答案、提取具体信息）
-        answers = await self._verify_kb_answers(srr, answers)
+        answers = await self._verify_kb_answers(srr, answers, kb_provider=kb_provider)
 
         return answers
 
     async def _verify_kb_answers(
-        self, srr: dict, answers: list[dict]
+        self, srr: dict, answers: list[dict],
+        kb_provider: str | None = None,
     ) -> list[dict]:
         """LLM 校验 KB 检索结果：判断是否真正相关、提取具体答案、拒绝不相关。
 
@@ -931,11 +951,17 @@ class ClarifyAgent:
             a = answers[idx]
             docs: list[str] = []
             for s in a.get("sources", [])[:3]:
-                v = s.get("value")
-                if isinstance(v, (dict, list)):
-                    docs.append(json.dumps(v, ensure_ascii=False)[:600])
-                elif v:
-                    docs.append(str(v)[:600])
+                # 优先用整篇 SRR 文档上下文（document_full），让 LLM 从中提取
+                # 「针对问题的具体片段」；回退到字段值 value（机械整字段提取）
+                doc_full = s.get("document_full")
+                if doc_full:
+                    docs.append(doc_full[:1500])
+                else:
+                    v = s.get("value")
+                    if isinstance(v, (dict, list)):
+                        docs.append(json.dumps(v, ensure_ascii=False)[:600])
+                    elif v:
+                        docs.append(str(v)[:600])
             verification_items.append({
                 "index": idx,
                 "question": a["question"],
@@ -957,9 +983,10 @@ class ClarifyAgent:
         try:
             result = await self._llm.call_json(
                 prompt=user_prompt,
-                system_prompt=prompts.KB_ANSWER_VERIFIER_SYSTEM_PROMPT,
+                system_prompt=prompt_manager.get("clarify_agent", "KB_ANSWER_VERIFIER_SYSTEM_PROMPT"),
                 schema_hint={"verifications": list},
                 temperature=0.1,
+                provider=kb_provider,
             )
             verifications = result.get("verifications", []) or []
             for v in verifications:
@@ -994,6 +1021,76 @@ class ClarifyAgent:
             # LLM 失败时不改变答案（降级为原有机械答案，避免全丢弃）
 
         return answers
+
+    async def _refine_unresolved_to_questions(
+        self, questions: list[dict], srr: dict, kb_provider: str | None = None,
+    ) -> list[dict]:
+        """为 KB 未答转人工的澄清问题补充回答形式与候选选项（降低回答成本）。
+
+        主流程第⑧步将 KB 未答问题直接转人工（input_type=text, options=[]），
+        但用户期望可选项。本方法调用 LLM（UNRESOLVED_REFINER_SYSTEM_PROMPT）
+        为每个问题判断 input_type 并生成 2-4 个候选选项；LLM 失败则降级保留原问题。
+
+        Args:
+            questions: 第⑧步构建的人工澄清问题列表（含 id/field/question/context/default_answer）
+            srr: 当前需求的 SRR（用于提供需求上下文，辅助选项生成）
+            kb_provider: KB 专属 LLM 供应商。若指定则优先使用，否则回退全局主 LLM。
+
+        Returns:
+            list[dict]: 补充了 input_type/options 的问题列表（原问题字段不变）
+        """
+        if not questions:
+            return questions
+
+        try:
+            items = [
+                {
+                    "id": q.get("id"),
+                    "field": q.get("field"),
+                    "question": q.get("question", ""),
+                    "context": q.get("context", ""),
+                    "default_answer": q.get("default_answer", ""),
+                }
+                for q in questions
+            ]
+            req_summary = (srr.get("requirement", {}) or {}).get("summary", "")
+            user_prompt = (
+                f"【当期需求摘要】\n{req_summary}\n\n"
+                f"【需补充回答形式与候选选项的澄清问题】\n"
+                f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
+                f"请为每个问题判断最合适的回答形式（text/select/multi_select），"
+                f"若 select 则给出 2-4 个候选选项，并尽量给出建议默认答案。只输出 JSON。"
+            )
+            result = await self._llm.call_json(
+                prompt=user_prompt,
+                system_prompt=prompt_manager.get("clarify_agent", "UNRESOLVED_REFINER_SYSTEM_PROMPT"),
+                schema_hint={"questions": list},
+                temperature=0.2,
+                provider=kb_provider,
+            )
+            refined = {q.get("id"): q for q in result.get("questions", []) if q.get("id")}
+            for q in questions:
+                r = refined.get(q.get("id"))
+                if not r:
+                    continue
+                it = r.get("input_type")
+                if it in ("text", "select", "multi_select"):
+                    q["input_type"] = it
+                opts = r.get("options") or []
+                if isinstance(opts, list):
+                    q["options"] = [str(o) for o in opts][:6]
+                if r.get("question"):
+                    q["question"] = r["question"]
+                if r.get("default_answer"):
+                    q["default_answer"] = r["default_answer"]
+            logger.info("[ClarifyAgent] 未答问题选项精炼完成: %d 题", len(questions))
+        except Exception as e:
+            logger.warning(
+                "[ClarifyAgent] 未答问题选项精炼失败，保留原 text 问题: %s",
+                str(e)[:200],
+            )
+
+        return questions
 
     def _resolve_field_conflict(
         self,

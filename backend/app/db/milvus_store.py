@@ -556,7 +556,8 @@ class MilvusVectorStore:
     def search_similar_cases(self, query: str, top_k: int = 5,
                              case_type: str | None = None,
                              req_id: str | None = None,
-                             product_id: str | None = None) -> list[dict]:
+                             product_id: str | None = None,
+                             modules: list[str] | None = None) -> list[dict]:
         """检索相似用例。
 
         Args:
@@ -565,6 +566,7 @@ class MilvusVectorStore:
             case_type: 按用例类型过滤（可选）
             req_id: 按需求 ID 过滤（可选）
             product_id: 按产品过滤（可选，产品隔离必须）
+            modules: 按模块过滤（多选，内存过滤）
         """
         self._ensure_connected()
         conditions = []
@@ -575,7 +577,23 @@ class MilvusVectorStore:
         if product_id:
             conditions.append(f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"')
         where_filter = " && ".join(conditions) if conditions else None
-        return self._search("test_cases", query, top_k=top_k, where_filter=where_filter)
+
+        # modules 无法用 Milvus expr 直接过滤（以逗号分隔字符串存储于 metadata），
+        # 放大召回量后在内存中按模块过滤，保持与 search_similar_requirements 一致。
+        fetch_k = top_k * 5 if modules else top_k
+        formatted = self._search("test_cases", query, top_k=fetch_k, where_filter=where_filter)
+
+        if modules:
+            wanted = {m for m in modules}
+            filtered = []
+            for r in formatted:
+                raw = r.get("metadata", {}).get("modules", "")
+                stored = raw.split(",") if isinstance(raw, str) and raw else (raw or [])
+                stored_set = {m.strip() for m in stored if isinstance(m, str) and m.strip()}
+                if wanted & stored_set:
+                    filtered.append(r)
+            formatted = filtered[:top_k]
+        return formatted
 
     def get_all_test_cases(self, product_id: str | None = None, limit: int = 100) -> list[dict]:
         """获取所有用例向量（product_id 为空时不过滤，避免空表达式报错）。"""

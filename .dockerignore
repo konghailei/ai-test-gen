@@ -8,6 +8,10 @@ data/
 logs/
 milvus/
 
+# 本地模型（通过 bind mount 挂载进容器，不烘焙进镜像；
+# 排除可避免 ~2.4GB 模型被打入 build context，极大加速构建）
+models/
+
 # Python 缓存
 __pycache__/
 *.pyc

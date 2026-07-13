@@ -13,6 +13,7 @@ from app.prompts import (
     gen_agent,
     review_agent,
     impact_agent,
+    knowledge_qa,
 )
 
 # ============================================================================
@@ -40,6 +41,12 @@ _PROMPT_REGISTRY: list[dict] = [
         "default": clarify_agent.SYSTEM_PROMPT,
         "description": "ClarifyAgent 系统指令 — 需求完整性与歧义检测",
     },
+    {
+        "module": "clarify_agent",
+        "name": "UNRESOLVED_REFINER_SYSTEM_PROMPT",
+        "default": clarify_agent.UNRESOLVED_REFINER_SYSTEM_PROMPT,
+        "description": "ClarifyAgent 未答缺口精炼 — 为 KB 无法回答的缺口生成带可选项的澄清问题",
+    },
     # GenAgent（用例生成）
     {
         "module": "gen_agent",
@@ -60,6 +67,26 @@ _PROMPT_REGISTRY: list[dict] = [
         "name": "SYSTEM_PROMPT",
         "default": impact_agent.SYSTEM_PROMPT,
         "description": "ImpactAnalysis 系统指令 — 变更影响分析",
+    },
+    # ClarifyAgent KB 相关提示词（v2.12 补充注册）
+    {
+        "module": "clarify_agent",
+        "name": "KB_QUERY_GENERATOR_SYSTEM_PROMPT",
+        "default": clarify_agent.KB_QUERY_GENERATOR_SYSTEM_PROMPT,
+        "description": "ClarifyAgent KB 查询生成器 — LLM 动态生成上下文感知的搜索查询",
+    },
+    {
+        "module": "clarify_agent",
+        "name": "KB_ANSWER_VERIFIER_SYSTEM_PROMPT",
+        "default": clarify_agent.KB_ANSWER_VERIFIER_SYSTEM_PROMPT,
+        "description": "ClarifyAgent KB 答案校验器 — LLM 审核检索结果的相关性与准确性",
+    },
+    # KnowledgeQA（知识问答）
+    {
+        "module": "knowledge_qa",
+        "name": "QA_SYSTEM_PROMPT",
+        "default": knowledge_qa.QA_SYSTEM_PROMPT,
+        "description": "知识问答系统指令 — 基于知识库上下文回答用户问题",
     },
 ]
 

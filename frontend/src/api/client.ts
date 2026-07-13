@@ -297,24 +297,38 @@ export const knowledge = {
     if (category) params.set('category', category)
     return request<PaginatedData<TestPattern>>(`/knowledge/patterns?${params}`)
   },
-  listEntries: (productId?: string, type?: string, filters?: { search?: string; vectorized?: string }) => {
+  listEntries: (productId?: string, type?: string, filters?: { search?: string; vectorized?: string; modules?: string[] }) => {
     const params = new URLSearchParams()
     if (productId) params.set('product_id', productId)
     if (type) params.set('type', type)
     if (filters?.search) params.set('search', filters.search)
     if (filters?.vectorized) params.set('vectorized', filters.vectorized)
+    if (filters?.modules?.length) params.set('modules', filters.modules.join(','))
     return request<{ items: KbEntry[]; total: number }>(`/knowledge/entries?${params}`)
   },
   deleteEntry: (entryId: string, entryType: string) =>
     request<{ entry_id: string; deleted: boolean; db_deleted?: boolean; kb_deleted?: boolean; kb_error?: string }>(`/knowledge/entries/${entryId}?entry_type=${entryType}`, {
       method: 'DELETE',
     }),
+  updateArchiveTime: (entryId: string, entryType: string, archiveTime: string) =>
+    request<{ entry_id: string; archive_time: string; milvus_updated?: boolean; milvus_error?: string }>(
+      `/knowledge/entries/${entryId}/archive-time?entry_type=${entryType}`,
+      { method: 'PATCH', body: JSON.stringify({ archive_time: archiveTime }) },
+    ),
   diagnostics: () => request<KbDiagnostics>('/knowledge/diagnostics'),
   modelStatus: () => request<KbModelStatus>('/knowledge/model-status'),
   revectorize: (entryId: string) =>
     request<{ req_id: string; queued: boolean; message?: string }>(`/knowledge/entries/${entryId}/revectorize`, { method: 'POST' }),
   revectorizeMissing: () =>
     request<{ total_archived: number; missing: number; queued: number; failed: number; message?: string }>('/knowledge/revectorize-missing', { method: 'POST' }),
+  /** 获取知识库专属 LLM 配置 */
+  getKbLlm: () => request<{ provider: string; providers: Array<{ provider: string; provider_label: string; model: string; is_primary: boolean }> }>('/knowledge/kb-llm'),
+  /** 设置知识库专属 LLM 供应商 */
+  setKbLlm: (provider: string) =>
+    request<{ provider: string }>('/knowledge/kb-llm', {
+      method: 'PUT',
+      body: JSON.stringify({ provider }),
+    }),
 }
 
 // ============================================================

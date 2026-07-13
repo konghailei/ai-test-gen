@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
@@ -77,6 +77,76 @@ function Table({ children, ...props }: any) {
 }
 
 // ============================================================================
+// 归档弹窗（React.memo 隔离，避免页面重渲染卡顿）
+// ============================================================================
+
+const ArchiveModal = React.memo(function ArchiveModal({
+  reqId,
+  onClose,
+  onArchived,
+}: {
+  reqId: string
+  onClose: () => void
+  onArchived: () => void
+}) {
+  const [archiveDate, setArchiveDate] = useState(new Date().toISOString().slice(0, 10))
+  const [archiving, setArchiving] = useState(false)
+
+  const handleArchive = async () => {
+    if (!archiveDate) { alert('请选择上线日期'); return }
+    setArchiving(true)
+    try {
+      await reqApi.archive(reqId, archiveDate)
+      onArchived()
+    } catch (e: any) {
+      alert('归档失败: ' + e.message)
+    } finally {
+      setArchiving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !archiving && onClose()}>
+      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center">
+            <Archive className="w-5 h-5 text-amber-600" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold text-slate-800">归档需求</h2>
+            <p className="text-xs text-slate-400">归档后数据将导入知识库，不可再编辑</p>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="label">上线日期 <span className="text-red-500">*</span></label>
+            <input
+              type="date"
+              value={archiveDate}
+              onChange={e => setArchiveDate(e.target.value)}
+              className="input-field text-sm"
+              autoFocus
+            />
+          </div>
+          <div className="p-3 bg-blue-50 rounded-lg text-xs text-blue-700 flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <span>上线日期用于知识库检索时区分最新需求。同一功能检索出多个需求时，以靠后日期为准。</span>
+          </div>
+        </div>
+        <div className="flex justify-end gap-3 mt-5">
+          <button onClick={onClose} className="btn-secondary" disabled={archiving}>
+            <X className="w-4 h-4" /> 取消
+          </button>
+          <button onClick={handleArchive} disabled={!archiveDate || archiving} className="btn-primary">
+            {archiving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />} 确认归档
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+})
+
+// ============================================================================
 // 主页面组件
 // ============================================================================
 
@@ -98,10 +168,8 @@ export default function RequirementDetail() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
 
-  // 归档
-  const [archiving, setArchiving] = useState(false)
+  // 归档 — 日期和保存状态由 memo 组件内部管理，父组件仅控制弹窗显隐
   const [showArchiveModal, setShowArchiveModal] = useState(false)
-  const [archiveDate, setArchiveDate] = useState('')
   // 确认生成最终SRR
   const [finalizing, setFinalizing] = useState(false)
 
@@ -236,25 +304,16 @@ export default function RequirementDetail() {
     }
   }
 
-  // 归档需求
-  const handleArchive = async () => {
-    if (!id || !req) return
-    if (!archiveDate) {
-      alert('请选择上线日期')
-      return
+  // 归档成功回调：重新加载需求详情
+  const handleArchived = useCallback(async () => {
+    setShowArchiveModal(false)
+    if (id) {
+      try {
+        const updated = await reqApi.get(id)
+        setReq(updated)
+      } catch {}
     }
-    setArchiving(true)
-    try {
-      await reqApi.archive(id, archiveDate)
-      const updated = await reqApi.get(id)
-      setReq(updated)
-      setShowArchiveModal(false)
-    } catch (e: any) {
-      alert('归档失败: ' + e.message)
-    } finally {
-      setArchiving(false)
-    }
-  }
+  }, [id])
 
   const handleFinalize = async () => {
     if (!id) return
@@ -898,8 +957,8 @@ export default function RequirementDetail() {
                 </button>
               )}
               {detail.status === 'active' && (
-                <button onClick={() => { setArchiveDate(new Date().toISOString().slice(0, 10)); setShowArchiveModal(true) }} disabled={archiving} className="btn-secondary">
-                  {archiving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
+                <button onClick={() => setShowArchiveModal(true)} className="btn-secondary">
+                  <Archive className="w-4 h-4" />
                   归档
                 </button>
               )}
@@ -1195,45 +1254,13 @@ export default function RequirementDetail() {
         </div>
       )}
 
-      {/* 归档弹窗 */}
-      {showArchiveModal && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !archiving && setShowArchiveModal(false)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center">
-                <Archive className="w-5 h-5 text-amber-600" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold text-slate-800">归档需求</h2>
-                <p className="text-xs text-slate-400">归档后数据将导入知识库，不可再编辑</p>
-              </div>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="label">上线日期 <span className="text-red-500">*</span></label>
-                <input
-                  type="date"
-                  value={archiveDate}
-                  onChange={e => setArchiveDate(e.target.value)}
-                  className="input-field text-sm"
-                  autoFocus
-                />
-              </div>
-              <div className="p-3 bg-blue-50 rounded-lg text-xs text-blue-700 flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                <span>上线日期用于知识库检索时区分最新需求。同一功能检索出多个需求时，以靠后日期为准。</span>
-              </div>
-            </div>
-            <div className="flex justify-end gap-3 mt-5">
-              <button onClick={() => setShowArchiveModal(false)} className="btn-secondary" disabled={archiving}>
-                <X className="w-4 h-4" /> 取消
-              </button>
-              <button onClick={handleArchive} disabled={!archiveDate || archiving} className="btn-primary">
-                {archiving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />} 确认归档
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* 归档弹窗（React.memo 隔离） */}
+      {showArchiveModal && id && (
+        <ArchiveModal
+          reqId={id}
+          onClose={() => setShowArchiveModal(false)}
+          onArchived={handleArchived}
+        />
       )}
     </div>
   )

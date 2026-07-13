@@ -58,6 +58,8 @@ class Requirement(Base):
 
     # 上线时间：归档时填写，用于 KB 检索时区分最新需求（同功能以靠后时间为准）
     go_live_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 归档时间：归档时设置，用户可手动修改。区别于 updated_at（任何字段修改都会刷新）。
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("idx_req_product_module", "product_id", "module"),
@@ -99,6 +101,8 @@ class TestCase(Base):
     weight: Mapped[float] = mapped_column(Float, default=1.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    # 归档时间：归档时设置，用户可手动修改。区别于 updated_at（任何字段修改都会刷新）。
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("idx_case_type", "type"),
@@ -371,17 +375,34 @@ class KnowledgeQA(Base):
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     archived_type: Mapped[str] = mapped_column(String(32), default="")
     archived_id: Mapped[str] = mapped_column(String(64), default="")
+    # 产品隔离：问答记录归属的产品 ID（归档时用于关联到正确产品，而非硬编码 PROD-DEFAULT）
+    product_id: Mapped[str] = mapped_column(String(64), default="PROD-DEFAULT", index=True)
     created_by: Mapped[str] = mapped_column(String(64), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("idx_kqa_created_at", "created_at"),
+        Index("idx_kqa_product", "product_id"),
     )
 
 
 # ============================================================================
-# 用户与角色（v2.12 新增 — 基于角色的菜单权限管理）
+# 知识库专属设置（v2.13 新增 - KB LLM 供应商选择等）
+# ============================================================================
+
+class KBSetting(Base):
+    """知识库专属设置（key-value 方式存储，如 KB 问答使用的 LLM 供应商）。"""
+    __tablename__ = "kb_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+# ============================================================================
+# 用户与角色（v2.12 新增 - 基于角色的菜单权限管理）
 # ============================================================================
 
 DEFAULT_MENUS = [

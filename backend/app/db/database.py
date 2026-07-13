@@ -56,6 +56,7 @@ async def init_db() -> None:
         Requirement, TestCase, TestPattern, ErrorCase, GenerationBatch,
         ReqDependency, Traceability, LLMConfig, Product, Project, Module,
         ModuleDependency, KnowledgeQA, User, PromptOverride, ReqPattern,
+        KBSetting,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 
@@ -81,12 +82,20 @@ async def init_db() -> None:
                 ("change_summary", "TEXT NOT NULL DEFAULT ''", "change_summary"),
                 ("diff_json", "JSON NOT NULL DEFAULT '{}'", "diff_json"),
                 ("go_live_date", "TIMESTAMP", "go_live_date"),
+                # 归档时间真实字段（区别于 updated_at，避免被任何字段修改污染）
+                ("archived_at", "TIMESTAMP WITH TIME ZONE", "archived_at"),
+            ],
+            "test_cases": [
+                # 用例归档时间真实字段
+                ("archived_at", "TIMESTAMP WITH TIME ZONE", "archived_at"),
             ],
             "projects": [
                 ("version", "VARCHAR(32) DEFAULT '1.0'", "version"),
             ],
             "knowledge_qa": [
                 ("conversation_history", "JSON NOT NULL DEFAULT '[]'", "conversation_history"),
+                # 产品隔离字段（替代归档时硬编码的 PROD-DEFAULT）
+                ("product_id", "VARCHAR(64) DEFAULT 'PROD-DEFAULT'", "product_id"),
             ],
         }
 

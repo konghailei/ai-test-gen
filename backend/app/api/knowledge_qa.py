@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_write
 from app.core.llm_client import llm_client
+from app.core import prompt_manager
 from app.db.database import get_session
 from app.db.models import KnowledgeQA, Requirement, TestCase, Product
 from app.db.milvus_store import vector_store
@@ -44,20 +45,10 @@ from app.utils.logger import logger
 router = APIRouter()
 
 # ============================================================================
-# 知识问答 Prompt 模板
+# 知识问答 Prompt 模板 — 通过 prompt_manager 统一管理，支持管理后台编辑
 # ============================================================================
-
-QA_SYSTEM_PROMPT = """你是 AI-Test-Gen 系统的知识问答助手，专注于软件测试领域。
-
-你的任务是基于知识库中的需求文档和测试用例来回答用户的问题。
-
-请严格遵循以下规则：
-1. 只能基于提供的知识库上下文回答问题
-2. 如果知识库中没有相关信息，请明确告知用户
-3. 引用来源时，使用「来源类型: 来源标题」的格式，**禁止编造任何 ID 或编号**
-4. 如果在回答中需要列出多个来源，只能使用提问中已有的来源标题，**绝对不要自创 ID 如 REQ-xxx 或 CASE-xxx**
-5. 回答要结构清晰、准确专业
-6. 如果问题涉及具体技术细节，给出完整的分析"""
+# QA_SYSTEM_PROMPT 定义已移至 app/prompts/knowledge_qa.py，
+# 此处通过 prompt_manager.get("knowledge_qa", "QA_SYSTEM_PROMPT") 获取。
 
 
 def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: list[dict]) -> str:
@@ -229,6 +220,7 @@ async def _stream_qa_answer(
     product_id: str | None,
     session: AsyncSession,
     kb_status: dict | None = None,
+    kb_provider: str | None = None,
 ):
     """流式生成问答回答（SSE 事件流）。
 
@@ -270,11 +262,13 @@ async def _stream_qa_answer(
 
     try:
         # 调用 LLM（非流式，一次性返回，以 chunk 事件发送）
+        # 使用 KB 专属 LLM（若已设置），否则使用全局主 LLM
         answer = await llm_client.call(
             prompt=prompt,
-            system_prompt=QA_SYSTEM_PROMPT,
+            system_prompt=prompt_manager.get("knowledge_qa", "QA_SYSTEM_PROMPT"),
             temperature=0.3,
             max_tokens=4096,
+            provider=kb_provider,
         )
         full_answer = answer
         yield {"event": "chunk", "data": answer}
@@ -311,6 +305,8 @@ async def _stream_qa_answer(
             reference_sources=reference_sources,
             conversation_history=conversation_history,
             created_by="system",
+            # 产品隔离：记录归属的产品 ID（归档时用于关联到正确产品）
+            product_id=product_id or "PROD-DEFAULT",
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
@@ -339,10 +335,14 @@ async def kqa_ask(
     if not question:
         raise HTTPException(status_code=400, detail="问题不能为空")
     product_id = req.product_id
+    modules = req.modules
 
-    logger.info("[API/knowledge-qa] 流式问答: question={}, product_id={}", question[:100], product_id)
+    logger.info(
+        "[API/knowledge-qa] 流式问答: question={}, product_id={}, modules={}",
+        question[:100], product_id, modules,
+    )
 
-    # 1. 检索知识库（带产品隔离 + 仅已归档需求）
+    # 1. 检索知识库（带产品隔离 + 模块过滤 + 仅已归档需求）
     #    需求检索走 hybrid_searcher（向量 + BM25 + RRF + 重排）
     #    用例检索保持直接调用 vector_store（hybrid_searcher 暂未支持 test_cases）
     kb_sources: list[dict[str, Any]] = []
@@ -350,7 +350,7 @@ async def kqa_ask(
     try:
         from app.db.hybrid_search import hybrid_searcher
         req_results = await hybrid_searcher.search_requirements(
-            query=question, product_id=product_id, top_k=5,
+            query=question, product_id=product_id, modules=modules, top_k=5,
             status="archived", session=session,
         )
         for r in req_results:
@@ -362,7 +362,10 @@ async def kqa_ask(
         logger.warning("[API/knowledge-qa] 检索需求失败: {}", err_msg[:100])
 
     try:
-        case_results = await asyncio.to_thread(vector_store.search_similar_cases, question, top_k=5)
+        case_results = await asyncio.to_thread(
+            vector_store.search_similar_cases,
+            question, top_k=5, product_id=product_id, modules=modules,
+        )
         for r in case_results:
             r["type"] = "test_case"
             if not any(s.get("id") == r.get("id") and s.get("type") == "test_case" for s in kb_sources):
@@ -397,7 +400,14 @@ async def kqa_ask(
             },
         )
 
-    return EventSourceResponse(_stream_qa_answer(question, kb_sources, product_id, session, kb_status))
+    # 读取知识库专属 LLM 供应商（若未设置则使用全局主 LLM）
+    from app.api.knowledge import get_kb_llm_provider
+    kb_provider = await get_kb_llm_provider(session)
+
+    return EventSourceResponse(_stream_qa_answer(
+        question, kb_sources, product_id, session, kb_status,
+        kb_provider=kb_provider,
+    ))
 
 
 # ============================================================================
@@ -567,11 +577,16 @@ async def kqa_archive(
     archived_id = ""
     title = req.title or f"知识问答归档 - {record.question[:50]}"
 
+    # 产品隔离：从问答记录获取真实 product_id（替代硬编码 PROD-DEFAULT）
+    real_product_id = record.product_id or "PROD-DEFAULT"
+    archived_now = datetime.now(timezone.utc)
+
     if req.archive_type == "requirement":
         # 归档为需求
         archived_id = gen_requirement_id()
         new_req = Requirement(
             id=archived_id,
+            product_id=real_product_id,
             title=title,
             priority="P2",
             status="archived",
@@ -579,6 +594,7 @@ async def kqa_archive(
                 "requirement": {
                     "title": title,
                     "summary": final_content[:500],
+                    "product_id": real_product_id,
                 },
                 "flows": {},
                 "business_rules": [],
@@ -587,15 +603,21 @@ async def kqa_archive(
             raw_text=final_content,
             source_type="knowledge_qa",
             created_by="system",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+            created_at=archived_now,
+            updated_at=archived_now,
+            archived_at=archived_now,
         )
         session.add(new_req)
 
         # 异步双写向量库（Celery 不可用时降级为同步）
         try:
             from app.tasks.celery_app import celery_app
-            archive_meta = {"title": title, "type": "knowledge_qa", "qa_id": req.id, "product_id": "PROD-DEFAULT"}
+            archive_meta = {
+                "title": title, "type": "knowledge_qa", "qa_id": req.id,
+                "product_id": real_product_id,
+                "status": "archived",
+                "archived_at": archived_now.isoformat(),
+            }
             if celery_app is not None:
                 celery_app.send_task(
                     "app.tasks.embedding_tasks.embed_and_store_requirement",
@@ -613,6 +635,7 @@ async def kqa_archive(
         new_case = TestCase(
             id=archived_id,
             req_id="KQA-ARCHIVE",
+            product_id=real_product_id,
             title=title,
             type="functional",
             priority="P1",
@@ -625,15 +648,19 @@ async def kqa_archive(
             },
             source="knowledge_qa",
             confidence=1.0,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+            created_at=archived_now,
+            updated_at=archived_now,
+            archived_at=archived_now,
         )
         session.add(new_case)
 
         # 异步双写向量库（Celery 不可用时降级为同步）
         try:
             from app.tasks.celery_app import celery_app
-            archive_meta = {"title": title, "type": "knowledge_qa", "qa_id": req.id, "product_id": "PROD-DEFAULT"}
+            archive_meta = {
+                "title": title, "type": "knowledge_qa", "qa_id": req.id,
+                "product_id": real_product_id,
+            }
             if celery_app is not None:
                 celery_app.send_task(
                     "app.tasks.embedding_tasks.embed_and_store_test_case",

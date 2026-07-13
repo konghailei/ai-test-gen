@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react'
-import { Database, FileText, TestTube, Trash2, Filter, Loader2, CheckCircle2, AlertTriangle, Clock, RefreshCw, Search, Calendar, X, Save } from 'lucide-react'
-import { knowledge, requirements as reqApi } from '../api/client'
-import type { KbEntry, KbModelStatus } from '../types'
+import { useState, useEffect, useCallback } from 'react'
+import { Database, FileText, TestTube, Trash2, Filter, Loader2, CheckCircle2, AlertTriangle, Clock, RefreshCw, Search, Calendar, X, Save, Layers } from 'lucide-react'
+import { knowledge, requirements as reqApi, products as prodApi } from '../api/client'
+import type { KbEntry, KbModelStatus, Module } from '../types'
 import { useProduct } from '../store/ProductContext'
 import LoadingSpinner from '../components/LoadingSpinner'
 
@@ -45,22 +45,194 @@ function isoToDatetimeLocal(iso?: string): string {
   }
 }
 
+// ============================================================================
+// 弹窗组件（React.memo 隔离 — 避免 datetime-local onChange 触发整页重渲染）
+// ============================================================================
+
+const GoLiveEditModal = React.memo(function GoLiveEditModal({
+  entry,
+  onClose,
+  onSaved,
+  toast,
+}: {
+  entry: KbEntry
+  onClose: () => void
+  onSaved: (id: string, newDate: string) => void
+  toast: (t: { type: 'success' | 'error' | 'warning'; msg: string }) => void
+}) {
+  const [editValue, setEditValue] = useState(isoToDatetimeLocal(entry.go_live_date))
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!editValue) return
+    setSaving(true)
+    try {
+      const isoDate = datetimeLocalToISO(editValue)
+      const r = await reqApi.updateGoLiveDate(entry.id, isoDate)
+      onSaved(entry.id, r.go_live_date)  // 更新父列表
+      toast({
+        type: r.milvus_updated ? 'success' : 'warning',
+        msg: r.milvus_updated
+          ? `「${entry.title}」上线时间已更新，向量库元数据已同步`
+          : `「${entry.title}」上线时间已更新，但向量库元数据同步失败`,
+      })
+      onClose()
+    } catch (e: any) {
+      const errBody = e?.data?.detail || e?.detail || e?.message || ''
+      toast({ type: 'error', msg: `修改上线时间失败：${errBody || '未知错误'}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !saving && onClose()}>
+      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <Calendar className="w-5 h-5 text-primary-500" />
+          <div>
+            <h2 className="text-lg font-semibold text-slate-800">修改上线时间</h2>
+            <p className="text-xs text-slate-400 truncate max-w-[240px]">{entry.title}</p>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="label">上线时间</label>
+            <input
+              type="datetime-local"
+              value={editValue}
+              onChange={e => setEditValue(e.target.value)}
+              className="input-field text-sm"
+              autoFocus
+            />
+            <p className="text-xs text-slate-400 mt-1">
+              用于知识库检索时按上线时间排序，同一功能多个版本时以靠后时间为准
+            </p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-3 mt-5">
+          <button onClick={onClose} className="btn-secondary" disabled={saving}>
+            <X className="w-4 h-4" /> 取消
+          </button>
+          <button onClick={handleSave} disabled={!editValue || saving} className="btn-primary">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} 确认修改
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+})
+
+const ArchiveTimeEditModal = React.memo(function ArchiveTimeEditModal({
+  entry,
+  onClose,
+  onSaved,
+  toast,
+}: {
+  entry: KbEntry
+  onClose: () => void
+  onSaved: (id: string, newTime: string) => void
+  toast: (t: { type: 'success' | 'error' | 'warning'; msg: string }) => void
+}) {
+  const [editValue, setEditValue] = useState(isoToDatetimeLocal(entry.archived_at))
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!editValue) return
+    setSaving(true)
+    try {
+      const isoTime = datetimeLocalToISO(editValue)
+      const r = await knowledge.updateArchiveTime(entry.id, entry.type, isoTime)
+      onSaved(entry.id, r.archive_time)  // 更新父列表
+      toast({
+        type: r.milvus_updated ? 'success' : 'warning',
+        msg: entry.type === 'requirement'
+          ? (r.milvus_updated
+            ? `「${entry.title}」归档时间已更新，向量库元数据已同步`
+            : `「${entry.title}」归档时间已更新，但向量库元数据同步失败`)
+          : `「${entry.title}」归档时间已更新`,
+      })
+      onClose()
+    } catch (e: any) {
+      const errBody = e?.data?.detail || e?.detail || e?.message || ''
+      toast({ type: 'error', msg: `修改归档时间失败：${errBody || '未知错误'}` })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !saving && onClose()}>
+      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <Clock className="w-5 h-5 text-primary-500" />
+          <div>
+            <h2 className="text-lg font-semibold text-slate-800">修改归档时间</h2>
+            <p className="text-xs text-slate-400 truncate max-w-[240px]">{entry.title}</p>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="label">归档时间</label>
+            <input
+              type="datetime-local"
+              value={editValue}
+              onChange={e => setEditValue(e.target.value)}
+              className="input-field text-sm"
+              autoFocus
+            />
+            <p className="text-xs text-slate-400 mt-1">
+              {entry.type === 'requirement'
+                ? '需求修改时同步更新 Milvus 向量库元数据，保证 KB 检索排序一致'
+                : '测试用例的归档时间，仅记录在关系库'}
+            </p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-3 mt-5">
+          <button onClick={onClose} className="btn-secondary" disabled={saving}>
+            <X className="w-4 h-4" /> 取消
+          </button>
+          <button onClick={handleSave} disabled={!editValue || saving} className="btn-primary">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} 确认修改
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+})
+
 export default function KnowledgeBase() {
   const { selectedProductId, products } = useProduct()
   const [entries, setEntries] = useState<KbEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [filterType, setFilterType] = useState('')
   const [filterVectorized, setFilterVectorized] = useState('')
+  const [filterModules, setFilterModules] = useState<string[]>([])
+  const [availableModules, setAvailableModules] = useState<Module[]>([])
   const [searchKeyword, setSearchKeyword] = useState('')
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'warning'; msg: string } | null>(null)
   const [modelStatus, setModelStatus] = useState<KbModelStatus | null>(null)
   const [revectorizingIds, setRevectorizingIds] = useState<Set<string>>(new Set())
   const [batchBusy, setBatchBusy] = useState(false)
 
-  // 修改上线时间弹窗
+  // 修改上线时间弹窗 — 只保留 entry 引用（日期/保存状态由 memo 组件内部管理）
   const [editingEntry, setEditingEntry] = useState<KbEntry | null>(null)
-  const [editGoLiveDate, setEditGoLiveDate] = useState('')
-  const [savingGoLive, setSavingGoLive] = useState(false)
+
+  // 修改归档时间弹窗 — 同上
+  const [editingArchiveEntry, setEditingArchiveEntry] = useState<KbEntry | null>(null)
+
+  // KB 专属 LLM 选择器
+  const [kbLlmProvider, setKbLlmProvider] = useState('')
+  const [llmProviders, setLlmProviders] = useState<Array<{ provider: string; provider_label: string; model: string }>>([])
+
+  // 加载当前产品的模块列表（用于模块筛选 chips）
+  useEffect(() => {
+    setFilterModules([])  // 切换产品时清空已选模块
+    if (!selectedProductId) { setAvailableModules([]); return }
+    prodApi.listModules(selectedProductId).then((mods: Module[]) => {
+      setAvailableModules(mods || [])
+    }).catch(() => setAvailableModules([]))
+  }, [selectedProductId])
 
   const loadEntries = async () => {
     setLoading(true)
@@ -68,11 +240,24 @@ export default function KnowledgeBase() {
       const r = await knowledge.listEntries(
         selectedProductId || undefined,
         filterType || undefined,
-        { search: searchKeyword || undefined, vectorized: filterVectorized || undefined },
+        {
+          search: searchKeyword || undefined,
+          vectorized: filterVectorized || undefined,
+          modules: filterModules.length > 0 ? filterModules : undefined,
+        },
       )
       setEntries(r.items || [])
     } catch {}
     setLoading(false)
+  }
+
+  // 切换模块筛选（多选）
+  const toggleFilterModule = (moduleName: string) => {
+    setFilterModules(prev =>
+      prev.includes(moduleName)
+        ? prev.filter(m => m !== moduleName)
+        : [...prev, moduleName]
+    )
   }
 
   const loadModelStatus = async () => {
@@ -82,8 +267,15 @@ export default function KnowledgeBase() {
     } catch {}
   }
 
-  useEffect(() => { loadEntries() }, [selectedProductId, filterType, filterVectorized])
+  useEffect(() => { loadEntries() }, [selectedProductId, filterType, filterVectorized, filterModules])
   useEffect(() => { loadModelStatus() }, [])
+  // 加载 KB 专属 LLM 配置
+  useEffect(() => {
+    knowledge.getKbLlm().then(r => {
+      setKbLlmProvider(r.provider || '')
+      setLlmProviders(r.providers || [])
+    }).catch(() => {})
+  }, [])
 
   // 搜索防抖
   useEffect(() => {
@@ -150,36 +342,18 @@ export default function KnowledgeBase() {
     }
   }
 
-  const handleEditGoLive = (entry: KbEntry) => {
-    setEditingEntry(entry)
-    setEditGoLiveDate(isoToDatetimeLocal(entry.go_live_date))
-  }
+  // 弹窗打开回调（memo 组件内部管理日期状态，仅保留 entry 引用控制显隐）
+  const handleEditGoLive = (entry: KbEntry) => setEditingEntry(entry)
 
-  const handleSaveGoLive = async () => {
-    if (!editingEntry || !editGoLiveDate) return
-    setSavingGoLive(true)
-    try {
-      const isoDate = datetimeLocalToISO(editGoLiveDate)
-      const r = await reqApi.updateGoLiveDate(editingEntry.id, isoDate)
-      // 更新本地列表
-      setEntries(prev => prev.map(e =>
-        e.id === editingEntry.id ? { ...e, go_live_date: r.go_live_date } : e
-      ))
-      setToast({
-        type: r.milvus_updated ? 'success' : 'warning',
-        msg: r.milvus_updated
-          ? `「${editingEntry.title}」上线时间已更新，向量库元数据已同步`
-          : `「${editingEntry.title}」上线时间已更新，但向量库元数据同步失败`,
-      })
-      setEditingEntry(null)
-      setEditGoLiveDate('')
-    } catch (e: any) {
-      const errBody = e?.data?.detail || e?.detail || e?.message || ''
-      setToast({ type: 'error', msg: `修改上线时间失败：${errBody || '未知错误'}` })
-    } finally {
-      setSavingGoLive(false)
-    }
-  }
+  const onSavedGoLive = useCallback((id: string, newDate: string) => {
+    setEntries(prev => prev.map(e => e.id === id ? { ...e, go_live_date: newDate } : e))
+  }, [])
+
+  const handleEditArchiveTime = (entry: KbEntry) => setEditingArchiveEntry(entry)
+
+  const onSavedArchiveTime = useCallback((id: string, newTime: string) => {
+    setEntries(prev => prev.map(e => e.id === id ? { ...e, archived_at: newTime } : e))
+  }, [])
 
   if (loading && entries.length === 0) return <LoadingSpinner text="加载知识库..." />
 
@@ -187,7 +361,28 @@ export default function KnowledgeBase() {
     <div className="space-y-6">
       <div>
         <h1 className="page-title">知识库</h1>
-        <p className="text-sm text-slate-500 mt-1">已归档需求与测试用例管理 · 显示向量库与关系库双状态</p>
+        <div className="flex items-center justify-between mt-1">
+          <p className="text-sm text-slate-500">已归档需求与测试用例管理 · 显示向量库与关系库双状态</p>
+          {llmProviders.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400">知识库 LLM：</span>
+              <select
+                value={kbLlmProvider}
+                onChange={e => {
+                  const v = e.target.value
+                  knowledge.setKbLlm(v).then(() => setKbLlmProvider(v)).catch(() => {})
+                }}
+                className="select-field text-xs max-w-[180px]"
+              >
+                {llmProviders.map(p => (
+                  <option key={p.provider} value={p.provider}>
+                    {p.provider_label} ({p.model})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
       </div>
 
       {modelStatus && !modelStatus.ready && (
@@ -263,6 +458,41 @@ export default function KnowledgeBase() {
           {entries.length > 0 && <span className="text-xs text-slate-400">共 {entries.length} 条</span>}
         </div>
 
+        {/* 模块筛选（多选 chips） */}
+        {availableModules.length > 0 && (
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
+            <Layers className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+            <span className="text-xs text-slate-500">模块筛选：</span>
+            {filterModules.length > 0 && (
+              <button
+                onClick={() => setFilterModules([])}
+                className="px-2 py-0.5 text-[11px] rounded-full bg-slate-200 text-slate-600 hover:bg-slate-300"
+              >
+                全部
+              </button>
+            )}
+            {availableModules.map(m => {
+              const selected = filterModules.includes(m.name)
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => toggleFilterModule(m.name)}
+                  className={`px-2 py-0.5 text-[11px] rounded-full transition-colors ${
+                    selected
+                      ? 'bg-primary-500 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-primary-50 hover:text-primary-600'
+                  }`}
+                >
+                  {m.name}
+                </button>
+              )
+            })}
+            {filterModules.length > 0 && (
+              <span className="text-[11px] text-primary-500">已选 {filterModules.length} 个</span>
+            )}
+          </div>
+        )}
+
         {/* 图例 */}
         <div className="flex items-center gap-4 mb-3 text-[11px] text-slate-400 flex-wrap">
           <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-emerald-400" /> 已归档（关系库）</span>
@@ -323,16 +553,16 @@ export default function KnowledgeBase() {
                     {entry.product_id && (products.find(p => p.id === entry.product_id)?.name || entry.product_id)}
                     {entry.archived_at && (
                       <span className="flex items-center gap-0.5">
-                        · <Clock className="w-2.5 h-2.5" /> {formatDate(entry.archived_at)} 归档
-                      </span>
-                    )}
-                    {entry.go_live_date && (
-                      <span className="flex items-center gap-0.5 text-primary-500">
-                        · <Calendar className="w-2.5 h-2.5" /> 上线时间: {formatDateTime(entry.go_live_date)}
+                        · <Clock className="w-2.5 h-2.5" /> 归档于 {formatDate(entry.archived_at)}
                       </span>
                     )}
                     {entry.summary ? ` · ${entry.summary}` : ''}
                   </p>
+                  {entry.go_live_date && (
+                    <p className="text-xs text-primary-500 mt-0.5 flex items-center gap-0.5">
+                      <Calendar className="w-2.5 h-2.5" /> 上线时间: {formatDateTime(entry.go_live_date)}
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-1 flex-shrink-0 ml-2">
                   {entry.type === 'requirement' && (
@@ -344,6 +574,13 @@ export default function KnowledgeBase() {
                       <Calendar className="w-3.5 h-3.5" />
                     </button>
                   )}
+                  <button
+                    onClick={() => handleEditArchiveTime(entry)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-primary-500 hover:bg-primary-50 transition-all"
+                    title="修改归档时间"
+                  >
+                    <Clock className="w-3.5 h-3.5" />
+                  </button>
                   <button onClick={() => handleDeleteEntry(entry)}
                     className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all"
                     title="从知识库删除">
@@ -356,44 +593,24 @@ export default function KnowledgeBase() {
         )}
       </div>
 
-      {/* 修改上线时间弹窗 */}
+      {/* 修改上线时间弹窗（React.memo 隔离，避免 onChange 触发列表重渲染） */}
       {editingEntry && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !savingGoLive && setEditingEntry(null)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center gap-3 mb-4">
-              <Calendar className="w-5 h-5 text-primary-500" />
-              <div>
-                <h2 className="text-lg font-semibold text-slate-800">修改上线时间</h2>
-                <p className="text-xs text-slate-400 truncate max-w-[240px]">{editingEntry.title}</p>
-              </div>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="label">上线时间</label>
-                <input
-                  type="datetime-local"
-                  value={editGoLiveDate}
-                  onChange={e => setEditGoLiveDate(e.target.value)}
-                  className="input-field text-sm"
-                  autoFocus
-                />
-                <p className="text-xs text-slate-400 mt-1">
-                  用于知识库检索时按上线时间排序，同一功能多个版本时以靠后时间为准
-                </p>
-              </div>
-            </div>
-            <div className="flex justify-end gap-3 mt-5">
-              <button onClick={() => { setEditingEntry(null); setEditGoLiveDate('') }}
-                className="btn-secondary" disabled={savingGoLive}>
-                <X className="w-4 h-4" /> 取消
-              </button>
-              <button onClick={handleSaveGoLive}
-                disabled={!editGoLiveDate || savingGoLive} className="btn-primary">
-                {savingGoLive ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} 确认修改
-              </button>
-            </div>
-          </div>
-        </div>
+        <GoLiveEditModal
+          entry={editingEntry}
+          onClose={() => setEditingEntry(null)}
+          onSaved={onSavedGoLive}
+          toast={t => setToast(t)}
+        />
+      )}
+
+      {/* 修改归档时间弹窗（React.memo 隔离） */}
+      {editingArchiveEntry && (
+        <ArchiveTimeEditModal
+          entry={editingArchiveEntry}
+          onClose={() => setEditingArchiveEntry(null)}
+          onSaved={onSavedArchiveTime}
+          toast={t => setToast(t)}
+        />
       )}
     </div>
   )

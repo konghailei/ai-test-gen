@@ -12,14 +12,16 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_admin, require_write
 from app.db.database import get_session
-from app.db.models import GenerationBatch, Project, Requirement, TestCase, TestPattern
+from app.db.models import GenerationBatch, Project, Requirement, TestCase, TestPattern, KBSetting, LLMConfig
 from app.db.milvus_store import vector_store
 from app.models.api_schemas import ApiResponse, KnowledgeStats
 from app.utils.logger import logger
@@ -28,19 +30,25 @@ from app.utils.logger import logger
 router = APIRouter()
 
 
+class UpdateArchiveTimeRequest(BaseModel):
+    """修改归档时间请求体。"""
+    archive_time: str = Field(..., description="归档时间，格式 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD")
+
+
 # ============================================================================
 # 辅助：构建需求向量化元数据 + 派发异步嵌入任务
 # ============================================================================
 
 def _build_requirement_kb_meta(record: Requirement, project_version: str) -> dict:
     """为已归档需求构建 Milvus 写入元数据（与归档接口保持一致）。"""
-    ts = record.updated_at or record.created_at
+    # 优先使用真实 archived_at，未设置时回退到 updated_at（兼容历史数据）
+    archived_ts = record.archived_at or record.updated_at or record.created_at
     return {
         "product_id": record.product_id,
         "modules": ",".join(record.modules or []),
         "priority": record.priority,
         "status": "archived",
-        "archived_at": ts.isoformat() if ts else "",
+        "archived_at": archived_ts.isoformat() if archived_ts else "",
         "go_live_date": record.go_live_date.isoformat() if record.go_live_date else "",
         "project_version": project_version,
     }
@@ -207,6 +215,7 @@ async def list_kb_entries(
     type_filter: str | None = Query(default=None, alias="type", description="按类型筛选 requirement / test_case"),
     search: str | None = Query(default=None, description="按标题模糊搜索"),
     vectorized: str | None = Query(default=None, description="按向量化状态筛选: true / false"),
+    modules: str | None = Query(default=None, description="按模块筛选（逗号分隔，如 'auth,login'）"),
     limit: int = Query(default=100, ge=1, le=500, description="每页条数"),
     offset: int = Query(default=0, ge=0, description="偏移量"),
     session: AsyncSession = Depends(get_session),
@@ -214,13 +223,14 @@ async def list_kb_entries(
     """获取知识库中的条目列表。
 
     从 PostgreSQL 中读取已归档的需求和从向量库读取测试用例。
-    支持按产品 ID、类型、标题搜索、向量化状态筛选。
+    支持按产品 ID、类型、标题搜索、向量化状态、模块筛选。
 
     Args:
         product_id: 按产品 ID 筛选（可选）
         type_filter: 按类型筛选 requirement / test_case（可选）
         search: 按标题模糊搜索（可选）
         vectorized: 按向量化状态筛选 true/false（可选，仅对 requirement 有效）
+        modules: 按模块筛选（可选，逗号分隔的模块名，匹配条目任一所属模块即返回）
         limit: 每页条数
         offset: 偏移量
         session: 数据库会话
@@ -229,6 +239,11 @@ async def list_kb_entries(
         ApiResponse: data 含 items（条目列表）/ total
     """
     items: list[dict] = []
+
+    # 解析模块筛选参数
+    module_filter_set: set[str] = set()
+    if modules:
+        module_filter_set = {m.strip() for m in modules.split(",") if m.strip()}
 
     # 批量获取已向量化的 req_id 集合（避免 N+1 查询）
     vectorized_ids: set[str] = set()
@@ -261,6 +276,11 @@ async def list_kb_entries(
             # 向量化状态过滤
             if vectorized_filter is not None and is_vectorized != vectorized_filter:
                 continue
+            # 模块过滤（任一所属模块命中筛选集合即返回，与 KB 问答的 modules 语义一致）
+            if module_filter_set:
+                req_modules = {m for m in (r.modules or []) if isinstance(m, str) and m.strip()}
+                if not (req_modules & module_filter_set):
+                    continue
             summary = ""
             srr = r.srr_json or {}
             req_data = srr.get("requirement", {})
@@ -274,7 +294,8 @@ async def list_kb_entries(
                 "modules": ",".join(r.modules or []),
                 "priority": r.priority,
                 "summary": summary,
-                "archived_at": r.updated_at.isoformat() if r.updated_at else "",
+                # 真实归档时间，未设置时回退到 updated_at（兼容历史数据）
+                "archived_at": (r.archived_at or r.updated_at).isoformat() if (r.archived_at or r.updated_at) else "",
                 "go_live_date": r.go_live_date.isoformat() if r.go_live_date else "",
                 "vectorized": is_vectorized,
                 "created_at": r.created_at.isoformat() if r.created_at else "",
@@ -292,12 +313,21 @@ async def list_kb_entries(
         result = await session.execute(stmt)
         cases = result.scalars().all()
         for c in cases:
+            # 模块过滤（任一所属模块命中筛选集合即返回）
+            if module_filter_set:
+                case_modules = {m for m in (c.modules or []) if isinstance(m, str) and m.strip()}
+                if not (case_modules & module_filter_set):
+                    continue
             items.append({
                 "id": c.id,
                 "title": c.title,
                 "type": "test_case",
                 "product_id": c.product_id,
+                "modules": ",".join(c.modules or []),
+                "priority": c.priority,
                 "summary": f"类型: {c.type} / 优先级: {c.priority}" if c.type else "",
+                # 真实归档时间，未设置时回退到 updated_at（兼容历史数据）
+                "archived_at": (c.archived_at or c.updated_at).isoformat() if (c.archived_at or c.updated_at) else "",
                 "created_at": c.created_at.isoformat() if c.created_at else "",
             })
 
@@ -394,6 +424,181 @@ async def delete_kb_entry(
             "kb_deleted": kb_deleted,
             "kb_error": kb_error,
         },
+    )
+
+
+# ============================================================================
+# 4b. 修改归档时间
+# ============================================================================
+
+@router.patch("/entries/{entry_id}/archive-time", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def update_archive_time(
+    entry_id: str,
+    body: UpdateArchiveTimeRequest,
+    entry_type: str = Query(..., description="条目类型 requirement / test_case"),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """修改已归档条目的归档时间。
+
+    支持需求与测试用例两种类型。需求修改时同步更新 Milvus 向量库元数据，
+    保证 KB 检索时按归档时间排序的一致性。测试用例无向量库元数据同步需求。
+    """
+    if entry_type not in ("requirement", "test_case"):
+        raise HTTPException(status_code=400, detail=f"不支持的条目类型: {entry_type}")
+
+    model_cls = Requirement if entry_type == "requirement" else TestCase
+    stmt = select(model_cls).where(model_cls.id == entry_id)
+    record = (await session.execute(stmt)).scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail=f"{entry_type} {entry_id} 不存在")
+
+    # 解析时间（沿用 update_go_live_date 的两级解析模式）
+    try:
+        parsed = datetime.fromisoformat(body.archive_time)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(body.archive_time + "T00:00:00")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"归档时间格式不正确: {body.archive_time}，需为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD",
+            )
+
+    old_archive_time = record.archived_at
+    record.archived_at = parsed
+    await session.commit()
+
+    logger.info(
+        "[API/knowledge] 归档时间已修改: id={}, type={}, {} → {}",
+        entry_id, entry_type,
+        old_archive_time.isoformat() if old_archive_time else "(空)",
+        parsed.isoformat(),
+    )
+
+    # 同步 Milvus 向量库元数据（仅需求有元数据；用例元数据不区分归档时间）
+    milvus_updated = False
+    milvus_error = ""
+    if entry_type == "requirement":
+        try:
+            await asyncio.to_thread(
+                vector_store.update_requirement_metadata,
+                entry_id,
+                {"archived_at": parsed.isoformat()},
+            )
+            milvus_updated = True
+        except Exception as e:
+            milvus_error = str(e)[:300]
+            logger.warning(
+                "[API/knowledge] Milvus 元数据更新失败（不阻断）: req_id={}, error={}",
+                entry_id, milvus_error[:200],
+            )
+
+    return ApiResponse(
+        success=True,
+        message="归档时间已更新" + ("，向量库元数据已同步" if milvus_updated else "（仅关系库；向量库同步失败）"),
+        data={
+            "entry_id": entry_id,
+            "entry_type": entry_type,
+            "archive_time": parsed.isoformat(),
+            "milvus_updated": milvus_updated,
+            "milvus_error": milvus_error if not milvus_updated else "",
+        },
+    )
+
+
+# ============================================================================
+# 4c. 知识库专属 LLM 配置
+# ============================================================================
+
+KB_LLM_SETTING_KEY = "llm_provider"
+
+
+async def get_kb_llm_provider(session: AsyncSession) -> str | None:
+    """读取知识库专属 LLM 供应商（供 knowledge_qa /ask 和 clarify_agent 使用）。
+
+    返回 None 表示未设置，调用方应使用全局主 LLM。
+    """
+    try:
+        result = await session.execute(
+            select(KBSetting).where(KBSetting.key == KB_LLM_SETTING_KEY)
+        )
+        row = result.scalar_one_or_none()
+        return row.value if row and row.value else None
+    except Exception:
+        return None
+
+
+@router.get("/kb-llm", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_kb_llm(
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """获取知识库专属 LLM 配置。
+
+    返回当前 KB LLM 供应商 + 所有可用供应商列表（从 LLMConfig 表）。
+    """
+    # 当前 KB 专属 LLM
+    current_provider = await get_kb_llm_provider(session)
+
+    # 可用供应商列表
+    result = await session.execute(
+        select(LLMConfig).order_by(LLMConfig.is_primary.desc(), LLMConfig.id.desc())
+    )
+    rows = result.scalars().all()
+    providers = [{
+        "provider": r.provider,
+        "provider_label": r.provider_label or r.provider,
+        "model": r.model,
+        "is_primary": r.is_primary,
+    } for r in rows if r.api_key]  # 仅返回有 API Key 的
+
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data={
+            "provider": current_provider or (providers[0]["provider"] if providers else ""),
+            "providers": providers,
+        },
+    )
+
+
+@router.put("/kb-llm", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def set_kb_llm(
+    body: dict,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """设置知识库专属 LLM 供应商。
+
+    body: {"provider": "deepseek"}
+    """
+    provider = body.get("provider", "").strip()
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider 不能为空")
+
+    # 验证供应商存在
+    result = await session.execute(
+        select(LLMConfig).where(LLMConfig.provider == provider)
+    )
+    llm_row = result.scalar_one_or_none()
+    if not llm_row:
+        raise HTTPException(status_code=404, detail=f"供应商 {provider} 不存在")
+
+    # 写入 KBSetting
+    existing = await session.execute(
+        select(KBSetting).where(KBSetting.key == KB_LLM_SETTING_KEY)
+    )
+    row = existing.scalar_one_or_none()
+    if row:
+        row.value = provider
+    else:
+        session.add(KBSetting(key=KB_LLM_SETTING_KEY, value=provider))
+    await session.commit()
+
+    logger.info("[API/knowledge] KB LLM 已设置: provider={}", provider)
+
+    return ApiResponse(
+        success=True,
+        message=f"知识库 LLM 已设置为 {llm_row.provider_label or provider}",
+        data={"provider": provider},
     )
 
 

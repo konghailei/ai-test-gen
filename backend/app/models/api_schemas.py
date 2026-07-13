@@ -237,6 +237,7 @@ class KbQAAskRequest(BaseModel):
     """知识问答提问请求。"""
     question: str = Field(..., min_length=1, max_length=10000, description="用户问题")
     product_id: str | None = Field(default=None, max_length=64, description="产品 ID（可选，用于产品隔离）")
+    modules: list[str] | None = Field(default=None, description="按模块过滤（多选，可选，仅在所选模块范围内问答）")
 
 
 class KbQAAskResponse(BaseModel):

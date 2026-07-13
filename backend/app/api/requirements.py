@@ -1459,10 +1459,11 @@ async def archive_requirement(
         if proj_row:
             project_version = proj_row
 
-    # 更新状态 + 上线日期
+    # 更新状态 + 上线日期 + 归档时间（真实持久化，区别于 updated_at）
     old_status = record.status
     record.status = "archived"
     record.go_live_date = parsed_go_live
+    record.archived_at = datetime.now(timezone.utc)
     await session.commit()
 
     # 写入向量知识库（供后续需求检索参考）
@@ -1475,7 +1476,7 @@ async def archive_requirement(
         "modules": ",".join(record.modules or []),
         "priority": record.priority,
         "status": "archived",
-        "archived_at": datetime.now(timezone.utc).isoformat(),
+        "archived_at": record.archived_at.isoformat() if record.archived_at else "",
         "go_live_date": parsed_go_live.isoformat() if parsed_go_live else "",
         "project_version": project_version,
     }

@@ -222,6 +222,7 @@ class LLMClient:
         response_format: str | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
+        provider: str | None = None,
     ) -> str:
         """调用 LLM 生成文本（主入口）。
 
@@ -232,6 +233,8 @@ class LLMClient:
             response_format: 响应格式约束。"json" 表示强制 JSON 输出；None 表示自由文本
             model: 指定模型名（覆盖配置）。默认用 settings 中的模型
             max_tokens: 最大生成 token 数。None 表示不限
+            provider: 指定供应商名称（如 "deepseek"/"openai"）。若指定且可用，
+                      仅使用该供应商；不可用时回退到正常候选列表。
 
         Returns:
             str: LLM 生成的文本内容
@@ -240,7 +243,7 @@ class LLMClient:
             RuntimeError: 所有提供商均不可用或重试耗尽
 
         Note:
-            故障转移顺序：主提供商 → 备用提供商（若配置）。
+            故障转移顺序：主提供商 -> 备用提供商（若配置）。
             每个提供商内部执行全抖动重试；提供商间为故障转移关系。
         """
         # 断路器检查
@@ -252,8 +255,8 @@ class LLMClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        # 构建候选提供商列表（主 → 备）
-        providers = self._candidate_providers(model)
+        # 构建候选提供商列表（主 -> 备）
+        providers = self._candidate_providers(model, provider=provider)
         if not providers:
             raise LLMNoProviderAvailable("无可用 LLM 提供商（未配置 API Key）")
 
@@ -293,6 +296,7 @@ class LLMClient:
         temperature: float = 0.2,
         model: str | None = None,
         max_tokens: int | None = None,
+        provider: str | None = None,
     ) -> dict | list:
         """调用 LLM 并解析为 JSON 对象或数组。
 
@@ -303,6 +307,7 @@ class LLMClient:
             temperature: 采样温度。默认 0.2（JSON 输出需更稳定）
             model: 指定模型名
             max_tokens: 最大生成 token 数。None 表示不限（长 JSON 建议设置以防止 LLM 退化）
+            provider: 指定供应商名称。若指定且可用，仅使用该供应商。
 
         Returns:
             dict: 解析后的 JSON 对象
@@ -328,6 +333,7 @@ class LLMClient:
             response_format="json",
             model=model,
             max_tokens=max_tokens,
+            provider=provider,
         )
         return self._parse_json(text, schema_hint)
 
@@ -335,7 +341,7 @@ class LLMClient:
     # 内部实现
     # ========================================================================
 
-    def _candidate_providers(self, model: str | None) -> list[dict]:
+    def _candidate_providers(self, model: str | None, provider: str | None = None) -> list[dict]:
         """构建候选提供商列表（跳过被禁用的）。
 
         优先使用 settings._all_provider_configs（多供应商持久化配置），
@@ -343,6 +349,8 @@ class LLMClient:
 
         Args:
             model: 指定模型（若提供则只用主提供商）
+            provider: 指定供应商名称。若指定且可用，仅返回该供应商配置；
+                      不可用时回退到正常候选列表。
 
         Returns:
             list[dict]: 可用提供商配置列表，每项含 key/api_key/base_url/model
@@ -352,6 +360,20 @@ class LLMClient:
         # 优先使用多供应商配置
         all_configs: dict = getattr(settings, "_all_provider_configs", {})
         primary_provider = getattr(settings, "LLM_PROVIDER", "deepseek")
+
+        # 若指定了 provider，优先尝试仅返回该供应商
+        if provider and all_configs and provider in all_configs:
+            cfg = all_configs[provider]
+            if cfg.get("api_key"):
+                key = f"{provider}:{cfg.get('model', '')}"
+                if self._provider_disabled_until.get(key, 0) < now:
+                    return [{
+                        "key": key,
+                        "api_key": cfg["api_key"],
+                        "base_url": cfg.get("base_url", ""),
+                        "model": model or cfg.get("model", ""),
+                    }]
+            # 指定 provider 不可用 -> 回退到正常逻辑（不 return）
 
         candidates: list[dict] = []
 

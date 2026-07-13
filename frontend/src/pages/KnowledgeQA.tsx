@@ -2,11 +2,11 @@ import { useState, useRef, useEffect } from 'react'
 import {
   MessageSquare, Send, Bot, User, CheckCircle2, Pencil,
   X, Loader2, BookOpen, FileText, TestTube, AlertCircle, History,
-  PenSquare, Save, CornerDownRight,
+  PenSquare, Save, CornerDownRight, Layers,
 } from 'lucide-react'
-import { knowledgeQA } from '../api/client'
+import { knowledgeQA, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
-import type { KbQAReference } from '../types'
+import type { KbQAReference, Module } from '../types'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -36,6 +36,10 @@ export default function KnowledgeQA() {
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyTotal, setHistoryTotal] = useState(0)
 
+  // 模块多选（仅在所选模块范围内问答）
+  const [selectedModules, setSelectedModules] = useState<string[]>([])
+  const [availableModules, setAvailableModules] = useState<Module[]>([])
+
   // Correction
   const [correctingId, setCorrectingId] = useState<string | null>(null)
   const [correctText, setCorrectText] = useState('')
@@ -49,6 +53,23 @@ export default function KnowledgeQA() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // 加载当前产品的模块列表（用于模块多选 chips）
+  useEffect(() => {
+    setSelectedModules([])  // 切换产品时清空已选模块
+    if (!selectedProductId) { setAvailableModules([]); return }
+    prodApi.listModules(selectedProductId).then((mods: Module[]) => {
+      setAvailableModules(mods || [])
+    }).catch(() => setAvailableModules([]))
+  }, [selectedProductId])
+
+  const toggleModule = (moduleName: string) => {
+    setSelectedModules(prev =>
+      prev.includes(moduleName)
+        ? prev.filter(m => m !== moduleName)
+        : [...prev, moduleName]
+    )
+  }
 
   const loadHistory = async (page = 1) => {
     setHistoryLoading(true)
@@ -101,7 +122,11 @@ export default function KnowledgeQA() {
         'Content-Type': 'application/json',
         'Authorization': token ? `Bearer ${token}` : '',
       },
-      body: JSON.stringify({ question: q, product_id: selectedProductId || undefined }),
+      body: JSON.stringify({
+        question: q,
+        product_id: selectedProductId || undefined,
+        modules: selectedModules.length > 0 ? selectedModules : undefined,
+      }),
       signal: controller.signal,
     }).then(async res => {
       if (res.status === 401) {
@@ -229,6 +254,45 @@ export default function KnowledgeQA() {
           <History className="w-4 h-4" /> 问答历史
         </button>
       </div>
+
+      {/* 模块多选 chips — 限定问答范围 */}
+      {availableModules.length > 0 && (
+        <div className="card p-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Layers className="w-4 h-4 text-slate-400 flex-shrink-0" />
+            <span className="text-sm text-slate-500">问答范围：</span>
+            {selectedModules.length > 0 && (
+              <button
+                onClick={() => setSelectedModules([])}
+                className="px-2.5 py-0.5 text-xs rounded-full bg-slate-200 text-slate-600 hover:bg-slate-300"
+              >
+                全部模块
+              </button>
+            )}
+            {availableModules.map(m => {
+              const selected = selectedModules.includes(m.name)
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => toggleModule(m.name)}
+                  className={`px-2.5 py-0.5 text-xs rounded-full transition-colors ${
+                    selected
+                      ? 'bg-primary-500 text-white'
+                      : 'bg-slate-100 text-slate-600 hover:bg-primary-50 hover:text-primary-600'
+                  }`}
+                >
+                  {m.name}
+                </button>
+              )
+            })}
+            {selectedModules.length > 0 && (
+              <span className="text-xs text-primary-500 ml-1">
+                已选 {selectedModules.length} 个 · 仅在此范围内问答
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Chat area */}
       <div className="card p-6 min-h-[500px] flex flex-col">

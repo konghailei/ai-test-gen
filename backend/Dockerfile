@@ -8,11 +8,13 @@ ARG BASE_IMAGE=ai-test-gen-base:latest
 FROM ${BASE_IMAGE}
 
 # 兜底安装关键依赖（基础镜像已含时跳过，仅耗时数秒）
+# 注：setuptools 须 <80 保留 pkg_resources（pymilvus 依赖），
+# 且须 >=77 满足 torch>=2.6 的声明，故与 requirements.txt 保持一致。
 RUN pip install --no-cache-dir \
     asyncpg==0.30.0 \
     psycopg2-binary==2.9.10 \
     "marshmallow==3.25.0" \
-    setuptools==75.8.0 \
+    "setuptools>=77,<80" \
     "celery[redis]==5.4.0" \
     redis==5.0.1
 

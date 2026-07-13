@@ -84,9 +84,8 @@ def download_model(repo: str, local: Path) -> bool:
         )
         return True
     except subprocess.CalledProcessError:
-        print(f"    [warn] 模型 {repo} 下载失败：无法连接到 HuggingFace Hub"
-              f"（huggingface.co / hf-mirror.com 均不可达？）。")
-        print(f"          排查：检查网络/代理（如设置 HTTPS_PROXY），")
+        print(f"    [warn] 模型 {repo} 下载失败：所有 HF_ENDPOINT 均不可达。")
+        print(f"          排查：检查网络/代理（如设置 HTTPS_PROXY / HF_ENDPOINT），")
         print(f"          或手动将模型放到 {local} 后重跑本脚本（会幂等跳过）。")
         return False
 

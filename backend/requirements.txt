@@ -37,12 +37,16 @@ numpy==1.26.4                     # 锁定 1.x：与 sentence-transformers / tor
 
 # Milvus（生产向量库）：
 pymilvus==2.4.4
-setuptools==75.8.0                # pymilvus 依赖 pkg_resources（setuptools>=80 已移除）
+setuptools>=77,<80                # 须 <80 保留 pkg_resources（pymilvus 2.4.4 依赖 import pkg_resources）；
+                                    # 须 >=77 满足 torch>=2.6 对 setuptools 的声明。二者不可兼得时优先 <80。
 marshmallow==3.25.0               # environs 9.5.0 不兼容 marshmallow 4.x
 
 # 本地嵌入模型（bge-large-zh-v1.5，1024 维中文优化）：
+# 注意：torch 必须 >=2.6。新版 transformers 对 torch.load 读取 .bin 权重
+# 强制要求 torch>=2.6（CVE-2025-32434 安全补丁）；bge-large 仅提供
+# pytorch_model.bin，故必须升级 torch，否则模型加载直接抛 ValueError。
 sentence-transformers==3.1.1
-torch==2.4.0
+torch>=2.6.0
 
 # ============================================================================
 # 数据库 ORM
