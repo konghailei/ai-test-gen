@@ -88,6 +88,12 @@ _PROMPT_REGISTRY: list[dict] = [
         "default": knowledge_qa.QA_SYSTEM_PROMPT,
         "description": "知识问答系统指令 — 基于知识库上下文回答用户问题",
     },
+    {
+        "module": "knowledge_qa",
+        "name": "CHAT_SYSTEM_PROMPT",
+        "default": knowledge_qa.CHAT_SYSTEM_PROMPT,
+        "description": "知识问答追问系统指令 — 多轮对话中的总结/提炼/修改",
+    },
 ]
 
 

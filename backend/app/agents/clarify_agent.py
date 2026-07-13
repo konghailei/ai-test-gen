@@ -119,8 +119,8 @@ class ClarifyAgent:
             try:
                 from app.api.knowledge import get_kb_llm_provider
                 kb_provider = await get_kb_llm_provider(session)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[ClarifyAgent] 读取 KB LLM 供应商失败，回退全局主 LLM: {}", str(e)[:120])
 
         # 初始化 KB 访问日志（v2.1 新增）
         kb_access_log: list[dict] = []

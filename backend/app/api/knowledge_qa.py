@@ -414,17 +414,6 @@ async def kqa_ask(
 # 1.5 追问对话（多轮对话）
 # ============================================================================
 
-CHAT_SYSTEM_PROMPT = """你是 AI-Test-Gen 系统的知识问答助手，专注于软件测试领域。
-
-你正在和用户进行多轮对话，用户可能在追问详情、要求总结提炼、或请求修改之前的回答。
-
-请严格遵循以下规则：
-1. 基于对话历史中的上下文来回答
-2. 如果用户要求总结或提炼，给出精简、结构化的版本
-3. 回答要准确、专业
-4. 如果用户要求修改之前的回答，直接给出修改后的完整版本"""
-
-
 @router.post("/chat", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def kqa_chat(
     req: KbQACharRequest,
@@ -471,13 +460,16 @@ async def kqa_chat(
         f"如果用户要求修改之前的回答，直接给出修改后的完整版本。"
     )
 
-    # 3. 调用 LLM
+    # 3. 调用 LLM（使用 KB 专属 LLM + prompt_manager 管理的提示词）
+    from app.api.knowledge import get_kb_llm_provider
+    kb_provider = await get_kb_llm_provider(session)
     try:
         answer = await llm_client.call(
             prompt=chat_prompt,
-            system_prompt=CHAT_SYSTEM_PROMPT,
+            system_prompt=prompt_manager.get("knowledge_qa", "CHAT_SYSTEM_PROMPT"),
             temperature=0.3,
             max_tokens=4096,
+            provider=kb_provider,
         )
     except Exception as e:
         logger.error("[API/knowledge-qa] 追问 LLM 调用失败: {}", str(e)[:200])

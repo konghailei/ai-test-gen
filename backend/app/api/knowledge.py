@@ -248,7 +248,7 @@ async def list_kb_entries(
     # 批量获取已向量化的 req_id 集合（避免 N+1 查询）
     vectorized_ids: set[str] = set()
     try:
-        all_reqs = await asyncio.to_thread(vector_store.get_all_requirements, None, 1000)
+        all_reqs = await asyncio.to_thread(vector_store.get_all_requirements, None, 16384)
         vectorized_ids = {r["id"] for r in all_reqs}
     except Exception as e:
         logger.warning("[API/knowledge] 获取向量库需求列表失败: {}", str(e)[:100])
