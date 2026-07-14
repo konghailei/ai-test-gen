@@ -515,6 +515,15 @@ async def _run_requirement_analysis(
     from app.db.models import Requirement as ReqModel
     from sqlalchemy import update as sa_update
 
+    async def _is_cancelled() -> bool:
+        """检测任务是否被用户取消（status=interrupted）。"""
+        try:
+            async with async_session() as s:
+                t = await s.get(AnalysisTask, task_id)
+                return t is not None and t.status == "interrupted"
+        except Exception:
+            return False
+
     try:
         # ===== phase 1: parse =====
         await _update_task(task_id, status="running", phase="parse", progress=10,
@@ -528,6 +537,10 @@ async def _run_requirement_analysis(
         if not isinstance(srr, dict):
             raise RuntimeError(f"需求解析返回异常类型: {type(srr).__name__}")
 
+        if await _is_cancelled():
+            logger.info("[Task] 任务已取消，提前退出: task_id={}", task_id)
+            return
+
         req_data = srr.setdefault("requirement", {})
         # 覆盖调用方指定的字段
         if title:
@@ -538,6 +551,10 @@ async def _run_requirement_analysis(
             req_data["modules"] = module_list
 
         await _update_task(task_id, phase="parse", progress=30, message="需求解析完成，正在检索知识库...")
+
+        if await _is_cancelled():
+            logger.info("[Task] 任务已取消（kb_search 前），提前退出: task_id={}", task_id)
+            return
 
         # ===== phase 2: kb_search + clarify =====
         await _update_task(task_id, phase="kb_search", progress=40,
@@ -890,6 +907,50 @@ async def get_task_by_req(
         return ApiResponse(success=True, message="无关联任务", data=None)
 
     return ApiResponse(success=True, message="ok", data=task.to_dict())
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def cancel_task(
+    task_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """取消分析任务（将 running/pending 标记为 interrupted）。
+
+    Note:
+        - 无法真正终止正在运行的 asyncio 协程，仅标记状态。
+          后台协程在下次更新状态时会检测到 interrupted 并提前退出。
+        - 已完成/已失败/已中断的任务不可取消。
+
+    Raises:
+        HTTPException 404: 任务不存在
+        HTTPException 409: 任务不在可取消状态
+    """
+    task = await session.get(AnalysisTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if task.status not in ("pending", "running"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务状态为 {task.status}，无法取消（仅 pending/running 可取消）",
+        )
+
+    task.status = "interrupted"
+    task.error = "用户手动取消"
+    task.message = "已取消"
+    task.completed_at = datetime.now(timezone.utc)
+
+    # 若关联需求仍为 analyzing 状态，回退为 draft 避免卡死
+    if task.req_id:
+        req = await session.get(Requirement, task.req_id)
+        if req and req.status == "analyzing":
+            req.status = "draft"
+            logger.info("[API] 任务取消，需求状态回退: req_id={} analyzing→draft", task.req_id)
+
+    await session.commit()
+    logger.info("[API] 任务已取消: task_id={}, task_type={}", task_id, task.task_type)
+
+    return ApiResponse(success=True, message="任务已取消", data=task.to_dict())
 
 
 # ============================================================================
@@ -1997,6 +2058,14 @@ class FPUpdateRequest(BaseModel):
     priority: str | None = None
 
 
+class FPDependencyCreateRequest(BaseModel):
+    """FP 依赖创建请求。"""
+    source_fp_id: str
+    target_fp_id: str
+    relation_type: str = "depends_on"
+    description: str = ""
+
+
 @router.post("/{req_id}/fp/extract-bp", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def fp_extract_bp(
     req_id: str,
@@ -2127,8 +2196,8 @@ async def fp_split(
                     ))
                     deps_added += 1
             logger.info("[FP] 关联分析完成: {} 条依赖", deps_added)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[FP] 关联分析失败（不阻断拆分）: {}", str(e)[:200])
 
     await session.commit()
     return ApiResponse(
@@ -2198,6 +2267,103 @@ async def fp_dependencies(req_id: str, session: AsyncSession = Depends(get_sessi
             for d in deps
         ]
     })
+
+
+# FP 依赖合法关系类型（与 FPDependency 模型注释一致）
+_FP_RELATION_TYPES = {"depends_on", "data_flows", "invariants", "lifecycle_scenarios", "conflicts_with"}
+
+
+@router.post("/{req_id}/fp/dependencies", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_add_dependency(
+    req_id: str,
+    body: FPDependencyCreateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """创建功能点依赖关系。
+
+    Note:
+        - source_fp 必须属于该 req_id
+        - target_fp 可属于同产品下任意需求（支持跨需求依赖）
+        - relation_type 必须为 5 种合法值之一
+    """
+    # 校验关系类型
+    if body.relation_type not in _FP_RELATION_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"relation_type 必须为 {', '.join(sorted(_FP_RELATION_TYPES))} 之一",
+        )
+
+    # 不自引用
+    if body.source_fp_id == body.target_fp_id:
+        raise HTTPException(status_code=400, detail="source 和 target 不能为同一功能点")
+
+    # 校验 source 属于该 req_id
+    source_fp = await session.get(FunctionalPoint, body.source_fp_id)
+    if not source_fp or source_fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="source 功能点不存在或不属于该需求")
+
+    # 校验 target 存在且同产品
+    target_fp = await session.get(FunctionalPoint, body.target_fp_id)
+    if not target_fp:
+        raise HTTPException(status_code=404, detail="target 功能点不存在")
+
+    # 同产品校验
+    source_req = await session.get(Requirement, source_fp.requirement_id)
+    target_req = await session.get(Requirement, target_fp.requirement_id)
+    if not source_req or not target_req or source_req.product_id != target_req.product_id:
+        raise HTTPException(status_code=400, detail="source 和 target 功能点必须属于同一产品")
+
+    # 查重
+    dup = await session.execute(
+        select(FPDependency).where(
+            FPDependency.source_fp_id == body.source_fp_id,
+            FPDependency.target_fp_id == body.target_fp_id,
+            FPDependency.relation_type == body.relation_type,
+        )
+    )
+    if dup.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="该依赖关系已存在")
+
+    dep = FPDependency(
+        source_fp_id=body.source_fp_id,
+        target_fp_id=body.target_fp_id,
+        relation_type=body.relation_type,
+        description=body.description,
+    )
+    session.add(dep)
+    await session.commit()
+    await session.refresh(dep)
+
+    logger.info("[FP] 依赖创建: {} -{}-> {} (req={})",
+                body.source_fp_id, body.relation_type, body.target_fp_id, req_id)
+
+    return ApiResponse(success=True, message="依赖关系已创建", data={
+        "id": dep.id, "source_fp_id": dep.source_fp_id,
+        "target_fp_id": dep.target_fp_id, "relation_type": dep.relation_type,
+    })
+
+
+@router.delete("/{req_id}/fp/dependencies/{dep_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_remove_dependency(
+    req_id: str,
+    dep_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """删除功能点依赖关系。"""
+    dep = await session.get(FPDependency, dep_id)
+    if not dep:
+        raise HTTPException(status_code=404, detail="依赖关系不存在")
+
+    # 校验 source_fp 属于该 req_id
+    source_fp = await session.get(FunctionalPoint, dep.source_fp_id)
+    if not source_fp or source_fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="依赖关系不属于该需求")
+
+    await session.delete(dep)
+    await session.commit()
+
+    logger.info("[FP] 依赖删除: dep_id={} (req={})", dep_id, req_id)
+    return ApiResponse(success=True, message="依赖关系已删除")
 
 
 @router.patch("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])

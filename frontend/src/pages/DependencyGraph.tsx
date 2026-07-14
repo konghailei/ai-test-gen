@@ -7,7 +7,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import {
   Search, Trash2, Edit3, GitBranch, Puzzle, Link2, GripVertical,
-  Maximize, Minimize, Loader2, Unlink, X, ArrowLeftRight,
+  Maximize, Minimize, Loader2, Unlink, X, ArrowLeftRight, Boxes,
 } from 'lucide-react'
 import { dependencyGraph, products as prodApi, requirements as reqApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
@@ -49,20 +49,84 @@ function ModuleNode({ data, selected }: any) {
   )
 }
 
-const nodeTypes = { moduleNode: ModuleNode }
+// ============================================================================
+// FP Node (功能点节点)
+// ============================================================================
+const FP_TYPE_STYLES: Record<string, { label: string; bg: string; text: string }> = {
+  workflow: { label: '流程', bg: 'bg-blue-50', text: 'text-blue-600' },
+  calculation: { label: '计算', bg: 'bg-green-50', text: 'text-green-600' },
+  constraint: { label: '约束', bg: 'bg-orange-50', text: 'text-orange-600' },
+  api_behavior: { label: 'API', bg: 'bg-purple-50', text: 'text-purple-600' },
+  data_record: { label: '数据', bg: 'bg-cyan-50', text: 'text-cyan-600' },
+  config: { label: '配置', bg: 'bg-slate-100', text: 'text-slate-600' },
+}
+
+function FPNode({ data, selected }: any) {
+  const fpStyle = FP_TYPE_STYLES[data.fpType] || FP_TYPE_STYLES.workflow
+  return (
+    <div className={[
+      'relative px-4 py-3 bg-white rounded-2xl border-2 shadow-md min-w-[140px] transition-all duration-200 group',
+      selected
+        ? 'border-indigo-400 shadow-indigo-100 shadow-lg ring-2 ring-indigo-100'
+        : 'border-slate-200 hover:border-slate-300 hover:shadow-lg',
+    ].join(' ')}>
+      <Handle type="target" position={Position.Left}
+        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
+      <Handle type="source" position={Position.Right}
+        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
+      <Handle type="target" position={Position.Top} id="top"
+        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
+      <Handle type="source" position={Position.Bottom} id="bottom"
+        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
+      <div className="flex items-center gap-2 mb-1">
+        <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center flex-shrink-0">
+          <Boxes className="w-4 h-4 text-indigo-500" />
+        </div>
+        <span className="text-sm font-semibold text-slate-800 truncate max-w-[120px]">
+          {data.label}
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5 pl-10">
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${fpStyle.bg} ${fpStyle.text} font-medium`}>
+          {fpStyle.label}
+        </span>
+        {data.priority && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-medium">
+            {data.priority}
+          </span>
+        )}
+      </div>
+      {data.reqTitle && (
+        <p className="text-[11px] text-slate-400 leading-relaxed line-clamp-1 pl-10 mt-0.5">
+          {data.reqTitle}
+        </p>
+      )}
+    </div>
+  )
+}
+
+const nodeTypes = { moduleNode: ModuleNode, fpNode: FPNode }
 
 // ============================================================================
-// Edge Styles
+// Edge Styles (模块 / 功能点 分离)
 // ============================================================================
-const EDGE_STYLES: Record<string, { label: string; stroke: string }> = {
+const MODULE_EDGE_STYLES: Record<string, { label: string; stroke: string }> = {
   depends_on: { label: '依赖', stroke: '#818cf8' },
   interdependent: { label: '相互依赖', stroke: '#22d3ee' },
+}
+
+const FP_EDGE_STYLES: Record<string, { label: string; stroke: string }> = {
+  depends_on: { label: '依赖', stroke: '#818cf8' },
+  data_flows: { label: '数据流向', stroke: '#34d399' },
+  invariants: { label: '共享约束', stroke: '#fbbf24' },
+  lifecycle_scenarios: { label: '生命周期', stroke: '#f472b6' },
+  conflicts_with: { label: '冲突', stroke: '#f87171' },
 }
 
 const EDGE_COMMON = { type: 'smoothstep' as const, animated: true, style: { strokeWidth: 2.5 } }
 
 function createEdge(source: string, target: string, eType: string, srcName = source, tgtName = target): any {
-  const s = EDGE_STYLES[eType] || EDGE_STYLES.depends_on
+  const s = MODULE_EDGE_STYLES[eType] || MODULE_EDGE_STYLES.depends_on
   const label = eType === 'interdependent'
     ? `${srcName} ↔ ${tgtName}`
     : `${srcName} 依赖 ${tgtName}`
@@ -75,6 +139,23 @@ function createEdge(source: string, target: string, eType: string, srcName = sou
     data: { label, eType },
   }
   if (eType === 'interdependent') {
+    edge.markerStart = { type: MarkerType.ArrowClosed, color: s.stroke, width: 18, height: 18 }
+  }
+  return edge
+}
+
+function createFPEdge(depId: number, source: string, target: string, relationType: string, srcName = source, tgtName = target, description = ''): any {
+  const s = FP_EDGE_STYLES[relationType] || FP_EDGE_STYLES.depends_on
+  const label = `${srcName} ${s.label} ${tgtName}`
+  const edge: any = {
+    id: `e-${depId}`,
+    source, target, ...EDGE_COMMON,
+    style: { ...EDGE_COMMON.style, stroke: s.stroke },
+    markerEnd: { type: MarkerType.ArrowClosed, color: s.stroke, width: 18, height: 18 },
+    label,
+    data: { label, eType: relationType, description, depId },
+  }
+  if (relationType === 'invariants' || relationType === 'lifecycle_scenarios') {
     edge.markerStart = { type: MarkerType.ArrowClosed, color: s.stroke, width: 18, height: 18 }
   }
   return edge
@@ -183,12 +264,14 @@ export default function DependencyGraph() {
 
   // v1.4: 图谱类型切换
   const [graphType, setGraphType] = useState<'modules' | 'fp'>('modules')
-  const [fpReqIds, setFpReqIds] = useState<string[]>([])
 
   // Module picker state
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerExcludes, setPickerExcludes] = useState<string[]>([])
   const [pickerTarget, setPickerTarget] = useState<'new' | { nodeId: string }>('new')
+
+  // 当前模式对应的边样式表
+  const currentEdgeStyles = graphType === 'fp' ? FP_EDGE_STYLES : MODULE_EDGE_STYLES
 
   // ========== Data Loading ==========
   useEffect(() => {
@@ -230,54 +313,29 @@ export default function DependencyGraph() {
     setLoading(false)
   }
 
-  // ========== v1.4 FP Graph ==========
+  // ========== v1.4 FP Graph（使用跨需求图谱端点，消除 N+1 + slice 截断） ==========
   const loadFPGraph = async () => {
     if (!selectedProductId) return
     setLoading(true)
     try {
-      // Get all requirements for this product to find FPs
-      const reqs = await reqApi.list(1, 200, selectedProductId, undefined, { status: 'archived' }) as any
-      const reqItems: any[] = reqs?.items || reqs || []
-      const fpNodes: Node[] = []
-      const fpEdges: Edge[] = []
+      const data = await dependencyGraph.fpGraph(selectedProductId)
+      const fpNodes: Node[] = (data?.nodes || []).map((n: any, i: number) => ({
+        id: n.id,
+        type: 'fpNode',
+        position: autoLayout(i, (data?.nodes || []).length),
+        data: {
+          label: n.name,
+          fpType: n.fp_type,
+          reqId: n.req_id,           // 供 onConnect/deleteEdge 确定 POST/DELETE 路径参数
+          reqTitle: n.req_title,
+          priority: n.priority,
+        },
+      }))
       const nameMap: Record<string, string> = {}
-
-      for (const req of reqItems.slice(0, 10)) {
-        try {
-          const r = await reqApi.fpList(req.id)
-          for (const fp of (r.items || [])) {
-            fpNodes.push({
-              id: fp.id,
-              type: 'moduleNode',
-              position: autoLayout(fpNodes.length, 50),
-              data: { label: fp.name, description: `[${req.title?.slice(0, 30) || req.id}] ${fp.fp_type || ''}` },
-            })
-            nameMap[fp.id] = fp.name
-          }
-        } catch { }
-      }
-
-      // Load dependencies
-      const depIds = new Set(fpNodes.map(n => n.id))
-      if (depIds.size > 1) {
-        for (const req of reqItems.slice(0, 10)) {
-          try {
-            const r = await reqApi.fpDependencies(req.id)
-            for (const d of (r.dependencies || [])) {
-              if (depIds.has(d.source_fp_id) && depIds.has(d.target_fp_id)) {
-                fpEdges.push({
-                  id: `e-${d.id}`,
-                  source: d.source_fp_id,
-                  target: d.target_fp_id,
-                  label: d.relation_type,
-                  style: { stroke: d.relation_type === 'depends_on' ? '#818cf8' : '#22d3ee' },
-                })
-              }
-            }
-          } catch { }
-        }
-      }
-
+      fpNodes.forEach(n => { nameMap[n.id] = String(n.data.label) })
+      const fpEdges: Edge[] = (data?.edges || []).map((e: any) =>
+        createFPEdge(e.id, e.source, e.target, e.relation_type, nameMap[e.source], nameMap[e.target], e.description)
+      )
       setNodes(fpNodes)
       setEdges(fpEdges)
     } catch { }
@@ -288,21 +346,37 @@ export default function DependencyGraph() {
   const onConnect = useCallback(async (conn: Connection) => {
     if (!conn.source || !conn.target || conn.source === conn.target) return
     try {
-      await dependencyGraph.addEdge(conn.source, conn.target, edgeType)
-      // 添加成功后刷新图谱，确保数据一致
-      await loadGraph()
+      if (graphType === 'fp') {
+        // FP 模式：需确定 source_fp 所属的 req_id
+        const sourceNode = nodes.find(n => n.id === conn.source)
+        const reqId = sourceNode?.data?.reqId as string
+        if (!reqId) { alert('无法确定功能点所属需求'); return }
+        await reqApi.fpAddDependency(reqId, conn.source, conn.target, edgeType)
+        await loadFPGraph()
+      } else {
+        await dependencyGraph.addEdge(conn.source, conn.target, edgeType)
+        await loadGraph()
+      }
     } catch (e: any) {
       alert('添加依赖失败: ' + (e?.message || '未知错误'))
     }
-  }, [edgeType])
+  }, [edgeType, graphType, nodes])
 
   const deleteEdge = async (edgeId: string) => {
     const edge = edges.find(e => e.id === edgeId)
     if (!edge || !confirm('确认删除该连线？')) return
     try {
-      await dependencyGraph.removeEdge(String(edge.source), String(edge.target))
-      // 删除成功后刷新图谱
-      await loadGraph()
+      if (graphType === 'fp') {
+        const depId = (edge.data as any)?.depId || Number(String(edge.id).replace(/^e-/, ''))
+        const sourceNode = nodes.find(n => n.id === edge.source)
+        const reqId = sourceNode?.data?.reqId as string
+        if (!reqId || !depId) { alert('无法删除：缺少依赖 ID'); return }
+        await reqApi.fpRemoveDependency(reqId, depId)
+        await loadFPGraph()
+      } else {
+        await dependencyGraph.removeEdge(String(edge.source), String(edge.target))
+        await loadGraph()
+      }
       setSelectedEdge(null)
     } catch (e: any) {
       alert('删除失败: ' + (e?.message || '未知错误'))
@@ -342,15 +416,17 @@ export default function DependencyGraph() {
   }
 
   const onNodeDragStop = useCallback(async (_: any, node: Node) => {
+    if (graphType === 'fp') return  // FP 不持久化位置
     try { await dependencyGraph.updateNodePosition(node.id, node.position.x, node.position.y) } catch { }
-  }, [])
+  }, [graphType])
 
-  // Double-click opens picker to swap module
+  // Double-click opens picker to swap module (FP 模式禁用)
   const onNodeDoubleClick = useCallback((_: any, node: Node) => {
+    if (graphType === 'fp') return
     setPickerTarget({ nodeId: node.id })
     setPickerExcludes(nodes.filter(n => n.id !== node.id).map(n => n.id))
     setPickerOpen(true)
-  }, [nodes])
+  }, [nodes, graphType])
 
   // ========== Context Menu ==========
   const onNodeContextMenu = useCallback((event: React.MouseEvent, node: Node) => {
@@ -397,8 +473,15 @@ export default function DependencyGraph() {
     const selNodeIds = nodes.filter(n => n.selected).map(n => n.id)
     const selEdgeIds = edges.filter(e => e.selected).map(e => e.id)
     if (selNodeIds.length === 0 && selEdgeIds.length === 0) return
-    if (!confirm(`从图谱中移除 ${selNodeIds.length} 个节点、${selEdgeIds.length} 条连线？（模块不会被删除）`)) return
-    selNodeIds.forEach(id => removeNodeFromGraph(id))
+    if (graphType === 'modules') {
+      if (!confirm(`从图谱中移除 ${selNodeIds.length} 个节点、${selEdgeIds.length} 条连线？（模块不会被删除）`)) return
+    } else {
+      if (selEdgeIds.length === 0) return
+      if (!confirm(`删除 ${selEdgeIds.length} 条依赖连线？`)) return
+    }
+    if (graphType === 'modules') {
+      selNodeIds.forEach(id => removeNodeFromGraph(id))
+    }
     selEdgeIds.forEach(id => deleteEdge(id))
   }
 
@@ -435,16 +518,35 @@ export default function DependencyGraph() {
     if (!edge) return
     const srcName = String(nodes.find(n => n.id === edge.source)?.data?.label || edge.source)
     const tgtName = String(nodes.find(n => n.id === edge.target)?.data?.label || edge.target)
-    if (!confirm(`将依赖方向从 "${srcName} 依赖 ${tgtName}" 改为 "${tgtName} 依赖 ${srcName}"？`)) return
+    if (!confirm(`将依赖方向从 "${srcName} → ${tgtName}" 改为 "${tgtName} → ${srcName}"？`)) return
     try {
-      await dependencyGraph.removeEdge(String(edge.source), String(edge.target))
-      await dependencyGraph.addEdge(String(edge.target), String(edge.source), (edge.data as any)?.eType || 'depends_on')
-      await loadGraph()
+      if (graphType === 'fp') {
+        const depId = (edge.data as any)?.depId
+        const sourceNode = nodes.find(n => n.id === edge.source)
+        const reqId = sourceNode?.data?.reqId as string
+        const eType = (edge.data as any)?.eType || 'depends_on'
+        if (!reqId || !depId) { alert('无法交换：缺少依赖 ID'); return }
+        await reqApi.fpRemoveDependency(reqId, depId)
+        // 创建反向依赖（target 的 reqId）
+        const targetNode = nodes.find(n => n.id === edge.target)
+        const targetReqId = targetNode?.data?.reqId as string
+        if (!targetReqId) { alert('无法交换：缺少目标功能点所属需求'); return }
+        await reqApi.fpAddDependency(targetReqId, edge.target, edge.source, eType)
+        await loadFPGraph()
+      } else {
+        await dependencyGraph.removeEdge(String(edge.source), String(edge.target))
+        await dependencyGraph.addEdge(String(edge.target), String(edge.source), (edge.data as any)?.eType || 'depends_on')
+        await loadGraph()
+      }
     } catch (e: any) { alert('交换方向失败: ' + (e?.message || '未知错误')) }
   }
 
   const contextRemove = () => {
     if (ctxMenu?.nodeId) {
+      if (graphType === 'fp') {
+        setCtxMenu(null)
+        return
+      }
       if (!confirm('从图谱中移除该模块？（模块不会被删除）')) return
       removeNodeFromGraph(ctxMenu.nodeId)
     }
@@ -458,6 +560,17 @@ export default function DependencyGraph() {
     ? products.find(p => p.id === selectedProductId)?.name || selectedProductId
     : null
 
+  // 边类型选项按模式生成
+  const edgeTypeOptions = graphType === 'fp'
+    ? Object.entries(FP_EDGE_STYLES)
+    : Object.entries(MODULE_EDGE_STYLES)
+
+  // 切换图谱类型
+  const switchGraphType = (type: 'modules' | 'fp') => {
+    setGraphType(type)
+    setEdgeType('depends_on')  // 切换后重置为默认类型
+  }
+
   // ==========================================================================
   // Render
   // ==========================================================================
@@ -467,13 +580,13 @@ export default function DependencyGraph() {
       <div className="flex items-center gap-3 px-5 py-2.5 border-b border-slate-200 bg-white shrink-0">
         <GitBranch className="w-5 h-5 text-primary-500" />
         <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
-          <button onClick={() => { setGraphType('modules'); loadGraph() }}
+          <button onClick={() => switchGraphType('modules')}
             className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
               graphType === 'modules' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
             }`}>
             模块依赖
           </button>
-          <button onClick={() => { setGraphType('fp'); loadFPGraph() }}
+          <button onClick={() => switchGraphType('fp')}
             className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
               graphType === 'fp' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
             }`}>
@@ -483,8 +596,8 @@ export default function DependencyGraph() {
         {productName && <span className="text-xs text-slate-400">· {productName}</span>}
         <div className="flex-1" />
 
-        {/* Draggable toolbar items */}
-        {selectedProductId && (
+        {/* Draggable toolbar items — 仅模块模式显示 */}
+        {selectedProductId && graphType === 'modules' && (
           <>
             <div className="flex items-center gap-1.5 px-2">
               {/* Module drag item */}
@@ -511,22 +624,25 @@ export default function DependencyGraph() {
               </div>
             </div>
             <div className="w-px h-5 bg-slate-200" />
+          </>
+        )}
 
-            {/* Edge type */}
+        {/* Edge type selector — 按模式显示不同选项 */}
+        {selectedProductId && (
+          <>
             <span className="text-[11px] text-slate-400">连线类型:</span>
-            <button onClick={() => setEdgeType('depends_on')}
-              className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${edgeType === 'depends_on' ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'}`}>
-              → 单向依赖
-            </button>
-            <button onClick={() => setEdgeType('interdependent')}
-              className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${edgeType === 'interdependent' ? 'bg-cyan-50 border-cyan-300 text-cyan-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'}`}>
-              ↔ 相互依赖
-            </button>
+            {edgeTypeOptions.map(([key, val]) => (
+              <button key={key} onClick={() => setEdgeType(key)}
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${edgeType === key ? 'border-slate-300 text-slate-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'}`}
+                style={edgeType === key ? { background: `${val.stroke}1a`, borderColor: val.stroke, color: val.stroke } : {}}>
+                {graphType === 'fp' && (key === 'invariants' || key === 'lifecycle_scenarios') ? `↔ ${val.label}` : `→ ${val.label}`}
+              </button>
+            ))}
           </>
         )}
 
         <div className="w-px h-5 bg-slate-200" />
-        <button onClick={loadGraph} disabled={loading} className="btn-ghost text-xs">
+        <button onClick={() => graphType === 'fp' ? loadFPGraph() : loadGraph()} disabled={loading} className="btn-ghost text-xs">
           <Loader2 className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
         </button>
         <button onClick={toggleFullscreen} className="btn-ghost text-xs" title={fullscreen ? '退出全屏 (Esc)' : '全屏'}>
@@ -545,36 +661,38 @@ export default function DependencyGraph() {
               <p className="text-[10px] text-slate-400 uppercase tracking-wider font-medium mb-3">图谱信息</p>
               <div className="space-y-2 text-xs text-slate-600">
                 <div className="flex justify-between">
-                  <span>模块节点</span>
+                  <span>{graphType === 'fp' ? '功能点节点' : '模块节点'}</span>
                   <span className="font-medium">{nodes.length}</span>
                 </div>
                 <div className="flex justify-between">
                   <span>依赖连线</span>
                   <span className="font-medium">{edges.length}</span>
                 </div>
-                <div className="flex justify-between">
-                  <span>可用模块</span>
-                  <span className="font-medium">{onGraphNodes.length}</span>
-                </div>
+                {graphType === 'modules' && (
+                  <div className="flex justify-between">
+                    <span>可用模块</span>
+                    <span className="font-medium">{onGraphNodes.length}</span>
+                  </div>
+                )}
               </div>
 
               <div className="mt-4 pt-3 border-t border-slate-200">
                 <p className="text-[10px] text-slate-400 uppercase tracking-wider font-medium mb-2">图例</p>
                 <div className="space-y-1.5">
-                  <div className="flex items-center gap-2 text-[11px]">
-                    <div className="w-5 h-0.5 rounded-full" style={{ background: EDGE_STYLES.depends_on.stroke }} />
-                    <span className="text-slate-600">{EDGE_STYLES.depends_on.label}</span>
-                  </div>
-                  <div className="flex items-center gap-2 text-[11px]">
-                    <div className="w-5 h-0.5 rounded-full" style={{ background: EDGE_STYLES.interdependent.stroke }} />
-                    <span className="text-slate-600">{EDGE_STYLES.interdependent.label}</span>
-                  </div>
+                  {Object.entries(currentEdgeStyles).map(([key, val]) => (
+                    <div key={key} className="flex items-center gap-2 text-[11px]">
+                      <div className="w-5 h-0.5 rounded-full" style={{ background: val.stroke }} />
+                      <span className="text-slate-600">{val.label}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
 
               <div className="mt-auto pt-3 border-t border-slate-200">
                 <p className="text-[10px] text-slate-400 leading-relaxed">
-                  从工具栏拖拽模块到画布 · 拖拽节点手柄连线 · 双击节点切换模块
+                  {graphType === 'fp'
+                    ? '拖拽节点手柄连线 · 右键删除/交换方向 · 位置不持久化'
+                    : '从工具栏拖拽模块到画布 · 拖拽节点手柄连线 · 双击节点切换模块'}
                 </p>
               </div>
             </>
@@ -585,6 +703,7 @@ export default function DependencyGraph() {
         <div className="flex-1 relative bg-slate-50"
           onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' }}
           onDrop={(e) => {
+            if (graphType === 'fp') return  // FP 模式不支持拖放添加
             e.preventDefault()
             const itemType = e.dataTransfer.getData('application/reactflow')
             if (itemType === 'module') openAddPicker()
@@ -616,7 +735,7 @@ export default function DependencyGraph() {
                 fitView fitViewOptions={{ padding: 0.3 }}
                 selectionMode={SelectionMode.Partial} selectionOnDrag
                 panOnDrag={[1, 2]} deleteKeyCode={null} multiSelectionKeyCode="Shift"
-                connectionLineStyle={{ stroke: EDGE_STYLES[edgeType]?.stroke || '#818cf8', strokeWidth: 2 }}
+                connectionLineStyle={{ stroke: currentEdgeStyles[edgeType]?.stroke || '#818cf8', strokeWidth: 2 }}
                 defaultEdgeOptions={{ type: 'smoothstep', animated: true }}
               >
                 <Background color="#e2e8f0" gap={20} size={1} />
@@ -629,7 +748,11 @@ export default function DependencyGraph() {
                   <Panel position="top-center">
                     <div className="bg-white/90 backdrop-blur px-4 py-3 rounded-2xl shadow-lg border border-slate-200 text-center">
                       <p className="text-sm font-medium text-slate-600 mb-1">画布为空</p>
-                      <p className="text-xs text-slate-400">从工具栏拖拽「模块」到画布添加，拖拽节点间的手柄创建连线</p>
+                      <p className="text-xs text-slate-400">
+                        {graphType === 'fp'
+                          ? '当前产品下暂无功能点，请先在需求详情中拆分功能点'
+                          : '从工具栏拖拽「模块」到画布添加，拖拽节点间的手柄创建连线'}
+                      </p>
                     </div>
                   </Panel>
                 )}
@@ -639,7 +762,7 @@ export default function DependencyGraph() {
                     <div className="bg-white/95 backdrop-blur px-4 py-2.5 rounded-2xl shadow-lg border border-slate-200 flex items-center gap-3">
                       <div className="flex items-center gap-1.5 text-xs">
                         <span className="w-2 h-2 rounded-full"
-                          style={{ background: EDGE_STYLES[(selectedEdge.data as any)?.eType === 'interdependent' ? 'interdependent' : 'depends_on']?.stroke }} />
+                          style={{ background: currentEdgeStyles[(selectedEdge.data as any)?.eType]?.stroke || '#818cf8' }} />
                         <span className="text-slate-600 font-medium">{selectedEdge.label}</span>
                       </div>
                       <div className="w-px h-4 bg-slate-200" />
@@ -652,7 +775,9 @@ export default function DependencyGraph() {
                 )}
 
                 <Panel position="bottom-right">
-                  <p className="text-[10px] text-slate-300">Shift+框选 · Del 移除 · 右键菜单</p>
+                  <p className="text-[10px] text-slate-300">
+                    {graphType === 'fp' ? '右键删除/交换方向' : 'Shift+框选 · Del 移除 · 右键菜单'}
+                  </p>
                 </Panel>
               </ReactFlow>
             </ReactFlowProvider>
@@ -664,7 +789,7 @@ export default function DependencyGraph() {
       {ctxMenu && (
         <div className="fixed z-[100] bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 min-w-[150px]"
           style={{ left: ctxMenu.x, top: ctxMenu.y }}>
-          {ctxMenu.nodeId && (
+          {ctxMenu.nodeId && graphType === 'modules' && (
             <>
               <button onClick={contextEdit}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
@@ -691,7 +816,7 @@ export default function DependencyGraph() {
         </div>
       )}
 
-      {/* Module Picker Modal */}
+      {/* Module Picker Modal — 仅模块模式使用 */}
       {pickerOpen && (
         <ModulePicker
           modules={allModules}

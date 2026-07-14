@@ -539,10 +539,15 @@ class ReviewAgent:
                             session.add(error_record)
 
                         # 写入追溯矩阵
+                        # v1.4：若用例标注了 related_fp（功能点 ID），在 requirement_field
+                        # 记录 "fp:{fp_id}"，建立 test_case↔functional_point 追溯链
+                        related_fp = case.get("related_fp", "")
+                        req_field = f"fp:{related_fp}" if related_fp else ""
                         trace = Traceability(
                             test_case_id=case_id,
                             requirement_id=req_id,
-                            trace_type="direct",
+                            requirement_field=req_field,
+                            trace_type="direct" if related_fp else "direct",
                             confidence=confidence,
                         )
                         session.add(trace)

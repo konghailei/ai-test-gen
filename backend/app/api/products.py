@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_session
 from app.db.models import (
     Product, Project, Module, Requirement, ModuleDependency, TestCase, User,
+    FunctionalPoint, FPDependency,
 )
 from app.models.api_schemas import ApiResponse
 from app.utils.logger import logger
@@ -492,6 +493,79 @@ async def remove_dependency_edge(
     await session.commit()
     logger.info("[API/products] 依赖已删除: source={}, target={}, count={}", source, target, len(edges))
     return ApiResponse(success=True, message=f"已删除 {len(edges)} 条依赖")
+
+
+# ============================================================================
+# 4b. 功能点（FP）依赖图谱（跨需求）
+# ============================================================================
+
+@router.get("/{product_id}/fp/dependency-graph", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_fp_dependency_graph(
+    product_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """获取产品下所有功能点及其依赖关系（跨需求）。
+
+    返回 nodes（功能点）和 edges（FP 依赖关系，含跨需求边）。
+    只返回该产品下所有需求的功能点；边的两端必须都在该产品功能点集合内。
+    """
+    # 1. 查询该产品下所有需求的 ID + title
+    req_stmt = select(Requirement.id, Requirement.title).where(
+        Requirement.product_id == product_id
+    )
+    req_result = await session.execute(req_stmt)
+    req_rows = req_result.all()
+    req_id_set = {row[0] for row in req_rows}
+    req_title_map = {row[0]: row[1] or "" for row in req_rows}
+
+    if not req_id_set:
+        return ApiResponse(success=True, message="ok", data={"nodes": [], "edges": []})
+
+    # 2. 查询这些需求下的所有 FunctionalPoint
+    fp_stmt = select(
+        FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.fp_type,
+        FunctionalPoint.requirement_id, FunctionalPoint.priority,
+    ).where(FunctionalPoint.requirement_id.in_(req_id_set))
+    fp_result = await session.execute(fp_stmt)
+    fp_rows = fp_result.all()
+
+    if not fp_rows:
+        return ApiResponse(success=True, message="ok", data={"nodes": [], "edges": []})
+
+    fp_id_set = {row[0] for row in fp_rows}
+
+    nodes = [
+        {
+            "id": row[0],
+            "name": row[1],
+            "fp_type": row[2],
+            "req_id": row[3],
+            "req_title": req_title_map.get(row[3], ""),
+            "priority": row[4] or "P2",
+        }
+        for row in fp_rows
+    ]
+
+    # 3. 查询所有 FPDependency（source 或 target 在该产品 FP 集合内）
+    dep_stmt = select(FPDependency).where(
+        FPDependency.source_fp_id.in_(fp_id_set),
+        FPDependency.target_fp_id.in_(fp_id_set),
+    )
+    dep_result = await session.execute(dep_stmt)
+    deps = dep_result.scalars().all()
+
+    edges = [
+        {
+            "id": d.id,
+            "source": d.source_fp_id,
+            "target": d.target_fp_id,
+            "relation_type": d.relation_type,
+            "description": d.description or "",
+        }
+        for d in deps
+    ]
+
+    return ApiResponse(success=True, message="ok", data={"nodes": nodes, "edges": edges})
 
 
 # ============================================================================

@@ -723,6 +723,8 @@ class Orchestrator:
 
         对应 docs/00 §3 阶段⑤。
         根据 ChannelConfig 决定是否启用分类生成，注入影响分析指导。
+        v1.4：若需求已拆分功能点（FP），从 DB 加载并传入 GenAgent，
+        使 LLM 按 FP 定向生成用例，用例标注 related_fp 供追溯。
 
         Returns:
             dict: state 更新，含 test_cases
@@ -735,20 +737,61 @@ class Orchestrator:
         enable_multi_type = channel_config.get("enable_multi_type_generation", False)
         impact_guidance = impact_result.get("generation_guidance", "") or ""
 
+        # v1.4：从 DB 加载已拆分的功能点，用于 FP 定向生成
+        functional_points: list[dict] = []
+        if req_id:
+            try:
+                from app.db.database import async_session
+                from app.db.models import FunctionalPoint
+                from sqlalchemy import select
+                async with async_session() as fp_session:
+                    fp_result = await fp_session.execute(
+                        select(FunctionalPoint).where(
+                            FunctionalPoint.requirement_id == req_id
+                        )
+                    )
+                    fp_records = fp_result.scalars().all()
+                    functional_points = [
+                        {
+                            "id": fp.id,
+                            "name": fp.name,
+                            "fp_type": fp.fp_type,
+                            "srr_json": fp.srr_json or {},
+                            "test_hints": fp.test_hints or [],
+                            "atomicity_check": fp.atomicity_check or {},
+                        }
+                        for fp in fp_records
+                    ]
+                if functional_points:
+                    logger.info(
+                        "[Orchestrator] 加载功能点: req_id={}, fp_count={}",
+                        req_id, len(functional_points),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "[Orchestrator] 加载功能点失败（不阻断生成）: req_id={}, err={}",
+                    req_id, str(e)[:150],
+                )
+
         logger.info(
-            "[Orchestrator] ▶ 节点 generate: req_id={}, multi_type={}, has_guidance={}",
+            "[Orchestrator] ▶ 节点 generate: req_id={}, multi_type={}, has_guidance={}, fp_count={}",
             req_id,
             enable_multi_type,
             bool(impact_guidance),
+            len(functional_points),
         )
 
         cases = await gen_agent.generate(
-            srr, enable_multi_type=enable_multi_type, impact_guidance=impact_guidance,
+            srr,
+            enable_multi_type=enable_multi_type,
+            impact_guidance=impact_guidance,
+            functional_points=functional_points or None,
         )
 
         logger.info(
-            "[Orchestrator] ◀ 节点 generate 完成 ▶ 下一节点 review: cases={}",
+            "[Orchestrator] ◀ 节点 generate 完成 ▶ 下一节点 review: cases={}, fp_tagged={}",
             len(cases),
+            sum(1 for c in cases if c.get("related_fp")),
         )
 
         return {"test_cases": cases}

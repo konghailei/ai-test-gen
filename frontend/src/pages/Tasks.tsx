@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ListTodo, Loader2, CheckCircle2, XCircle, AlertCircle, RefreshCw,
-  FileText, Brain, Database, MessageCircle, Sparkles, Share2,
+  FileText, Brain, Database, MessageCircle, Sparkles, Share2, Ban,
 } from 'lucide-react'
 import { requirements as reqApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
@@ -64,6 +64,17 @@ export default function Tasks() {
   const handleRowClick = (task: AnalysisTaskInfo) => {
     if (task.req_id) {
       navigate(`/requirements/${task.req_id}`)
+    }
+  }
+
+  const handleCancel = async (e: React.MouseEvent, taskId: string) => {
+    e.stopPropagation()
+    if (!confirm('确定取消此任务？')) return
+    try {
+      await reqApi.cancelTask(taskId)
+      loadTasks()
+    } catch (err: any) {
+      alert('取消失败: ' + (err?.message || '未知错误'))
     }
   }
 
@@ -132,6 +143,7 @@ export default function Tasks() {
                   <th className="px-4 py-3 font-semibold">进度</th>
                   <th className="px-4 py-3 font-semibold">创建时间</th>
                   <th className="px-4 py-3 font-semibold">耗时</th>
+                  <th className="px-4 py-3 font-semibold">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
@@ -193,6 +205,19 @@ export default function Tasks() {
                       </td>
                       <td className="px-4 py-3 text-slate-500 text-xs">
                         {durationSec < 60 ? `${durationSec}s` : `${Math.floor(durationSec / 60)}m ${durationSec % 60}s`}
+                      </td>
+                      <td className="px-4 py-3">
+                        {isRunning ? (
+                          <button
+                            onClick={(e) => handleCancel(e, task.id)}
+                            className="p-1 text-slate-400 hover:text-red-500 rounded transition-colors"
+                            title="取消任务"
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                          </button>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
                       </td>
                     </tr>
                   )

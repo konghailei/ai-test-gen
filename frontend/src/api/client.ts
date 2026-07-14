@@ -234,6 +234,9 @@ export const requirements = {
   /** v2.14: 按需求 ID 查询关联的最新任务 */
   getTaskByReq: (reqId: string) =>
     request<AnalysisTaskInfo | null>(`/requirements/${reqId}/task`),
+  /** v1.4: 取消分析任务 */
+  cancelTask: (taskId: string) =>
+    request<AnalysisTaskInfo>(`/requirements/tasks/${taskId}/cancel`, { method: 'POST' }),
   /** v1.4 功能点 */
   fpExtractBP: (reqId: string) =>
     request<{ business_points: FPBusinessPoint[] }>(`/requirements/${reqId}/fp/extract-bp`, { method: 'POST' }),
@@ -245,6 +248,13 @@ export const requirements = {
     request<{ items: FPItem[]; total: number }>(`/requirements/${reqId}/fp`),
   fpDependencies: (reqId: string) =>
     request<{ dependencies: FPDependencyItem[] }>(`/requirements/${reqId}/fp/dependencies`),
+  fpAddDependency: (reqId: string, sourceFpId: string, targetFpId: string, relationType: string, description = '') =>
+    request<{ id: number }>(`/requirements/${reqId}/fp/dependencies`, {
+      method: 'POST',
+      body: JSON.stringify({ source_fp_id: sourceFpId, target_fp_id: targetFpId, relation_type: relationType, description }),
+    }),
+  fpRemoveDependency: (reqId: string, depId: number) =>
+    request(`/requirements/${reqId}/fp/dependencies/${depId}`, { method: 'DELETE' }),
   fpUpdate: (reqId: string, fpId: string, updates: { name?: string; module_id?: string; fp_type?: string }) =>
     request<{ success: boolean }>(`/requirements/${reqId}/fp/${fpId}`, {
       method: 'PATCH', body: JSON.stringify(updates),
@@ -583,6 +593,9 @@ export const dependencyGraph = {
   // 项目影响分析
   analyzeProject: (projectId: string) =>
     request<import('../types').ProjectImpact>(`/products/projects/${projectId}/impact`),
+  // 功能点依赖图谱（跨需求）
+  fpGraph: (productId: string) =>
+    request<{ nodes: any[]; edges: any[] }>(`/products/${productId}/fp/dependency-graph`),
 }
 
 // ============================================================

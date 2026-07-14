@@ -56,6 +56,7 @@ class GenAgent:
         srr: dict,
         enable_multi_type: bool = True,
         impact_guidance: str = "",
+        functional_points: list[dict] | None = None,
     ) -> list[dict]:
         """根据 SRR 生成测试用例集。
 
@@ -63,6 +64,9 @@ class GenAgent:
             srr: SRR JSON 字典
             enable_multi_type: 是否启用分类生成（FULL 通道 True / FAST 通道 False）
             impact_guidance: 影响分析指导文本（仅优化需求时传入）
+            functional_points: 需求已拆分的功能点列表（v1.4 新增）。传入时
+                LLM 按每个 FP 定向生成用例，并在用例中标注 related_fp 字段，
+                供 persist_to_kb 写入 test_case↔functional_point 追溯关系。
 
         Returns:
             list[dict]: UTCF 用例列表，每个用例为字典格式
@@ -71,14 +75,14 @@ class GenAgent:
             生成流程（docs/03 §2）：
                 1. 检索 KB 相似用例（Few-shot 注入）
                 2. 检索匹配的测试模式
-                3. 构建 Prompt（分类/批量）
+                3. 构建 Prompt（分类/批量 + FP 定向）
                 4. 调用 LLM 生成
                 5. 解析用例 JSON + 生成 ID
                 6. gen_confidence 放入 gen_metadata
         """
         req_id = srr.get("requirement", {}).get("id", "")
-        logger.info("[GenAgent] ▶ 开始生成: req_id={}, multi_type={}, has_impact_guidance={}",
-                    req_id, enable_multi_type, bool(impact_guidance))
+        logger.info("[GenAgent] ▶ 开始生成: req_id={}, multi_type={}, has_impact_guidance={}, fp_count={}",
+                    req_id, enable_multi_type, bool(impact_guidance), len(functional_points or []))
 
         # 1. 检索 KB 相似用例（Few-shot）
         few_shot_cases = await asyncio.to_thread(self._search_similar_cases, srr)
@@ -88,13 +92,14 @@ class GenAgent:
         logger.info("[GenAgent] KB 检索: few_shot_cases={}, matched_patterns={}",
                     len(few_shot_cases), len(matched_patterns))
 
-        # 3. 构建 Prompt
+        # 3. 构建 Prompt（含 FP 定向上下文）
         user_prompt = prompts.build_user_prompt(
             srr=srr,
             few_shot_cases=few_shot_cases or None,
             matched_patterns=matched_patterns or None,
             impact_guidance=impact_guidance,
             enable_multi_type=enable_multi_type,
+            functional_points=functional_points,
         )
         logger.debug("[GenAgent] Prompt 构建完成: len={}", len(user_prompt))
 

@@ -111,6 +111,7 @@ def build_user_prompt(
     matched_patterns: list[dict] | None = None,
     impact_guidance: str = "",
     enable_multi_type: bool = True,
+    functional_points: list[dict] | None = None,
 ) -> str:
     """构建 GenAgent 的用户指令。
 
@@ -120,6 +121,10 @@ def build_user_prompt(
         matched_patterns: 匹配到的测试模式列表，每项含 {name, pattern_json, category}
         impact_guidance: 影响分析指导文本（仅优化需求时传入，来自 ImpactAnalysisAgent）
         enable_multi_type: 是否启用分类生成（FULL 通道 True / FAST 通道 False）
+        functional_points: 需求已拆分的功能点列表（可选）。每项含
+            {id, name, fp_type, test_hints, atomicity_check, summary}。
+            传入时 LLM 将按 FP 定向生成用例，并在每个用例的 related_fp 字段
+            标注对应的功能点 ID，用于后续 test_case↔functional_point 追溯。
 
     Returns:
         str: 完整的用户指令
@@ -149,6 +154,34 @@ def build_user_prompt(
 
 {impact_guidance}"""
 
+    # 功能点定向生成上下文（v1.4：FP 接入生成流水线）
+    fp_section = ""
+    fp_requirements = ""
+    if functional_points:
+        # 精简 FP 信息，避免 prompt 过长（只保留生成指导所需字段）
+        fp_brief = [
+            {
+                "id": fp.get("id", ""),
+                "name": fp.get("name", ""),
+                "fp_type": fp.get("fp_type", "workflow"),
+                "summary": fp.get("srr_json", {}).get("summary", ""),
+                "test_hints": fp.get("test_hints", []),
+                "atomicity_check": fp.get("atomicity_check", {}),
+            }
+            for fp in functional_points
+        ]
+        fp_section = f"""
+
+## 功能点拆分（已拆分的原子功能单元，按此定向生成用例）
+{json.dumps(fp_brief, ensure_ascii=False, indent=2)}"""
+        fp_requirements = """
+### 功能点覆盖要求（优先级最高）
+- 每个功能点（FP）至少生成 1 个测试用例，覆盖其 happy_path
+- 对 atomicity_check 中 result/boundary 为 true 的 FP，补充边界值用例
+- 在每个用例中添加 "related_fp" 字段，值为此用例对应的功能点 ID（来自上方功能点列表的 id 字段）
+- 若一个用例覆盖多个 FP，related_fp 填主要 FP 的 ID
+- test_hints 是该 FP 的种子测试提示，应作为用例设计的重要参考"""
+
     if enable_multi_type:
         gen_requirements = """## 生成要求
 1. **功能测试** (≥ 3个) — 覆盖 happy_path 和 alternate_flows
@@ -166,11 +199,13 @@ def build_user_prompt(
 {few_shot_section}
 {patterns_section}
 {impact_section}
+{fp_section}
 
 ## 当前需求
 {json.dumps(srr, ensure_ascii=False, indent=2)}
 
 {gen_requirements}
+{fp_requirements}
 
 ## 输出格式
 输出 JSON 数组，每个元素为一个测试用例（符合上述 UTCF_CASE_SCHEMA）。

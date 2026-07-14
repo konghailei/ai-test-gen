@@ -1,35 +1,55 @@
 FROM pgvector/pgvector:pg16
 
 # ============================================================================
-# zhparser 中文分词 — 双源码编译（scws → zhparser）
+# zhparser 中文分词 — scws(tarball) + zhparser(Gitee 镜像)
 #
-# zhparser 依赖 scws（Simple Chinese Word Segmentation）库。
-# 两者在 Debian Bookworm / PGDG 16 中均未收录，需从源码编译。
+# 原版用 GitHub clone 在国内网络不稳定，改为：
+# - scws: xunsearch 官方 tarball（国内可访问）
+# - zhparser: Gitee 镜像（github.com/amutu/zhparser 的同步副本，已适配 PG16）
 # ============================================================================
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV SCWS_VERSION=1.2.3
 
-RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/*.sources \
+RUN set -eux \
+    && sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/*.sources \
     && sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list.d/*.sources \
     && apt-get update \
-    # 安装编译依赖（含 autotools 用于 scws）
     && apt-get install -y --no-install-recommends \
-        ca-certificates git make gcc autoconf automake libtool postgresql-server-dev-16 \
-    # 1. 编译安装 scws — GitHub 源码 + acprep 引导 configure
-    && git clone --depth 1 https://github.com/hightman/scws /tmp/scws \
-    && cd /tmp/scws \
-    && sh acprep \
+        ca-certificates wget bzip2 git make gcc autoconf automake libtool \
+        postgresql-server-dev-16 \
+    # ===== 1. 编译安装 scws（tarball，国内源） =====
+    && cd /tmp \
+    && wget -q --timeout=30 --tries=3 \
+        "http://www.xunsearch.com/scws/down/scws-${SCWS_VERSION}.tar.bz2" \
+        -O scws.tar.bz2 \
+    && tar xjf scws.tar.bz2 \
+    && cd "scws-${SCWS_VERSION}" \
     && ./configure --prefix=/usr/local \
-    && make -j$(nproc) && make install \
-    && cd / && rm -rf /tmp/scws \
-    # 2. 编译安装 zhparser
-    && git clone --depth 1 https://github.com/amutu/zhparser.git /tmp/zhparser \
+    && make -j"$(nproc)" \
+    && make install \
+    # 安装 scws 词典（分词必需，缺失会导致 to_tsvector 报错）
+    && mkdir -p /usr/local/scws/etc \
+    && wget -q --timeout=30 --tries=3 \
+        "http://www.xunsearch.com/scws/down/scws-dict-chs-utf8.tar.bz2" \
+        -O /tmp/scws-dict.tar.bz2 \
+    && tar xjf /tmp/scws-dict.tar.bz2 -C /usr/local/scws/etc/ \
+    && ls -la /usr/local/scws/etc/dict.utf8.xdb \
+    # 配置动态库路径（zhparser 运行时依赖 libscws.so）
+    && echo "/usr/local/lib" > /etc/ld.so.conf.d/scws.conf \
+    && ldconfig \
+    && cd /tmp && rm -rf /tmp/scws* \
+    # ===== 2. 编译安装 zhparser（Gitee 镜像，国内可访问） =====
+    && git clone --depth 1 https://gitee.com/eipoz-opensource/zhparser.git /tmp/zhparser \
     && cd /tmp/zhparser \
-    && make -j$(nproc) && make install \
+    && make -j"$(nproc)" \
+    && make install \
+    # 验证扩展文件已安装
+    && ls /usr/share/postgresql/16/extension/zhparser* \
+    && ls /usr/lib/postgresql/16/lib/zhparser.so \
     && cd / && rm -rf /tmp/zhparser \
-    # 3. 保留运行时 scws 库，清理全部编译依赖
-    && cp /usr/local/lib/libscws* /usr/lib/ \
-    && apt-get purge -y --autoremove git make gcc autoconf automake libtool ca-certificates postgresql-server-dev-16 \
+    # ===== 3. 清理编译依赖（保留运行时库 + 词典） =====
+    && apt-get purge -y --autoremove git make gcc autoconf automake libtool wget bzip2 postgresql-server-dev-16 \
     && rm -rf /var/lib/apt/lists/* /usr/local/lib/libscws.la /usr/local/share/aclocal
 
 COPY docker/init-zhparser.sql /docker-entrypoint-initdb.d/

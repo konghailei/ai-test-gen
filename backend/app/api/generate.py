@@ -29,6 +29,7 @@ SSE 事件格式（由 orchestrator.make_sse_event 产生）：
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -37,8 +38,9 @@ from sse_starlette.sse import EventSourceResponse
 from app.core.auth import require_write
 from app.core.orchestrator import orchestrator
 from app.db.database import async_session
-from app.db.models import Requirement
+from app.db.models import Requirement, AnalysisTask
 from app.models.api_schemas import GenerateRequest
+from app.utils.id_gen import gen_task_id
 from app.utils.logger import logger
 
 
@@ -65,6 +67,8 @@ async def generate_test_cases(req: GenerateRequest):
         - 澄清答案：若需求已提交澄清答案（存储在 srr_json.clarify_answers），
           会透传给 orchestrator.run_pipeline，在 _clarify_node 首轮应用到 SRR。
         - 错误处理：orchestrator 内部异常会 yield 一个 error 事件，SSE 流正常结束。
+        - v1.4：创建 AnalysisTask 记录，使生成任务在「任务管理」页面可见。
+          SSE 流式机制不变，仅追加任务状态追踪。
     """
     # 从 DB 查询需求，取出 raw_text 和澄清答案
     async with async_session() as session:
@@ -85,14 +89,43 @@ async def generate_test_cases(req: GenerateRequest):
     srr_json = requirement.srr_json or {}
     clarify_answers = srr_json.get("clarify_answers") or None
 
+    # v1.4：创建 AnalysisTask 记录（保持 SSE 流式，仅追加任务可见性）
+    task_id = gen_task_id()
+    async with async_session() as task_session:
+        task = AnalysisTask(
+            id=task_id,
+            task_type="generate_cases",
+            req_id=req.req_id,
+            product_id=requirement.product_id,
+            status="running",
+            phase="generate",
+            progress=0,
+            message="用例生成已启动...",
+            created_by="api",
+        )
+        task_session.add(task)
+        await task_session.commit()
+
     logger.info(
-        "[API/generate] 启动 SSE 流式生成: req_id={}, expected_channel={}, "
+        "[API/generate] 启动 SSE 流式生成: req_id={}, task_id={}, expected_channel={}, "
         "has_clarify_answers={}, raw_text_len={}",
         req.req_id,
+        task_id,
         req.channel,
         bool(clarify_answers),
         len(raw_text),
     )
+
+    async def _update_gen_task(**fields) -> None:
+        """更新生成任务状态（静默失败，不阻断 SSE 流）。"""
+        try:
+            from sqlalchemy import update as sa_update
+            async with async_session() as s:
+                stmt = sa_update(AnalysisTask).where(AnalysisTask.id == task_id).values(**fields)
+                await s.execute(stmt)
+                await s.commit()
+        except Exception as e:
+            logger.debug("[API/generate] 更新任务状态失败: {}", str(e)[:120])
 
     # SSE 事件生成器：包装 orchestrator.run_pipeline 的 AsyncGenerator
     async def event_generator():
@@ -115,10 +148,34 @@ async def generate_test_cases(req: GenerateRequest):
                     "event": "message",
                     "data": json.dumps(event, ensure_ascii=False, default=str),
                 }
+                # 同步更新任务进度（基于 SSE stage）
+                stage = event.get("stage", "")
+                progress = event.get("progress", 0)
+                if stage == "done":
+                    await _update_gen_task(
+                        status="completed", phase="done", progress=100,
+                        message="用例生成完成",
+                        completed_at=datetime.now(timezone.utc),
+                        result_json={"case_count": event.get("case_count", 0)},
+                    )
+                elif stage == "error":
+                    await _update_gen_task(
+                        status="failed", phase="generate",
+                        error=event.get("message", "")[:500],
+                        message="生成失败: " + event.get("message", "")[:200],
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                elif progress:
+                    await _update_gen_task(progress=progress, message=event.get("message", "")[:200])
         except Exception as e:
             # 兜底：orchestrator 内部未捕获的异常（正常情况已被 run_pipeline 的
             # try/except 捕获并 yield error 事件，此处为防御性处理）
             logger.error("[API/generate] SSE 流异常: {}", str(e)[:200])
+            await _update_gen_task(
+                status="failed", error=str(e)[:500],
+                message="生成流程异常: " + str(e)[:200],
+                completed_at=datetime.now(timezone.utc),
+            )
             error_event = {
                 "stage": "error",
                 "message": f"生成流程异常: {str(e)[:200]}",
