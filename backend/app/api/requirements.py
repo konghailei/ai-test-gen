@@ -39,7 +39,7 @@ from app.agents.clarify_agent import clarify_agent
 from app.utils.id_gen import gen_requirement_id, gen_task_id
 from app.agents.req_agent import req_agent
 from app.db.database import get_session, async_session
-from app.db.models import Requirement, Project, AnalysisTask
+from app.db.models import Requirement, Project, AnalysisTask, FunctionalPoint, FPDependency
 from app.models.api_schemas import (
     ApiResponse,
     ClarifyAnswerRequest,
@@ -1967,3 +1967,300 @@ async def analyze_requirement_impact(
             "affected_requirements": affected_reqs,
         },
     )
+
+
+# ============================================================================
+# v1.4 功能点（FunctionalPoint）API
+# ============================================================================
+
+from app.core import prompt_manager as pm
+from app.core.llm_client import llm_client
+from app.utils.id_gen import gen_requirement_id  # 复用 ID 生成
+
+
+class FPExtractBPRequest(BaseModel):
+    """BP 提取请求。"""
+    req_id: str
+
+
+class FPSplitRequest(BaseModel):
+    """FP 拆分请求。"""
+    req_id: str
+    bp_names: list[str]  # 用户选中的 BP 名称列表
+
+
+class FPUpdateRequest(BaseModel):
+    """FP 编辑请求。"""
+    name: str | None = None
+    module_id: str | None = None
+    fp_type: str | None = None
+    priority: str | None = None
+
+
+@router.post("/{req_id}/fp/extract-bp", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def fp_extract_bp(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """从需求 SRR 提取候选业务点（BP）。"""
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="需求不存在")
+    srr = req.srr_json or {}
+    modules = ", ".join(req.modules or [])
+
+    # 精简 SRR 去掉大字段
+    srr_snippet = {
+        k: v for k, v in srr.items()
+        if k not in ("_raw_text", "additional_details", "assumptions", "dependencies", "api_definitions", "data_model", "relationships", "non_functional", "ui_rules", "user_roles")
+    }
+    import json as _json
+    snippet_text = _json.dumps(srr_snippet, ensure_ascii=False)[:8000]
+
+    prompt = pm.get("fp_agent", "FP_EXTRACT_BP_USER_PROMPT").format(
+        req_title=req.title, modules=modules, srr_snippet=snippet_text,
+    )
+
+    try:
+        result = await llm_client.call_json(
+            prompt=prompt,
+            system_prompt=pm.get("fp_agent", "FP_EXTRACT_BP_SYSTEM_PROMPT"),
+            schema_hint={"business_points": list},
+            temperature=0.2,
+        )
+        return ApiResponse(success=True, message="ok", data=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"BP 提取失败: {str(e)[:200]}")
+
+
+@router.post("/{req_id}/fp/split", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def fp_split(
+    req_id: str,
+    body: FPSplitRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """在选中的 BP 范围内拆分功能点并持久化。"""
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="需求不存在")
+    srr = req.srr_json or {}
+
+    # 精简 SRR
+    srr_snippet = {
+        k: v for k, v in srr.items()
+        if k not in ("_raw_text", "additional_details", "assumptions", "dependencies", "api_definitions", "data_model", "relationships", "non_functional", "ui_rules", "user_roles")
+    }
+    import json as _json
+    snippet_text = _json.dumps(srr_snippet, ensure_ascii=False)[:6000]
+
+    all_fps = []
+    for bp_name in body.bp_names:
+        prompt = pm.get("fp_agent", "FP_SPLIT_USER_PROMPT").format(
+            bp_name=bp_name, bp_summary="", req_title=req.title, srr_snippet=snippet_text,
+        )
+        try:
+            result = await llm_client.call_json(
+                prompt=prompt,
+                system_prompt=pm.get("fp_agent", "FP_SPLIT_SYSTEM_PROMPT"),
+                schema_hint={"functional_points": list},
+                temperature=0.2,
+            )
+            all_fps.extend(result.get("functional_points", []))
+        except Exception:
+            continue
+
+    created = []
+    for fp in all_fps:
+        fp_id = gen_requirement_id()
+        record = FunctionalPoint(
+            id=fp_id,
+            requirement_id=req_id,
+            module_id=fp.get("suggested_module_id"),
+            name=fp.get("name", "未命名功能点"),
+            fp_type=fp.get("fp_type", "workflow"),
+            priority=req.priority,
+            srr_json={
+                "happy_path": fp.get("happy_path", ""),
+                "alternate_flows": fp.get("alternate_flows", ""),
+                "business_rules": fp.get("business_rules", []),
+                "triggers": fp.get("triggers", ""),
+                "expected_results": fp.get("expected_results", ""),
+                "boundary_elements": fp.get("boundary_elements", ""),
+                "summary": fp.get("summary", ""),
+            },
+            atomicity_check=fp.get("atomicity_check", {}),
+            test_hints=fp.get("test_hints", []),
+        )
+        session.add(record)
+        created.append({
+            "id": fp_id,
+            "name": record.name,
+            "fp_type": record.fp_type,
+            "module_id": record.module_id,
+        })
+
+    # 关联分析
+    if len(created) >= 2:
+        fp_list_text = "\n".join(
+            f"- {f['name']}" for f in created
+        )
+        try:
+            assoc_result = await llm_client.call_json(
+                prompt=pm.get("fp_agent", "FP_ASSOCIATE_USER_PROMPT").format(
+                    req_title=req.title, fp_list=fp_list_text,
+                ),
+                system_prompt=pm.get("fp_agent", "FP_ASSOCIATE_SYSTEM_PROMPT"),
+                schema_hint={"dependencies": list},
+                temperature=0.2,
+            )
+            id_map = {f["name"]: f["id"] for f in created}
+            deps_added = 0
+            for dep in assoc_result.get("dependencies", []):
+                src_id = id_map.get(dep.get("source_fp_name", ""))
+                tgt_id = id_map.get(dep.get("target_fp_name", ""))
+                if src_id and tgt_id and src_id != tgt_id:
+                    session.add(FPDependency(
+                        source_fp_id=src_id,
+                        target_fp_id=tgt_id,
+                        relation_type=dep.get("relation_type", "depends_on"),
+                        description=dep.get("description", ""),
+                    ))
+                    deps_added += 1
+            logger.info("[FP] 关联分析完成: {} 条依赖", deps_added)
+        except Exception:
+            pass
+
+    await session.commit()
+    return ApiResponse(
+        success=True,
+        message=f"已拆分 {len(created)} 个功能点",
+        data={"functional_points": created, "total": len(created)},
+    )
+
+
+@router.get("/{req_id}/fp", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def fp_list(req_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
+    """获取需求的功能点列表。"""
+    result = await session.execute(
+        select(FunctionalPoint).where(
+            FunctionalPoint.requirement_id == req_id
+        ).order_by(FunctionalPoint.created_at)
+    )
+    fps = result.scalars().all()
+    return ApiResponse(success=True, message="ok", data={
+        "items": [
+            {
+                "id": fp.id, "name": fp.name, "fp_type": fp.fp_type,
+                "module_id": fp.module_id, "priority": fp.priority,
+                "srr_json": fp.srr_json, "atomicity_check": fp.atomicity_check,
+                "test_hints": fp.test_hints,
+                "vectorization_status": fp.vectorization_status,
+                "created_at": fp.created_at.isoformat() if fp.created_at else "",
+            }
+            for fp in fps
+        ],
+        "total": len(fps),
+    })
+
+
+@router.get("/{req_id}/fp/dependencies", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def fp_dependencies(req_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
+    """获取功能点依赖关系。"""
+    fp_ids_result = await session.execute(
+        select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
+    )
+    fp_ids = {r[0] for r in fp_ids_result.fetchall()}
+
+    dep_result = await session.execute(
+        select(FPDependency).where(FPDependency.source_fp_id.in_(fp_ids))
+    )
+    deps = dep_result.scalars().all()
+
+    # 获取名称映射
+    all_ids = {d.source_fp_id for d in deps} | {d.target_fp_id for d in deps}
+    name_map = {}
+    if all_ids:
+        names_result = await session.execute(
+            select(FunctionalPoint.id, FunctionalPoint.name).where(FunctionalPoint.id.in_(all_ids))
+        )
+        name_map = {row[0]: row[1] for row in names_result.fetchall()}
+
+    return ApiResponse(success=True, message="ok", data={
+        "dependencies": [
+            {
+                "id": d.id, "source_fp_id": d.source_fp_id,
+                "source_name": name_map.get(d.source_fp_id, ""),
+                "target_fp_id": d.target_fp_id,
+                "target_name": name_map.get(d.target_fp_id, ""),
+                "relation_type": d.relation_type,
+                "description": d.description,
+            }
+            for d in deps
+        ]
+    })
+
+
+@router.patch("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def fp_update(
+    req_id: str, fp_id: str, body: FPUpdateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """编辑功能点（名称/模块/类型/优先级）。"""
+    fp = await session.get(FunctionalPoint, fp_id)
+    if not fp or fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="功能点不存在")
+    if body.name is not None:
+        fp.name = body.name
+    if body.module_id is not None:
+        fp.module_id = body.module_id
+    if body.fp_type is not None:
+        fp.fp_type = body.fp_type
+    if body.priority is not None:
+        fp.priority = body.priority
+    await session.commit()
+    return ApiResponse(success=True, message="功能点已更新")
+
+
+@router.get("/{req_id}/fp/search-names", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def fp_search_names(
+    req_id: str, q: str = Query(min_length=1),
+    product_id: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """搜索已有功能点名称（跨需求复用命名）。"""
+    stmt = select(FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.requirement_id).where(
+        FunctionalPoint.name.ilike(f"%{q}%")
+    ).order_by(FunctionalPoint.created_at.desc()).limit(20)
+
+    if product_id:
+        req_ids_result = await session.execute(
+            select(Requirement.id).where(Requirement.product_id == product_id)
+        )
+        req_ids = {r[0] for r in req_ids_result.fetchall()}
+        if req_ids:
+            stmt = stmt.where(FunctionalPoint.requirement_id.in_(req_ids))
+
+    result = await session.execute(stmt)
+    rows = result.fetchall()
+    return ApiResponse(success=True, message="ok", data={
+        "names": [{"id": r[0], "name": r[1], "req_id": r[2]} for r in rows],
+    })
+
+
+@router.delete("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def fp_delete(req_id: str, fp_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
+    """删除功能点。"""
+    fp = await session.get(FunctionalPoint, fp_id)
+    if not fp or fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="功能点不存在")
+    # 删除关联依赖
+    dep_result = await session.execute(
+        select(FPDependency).where(
+            (FPDependency.source_fp_id == fp_id) | (FPDependency.target_fp_id == fp_id)
+        )
+    )
+    for dep in dep_result.scalars().all():
+        await session.delete(dep)
+    await session.delete(fp)
+    await session.commit()
+    return ApiResponse(success=True, message="功能点已删除")

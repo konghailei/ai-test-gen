@@ -9,7 +9,7 @@ import {
   Search, Trash2, Edit3, GitBranch, Puzzle, Link2, GripVertical,
   Maximize, Minimize, Loader2, Unlink, X, ArrowLeftRight,
 } from 'lucide-react'
-import { dependencyGraph, products as prodApi } from '../api/client'
+import { dependencyGraph, products as prodApi, requirements as reqApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Module as ModuleType } from '../types'
 
@@ -181,6 +181,10 @@ export default function DependencyGraph() {
   const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; nodeId?: string; edgeId?: string } | null>(null)
 
+  // v1.4: 图谱类型切换
+  const [graphType, setGraphType] = useState<'modules' | 'fp'>('modules')
+  const [fpReqIds, setFpReqIds] = useState<string[]>([])
+
   // Module picker state
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerExcludes, setPickerExcludes] = useState<string[]>([])
@@ -192,13 +196,11 @@ export default function DependencyGraph() {
       prodApi.listModules(selectedProductId)
         .then(mods => setAllModules(mods || []))
         .catch(() => setAllModules([]))
-      loadGraph()
+      graphType === 'fp' ? loadFPGraph() : loadGraph()
     } else {
-      setNodes([])
-      setEdges([])
-      setAllModules([])
+      setNodes([]); setEdges([]); setAllModules([])
     }
-  }, [selectedProductId])
+  }, [selectedProductId, graphType])
 
   function autoLayout(index: number, total: number) {
     const cols = Math.ceil(Math.sqrt(total))
@@ -224,6 +226,60 @@ export default function DependencyGraph() {
       )
       setNodes(graphNodes)
       setEdges(graphEdges)
+    } catch { }
+    setLoading(false)
+  }
+
+  // ========== v1.4 FP Graph ==========
+  const loadFPGraph = async () => {
+    if (!selectedProductId) return
+    setLoading(true)
+    try {
+      // Get all requirements for this product to find FPs
+      const reqs = await reqApi.list(1, 200, selectedProductId, undefined, { status: 'archived' }) as any
+      const reqItems: any[] = reqs?.items || reqs || []
+      const fpNodes: Node[] = []
+      const fpEdges: Edge[] = []
+      const nameMap: Record<string, string> = {}
+
+      for (const req of reqItems.slice(0, 10)) {
+        try {
+          const r = await reqApi.fpList(req.id)
+          for (const fp of (r.items || [])) {
+            fpNodes.push({
+              id: fp.id,
+              type: 'moduleNode',
+              position: autoLayout(fpNodes.length, 50),
+              data: { label: fp.name, description: `[${req.title?.slice(0, 30) || req.id}] ${fp.fp_type || ''}` },
+            })
+            nameMap[fp.id] = fp.name
+          }
+        } catch { }
+      }
+
+      // Load dependencies
+      const depIds = new Set(fpNodes.map(n => n.id))
+      if (depIds.size > 1) {
+        for (const req of reqItems.slice(0, 10)) {
+          try {
+            const r = await reqApi.fpDependencies(req.id)
+            for (const d of (r.dependencies || [])) {
+              if (depIds.has(d.source_fp_id) && depIds.has(d.target_fp_id)) {
+                fpEdges.push({
+                  id: `e-${d.id}`,
+                  source: d.source_fp_id,
+                  target: d.target_fp_id,
+                  label: d.relation_type,
+                  style: { stroke: d.relation_type === 'depends_on' ? '#818cf8' : '#22d3ee' },
+                })
+              }
+            }
+          } catch { }
+        }
+      }
+
+      setNodes(fpNodes)
+      setEdges(fpEdges)
     } catch { }
     setLoading(false)
   }
@@ -410,7 +466,20 @@ export default function DependencyGraph() {
       {/* Top Toolbar */}
       <div className="flex items-center gap-3 px-5 py-2.5 border-b border-slate-200 bg-white shrink-0">
         <GitBranch className="w-5 h-5 text-primary-500" />
-        <h1 className="text-sm font-semibold text-slate-800">模块依赖图谱</h1>
+        <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+          <button onClick={() => { setGraphType('modules'); loadGraph() }}
+            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+              graphType === 'modules' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+            }`}>
+            模块依赖
+          </button>
+          <button onClick={() => { setGraphType('fp'); loadFPGraph() }}
+            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+              graphType === 'fp' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+            }`}>
+            功能点依赖
+          </button>
+        </div>
         {productName && <span className="text-xs text-slate-400">· {productName}</span>}
         <div className="flex-1" />
 

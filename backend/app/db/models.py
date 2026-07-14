@@ -575,3 +575,86 @@ class ReqPattern(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc)
     )
+
+
+# ============================================================================
+# 15. 功能点表（functional_points，v1.4）
+# ============================================================================
+
+class FunctionalPoint(Base):
+    """功能点表。需求按功能点拆分的最小可测单元。
+
+    设计依据：industry BP→FP→Data 三级粒度模型（51testing/UML.org）
+    FP 原子性三要素：明确触发操作 + 可验证业务结果 + 有限元素边界
+    """
+    __tablename__ = "functional_points"
+    __table_args__ = (
+        UniqueConstraint("requirement_id", "name", name="uq_fp_req_name"),
+        Index("idx_fp_module", "module_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    requirement_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("requirements.id", ondelete="CASCADE"), index=True
+    )
+    module_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("modules.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    fp_type: Mapped[str] = mapped_column(
+        String(32), default="workflow",
+        comment="calculation / constraint / workflow / api_behavior / data_record / config"
+    )
+    priority: Mapped[str] = mapped_column(String(4), default="P2")
+    srr_json: Mapped[dict] = mapped_column(JSON, default=dict, comment="功能点专属 SRR（精简版）")
+    atomicity_check: Mapped[dict] = mapped_column(
+        JSON, default=dict,
+        comment="三要素自检：trigger / result / boundary，缺项标记 needs_review"
+    )
+    test_hints: Mapped[list] = mapped_column(JSON, default=list, comment="测试提示（种子用例）")
+    vectorization_status: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+# ============================================================================
+# 16. 功能点依赖表（fp_dependencies，v1.4）
+# ============================================================================
+
+class FPDependency(Base):
+    """功能点依赖关系表。
+
+    关系类型扩展自 docs/02 §2.4，支持 5 种关联：
+    - depends_on: A 的前置条件是 B（B 完成 A 才能执行）
+    - data_flows: A 的输出数据是 B 的输入
+    - invariants: A 和 B 共享同一全局约束
+    - lifecycle_scenarios: A 和 B 属于同一端到端流程
+    - conflicts_with: A 和 B 互斥（不应同时生效）
+    """
+    __tablename__ = "fp_dependencies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_fp_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("functional_points.id", ondelete="CASCADE"), index=True
+    )
+    target_fp_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("functional_points.id", ondelete="CASCADE"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(
+        String(32), default="depends_on",
+        comment="depends_on / data_flows / invariants / lifecycle_scenarios / conflicts_with"
+    )
+    description: Mapped[str] = mapped_column(Text, default="", comment="关系说明")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        Index("idx_fp_dep_src_tgt", "source_fp_id", "target_fp_id"),
+        UniqueConstraint("source_fp_id", "target_fp_id", "relation_type", name="uq_fp_dep_edge"),
+    )

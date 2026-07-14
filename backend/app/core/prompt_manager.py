@@ -14,6 +14,7 @@ from app.prompts import (
     review_agent,
     impact_agent,
     knowledge_qa,
+    fp_agent,
 )
 
 # ============================================================================
@@ -93,6 +94,25 @@ _PROMPT_REGISTRY: list[dict] = [
         "name": "CHAT_SYSTEM_PROMPT",
         "default": knowledge_qa.CHAT_SYSTEM_PROMPT,
         "description": "知识问答追问系统指令 — 多轮对话中的总结/提炼/修改",
+    },
+    # FP（功能点拆分，v1.4）
+    {
+        "module": "fp_agent",
+        "name": "FP_EXTRACT_BP_SYSTEM_PROMPT",
+        "default": fp_agent.FP_EXTRACT_BP_SYSTEM_PROMPT,
+        "description": "FP-Agent BP 提取 — 从 SRR 提取候选业务点",
+    },
+    {
+        "module": "fp_agent",
+        "name": "FP_SPLIT_SYSTEM_PROMPT",
+        "default": fp_agent.FP_SPLIT_SYSTEM_PROMPT,
+        "description": "FP-Agent FP 拆分 — 按 R1-R4 规则拆分功能点",
+    },
+    {
+        "module": "fp_agent",
+        "name": "FP_ASSOCIATE_SYSTEM_PROMPT",
+        "default": fp_agent.FP_ASSOCIATE_SYSTEM_PROMPT,
+        "description": "FP-Agent 关联分析 — 分析功能点间关联关系",
     },
 ]
 

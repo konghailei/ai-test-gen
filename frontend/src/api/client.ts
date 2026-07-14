@@ -5,6 +5,7 @@ import type {
   ApiResponse, Requirement, RequirementDetail, TestCase, TestPattern,
   KnowledgeStats, ClarifyQuestion, PaginatedData, LLMConfig, HealthStatus, KbFlowback, KbEntry, KbQAAskResponse, KbQAReference, KbQARecord,
   KbAugmentation, FieldConflict, ClarifyHistoryEntry, KbDiagnostics, KbModelStatus, AnalysisTaskInfo,
+  FPBusinessPoint, FPItem, FPDependencyItem, FPNameSuggestion,
 } from '../types'
 
 const BASE = '/api'
@@ -233,6 +234,28 @@ export const requirements = {
   /** v2.14: 按需求 ID 查询关联的最新任务 */
   getTaskByReq: (reqId: string) =>
     request<AnalysisTaskInfo | null>(`/requirements/${reqId}/task`),
+  /** v1.4 功能点 */
+  fpExtractBP: (reqId: string) =>
+    request<{ business_points: FPBusinessPoint[] }>(`/requirements/${reqId}/fp/extract-bp`, { method: 'POST' }),
+  fpSplit: (reqId: string, bpNames: string[]) =>
+    request<{ functional_points: { id: string; name: string; fp_type: string; module_id: string | null }[]; total: number }>(
+      `/requirements/${reqId}/fp/split`, { method: 'POST', body: JSON.stringify({ req_id: reqId, bp_names: bpNames }) }
+    ),
+  fpList: (reqId: string) =>
+    request<{ items: FPItem[]; total: number }>(`/requirements/${reqId}/fp`),
+  fpDependencies: (reqId: string) =>
+    request<{ dependencies: FPDependencyItem[] }>(`/requirements/${reqId}/fp/dependencies`),
+  fpUpdate: (reqId: string, fpId: string, updates: { name?: string; module_id?: string; fp_type?: string }) =>
+    request<{ success: boolean }>(`/requirements/${reqId}/fp/${fpId}`, {
+      method: 'PATCH', body: JSON.stringify(updates),
+    }),
+  fpSearchNames: (reqId: string, q: string, productId?: string) => {
+    const p = new URLSearchParams({ q })
+    if (productId) p.append('product_id', productId)
+    return request<{ names: FPNameSuggestion[] }>(`/requirements/${reqId}/fp/search-names?${p}`)
+  },
+  fpDelete: (reqId: string, fpId: string) =>
+    request<{ success: boolean }>(`/requirements/${reqId}/fp/${fpId}`, { method: 'DELETE' }),
 }
 
 // ============================================================

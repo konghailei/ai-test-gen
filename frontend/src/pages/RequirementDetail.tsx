@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, memo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
+import FunctionalPoints from '../components/FunctionalPoints'
 
 // ============================================================================
 // Markdown 自定义渲染组件
@@ -173,8 +174,8 @@ export default function RequirementDetail() {
   // 确认生成最终SRR
   const [finalizing, setFinalizing] = useState(false)
 
-  // Tab 切换：'srr' | 'raw' | 'kb' | 'impact' | 'history'
-  const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact' | 'history'>('srr')
+  // Tab 切换：'srr' | 'raw' | 'kb' | 'impact' | 'history' | 'fp'
+  const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact' | 'history' | 'fp'>('srr')
 
   // 澄清历史
   const [clarifyHistory, setClarifyHistory] = useState<ClarifyHistoryEntry[]>([])
@@ -1087,6 +1088,17 @@ export default function RequirementDetail() {
               </span>
             )}
           </button>
+          <button
+            onClick={() => setActiveTab('fp')}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-all duration-150 ${
+              activeTab === 'fp'
+                ? 'border-primary-500 text-primary-700'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <Layers className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
+            功能点
+          </button>
         </div>
 
         {/* Tab 内容 */}
@@ -1132,6 +1144,8 @@ export default function RequirementDetail() {
               onNavigateToClarify={() => navigate(`/requirements/${id}/clarify`)}
               status={detail.status}
             />
+          ) : activeTab === 'fp' ? (
+            <FunctionalPoints reqId={id!} productId={detail.product_id} />
           ) : null}
         </div>
       </div>

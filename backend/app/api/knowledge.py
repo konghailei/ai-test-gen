@@ -542,7 +542,22 @@ async def get_kb_diagnostics() -> ApiResponse:
             "object_storage": "MinIO — Milvus 的存储后端，存储向量数据文件（非独立 KB 管理器）",
             "coordination": "etcd — Milvus 的协调服务",
         },
+        "warnings": [],
     }
+
+    # 检测 zhparser 中文分词
+    try:
+        from sqlalchemy import text as sa_text
+        async for tmp_session in get_session():
+            ts = await tmp_session.execute(sa_text("SELECT 1 FROM pg_ts_config WHERE cfgname = 'chinese'"))
+            if not ts.fetchone():
+                diag["warnings"].append(
+                    "zhparser 中文分词未安装：BM25 全文检索使用 simple 配置，中文分词效果有限。"
+                    "建议在 PostgreSQL 容器中安装 postgresql-16-zhparser 并重启。"
+                )
+            break
+    except Exception:
+        pass
     try:
         diag["vector_db"]["connected"] = True
         model_status = await asyncio.to_thread(vector_store.model_status)

@@ -323,6 +323,7 @@ export interface KbDiagnostics {
     object_storage: string
     coordination: string
   }
+  warnings?: string[]
 }
 
 export interface KbModelStatus {
@@ -391,4 +392,42 @@ export interface PromptItem {
   default_value: string
   description: string
   updated_at: string
+}
+
+// ============================================================================
+// v1.4 功能点（FunctionalPoint）
+// ============================================================================
+export interface FPBusinessPoint {
+  name: string
+  summary: string
+  suggested_module_id?: string
+}
+
+export interface FPItem {
+  id: string
+  name: string
+  fp_type: string
+  module_id: string | null
+  priority: string
+  srr_json: Record<string, any>
+  atomicity_check: Record<string, boolean>
+  test_hints: string[]
+  vectorization_status: string | null
+  created_at: string
+}
+
+export interface FPDependencyItem {
+  id: number
+  source_fp_id: string
+  source_name: string
+  target_fp_id: string
+  target_name: string
+  relation_type: string
+  description: string
+}
+
+export interface FPNameSuggestion {
+  id: string
+  name: string
+  req_id: string
 }

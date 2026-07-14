@@ -101,6 +101,9 @@ async def init_db() -> None:
                 # 产品隔离字段（替代归档时硬编码的 PROD-DEFAULT）
                 ("product_id", "VARCHAR(64) DEFAULT 'PROD-DEFAULT'", "product_id"),
             ],
+            # v1.4: 功能点新表（Base.metadata.create_all 自动创建）
+            "functional_points": [],
+            "fp_dependencies": [],
         }
 
         def _migrate(conn_sync):

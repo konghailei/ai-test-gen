@@ -64,6 +64,19 @@ export default function AdminKnowledgeBase() {
         </button>
       </div>
 
+      {/* 系统警告 */}
+      {diag?.warnings && diag.warnings.length > 0 && (
+        <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
+          <div className="flex items-center gap-2 text-amber-700">
+            <AlertTriangle className="w-5 h-5" />
+            <span className="text-sm font-semibold">系统警告（{diag.warnings.length} 条）</span>
+          </div>
+          {diag.warnings.map((w, i) => (
+            <p key={i} className="text-xs text-amber-600 leading-relaxed ml-7">{w}</p>
+          ))}
+        </div>
+      )}
+
       {/* 统计 */}
       {stats && (
         <div className="grid grid-cols-4 gap-4">
