@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield } from 'lucide-react'
-import { settings as settingsApi, health, auth } from '../api/client'
+import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database } from 'lucide-react'
+import { settings as settingsApi, health, auth, knowledge } from '../api/client'
 import type { LLMConfig, LLMProviderItem, HealthStatus } from '../types'
 
 const DEFAULT_PROVIDER: LLMProviderItem = {
@@ -37,6 +37,18 @@ export default function Settings() {
   const [showNewPwd, setShowNewPwd] = useState(false)
   const [showCurrentPwd, setShowCurrentPwd] = useState(false)
 
+  // KB 专属 LLM 选择器
+  const [kbLlmProvider, setKbLlmProvider] = useState('')
+  const [kbLlmProviders, setKbLlmProviders] = useState<Array<{ provider: string; provider_label: string; model: string }>>([])
+  const [kbLlmLoading, setKbLlmLoading] = useState(false)
+
+  const loadKbLlm = () => {
+    knowledge.getKbLlm().then(r => {
+      setKbLlmProvider(r.provider || '')
+      setKbLlmProviders(r.providers || [])
+    }).catch(() => {})
+  }
+
   const loadSettings = () => {
     setLoading(true)
     Promise.all([settingsApi.get(), health()]).then(([c, h]) => {
@@ -49,6 +61,7 @@ export default function Settings() {
         setProviders([{ ...DEFAULT_PROVIDER }])
       }
     }).catch(() => {}).finally(() => setLoading(false))
+    loadKbLlm()
   }
 
   useEffect(() => { loadSettings() }, [])
@@ -460,6 +473,43 @@ export default function Settings() {
               </button>
               <button onClick={() => { setPasswordFormOpen(false); setPasswordMsg(null) }} className="btn-secondary text-sm">取消</button>
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* KB 专属 LLM 配置 */}
+      <div className="card">
+        <h2 className="section-title flex items-center gap-2 mb-4">
+          <Database className="w-4 h-4 text-primary-500" /> 知识库 LLM
+        </h2>
+        <p className="text-xs text-slate-400 mb-4">
+          知识库问答（/ask）和需求澄清（ClarifyAgent）使用独立 LLM，可选指定供应商优化成本与性能。
+        </p>
+        {kbLlmProviders.length === 0 ? (
+          <p className="text-xs text-slate-400">暂无可用 LLM 供应商，请先在「LLM 供应商」中配置 API Key。</p>
+        ) : (
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-slate-600">当前：</span>
+            <select
+              value={kbLlmProvider}
+              onChange={e => {
+                const v = e.target.value
+                setKbLlmLoading(true)
+                knowledge.setKbLlm(v).then(() => {
+                  setKbLlmProvider(v)
+                }).catch(() => {}).finally(() => setKbLlmLoading(false))
+              }}
+              disabled={kbLlmLoading}
+              className="select-field text-sm max-w-[240px]"
+            >
+              <option value="">跟随全局（默认主供应商）</option>
+              {kbLlmProviders.map(p => (
+                <option key={p.provider} value={p.provider}>
+                  {p.provider_label} ({p.model})
+                </option>
+              ))}
+            </select>
+            {kbLlmLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
           </div>
         )}
       </div>

@@ -17,6 +17,7 @@ export function statusBadge(s: string): string {
   const map: Record<string, string> = {
     active: 'badge-active', approved: 'badge-approved', reviewed: 'badge-reviewed',
     draft: 'badge-draft', rejected: 'badge-rejected',
+    analyzing: 'badge-info',
   }
   return map[s] || 'badge-draft'
 }
@@ -28,6 +29,7 @@ export const STATUS_LABELS: Record<string, string> = {
   superseded: '已替代',
   deprecated: '已废弃',
   draft: '草稿',
+  analyzing: '分析中',
 }
 
 /** 用例状态中文映射 */

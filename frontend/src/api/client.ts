@@ -4,7 +4,7 @@
 import type {
   ApiResponse, Requirement, RequirementDetail, TestCase, TestPattern,
   KnowledgeStats, ClarifyQuestion, PaginatedData, LLMConfig, HealthStatus, KbFlowback, KbEntry, KbQAAskResponse, KbQAReference, KbQARecord,
-  KbAugmentation, FieldConflict, ClarifyHistoryEntry, KbDiagnostics, KbModelStatus,
+  KbAugmentation, FieldConflict, ClarifyHistoryEntry, KbDiagnostics, KbModelStatus, AnalysisTaskInfo,
 } from '../types'
 
 const BASE = '/api'
@@ -215,6 +215,24 @@ export const requirements = {
       indirect_modules: { id: string; name: string; reason: string; depth: number }[]
       affected_requirements: { id: string; title: string; priority: string; modules: string[] }[]
     }>(`/requirements/${reqId}/impact`),
+
+  /** v2.14: 查询分析任务列表（任务管理） */
+  listTasks: (params?: { status?: string; task_type?: string; product_id?: string; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams()
+    if (params?.status) query.append('status', params.status)
+    if (params?.task_type) query.append('task_type', params.task_type)
+    if (params?.product_id) query.append('product_id', params.product_id)
+    if (params?.limit) query.append('limit', String(params.limit))
+    if (params?.offset) query.append('offset', String(params.offset))
+    const qs = query.toString()
+    return request<{ items: AnalysisTaskInfo[]; total: number }>(`/requirements/tasks${qs ? '?' + qs : ''}`)
+  },
+  /** v2.14: 查询单个任务状态（轮询进度） */
+  getTask: (taskId: string) =>
+    request<AnalysisTaskInfo>(`/requirements/tasks/${taskId}`),
+  /** v2.14: 按需求 ID 查询关联的最新任务 */
+  getTaskByReq: (reqId: string) =>
+    request<AnalysisTaskInfo | null>(`/requirements/${reqId}/task`),
 }
 
 // ============================================================

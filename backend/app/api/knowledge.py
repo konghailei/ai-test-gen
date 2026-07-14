@@ -246,12 +246,14 @@ async def list_kb_entries(
         logger.warning("[API/knowledge] 获取向量库需求列表失败: {}", str(e)[:100])
 
     # 解析向量化筛选参数
-    vectorized_filter: bool | None = None
+    vectorized_filter: bool | str | None = None
     if vectorized is not None:
         if vectorized.lower() in ("true", "1", "yes"):
             vectorized_filter = True
         elif vectorized.lower() in ("false", "0", "no"):
             vectorized_filter = False
+        elif vectorized.lower() in ("processing", "failed"):
+            vectorized_filter = vectorized.lower()
 
     # 从 PostgreSQL 读取已归档的需求（status='archived'）
     if not type_filter or type_filter == "requirement":
@@ -266,7 +268,11 @@ async def list_kb_entries(
         for r in reqs:
             is_vectorized = r.id in vectorized_ids
             # 向量化状态过滤
-            if vectorized_filter is not None and is_vectorized != vectorized_filter:
+            if isinstance(vectorized_filter, str):
+                status_match = (r.vectorization_status or ("completed" if is_vectorized else None))
+                if status_match != vectorized_filter:
+                    continue
+            elif vectorized_filter is not None and is_vectorized != vectorized_filter:
                 continue
             # 模块过滤（任一所属模块命中筛选集合即返回，与 KB 问答的 modules 语义一致）
             if module_filter_set:
@@ -290,6 +296,8 @@ async def list_kb_entries(
                 "archived_at": (r.archived_at or r.updated_at).isoformat() if (r.archived_at or r.updated_at) else "",
                 "go_live_date": r.go_live_date.isoformat() if r.go_live_date else "",
                 "vectorized": is_vectorized,
+                "vectorization_status": r.vectorization_status or ("completed" if is_vectorized else None),
+                "vectorization_error": r.vectorization_error,
                 "created_at": r.created_at.isoformat() if r.created_at else "",
             })
 
@@ -585,6 +593,12 @@ async def reverctorize_requirement(entry_id: str, session: AsyncSession = Depend
 
     project_version = await _project_version(session, record.project_id)
     meta = _build_requirement_kb_meta(record, project_version)
+
+    # 标记向量化状态为"进行中"，清除旧错误
+    record.vectorization_status = "processing"
+    record.vectorization_error = None
+    await session.commit()
+
     queued = _dispatch_embedding_task(record.id, record.srr_json or {}, meta)
     return ApiResponse(
         success=True,
@@ -622,9 +636,12 @@ async def reverctorize_missing(session: AsyncSession = Depends(get_session)) -> 
         project_version = await _project_version(session, r.project_id)
         meta = _build_requirement_kb_meta(r, project_version)
         if _dispatch_embedding_task(r.id, r.srr_json or {}, meta):
+            r.vectorization_status = "processing"
+            r.vectorization_error = None
             queued += 1
         else:
             failed += 1
+    await session.commit()
 
     missing = len(records) - len(vectorized_ids)
     return ApiResponse(

@@ -287,14 +287,14 @@ class ReqAgent:
         # v2.9：增量文档兜底识别——若 LLM 未输出 _is_incremental，但原文含增量信号，
         # 则补标记并生成默认基线缺口，确保下游 ClarifyAgent 强制触发 KB 基础补全。
         # （LLM 已输出 _is_incremental 时尊重其判断，不覆盖）
+        # v2.14 修复：移除硬编码登录相关 _baseline_gaps（污染非登录需求，如架构文档），
+        # 改为留空列表，交由 ClarifyAgent 基于原文动态推导真实缺口。
         if not srr.get("_is_incremental") and raw_requirement:
             if self._looks_like_incremental(raw_requirement):
                 srr["_is_incremental"] = True
-                srr.setdefault("_baseline_gaps", [
-                    "账号密码登录主流程", "密码复杂度与长度规则",
-                    "登录失败锁定策略", "登录错误提示规范", "验证码发送与校验规则",
-                ])
-                logger.info("[ReqAgent] 检测到增量文档信号，标记 _is_incremental=true（基线补全将由 ClarifyAgent 触发）")
+                # 不注入硬编码缺口，留给 ClarifyAgent 基于原文动态推导
+                srr.setdefault("_baseline_gaps", [])
+                logger.info("[ReqAgent] 检测到增量文档信号，标记 _is_incremental=true（基线缺口由 ClarifyAgent 推导）")
 
         return srr
 
@@ -304,6 +304,10 @@ class ReqAgent:
 
         仅作为 LLM 未输出 _is_incremental 时的兜底，避免漏标导致增量文档
         被当成完整独立需求、无法触发知识库基线补全。
+
+        v2.14 修复：移除"标题含版本号视为增量信号"的过宽匹配——
+        架构文档普遍含 v2.0 等版本号但并非增量文档，误触发率过高。
+        仅保留明确的增量语义信号。
         """
         import re
         if not text:
@@ -316,9 +320,7 @@ class ReqAgent:
         for pat in signals:
             if re.search(pat, text):
                 return True
-        # 标题含版本号（如 V2.0 / 第二版 / 2.0）也视为增量信号
-        if re.search(r"V\d+\.\d+\s*（|第.{1,3}版|v\d+\.\d+", text[:200]):
-            return True
+        # v2.14：移除标题含版本号的过宽匹配（v\d+\.\d+ 误触发架构文档）
         return False
 
     # 字段名别名映射表

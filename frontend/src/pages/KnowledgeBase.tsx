@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, memo } from 'react'
-import { Database, FileText, TestTube, Trash2, Filter, Loader2, CheckCircle2, AlertTriangle, RefreshCw, Search, Calendar, X, Save, Layers } from 'lucide-react'
+import { Database, FileText, TestTube, Trash2, Filter, Loader2, CheckCircle2, AlertTriangle, RefreshCw, Search, Calendar, X, Save, Layers, XCircle } from 'lucide-react'
 import { knowledge, requirements as reqApi, products as prodApi } from '../api/client'
 import type { KbEntry, KbModelStatus, Module } from '../types'
 import { useProduct } from '../store/ProductContext'
@@ -140,10 +140,6 @@ export default function KnowledgeBase() {
   // 修改上线时间弹窗 — 只保留 entry 引用（日期/保存状态由 memo 组件内部管理）
   const [editingEntry, setEditingEntry] = useState<KbEntry | null>(null)
 
-  // KB 专属 LLM 选择器
-  const [kbLlmProvider, setKbLlmProvider] = useState('')
-  const [llmProviders, setLlmProviders] = useState<Array<{ provider: string; provider_label: string; model: string }>>([])
-
   // 加载当前产品的模块列表（用于模块筛选 chips）
   useEffect(() => {
     setFilterModules([])  // 切换产品时清空已选模块
@@ -170,12 +166,12 @@ export default function KnowledgeBase() {
     setLoading(false)
   }
 
-  // 切换模块筛选（多选）
-  const toggleFilterModule = (moduleName: string) => {
+  // 切换模块筛选（多选，按模块 ID 匹配）
+  const toggleFilterModule = (moduleId: string) => {
     setFilterModules(prev =>
-      prev.includes(moduleName)
-        ? prev.filter(m => m !== moduleName)
-        : [...prev, moduleName]
+      prev.includes(moduleId)
+        ? prev.filter(m => m !== moduleId)
+        : [...prev, moduleId]
     )
   }
 
@@ -188,14 +184,6 @@ export default function KnowledgeBase() {
 
   useEffect(() => { loadEntries() }, [selectedProductId, filterType, filterVectorized, filterModules])
   useEffect(() => { loadModelStatus() }, [])
-  // 加载 KB 专属 LLM 配置
-  useEffect(() => {
-    knowledge.getKbLlm().then(r => {
-      setKbLlmProvider(r.provider || '')
-      setLlmProviders(r.providers || [])
-    }).catch(() => {})
-  }, [])
-
   // 搜索防抖
   useEffect(() => {
     const t = setTimeout(() => { loadEntries() }, 300)
@@ -274,28 +262,7 @@ export default function KnowledgeBase() {
     <div className="space-y-6">
       <div>
         <h1 className="page-title">知识库</h1>
-        <div className="flex items-center justify-between mt-1">
-          <p className="text-sm text-slate-500">已归档需求与测试用例管理 · 显示向量库与关系库双状态</p>
-          {llmProviders.length > 0 && (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400">知识库 LLM：</span>
-              <select
-                value={kbLlmProvider}
-                onChange={e => {
-                  const v = e.target.value
-                  knowledge.setKbLlm(v).then(() => setKbLlmProvider(v)).catch(() => {})
-                }}
-                className="select-field text-xs max-w-[180px]"
-              >
-                {llmProviders.map(p => (
-                  <option key={p.provider} value={p.provider}>
-                    {p.provider_label} ({p.model})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-        </div>
+        <p className="text-sm text-slate-500 mt-1">已归档需求与测试用例管理 · 显示向量库与关系库双状态</p>
       </div>
 
       {modelStatus && !modelStatus.ready && (
@@ -353,9 +320,11 @@ export default function KnowledgeBase() {
             <option value="test_case">测试用例</option>
           </select>
           <select value={filterVectorized} onChange={e => setFilterVectorized(e.target.value)}
-            className="select-field text-sm max-w-[120px]">
+            className="select-field text-sm max-w-[130px]">
             <option value="">向量化状态</option>
             <option value="true">已向量化</option>
+            <option value="processing">向量化中</option>
+            <option value="failed">向量化失败</option>
             <option value="false">未向量化</option>
           </select>
           <div className="relative flex-1 min-w-[180px] max-w-xs">
@@ -385,11 +354,11 @@ export default function KnowledgeBase() {
               </button>
             )}
             {availableModules.map(m => {
-              const selected = filterModules.includes(m.name)
+              const selected = filterModules.includes(m.id)
               return (
                 <button
                   key={m.id}
-                  onClick={() => toggleFilterModule(m.name)}
+                  onClick={() => toggleFilterModule(m.id)}
                   className={`px-2 py-0.5 text-[11px] rounded-full transition-colors ${
                     selected
                       ? 'bg-primary-500 text-white'
@@ -408,8 +377,10 @@ export default function KnowledgeBase() {
 
         {/* 图例 */}
         <div className="flex items-center gap-4 mb-3 text-[11px] text-slate-400 flex-wrap">
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-emerald-400" /> 已归档（关系库）</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-blue-400" /> 已向量化（Milvus）</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-emerald-400" /> 已归档</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-emerald-400" /> 已向量化</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-blue-400" /> 向量化中</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-red-400" /> 向量化失败</span>
           <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-amber-400" /> 未向量化</span>
         </div>
 
@@ -437,9 +408,17 @@ export default function KnowledgeBase() {
                         <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-emerald-50 text-emerald-600 flex items-center gap-0.5">
                           <CheckCircle2 className="w-2.5 h-2.5" /> 已归档
                         </span>
-                        {entry.vectorized ? (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-blue-50 text-blue-600 flex items-center gap-0.5">
+                        {entry.vectorization_status === 'processing' ? (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-blue-50 text-blue-600 flex items-center gap-0.5" title="Celery 任务进行中，写入 Milvus…">
+                            <Loader2 className="w-2.5 h-2.5 animate-spin" /> 向量化中
+                          </span>
+                        ) : entry.vectorized ? (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-emerald-50 text-emerald-600 flex items-center gap-0.5">
                             <CheckCircle2 className="w-2.5 h-2.5" /> 已向量化
+                          </span>
+                        ) : entry.vectorization_status === 'failed' ? (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-red-50 text-red-600 flex items-center gap-0.5" title={entry.vectorization_error || '向量化任务失败（Celery 重试耗尽）'}>
+                            <XCircle className="w-2.5 h-2.5" /> 向量化失败
                           </span>
                         ) : (
                           <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-amber-50 text-amber-600 flex items-center gap-0.5" title="需求已归档但向量库中未找到向量，可能归档时写入失败">
@@ -450,7 +429,7 @@ export default function KnowledgeBase() {
                     ) : (
                       <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-accent-50 text-accent-600">用例</span>
                     )}
-                    {entry.type === 'requirement' && !entry.vectorized && (
+                    {entry.type === 'requirement' && !entry.vectorized && entry.vectorization_status !== 'processing' && (
                       <button
                         onClick={() => handleRevectorize(entry)}
                         disabled={revectorizingIds.has(entry.id)}

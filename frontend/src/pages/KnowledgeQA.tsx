@@ -81,6 +81,28 @@ export default function KnowledgeQA() {
     setHistoryLoading(false)
   }
 
+  // 点击历史记录加载完整对话
+  const handleHistoryClick = async (recordId: string) => {
+    try {
+      const record = await knowledgeQA.detail(recordId)
+      const conv = record.conversation_history || []
+      const msgs: ChatMessage[] = conv.map((m: any, i: number) => ({
+        id: `hist-${recordId}-${i}`,
+        role: m.role,
+        content: m.content,
+        recordId,
+      }))
+      if (msgs.length === 0) {
+        // 无 conversation_history，用 question + answer 构建
+        msgs.push({ id: `hist-${recordId}-0`, role: 'user', content: record.question, recordId })
+        msgs.push({ id: `hist-${recordId}-1`, role: 'assistant', content: record.answer, recordId })
+      }
+      setMessages(msgs)
+      setActiveRecordId(recordId)
+      setShowHistory(false)
+    } catch { }
+  }
+
   // ========== Streaming Submit ==========
   const handleSubmit = async () => {
     const q = input.trim()
@@ -270,11 +292,11 @@ export default function KnowledgeQA() {
               </button>
             )}
             {availableModules.map(m => {
-              const selected = selectedModules.includes(m.name)
+              const selected = selectedModules.includes(m.id)
               return (
                 <button
                   key={m.id}
-                  onClick={() => toggleModule(m.name)}
+                  onClick={() => toggleModule(m.id)}
                   className={`px-2.5 py-0.5 text-xs rounded-full transition-colors ${
                     selected
                       ? 'bg-primary-500 text-white'
@@ -484,7 +506,8 @@ export default function KnowledgeQA() {
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-2">
               {historyRecords.map(r => (
-                <div key={r.id} className="p-3 bg-slate-50 rounded-xl text-sm">
+                <div key={r.id} onClick={() => handleHistoryClick(r.id)}
+                  className="p-3 bg-slate-50 hover:bg-primary-50 rounded-xl text-sm cursor-pointer transition-colors border border-transparent hover:border-primary-200">
                   <p className="font-medium text-slate-700">{r.question}</p>
                   <p className="text-xs text-slate-400 mt-1 line-clamp-2">{r.answer}</p>
                   <p className="text-[10px] text-slate-400 mt-2">{r.created_at?.slice(0, 16)}</p>

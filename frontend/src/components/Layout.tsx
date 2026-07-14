@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react'
 import { Outlet, useNavigate } from 'react-router-dom'
 import Sidebar from './Sidebar'
-import { health } from '../api/client'
+import { health, requirements as reqApi } from '../api/client'
 import { useAuth } from '../auth'
 import { useProduct } from '../store/ProductContext'
-import { Menu, LogOut, User as UserIcon, Settings, ChevronDown, Building2, ShieldCheck, Key, X, Loader2, Save, Package, BookOpen } from 'lucide-react'
+import { Menu, LogOut, User as UserIcon, Settings, ChevronDown, Building2, ShieldCheck, Key, X, Loader2, Save, Package, BookOpen, ListTodo } from 'lucide-react'
 
 export default function Layout() {
   const { user, isLoggedIn, logout } = useAuth()
@@ -20,6 +20,7 @@ export default function Layout() {
   const [pwdCurrent, setPwdCurrent] = useState('')
   const [pwdNew, setPwdNew] = useState('')
   const [pwdSaving, setPwdSaving] = useState(false)
+  const [runningTaskCount, setRunningTaskCount] = useState(0)
 
   const handleChangePassword = async () => {
     if (!pwdCurrent || !pwdNew) return
@@ -53,6 +54,19 @@ export default function Layout() {
       kb_empty: h.kb_empty,
     })).catch(() => {})
     refreshProducts()
+  }, [])
+
+  // v2.14: 轮询进行中任务数（角标显示）
+  useEffect(() => {
+    const pollRunningCount = async () => {
+      try {
+        const res = await reqApi.listTasks({ status: 'running', limit: 1 })
+        setRunningTaskCount(res.total || 0)
+      } catch { /* 忽略 */ }
+    }
+    pollRunningCount()
+    const timer = setInterval(pollRunningCount, 5000)
+    return () => clearInterval(timer)
   }, [])
 
   const handleLogout = () => {
@@ -152,8 +166,23 @@ export default function Layout() {
           </div>
         </div>
 
-        {/* 右侧：用户手册 + 用户信息 */}
+        {/* 右侧：任务管理 + 用户手册 + 用户信息 */}
         <div className="flex items-center gap-1">
+          {/* v2.14: 任务管理按钮（带进行中任务数角标） */}
+          <button
+            onClick={() => navigate('/tasks')}
+            className="relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-all text-sm text-slate-600"
+            title="任务管理"
+          >
+            <ListTodo className="w-4 h-4" />
+            <span className="hidden sm:inline">任务管理</span>
+            {runningTaskCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 flex items-center justify-center bg-primary-500 text-white text-[10px] font-medium rounded-full">
+                {runningTaskCount > 99 ? '99+' : runningTaskCount}
+              </span>
+            )}
+          </button>
+
           <button
             onClick={() => navigate('/manual')}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-all text-sm text-slate-600"

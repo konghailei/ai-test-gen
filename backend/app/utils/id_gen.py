@@ -20,6 +20,7 @@ from datetime import datetime
 _req_counter = random.randint(0, 9999)
 _case_counter = random.randint(0, 9999)
 _batch_counter = random.randint(0, 99999)
+_task_counter = random.randint(0, 9999)
 
 # 线程锁：保证计数器自增的原子性，避免 FastAPI 异步+线程池并发下产生重复 ID
 _id_lock = threading.Lock()
@@ -94,3 +95,17 @@ def gen_error_id() -> str:
     date_str = datetime.now().strftime("%Y%m%d")
     random_suffix = "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=6))
     return f"ERR-{date_str}-{random_suffix}"
+
+
+def gen_task_id() -> str:
+    """生成异步分析任务 ID（线程安全，带计数器防同毫秒碰撞）。
+
+    Returns:
+        str: 形如 TASK-{时间戳毫秒}-{4位序号} 的任务 ID
+    """
+    global _task_counter
+    with _id_lock:
+        _task_counter += 1
+        seq = _task_counter % 10000
+    ms = int(time.time() * 1000)
+    return f"TASK-{ms}-{seq:04d}"

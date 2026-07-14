@@ -61,6 +61,11 @@ class Requirement(Base):
     # 归档时间：归档时设置，用户可手动修改。区别于 updated_at（任何字段修改都会刷新）。
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # 向量化状态追踪
+    # null = 未尝试 / 'processing' = Celery 任务进行中 / 'completed' = 已写入 Milvus / 'failed' = 失败（含重试耗尽）
+    vectorization_status: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
+    vectorization_error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
     __table_args__ = (
         Index("idx_req_product_module", "product_id", "module"),
         Index("idx_req_status", "status"),
@@ -399,6 +404,55 @@ class KBSetting(Base):
     key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     value: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+# ============================================================================
+# 异步分析任务（v2.14 新增 - 需求解析/澄清/重生成/影响分析/用例生成等长耗时任务）
+# ============================================================================
+
+class AnalysisTask(Base):
+    """异步分析任务（需求解析/澄清/重生成/影响分析/用例生成等长耗时任务）。
+
+    后端 upload/clarify/regenerate/impact 端点改为异步后，立即创建本记录并返回 task_id，
+    前端轮询任务状态获取真实进度。进程重启时 stale 的 running 任务标记为 interrupted。
+    """
+    __tablename__ = "analysis_tasks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # TASK-{ms}-{seq}
+    task_type: Mapped[str] = mapped_column(String(32), index=True)
+    # upload_requirement / submit_clarify / regenerate / analyze_impact / generate_cases
+    req_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("requirements.id"), nullable=True, index=True)
+    product_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    # pending / running / completed / failed / interrupted
+    phase: Mapped[str] = mapped_column(String(32), default="")
+    # parse / kb_search / clarify / regenerate / impact / generate / review / format / done
+    progress: Mapped[int] = mapped_column(Integer, default=0)  # 0-100
+    message: Mapped[str] = mapped_column(Text, default="")
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)  # 任务结果（req_id/questions 等）
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(String(64), default="api")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def to_dict(self) -> dict:
+        """序列化为前端可用的字典。"""
+        return {
+            "id": self.id,
+            "task_type": self.task_type,
+            "req_id": self.req_id,
+            "product_id": self.product_id,
+            "status": self.status,
+            "phase": self.phase,
+            "progress": self.progress,
+            "message": self.message,
+            "result_json": self.result_json or {},
+            "error": self.error,
+            "created_at": self.created_at.isoformat() if self.created_at else "",
+            "updated_at": self.updated_at.isoformat() if self.updated_at else "",
+            "completed_at": self.completed_at.isoformat() if self.completed_at else "",
+        }
 
 
 # ============================================================================

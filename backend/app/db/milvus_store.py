@@ -405,7 +405,9 @@ class MilvusVectorStore:
         )
         # srr_json 作为 metadata 中的字符串字段存储（JSON 编码后的完整 SRR），
         # 供 ClarifyAgent KB 自动补全经 meta.get("srr_json") + json.loads 提取字段值。
-        meta["srr_json"] = json.dumps(srr_json, ensure_ascii=False)
+        # Milvus metadata 上限 65536 字节 → 超大文档需裁剪（去掉 _raw_text/add_details 等长字段）。
+        srr_for_meta = self._srr_for_metadata(srr_json)
+        meta["srr_json"] = json.dumps(srr_for_meta, ensure_ascii=False)
         self._upsert("requirements", [req_id], [text], [meta])
 
     def search_similar_requirements(
@@ -801,6 +803,34 @@ class MilvusVectorStore:
             product_id: 产品 ID
         """
         return self.count_requirements(product_id) == 0
+
+    def _srr_for_metadata(self, srr_json: dict) -> dict:
+        """为 Milvus metadata 构建轻量化 SRR（metadata 总上限 65536 字节）。
+
+        大文档（如架构设计文档）的 SRR JSON 可能达到 400KB+，
+        直接存入 Milvus metadata 会触发 (code=1100) 报错。
+
+        方案：只保留 KB 补全 / ClarifyAgent 实际用到的结构化字段，
+        移除 _raw_text、additional_details、dependencies 等仅用于人工阅读的大字段。
+
+        实测：REQ-1784008720572-8967 从 309KB → 29KB（保留全部有用信息）。
+        """
+        # ClarifyAgent 实际消费的字段（见 clarify_agent.py _extract_baseline_block）
+        # + document_full[:3000] 送给 LLM 的上下文
+        KEEP_TOP_KEYS = {
+            "srr_version",
+            "requirement",
+            "overview",
+            "flows",
+            "boundary_conditions",
+            "business_rules",
+            "data_constraints",
+            "preconditions",
+            "acceptance_criteria",
+            "test_points_hint",
+            "notes",
+        }
+        return {k: v for k, v in srr_json.items() if k in KEEP_TOP_KEYS}
 
     def _srr_to_text(self, srr_json: dict) -> str:
         """SRR JSON → 嵌入文本。"""

@@ -36,10 +36,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_admin, require_write, get_current_user, CurrentUser
 from app.agents.clarify_agent import clarify_agent
-from app.utils.id_gen import gen_requirement_id
+from app.utils.id_gen import gen_requirement_id, gen_task_id
 from app.agents.req_agent import req_agent
-from app.db.database import get_session
-from app.db.models import Requirement, Project
+from app.db.database import get_session, async_session
+from app.db.models import Requirement, Project, AnalysisTask
 from app.models.api_schemas import (
     ApiResponse,
     ClarifyAnswerRequest,
@@ -477,7 +477,188 @@ async def upload_requirement_file(
 
 
 # ============================================================================
-# 1c. 多文件上传需求（v2.1 新增：需求文档 + 设计文档联合分析）
+# 1c. 异步分析后台协程（v2.14 新增 - 需求解析/澄清的异步执行）
+# ============================================================================
+
+async def _update_task(task_id: str, **fields) -> None:
+    """更新 AnalysisTask 记录（独立 session，供后台协程使用）。"""
+    try:
+        async with async_session() as s:
+            from sqlalchemy import update as sa_update
+            stmt = sa_update(AnalysisTask).where(AnalysisTask.id == task_id).values(**fields)
+            await s.execute(stmt)
+            await s.commit()
+    except Exception as e:
+        logger.warning("[Task] 更新任务状态失败: task_id={}, error={}", task_id, str(e)[:150])
+
+
+async def _run_requirement_analysis(
+    task_id: str,
+    req_id: str,
+    combined_raw: str,
+    product_id: str,
+    product_name: str,
+    title: str,
+    priority: str,
+    project_id: str,
+    module_list: list[str],
+    source_files: list[str],
+) -> None:
+    """后台执行需求解析 + 澄清（异步协程，使用独立 session）。
+
+    流程：
+    1. phase=parse: req_agent.parse() 解析需求
+    2. phase=kb_search: clarify_agent.clarify() KB 检索 + 问题生成
+    3. 若有问题: phase=clarify, status=completed, result_json 含 questions
+       若无问题: phase=regenerate, 生成 final_srr, Requirement.status=active
+    """
+    from app.db.models import Requirement as ReqModel
+    from sqlalchemy import update as sa_update
+
+    try:
+        # ===== phase 1: parse =====
+        await _update_task(task_id, status="running", phase="parse", progress=10,
+                           message="正在调用 LLM 解析需求文档...")
+
+        srr = await req_agent.parse(
+            raw_requirement=combined_raw,
+            product_id=product_id,
+            product_name=product_name or "",
+        )
+        if not isinstance(srr, dict):
+            raise RuntimeError(f"需求解析返回异常类型: {type(srr).__name__}")
+
+        req_data = srr.setdefault("requirement", {})
+        # 覆盖调用方指定的字段
+        if title:
+            req_data["title"] = title
+        if priority:
+            req_data["priority"] = priority
+        if module_list:
+            req_data["modules"] = module_list
+
+        await _update_task(task_id, phase="parse", progress=30, message="需求解析完成，正在检索知识库...")
+
+        # ===== phase 2: kb_search + clarify =====
+        await _update_task(task_id, phase="kb_search", progress=40,
+                           message="正在检索知识库历史需求并补充缺失字段...")
+
+        clarify_result = None
+        questions = []
+        async with async_session() as s:
+            try:
+                clarify_result = await clarify_agent.clarify(srr, session=s)
+                questions = clarify_result.get("questions", [])
+            except Exception as e:
+                logger.warning("[Task] ClarifyAgent 检测失败（不阻断）: {}", str(e)[:200])
+
+        await _update_task(task_id, phase="clarify", progress=70,
+                           message=f"知识库检索完成，检测到 {len(questions)} 个待补充问题" if questions else "知识库检索完成，正在生成最终分析...")
+
+        # ===== 构建持久化数据 =====
+        multi_augmented = clarify_result.get("augmented_srr", srr) if clarify_result else srr
+        srr_json_data = dict(multi_augmented)
+        if clarify_result:
+            srr_json_data["_clarify_state"] = {
+                "questions": questions,
+                "auto_augmentations": clarify_result.get("auto_augmentations", []),
+                "kb_status": clarify_result.get("kb_status", {}),
+                "quality_report": clarify_result.get("quality_report", {}),
+                "field_conflicts": clarify_result.get("field_conflicts", []),
+            }
+            kb_logs = clarify_result.get("kb_access_log", [])
+            if kb_logs:
+                srr_json_data["_kb_query_logs"] = kb_logs
+
+        needs_clarify = (clarify_result.get("status") == "needs_clarification") if clarify_result else (len(questions) > 0)
+        final_status = "draft" if needs_clarify else "active"
+
+        # ===== phase 3: regenerate（无澄清问题时生成最终 SRR）=====
+        if not needs_clarify:
+            await _update_task(task_id, phase="regenerate", progress=85,
+                               message="正在生成最终需求分析结果...")
+            kb_augments = clarify_result.get("auto_augmentations", []) if clarify_result else []
+            if kb_augments:
+                parts = [combined_raw, "\n\n## KB 自动补全信息\n"]
+                for aug in kb_augments:
+                    parts.append(f"- {aug.get('field', '')}: {str(aug.get('value', ''))[:300]}")
+                enhanced_raw = "\n".join(parts)
+            else:
+                enhanced_raw = combined_raw
+            try:
+                final_srr = await req_agent.parse(
+                    raw_requirement=enhanced_raw,
+                    product_id=product_id or "PROD-DEFAULT",
+                )
+                final_srr_data = dict(final_srr)
+                # 保留 KB 日志
+                if clarify_result:
+                    kb_logs = clarify_result.get("kb_access_log", [])
+                    if kb_logs:
+                        final_srr_data["_kb_query_logs"] = kb_logs
+                final_srr_data.pop("_clarify_state", None)
+                final_srr_data.pop("_field_sources", None)
+                srr_json_data = final_srr_data
+            except Exception as e:
+                logger.error("[Task] 最终SRR生成失败→降级: {}", str(e)[:200])
+                final_srr_data = dict(srr)
+                final_srr_data["_finalize_degraded"] = True
+                srr_json_data = final_srr_data
+
+        # ===== 持久化 Requirement（更新已创建的 analyzing 记录）=====
+        async with async_session() as s:
+            stmt = sa_update(ReqModel).where(ReqModel.id == req_id).values(
+                title=req_data.get("title", ""),
+                priority=req_data.get("priority", "P2"),
+                module=module_list[0] if module_list else "",
+                modules=module_list,
+                status=final_status,
+                srr_json=srr_json_data,
+                raw_text=combined_raw,
+            )
+            await s.execute(stmt)
+            await s.commit()
+
+        # ===== 完成 =====
+        result = {
+            "req_id": req_id,
+            "title": req_data.get("title", ""),
+            "status": final_status,
+            "questions": questions,
+            "has_unanswered_questions": needs_clarify,
+            "source_files": source_files,
+            "kb_status": clarify_result.get("kb_status", {}) if clarify_result else {},
+            "kb_empty": clarify_result.get("kb_status", {}).get("kb_empty", True) if clarify_result else True,
+        }
+        await _update_task(
+            task_id, status="completed", phase="done", progress=100,
+            message="分析完成" + ("，有待补充问题" if needs_clarify else ""),
+            result_json=result, completed_at=datetime.now(timezone.utc),
+        )
+        logger.info("[Task] 需求分析完成: task_id={}, req_id={}, status={}, questions={}",
+                    task_id, req_id, final_status, len(questions))
+
+    except Exception as e:
+        err_msg = str(e)[:500]
+        logger.error("[Task] 需求分析失败: task_id={}, req_id={}, error={}", task_id, req_id, err_msg)
+        await _update_task(
+            task_id, status="failed", phase="", error=err_msg,
+            message="分析失败: " + err_msg[:200], completed_at=datetime.now(timezone.utc),
+        )
+        # 失败时将 Requirement 标记为 draft（便于用户看到记录）
+        try:
+            async with async_session() as s:
+                stmt = sa_update(Requirement).where(Requirement.id == req_id).values(
+                    status="draft", title=title or "(分析失败)",
+                )
+                await s.execute(stmt)
+                await s.commit()
+        except Exception:
+            pass
+
+
+# ============================================================================
+# 1d. 多文件上传需求（v2.1 新增：需求文档 + 设计文档联合分析）
 # ============================================================================
 
 @router.post("/upload/multi", response_model=ApiResponse, dependencies=[Depends(require_write)])
@@ -549,120 +730,166 @@ async def upload_requirement_multi(
         merged_text_parts.append(f"【文档：{doc['filename']}】\n{doc['text']}")
     combined_raw = "\n\n---\n\n".join(merged_text_parts)
 
-    # 调用 ReqAgent 解析合并后的统一文本
-    try:
-        srr = await req_agent.parse(
-            raw_requirement=combined_raw,
-            product_id=product_id,
-            product_name=product_name or "",
-        )
-        # 防御：确保 srr 是 dict
-        if not isinstance(srr, dict):
-            logger.error("[API] 多文档解析返回非 dict: type={}, value={}", type(srr).__name__, str(srr)[:200])
-            raise HTTPException(status_code=500, detail=f"需求解析返回异常类型: {type(srr).__name__}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("[API] 多文档解析失败: {}", str(e)[:500])
-        raise HTTPException(status_code=500, detail=f"需求解析失败: {str(e)[:200]}")
+    # v2.14: 异步分析模式——立即创建 Requirement(analyzing) + AnalysisTask，后台协程执行解析
+    req_id = gen_requirement_id()
+    task_id = gen_task_id()
 
-    req_id = srr.get("requirement", {}).get("id", "")
-    if not req_id:
-        raise HTTPException(status_code=500, detail="解析失败：未生成需求 ID")
-
-    # 确保 req_id 唯一（防止 LLM 生成重复 ID）
-    existing = await session.get(Requirement, req_id)
-    if existing:
-        # 重新生成唯一 ID（线程安全计数器，避免并发冲突）
-        req_id = gen_requirement_id()
-        srr["requirement"]["id"] = req_id
-        logger.warning("[API/requirements] req_id 冲突 (multi)，重新生成: new_id={}", req_id)
-
-    # 若调用方指定了 title/priority，覆盖 SRR 中的值
-    req_data = srr.setdefault("requirement", {})
-    if title:
-        req_data["title"] = title
-    if priority:
-        req_data["priority"] = priority
-    if module_list:
-        req_data["modules"] = module_list
-
-    # ===== ② ClarifyAgent 自动检测（KB 检索 + 问题生成） =====
-    clarify_result = None
-    questions = []
-    try:
-        clarify_result = await clarify_agent.clarify(srr, session=session)
-        questions = clarify_result.get("questions", [])
-        logger.info(
-            "[API/requirements] ClarifyAgent 检测完成: req_id={}, status={}, questions={}",
-            req_id,
-            clarify_result.get("status", ""),
-            len(questions),
-        )
-    except Exception as e:
-        logger.warning("[API/requirements] ClarifyAgent 检测失败（不阻断）: {}", str(e)[:200])
-
-    # ===== ③ 持久化到 DB =====
-    # v2.6: 使用 KB 增强后的 SRR
-    multi_augmented = clarify_result.get("augmented_srr", srr) if clarify_result else srr
-    srr_json_data = dict(multi_augmented)
-    if clarify_result:
-        srr_json_data["_clarify_state"] = {
-            "questions": questions,
-            "auto_augmentations": clarify_result.get("auto_augmentations", []),
-            "kb_status": clarify_result.get("kb_status", {}),
-            "quality_report": clarify_result.get("quality_report", {}),
-            # v2.12: 字段冲突列表（docs/01 §4.4.1）
-            "field_conflicts": clarify_result.get("field_conflicts", []),
-        }
-        kb_logs = clarify_result.get("kb_access_log", [])
-        if kb_logs:
-            srr_json_data["_kb_query_logs"] = kb_logs
-
-    needs_clarify = (clarify_result.get("status") == "needs_clarification") if clarify_result else (len(questions) > 0)
-    status = "draft" if needs_clarify else "active"
-
+    # 立即创建 Requirement 记录（status=analyzing，分析完成后更新）
     record = Requirement(
         id=req_id,
-        product_id=req_data.get("product_id", product_id),
+        product_id=product_id,
         project_id=project_id or None,
-        title=req_data.get("title", ""),
-        priority=req_data.get("priority", "P2"),
+        title=title or "(分析中...)",
+        priority=priority,
         module=module_list[0] if module_list else "",
         modules=module_list,
         tags=[],
         version=1,
-        status=status,
-        srr_json=srr_json_data,
+        status="analyzing",
+        srr_json={},
         raw_text=combined_raw,
         source_type="multi",
         created_by="api",
     )
     session.add(record)
+    await session.flush()  # 确保 Requirement 先落库，避免 AnalysisTask 外键约束 violation
+
+    # 创建任务记录
+    task = AnalysisTask(
+        id=task_id,
+        task_type="upload_requirement",
+        req_id=req_id,
+        product_id=product_id,
+        status="pending",
+        phase="parse",
+        progress=0,
+        message="已接收文件，准备开始分析...",
+        created_by="api",
+    )
+    session.add(task)
     await session.commit()
 
-    logger.info("[API] 多文档上传成功: req_id={}, files={}, status={}, questions={}",
-                req_id, [d["filename"] for d in doc_contents], status, len(questions))
+    # 启动后台协程（不 await，立即返回）
+    asyncio.create_task(_run_requirement_analysis(
+        task_id=task_id,
+        req_id=req_id,
+        combined_raw=combined_raw,
+        product_id=product_id,
+        product_name=product_name,
+        title=title,
+        priority=priority,
+        project_id=project_id,
+        module_list=module_list,
+        source_files=[d["filename"] for d in doc_contents],
+    ))
+
+    logger.info("[API] 多文档上传已派发异步分析: task_id={}, req_id={}, files={}",
+                task_id, req_id, [d["filename"] for d in doc_contents])
 
     return ApiResponse(
         success=True,
-        message=f"多文档上传成功（{len(doc_contents)} 个文件），已合并为统一需求",
+        message=f"已接收 {len(doc_contents)} 个文件，正在后台分析",
         data={
+            "task_id": task_id,
             "req_id": req_id,
-            "srr": srr,
-            "title": req_data.get("title", ""),
-            "priority": req_data.get("priority", "P2"),
-            "modules": module_list,
+            "status": "analyzing",
             "source_files": [d["filename"] for d in doc_contents],
-            "status": status,
-            "questions": questions,
-            "has_unanswered_questions": needs_clarify,
-            # KB 检索结果
-            "kb_status": clarify_result.get("kb_status", {}) if clarify_result else {},
-            "auto_augmentations_count": len(clarify_result.get("auto_augmentations", [])) if clarify_result else 0,
-            "kb_empty": clarify_result.get("kb_status", {}).get("kb_empty", True) if clarify_result else True,
         },
     )
+
+
+# ============================================================================
+# 1e. 任务状态查询（v2.14 新增 - 供前端轮询分析进度）
+# ============================================================================
+
+@router.get("/tasks", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def list_tasks(
+    status: str | None = Query(default=None, description="按状态筛选 pending/running/completed/failed/interrupted"),
+    task_type: str | None = Query(default=None, description="按任务类型筛选 upload_requirement/submit_clarify/..."),
+    product_id: str | None = Query(default=None, description="按产品筛选"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """列出分析任务（支持按状态/类型/产品筛选，分页）。"""
+    conditions = []
+    if status:
+        conditions.append(AnalysisTask.status == status)
+    if task_type:
+        conditions.append(AnalysisTask.task_type == task_type)
+    if product_id:
+        conditions.append(AnalysisTask.product_id == product_id)
+
+    count_stmt = select(func.count(AnalysisTask.id))
+    for cond in conditions:
+        count_stmt = count_stmt.where(cond)
+    total = (await session.execute(count_stmt)).scalar() or 0
+
+    stmt = select(AnalysisTask).order_by(AnalysisTask.created_at.desc())
+    for cond in conditions:
+        stmt = stmt.where(cond)
+    stmt = stmt.offset(offset).limit(limit)
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+
+    # 关联需求标题（避免 N+1，批量查询）
+    req_ids = {r.req_id for r in rows if r.req_id}
+    req_titles: dict[str, str] = {}
+    if req_ids:
+        title_rows = await session.execute(
+            select(Requirement.id, Requirement.title).where(Requirement.id.in_(req_ids))
+        )
+        req_titles = dict(title_rows.all())
+
+    items = []
+    for r in rows:
+        d = r.to_dict()
+        d["req_title"] = req_titles.get(r.req_id or "", "")
+        items.append(d)
+
+    return ApiResponse(success=True, message="ok", data={"items": items, "total": total})
+
+
+@router.get("/tasks/{task_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_task(
+    task_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """查询单个任务状态（供前端轮询进度）。"""
+    task = await session.get(AnalysisTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    d = task.to_dict()
+    # 关联需求标题
+    if task.req_id:
+        req = await session.get(Requirement, task.req_id)
+        d["req_title"] = req.title if req else ""
+    else:
+        d["req_title"] = ""
+
+    return ApiResponse(success=True, message="ok", data=d)
+
+
+@router.get("/{req_id}/task", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_task_by_req(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """按需求 ID 查询关联的最新任务（供需求详情页恢复进度）。"""
+    stmt = (
+        select(AnalysisTask)
+        .where(AnalysisTask.req_id == req_id)
+        .order_by(AnalysisTask.created_at.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    task = result.scalar_one_or_none()
+
+    if not task:
+        return ApiResponse(success=True, message="无关联任务", data=None)
+
+    return ApiResponse(success=True, message="ok", data=task.to_dict())
 
 
 # ============================================================================

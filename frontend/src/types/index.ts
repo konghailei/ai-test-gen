@@ -287,7 +287,27 @@ export interface KbEntry {
   archived_at?: string
   go_live_date?: string
   vectorized?: boolean
+  vectorization_status?: string | null  // null=未尝试 / processing=向量化中 / completed=已完成 / failed=失败
+  vectorization_error?: string | null
   created_at?: string
+}
+
+/** v2.14: 异步分析任务信息（任务管理 + 进度轮询） */
+export interface AnalysisTaskInfo {
+  id: string
+  task_type: string  // upload_requirement / submit_clarify / regenerate / analyze_impact
+  req_id: string | null
+  req_title?: string
+  product_id: string | null
+  status: string  // pending / running / completed / failed / interrupted
+  phase: string  // parse / kb_search / clarify / regenerate / impact / done
+  progress: number  // 0-100
+  message: string
+  result_json: Record<string, unknown>
+  error: string
+  created_at: string
+  updated_at: string
+  completed_at: string | null
 }
 
 export interface KbDiagnostics {

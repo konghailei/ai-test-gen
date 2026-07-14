@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2, Search, X } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
-import type { Requirement, Product, ClarifyQuestion, Module } from '../types'
+import type { Requirement, Product, ClarifyQuestion, Module, AnalysisTaskInfo } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, sourceTypeLabel } from '../utils'
 
 /** 上传进度步骤定义（v2.4 影响分析合并） */
@@ -16,9 +16,10 @@ const UPLOAD_PHASES = [
 ]
 
 type UploadProgress = {
-  phase: number          // 当前阶段索引（0-3）
+  phase: number          // 当前阶段索引（0-4）
   message: string       // 当前状态描述
   error: string | null  // 错误信息（不为空时表示出错）
+  progress: number      // 真实进度 0-100（v2.14 来自后端任务轮询）
 }
 
 export default function Requirements() {
@@ -40,6 +41,9 @@ export default function Requirements() {
   const [selProject, setSelProject] = useState('')
   const [uploadFiles, setUploadFiles] = useState<File[]>([])
   const [fileUploading, setFileUploading] = useState(false)
+
+  // 上传标题（手动输入，不再由 LLM 生成）
+  const [reqTitle, setReqTitle] = useState('')
 
   // 上传模块选择
   const [selModules, setSelModules] = useState<string[]>([])
@@ -65,6 +69,7 @@ export default function Requirements() {
   // 上传进度
   const [progress, setProgress] = useState<UploadProgress | null>(null)
   const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const taskPollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const navigate = useNavigate()
 
@@ -120,60 +125,126 @@ export default function Requirements() {
   const handleMultiFileUpload = async () => {
     if (uploadFiles.length === 0 || !selectedProductId) return
 
+    // 校验需求名称必填
+    if (!reqTitle.trim()) {
+      setProgress({ phase: 0, message: '请输入需求名称', error: '需求名称为必填项，请填写后再上传', progress: 0 })
+      return
+    }
+
     // 校验项目和模块必选
     if (!selProject) {
-      setProgress({ phase: 0, message: '请选择所属项目/版本', error: '所属项目/版本为必选项，请选择后再上传' })
+      setProgress({ phase: 0, message: '请选择所属项目/版本', error: '所属项目/版本为必选项，请选择后再上传', progress: 0 })
       return
     }
     if (selModules.length === 0) {
-      setProgress({ phase: 0, message: '请选择关联模块', error: '关联模块为必选项，请至少选择一个模块后再上传' })
+      setProgress({ phase: 0, message: '请选择关联模块', error: '关联模块为必选项，请至少选择一个模块后再上传', progress: 0 })
       return
     }
 
-    setProgress({ phase: 0, message: `正在上传 ${uploadFiles.length} 个文件...`, error: null })
-    startProgressSimulation()
+    setProgress({ phase: 0, message: `正在上传 ${uploadFiles.length} 个文件...`, error: null, progress: 0 })
     setFileUploading(true)
 
     try {
-      await sleep(400)
-      setProgress({ phase: 0, message: '正在调用 AI 解析文档内容...', error: null })
-
-      const res: any = await reqApi.uploadMultiFiles(uploadFiles, selectedProductId, '', selProject, selModules.join(','))
-
-      stopProgressTimer()
-
-      // 处理解析后的澄清问题
-      const questions: ClarifyQuestion[] = res?.data?.questions || []
+      // v2.14: 异步模式——upload 立即返回 task_id，后台执行分析
+      const res: any = await reqApi.uploadMultiFiles(uploadFiles, selectedProductId, reqTitle, selProject, selModules.join(','))
+      const taskId = res?.data?.task_id
       const reqId = res?.data?.req_id
 
-      if (questions.length > 0 && reqId) {
-        // 有未回答问题：先停到阶段 3，再平滑切换到问题面板
-        setProgress({ phase: 2, message: '检测到需要补充的内容，请确认以下问题', error: null })
-        await sleep(800)
-        setProgress(null)
-        const initAnswers: Record<string, string> = {}
-        questions.forEach(q => { initAnswers[q.id] = '' })
-        setUploadResult({ req_id: reqId, questions, answers: initAnswers })
-      } else {
-        // 无问题：进入影响分析阶段
-        await runImpactAnalysis(reqId)
+      if (!taskId || !reqId) {
+        throw new Error(res?.message || '上传失败：未返回任务 ID')
       }
+
+      // 开始轮询任务状态
+      startTaskPolling(taskId, reqId)
     } catch (e: any) {
       stopProgressTimer()
       setProgress(prev => ({
         phase: prev?.phase || 0,
         message: '文件上传失败',
         error: e.message || '请求失败，请稍后重试',
+        progress: prev?.progress || 0,
       }))
-    } finally {
       setFileUploading(false)
     }
+  }
+
+  /** v2.14: 轮询任务状态，更新真实进度 */
+  const startTaskPolling = (taskId: string, reqId: string) => {
+    stopProgressTimer()
+    if (taskPollingRef.current) clearInterval(taskPollingRef.current)
+
+    const PHASE_MAP: Record<string, number> = {
+      parse: 0, kb_search: 1, clarify: 2, regenerate: 3, impact: 4, done: 4,
+    }
+
+    const poll = async () => {
+      try {
+        const task: AnalysisTaskInfo = await reqApi.getTask(taskId)
+
+        // 映射后端 phase 到前端 UPLOAD_PHASES 索引
+        const phaseIdx = PHASE_MAP[task.phase] ?? 0
+
+        if (task.status === 'running' || task.status === 'pending') {
+          setProgress({
+            phase: phaseIdx,
+            message: task.message || '正在分析...',
+            error: null,
+            progress: task.progress,
+          })
+        } else if (task.status === 'completed') {
+          // 任务完成
+          if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+          setFileUploading(false)
+
+          const result = task.result_json || {}
+          const questions: ClarifyQuestion[] = (result.questions as ClarifyQuestion[]) || []
+
+          if (questions.length > 0) {
+            // 有未回答问题：显示澄清面板
+            setProgress({ phase: 2, message: '检测到需要补充的内容，请确认以下问题', error: null, progress: 100 })
+            await sleep(800)
+            setProgress(null)
+            const initAnswers: Record<string, string> = {}
+            questions.forEach(q => { initAnswers[q.id] = '' })
+            setUploadResult({ req_id: reqId, questions, answers: initAnswers })
+          } else {
+            // 无问题：进入影响分析阶段
+            await runImpactAnalysis(reqId)
+          }
+        } else if (task.status === 'failed') {
+          if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+          setFileUploading(false)
+          setProgress({
+            phase: phaseIdx,
+            message: '分析失败',
+            error: task.error || '分析过程中发生错误',
+            progress: task.progress,
+          })
+        } else if (task.status === 'interrupted') {
+          if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+          setFileUploading(false)
+          setProgress({
+            phase: phaseIdx,
+            message: '任务已中断（服务重启）',
+            error: task.error || '服务重启导致任务中断，请重新上传',
+            progress: task.progress,
+          })
+        }
+      } catch (e: any) {
+        // 轮询失败，不中断，下次重试
+        console.warn('任务轮询失败:', e?.message)
+      }
+    }
+
+    // 立即轮询一次，然后每 1.5 秒轮询
+    poll()
+    taskPollingRef.current = setInterval(poll, 1500)
   }
 
   /** 运行影响分析（基于模块依赖图谱 BFS 遍历） */
   const runImpactAnalysis = async (reqId: string) => {
     try {
-      setProgress({ phase: 4, message: '正在进行影响分析（基于模块依赖图谱 BFS 遍历）...', error: null })
+      setProgress({ phase: 4, message: '正在进行影响分析（基于模块依赖图谱 BFS 遍历）...', error: null, progress: 90 })
       startProgressSimulation()
 
       const impactRes = await reqApi.analyzeImpact(reqId)
@@ -185,19 +256,19 @@ export default function Requirements() {
                          (impactRes.affected_requirements?.length || 0) > 0
 
       if (hasImpacts) {
-        setProgress({ phase: 4, message: '影响分析完成，请确认以下影响范围', error: null })
+        setProgress({ phase: 4, message: '影响分析完成，请确认以下影响范围', error: null, progress: 95 })
         await sleep(600)
         setProgress(null)
         setImpactResult(impactRes)
       } else {
         // 无影响，直接完成
-        setProgress({ phase: 4, message: '影响分析完成（无影响范围），正在跳转...', error: null })
+        setProgress({ phase: 4, message: '影响分析完成（无影响范围），正在跳转...', error: null, progress: 100 })
         await sleep(800)
         finishUpload(reqId)
       }
     } catch (e: any) {
       stopProgressTimer()
-      setProgress({ phase: 4, message: '影响分析未完成（可稍后在需求详情页重新分析）', error: null })
+      setProgress({ phase: 4, message: '影响分析未完成（可稍后在需求详情页重新分析）', error: null, progress: 90 })
       await sleep(800)
       finishUpload(reqId)
     }
@@ -237,49 +308,21 @@ export default function Requirements() {
   }
 
   // ================================================================
-  // 进度条模拟（根据阶段推进显示不同消息）
+  // 进度条模拟（影响分析阶段的辅助提示，主进度由 taskPolling 提供）
   // ================================================================
   const startProgressSimulation = () => {
     stopProgressTimer()
     let elapsed = 0
     progressTimer.current = setInterval(() => {
       elapsed += 1
-      if (elapsed < 5) {
-        // 阶段 0：LLM 分析整理
-        const hints = [
-          '正在提取需求功能描述...',
-          '正在识别业务规则和边界条件...',
-          '正在分析数据约束和流程...',
-          '正在构建结构化需求模型...',
-        ]
-        const hintIdx = Math.min(Math.floor(elapsed / 1), hints.length - 1)
-        setProgress(prev => prev?.error ? prev : {
-          phase: 0, message: `${hints[hintIdx]}${'.'.repeat(elapsed % 4)}`, error: null,
-        })
-      } else if (elapsed < 8) {
-        // 阶段 1：知识库检索补充
-        const dots = '.'.repeat((elapsed - 5) % 4)
-        const hints = [
-          '正在查询知识库历史需求...',
-          '正在比对相似功能模块...',
-          '正在自动补充缺失字段...',
-        ]
-        const hintIdx = Math.min(Math.floor((elapsed - 5) / 1), hints.length - 1)
-        setProgress(prev => prev?.error ? prev : {
-          phase: 1, message: `${hints[hintIdx]}${dots}`, error: null,
-        })
-      } else if (elapsed < 12) {
-        // 阶段 2：检测不清晰内容（即将切换为人机交互）
-        const dots = '.'.repeat((elapsed - 8) % 4)
-        setProgress(prev => prev?.error ? prev : {
-          phase: 2, message: `正在检测不清晰的需求内容${dots}`, error: null,
-        })
-      } else {
-        // 超过 12 秒：提示等待
-        setProgress(prev => prev?.error ? prev : {
-          phase: 2, message: '⏳ 正在等待 AI 完成分析...', error: null,
-        })
-      }
+      // 影响分析阶段（phase 4）的提示动画
+      const dots = '.'.repeat(elapsed % 4)
+      setProgress(prev => prev?.error ? prev : {
+        phase: 4,
+        message: `正在进行影响分析（基于模块依赖图谱 BFS 遍历）${dots}`,
+        error: null,
+        progress: prev?.progress ?? 90,
+      })
     }, 1200)
   }
 
@@ -299,6 +342,7 @@ export default function Requirements() {
         phase: 3,
         message: `${hints[hintIdx]}${'.'.repeat(elapsed % 4)}`,
         error: null,
+        progress: 85,
       })
     }, 1200)
   }
@@ -307,6 +351,10 @@ export default function Requirements() {
     if (progressTimer.current) {
       clearInterval(progressTimer.current)
       progressTimer.current = null
+    }
+    if (taskPollingRef.current) {
+      clearInterval(taskPollingRef.current)
+      taskPollingRef.current = null
     }
   }
 
@@ -405,8 +453,8 @@ export default function Requirements() {
         <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => {
           if (!progress) setShowUpload(false)
         }}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-semibold text-slate-800 mb-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold text-slate-800 mb-4 sticky top-0 bg-white pb-2 z-10">
               {progress ? '正在上传需求' : uploadResult ? '请补充需求信息' : '上传需求'}
             </h2>
 
@@ -487,6 +535,17 @@ export default function Requirements() {
                 {/* 选择项目和模块（产品已在顶部栏选中） */}
                 <div className="space-y-3 mb-4">
                   <div>
+                    <label className="label">需求名称 <span className="text-red-400">*</span></label>
+                    <input
+                      type="text"
+                      value={reqTitle}
+                      onChange={e => setReqTitle(e.target.value)}
+                      placeholder="请输入需求名称（简洁描述需求内容）"
+                      className="input-field text-sm"
+                      autoFocus
+                    />
+                  </div>
+                  <div>
                     <label className="label">当前产品</label>
                     <div className="text-sm font-medium text-slate-700 bg-slate-50 rounded-lg px-3 py-2">
                       {selectedProductId
@@ -542,7 +601,7 @@ export default function Requirements() {
 
                 {/* 已选文件列表 */}
                 {uploadFiles.length > 0 && (
-                  <div className="space-y-2 mb-4">
+                  <div className="max-h-[180px] overflow-y-auto space-y-2 mb-4 pr-1">
                     <p className="text-xs text-slate-400">已选择 {uploadFiles.length} 个文件：</p>
                     {uploadFiles.map((f, i) => (
                       <div key={i} className="flex items-center justify-between bg-slate-50 p-2.5 rounded-lg">
@@ -560,8 +619,8 @@ export default function Requirements() {
                 )}
 
                 <div className="flex items-center justify-end gap-3 mt-5">
-                  <button onClick={() => { setShowUpload(false); setUploadFiles([]) }} className="btn-secondary">取消</button>
-                  <button onClick={handleMultiFileUpload} disabled={uploadFiles.length === 0 || !selectedProductId || fileUploading} className="btn-primary">
+                  <button onClick={() => { setShowUpload(false); setUploadFiles([]); setReqTitle('') }} className="btn-secondary">取消</button>
+                  <button onClick={handleMultiFileUpload} disabled={uploadFiles.length === 0 || !selectedProductId || !reqTitle.trim() || fileUploading} className="btn-primary">
                     {fileUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
                     上传并解析
                   </button>

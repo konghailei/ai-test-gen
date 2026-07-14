@@ -9,6 +9,7 @@
 """
 
 import asyncio
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -56,7 +57,7 @@ async def init_db() -> None:
         Requirement, TestCase, TestPattern, ErrorCase, GenerationBatch,
         ReqDependency, Traceability, LLMConfig, Product, Project, Module,
         ModuleDependency, KnowledgeQA, User, PromptOverride, ReqPattern,
-        KBSetting,
+        KBSetting, AnalysisTask,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 
@@ -84,6 +85,9 @@ async def init_db() -> None:
                 ("go_live_date", "TIMESTAMP", "go_live_date"),
                 # 归档时间真实字段（区别于 updated_at，避免被任何字段修改污染）
                 ("archived_at", "TIMESTAMP WITH TIME ZONE", "archived_at"),
+                # 向量化状态追踪
+                ("vectorization_status", "VARCHAR(20)", "vectorization_status"),
+                ("vectorization_error", "TEXT", "vectorization_error"),
             ],
             "test_cases": [
                 # 用例归档时间真实字段
@@ -249,6 +253,21 @@ async def init_db() -> None:
 
         await conn.run_sync(_migrate)
     logger.info("数据库表创建完成")
+
+    # 清理 stale 任务：进程重启后所有 running 任务无法继续，标记为 interrupted
+    try:
+        async with async_session() as cleanup_session:
+            from sqlalchemy import update
+            result = await cleanup_session.execute(
+                update(AnalysisTask)
+                .where(AnalysisTask.status.in_(["pending", "running"]))
+                .values(status="interrupted", error="进程重启，任务中断", completed_at=datetime.now(timezone.utc))
+            )
+            await cleanup_session.commit()
+            if result.rowcount > 0:
+                logger.info("[DB] 清理 stale 分析任务: {} 个 running/pending 标记为 interrupted", result.rowcount)
+    except Exception as e:
+        logger.warning("[DB] stale 任务清理失败（不影响启动）: {}", str(e)[:150])
 
     # 写入种子数据
     await seed_patterns()
