@@ -2783,7 +2783,7 @@ async def fp_regenerate(
             prompt=regenerate_prompt,
             system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
             schema_hint={"name": str, "fp_type": str, "summary": str, "sub_srr": dict, "atomicity_check": dict, "test_hints": list},
-            temperature=0.4,
+            temperature=0.2,
         )
         sub_srr = result.get("sub_srr", {}) if isinstance(result, dict) else {}
         fp.srr_json = {

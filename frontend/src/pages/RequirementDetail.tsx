@@ -393,6 +393,17 @@ export default function RequirementDetail() {
           }`}>{STATUS_LABELS[detail.status] || detail.status}</span></div>
         </div>
 
+        {/* v1.5.2: FP 审核（元信息下方、SRR 详情上方） */}
+        {detail.status !== 'archived' && (
+          <div className="border border-slate-200 rounded-xl p-4 bg-white">
+            <h3 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-2">
+              <Layers className="w-4 h-4 text-primary-500" />
+              功能点（FP）审核
+            </h3>
+            <FPSRRViewer reqId={id!} productId={detail.product_id} status={detail.status} />
+          </div>
+        )}
+
         {/* 功能概述 */}
         {reqData.summary && (
           <div>
@@ -492,16 +503,6 @@ export default function RequirementDetail() {
                 </tbody>
               </table>
             </div>
-          </div>
-        )}
-        {/* v1.5.2: 功能点 SRR 审核视图（合并到 SRR Tab 下方） */}
-        {detail.status !== 'archived' && (
-          <div className="border-t border-slate-200 pt-5 mt-5">
-            <h3 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-2">
-              <Layers className="w-4 h-4 text-primary-500" />
-              功能点（FP）审核
-            </h3>
-            <FPSRRViewer reqId={id!} productId={detail.product_id} status={detail.status} />
           </div>
         )}
       </div>

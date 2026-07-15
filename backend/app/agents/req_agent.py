@@ -575,7 +575,7 @@ class ReqAgent:
                 prompt=prompt,
                 system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
                 schema_hint={"functional_points": list, "dependencies": list},
-                temperature=0.4,
+                temperature=0.2,  # v1.5.2: 降到 0.2 避免随机拆分
             )
             if isinstance(result, dict):
                 self.last_fp_dependencies = result.get("dependencies", [])
