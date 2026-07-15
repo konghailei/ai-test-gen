@@ -924,7 +924,7 @@ class ClarifyAgent:
             })
 
         # v2.11：LLM 校验检索结果质量（判断相关性、拒绝不相关答案、提取具体信息）
-        answers = await self._verify_kb_answers(srr, answers, kb_provider=kb_provider)
+        answers = await self._verify_kb_answers(srr, answers)
 
         return answers
 
