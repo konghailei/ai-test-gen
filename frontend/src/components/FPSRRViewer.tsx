@@ -69,6 +69,14 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
   const approved = fps.filter(f => f.status === 'approved').length
   const allApproved = fps.length > 0 && approved === fps.length
 
+  // 全量重新拆分
+  const handleResplit = async () => {
+    if (!confirm('重新拆分会先删除当前所有功能点，基于原始文档重新生成。确定继续？')) return
+    setLoading(true)
+    try { await reqApi.fpSplit(reqId, []); await load(); await loadDeps() } catch { }
+    setLoading(false)
+  }
+
   const toggle = (id: string) => {
     const next = new Set(expanded)
     if (next.has(id)) next.delete(id); else next.add(id)
@@ -126,19 +134,32 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* 审核进度 */}
-      {!isArchived && fps.length > 0 && (
-        <div className={[
-          'flex items-center gap-3 p-3 rounded-xl text-sm',
-          allApproved ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700',
-        ].join(' ')}>
-          {allApproved ? <Check className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
-          <span>
-            {allApproved
-              ? '全部功能点已审核通过，可进行下一步：生成测试用例'
-              : `审核进度：${approved}/${fps.length} 个已通过，全部审核通过后可生成测试用例`}
+      {/* 审核进度 + 重新拆分 */}
+      {!isArchived && (
+        <>
+        {fps.length > 0 && (
+          <div className={[
+            'flex items-center gap-3 p-3 rounded-xl text-sm',
+            allApproved ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700',
+          ].join(' ')}>
+            {allApproved ? <Check className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
+            <span>
+              {allApproved
+                ? '全部功能点已审核通过，可进行下一步：生成测试用例'
+                : `审核进度：${approved}/${fps.length} 个已通过，全部审核通过后可生成测试用例`}
+            </span>
+          </div>
+        )}
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">
+            上传时自动拆分。拆分不准确可重新拆分。
           </span>
+          <button onClick={handleResplit} disabled={loading}
+            className="btn-secondary text-xs flex items-center gap-1.5">
+            <RefreshCw className="w-3.5 h-3.5" /> 重新拆分
+          </button>
         </div>
+        </>
       )}
 
       {fps.length === 0 ? (

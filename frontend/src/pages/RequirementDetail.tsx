@@ -176,7 +176,7 @@ export default function RequirementDetail() {
   const [finalizing, setFinalizing] = useState(false)
 
   // Tab 切换：'srr' | 'raw' | 'kb' | 'impact' | 'history' | 'fp'
-  const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact' | 'history' | 'fp' | 'fp-srr'>('srr')
+  const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact' | 'history'>('srr')
 
   // 澄清历史
   const [clarifyHistory, setClarifyHistory] = useState<ClarifyHistoryEntry[]>([])
@@ -492,6 +492,16 @@ export default function RequirementDetail() {
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+        {/* v1.5.2: 功能点 SRR 审核视图（合并到 SRR Tab 下方） */}
+        {detail.status !== 'archived' && (
+          <div className="border-t border-slate-200 pt-5 mt-5">
+            <h3 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-2">
+              <Layers className="w-4 h-4 text-primary-500" />
+              功能点（FP）审核
+            </h3>
+            <FPSRRViewer reqId={id!} productId={detail.product_id} status={detail.status} />
           </div>
         )}
       </div>
@@ -1089,28 +1099,6 @@ export default function RequirementDetail() {
               </span>
             )}
           </button>
-          <button
-            onClick={() => setActiveTab('fp')}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-all duration-150 ${
-              activeTab === 'fp'
-                ? 'border-primary-500 text-primary-700'
-                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
-            }`}
-          >
-            <Layers className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
-            功能点
-          </button>
-          <button
-            onClick={() => setActiveTab('fp-srr')}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-all duration-150 ${
-              activeTab === 'fp-srr'
-                ? 'border-primary-500 text-primary-700'
-                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
-            }`}
-          >
-            <FileText className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
-            功能点 SRR
-          </button>
         </div>
 
         {/* Tab 内容 */}
@@ -1156,10 +1144,6 @@ export default function RequirementDetail() {
               onNavigateToClarify={() => navigate(`/requirements/${id}/clarify`)}
               status={detail.status}
             />
-          ) : activeTab === 'fp' ? (
-            <FunctionalPoints reqId={id!} productId={detail.product_id} status={detail.status} />
-          ) : activeTab === 'fp-srr' ? (
-            <FPSRRViewer reqId={id!} productId={detail.product_id} status={detail.status} />
           ) : null}
         </div>
       </div>
