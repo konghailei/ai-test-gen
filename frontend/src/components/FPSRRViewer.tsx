@@ -39,6 +39,8 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
   const [regenHint, setRegenHint] = useState('')
   const [impactModal, setImpactModal] = useState<any>(null)
   const [impactLoading, setImpactLoading] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [merging, setMerging] = useState(false)
   const isArchived = status === 'archived'
   const navigate = useNavigate()
 
@@ -75,6 +77,21 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
     setLoading(true)
     try { await reqApi.fpSplit(reqId, []); await load(); await loadDeps() } catch { }
     setLoading(false)
+  }
+
+  // 多选合并
+  const toggleSelect = (fpId: string) => {
+    const next = new Set(selected)
+    if (next.has(fpId)) next.delete(fpId); else next.add(fpId)
+    setSelected(next)
+  }
+  const handleMerge = async () => {
+    const ids = [...selected]
+    if (ids.length < 2) return
+    if (!confirm(`确定将 ${ids.length} 个功能点合并为一个？LLM 将重新整理子 SRR。`)) return
+    setMerging(true)
+    try { await reqApi.fpMerge(reqId, ids); setSelected(new Set()); await load(); await loadDeps() } catch { }
+    setMerging(false)
   }
 
   const toggle = (id: string) => {
@@ -154,10 +171,19 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
           <span className="text-xs text-slate-400">
             上传时自动拆分。拆分不准确可重新拆分。
           </span>
-          <button onClick={handleResplit} disabled={loading}
-            className="btn-secondary text-xs flex items-center gap-1.5">
-            <RefreshCw className="w-3.5 h-3.5" /> 重新拆分
-          </button>
+          <div className="flex items-center gap-2">
+            {selected.size >= 2 && (
+              <button onClick={handleMerge} disabled={merging}
+                className="btn-primary text-xs flex items-center gap-1.5">
+                {merging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitBranch className="w-3.5 h-3.5" />}
+                合并 {selected.size} 个
+              </button>
+            )}
+            <button onClick={handleResplit} disabled={loading}
+              className="btn-secondary text-xs flex items-center gap-1.5">
+              <RefreshCw className="w-3.5 h-3.5" /> 重新拆分
+            </button>
+          </div>
         </div>
         </>
       )}
@@ -192,6 +218,14 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                       onClick={() => toggle(fp.id)}
                     >
                       <div className="flex items-center gap-3">
+                        {!isArchived && (
+                          <input type="checkbox"
+                            checked={selected.has(fp.id)}
+                            onChange={() => toggleSelect(fp.id)}
+                            onClick={e => e.stopPropagation()}
+                            className="w-4 h-4 text-primary-600 border-slate-300 rounded focus:ring-primary-500"
+                          />
+                        )}
                         <button className="text-slate-400">
                           {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                         </button>

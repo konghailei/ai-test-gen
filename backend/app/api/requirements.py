@@ -2721,6 +2721,115 @@ async def fp_remove_dependency(
     return ApiResponse(success=True, message="依赖关系已删除")
 
 
+# ============================================================================
+# v1.5.3: FP 合并（多选 → LLM 整理 → 合并为一个 FP）
+# ============================================================================
+
+class FPMergeRequest(BaseModel):
+    fp_ids: list[str]  # 至少 2 个
+
+
+@router.post("/{req_id}/fp/merge", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_merge(
+    req_id: str,
+    body: FPMergeRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """将多个功能点合并为一个，LLM 重新整理子 SRR 保证功能不遗漏。"""
+    if len(body.fp_ids) < 2:
+        raise HTTPException(status_code=400, detail="至少需要 2 个功能点才能合并")
+
+    await _load_active_requirement(req_id, session)
+
+    # 加载所有 FP
+    fps_to_merge = []
+    for fid in body.fp_ids:
+        fp = await session.get(FunctionalPoint, fid)
+        if not fp or fp.requirement_id != req_id:
+            raise HTTPException(status_code=404, detail=f"功能点 {fid} 不存在或不属于该需求")
+        fps_to_merge.append(fp)
+
+    if len(fps_to_merge) < 2:
+        raise HTTPException(status_code=400, detail="有效功能点不足，无法合并")
+
+    # 用 LLM 整理合并后的子 SRR
+    from app.core import prompt_manager as pm3
+    fp_texts = []
+    for fp in fps_to_merge:
+        parts = [f"### {fp.name}（{fp.fp_type}）"]
+        if isinstance(fp.srr_json, dict):
+            s = fp.srr_json
+            parts.append(f"描述：{s.get('requirement', {}).get('summary', '') or s.get('description', '')}")
+            parts.append(f"正常流程：{s.get('flows', {}).get('happy_path', '')}")
+            parts.append(f"异常分支：{s.get('flows', {}).get('alternate_flows', '')}")
+            parts.append(f"业务规则：{s.get('business_rules', [])}")
+        fp_texts.append("\n".join(parts))
+
+    merge_prompt = f"""将以下多个功能点合并为一个完整的功能点，整理其子 SRR。
+
+这些功能点原本属于同一个业务功能，因需求拆解过细被分成了多个。请将它们整合为一个功能点，保证所有功能细节不遗漏。
+
+合并规则：
+- 取一个最能概括所有子功能点的名称
+- fp_type 选最匹配的（workflow/constraint/calculation/api_behavior/data_record/config）
+- 正常流程整合为一条完整的步骤链
+- 异常分支、业务规则、验收标准合并且去重
+- 数据约束汇总且去重
+- 前置条件取并集
+
+原始功能点：
+{chr(10).join(fp_texts)}
+
+请输出合并后的单个功能点 JSON（格式与一体式 FP 拆分一致：name/fp_type/summary/suggested_module/sub_srr/test_hints）。"""
+
+    try:
+        merged = await llm_client.call_json(
+            prompt=merge_prompt,
+            system_prompt="你是一个需求合并专家，将拆得过细的功能点合并为一个完整的业务功能点。整理后的子 SRR 使用标准 SRR 结构（requirement/flows.happy_path.steps/flows.alternate_flows/business_rules/data_constraints/acceptance_criteria）。",
+            schema_hint={"name": str, "fp_type": str, "summary": str, "suggested_module": str, "sub_srr": dict, "test_hints": list},
+            temperature=0.2,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"合并失败：LLM 调用出错：{str(e)[:200]}")
+
+    # 创建合并后的 FP
+    merged_id = gen_requirement_id()
+    primary = fps_to_merge[0]  # 以第一个 FP 的模块归属为准
+
+    merged_fp = FunctionalPoint(
+        id=merged_id,
+        requirement_id=req_id,
+        module_id=primary.module_id,
+        name=merged.get("name", "合并功能点"),
+        fp_type=merged.get("fp_type", primary.fp_type),
+        priority=primary.priority,
+        status="pending_review",  # 合并后需重新审核
+        srr_json=merged.get("sub_srr", {}),
+        test_hints=merged.get("test_hints", []),
+        atomicity_check={"trigger": True, "result": True, "boundary": True},
+    )
+    session.add(merged_fp)
+
+    # 删除旧 FP（先删依赖）
+    old_ids = {fp.id for fp in fps_to_merge}
+    from sqlalchemy import delete as _del
+    await session.execute(
+        _del(FPDependency).where(
+            (FPDependency.source_fp_id.in_(old_ids)) | (FPDependency.target_fp_id.in_(old_ids))
+        )
+    )
+    for fp in fps_to_merge:
+        await session.delete(fp)
+
+    await session.commit()
+    logger.info("[FP] 合并完成: {} → {}, req={}", [fp.name for fp in fps_to_merge], merged_fp.name, req_id)
+    return ApiResponse(
+        success=True,
+        message=f"已将 {len(fps_to_merge)} 个功能点合并为「{merged_fp.name}」",
+        data={"id": merged_fp.id, "name": merged_fp.name, "fp_type": merged_fp.fp_type},
+    )
+
+
 @router.patch("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def fp_update(
     req_id: str, fp_id: str, body: FPUpdateRequest,

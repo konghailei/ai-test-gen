@@ -191,6 +191,26 @@ export default function RequirementDetail() {
     affected_requirements: { id: string; title: string; priority: string; modules: string[] }[]
   } | null>(null)
 
+  // v1.5.3: SRR 逐字段内联编辑
+  const [inlineField, setInlineField] = useState<string | null>(null)
+  const [inlineValue, setInlineValue] = useState('')
+  const saveInlineField = async () => {
+    if (!id || !inlineField) return
+    const srr = JSON.parse(JSON.stringify(detail.srr_json || {}))
+    const path = inlineField.split('.')
+    let target: any = srr
+    for (let i = 0; i < path.length - 1; i++) {
+      if (!target[path[i]]) target[path[i]] = {}
+      target = target[path[i]]
+    }
+    target[path[path.length - 1]] = inlineValue
+    try {
+      await reqApi.update(id, srr)
+      setReq(prev => prev ? { ...prev, srr_json: srr } : prev)
+      setInlineField(null)
+    } catch { }
+  }
+
   // 模块名称映射（ID→名称），用于 SRR 中显示模块名称
   const [moduleMap, setModuleMap] = useState<Record<string, string>>({})
 
@@ -406,9 +426,24 @@ export default function RequirementDetail() {
 
         {/* 功能概述 */}
         {reqData.summary && (
-          <div>
+          <div className="relative group">
             <h3 className="label">功能概述</h3>
-            <p className="text-sm text-slate-600 leading-relaxed">{reqData.summary}</p>
+            {inlineField === 'requirement.summary' ? (
+              <div className="flex items-start gap-2 mt-1">
+                <textarea value={inlineValue} onChange={e => setInlineValue(e.target.value)}
+                  className="input-field text-sm flex-1 resize-none" rows={2} autoFocus />
+                <button onClick={saveInlineField} className="btn-primary text-xs px-2 py-1"><Save className="w-3 h-3" /></button>
+                <button onClick={() => setInlineField(null)} className="btn-secondary text-xs px-2 py-1"><X className="w-3 h-3" /></button>
+              </div>
+            ) : (
+              <p className="text-sm text-slate-600 leading-relaxed">
+                {reqData.summary}
+                <button onClick={() => { setInlineField('requirement.summary'); setInlineValue(reqData.summary) }}
+                  className="ml-1 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500 align-top">
+                  <Edit3 className="w-3 h-3 inline" />
+                </button>
+              </p>
+            )}
           </div>
         )}
 

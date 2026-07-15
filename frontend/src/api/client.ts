@@ -282,6 +282,11 @@ export const requirements = {
       `/requirements/${reqId}/fp/${fpId}/regenerate`,
       { method: 'PATCH', body: JSON.stringify({ hint: hint || '' }) },
     ),
+  fpMerge: (reqId: string, fpIds: string[]) =>
+    request<{ id: string; name: string; fp_type: string }>(
+      `/requirements/${reqId}/fp/merge`,
+      { method: 'POST', body: JSON.stringify({ fp_ids: fpIds }) },
+    ),
 }
 
 // ============================================================
