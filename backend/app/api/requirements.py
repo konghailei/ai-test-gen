@@ -2727,6 +2727,7 @@ async def fp_remove_dependency(
 
 class FPMergeRequest(BaseModel):
     fp_ids: list[str]  # 至少 2 个
+    merged_name: str = ""  # 合并后功能点名称（为空则 LLM 自动生成）
 
 
 @router.post("/{req_id}/fp/merge", response_model=ApiResponse, dependencies=[Depends(require_write)])
@@ -2752,40 +2753,46 @@ async def fp_merge(
     if len(fps_to_merge) < 2:
         raise HTTPException(status_code=400, detail="有效功能点不足，无法合并")
 
-    # 用 LLM 整理合并后的子 SRR
-    from app.core import prompt_manager as pm3
-    fp_texts = []
+    # 用 LLM 整理合并后的子 SRR — 序列化完整子 SRR 避免字段遗漏
+    import json as _j
+    fp_jsons = []
     for fp in fps_to_merge:
-        parts = [f"### {fp.name}（{fp.fp_type}）"]
+        d = {
+            "name": fp.name,
+            "fp_type": fp.fp_type,
+            "test_hints": fp.test_hints or [],
+        }
         if isinstance(fp.srr_json, dict):
-            s = fp.srr_json
-            parts.append(f"描述：{s.get('requirement', {}).get('summary', '') or s.get('description', '')}")
-            parts.append(f"正常流程：{s.get('flows', {}).get('happy_path', '')}")
-            parts.append(f"异常分支：{s.get('flows', {}).get('alternate_flows', '')}")
-            parts.append(f"业务规则：{s.get('business_rules', [])}")
-        fp_texts.append("\n".join(parts))
+            d["sub_srr"] = fp.srr_json
+        fp_jsons.append(d)
 
-    merge_prompt = f"""将以下多个功能点合并为一个完整的功能点，整理其子 SRR。
+    custom_name_hint = f"\n\n**用户指定的合并后名称：{body.merged_name}**" if body.merged_name else ""
 
-这些功能点原本属于同一个业务功能，因需求拆解过细被分成了多个。请将它们整合为一个功能点，保证所有功能细节不遗漏。
+    merge_prompt = f"""将以下多个功能点合并为一个完整的功能点。
+
+这些功能点原本属于同一个业务功能，因需求拆解过细被分成了多个。请按标准 SRR 格式重新生成一份**完整**的子 SRR，保证所有功能细节不遗漏。{custom_name_hint}
 
 合并规则：
-- 取一个最能概括所有子功能点的名称
+- 如果上面提供了用户指定名称，使用该名称；否则取一个最能概括所有子功能点的名称
 - fp_type 选最匹配的（workflow/constraint/calculation/api_behavior/data_record/config）
-- 正常流程整合为一条完整的步骤链
-- 异常分支、业务规则、验收标准合并且去重
-- 数据约束汇总且去重
-- 前置条件取并集
+- flows.happy_path.steps：将各子 FP 的步骤整合为一条完整的步骤链（order/action/expect）
+- flows.alternate_flows：所有异常分支合并且去重（name/trigger/expect）
+- boundary_conditions：保留所有边界条件
+- business_rules：保留所有业务规则（id/rule/type），去重
+- data_constraints：保留所有字段约束（field/type/required/constraints/example），去重
+- acceptance_criteria：保留所有验收标准（id/description/type），去重
+- preconditions：取并集去重
+- test_hints：合并去重
 
-原始功能点：
-{chr(10).join(fp_texts)}
+原始功能点（完整子 SRR）：
+{_j.dumps(fp_jsons, ensure_ascii=False, indent=2)}
 
-请输出合并后的单个功能点 JSON（格式与一体式 FP 拆分一致：name/fp_type/summary/suggested_module/sub_srr/test_hints）。"""
+请输出合并后的功能点 JSON。子 SRR 必须使用标准格式（requirement/flows.happy_path.steps/flows.alternate_flows/boundary_conditions/business_rules/data_constraints/acceptance_criteria/preconditions）。"""
 
     try:
         merged = await llm_client.call_json(
             prompt=merge_prompt,
-            system_prompt="你是一个需求合并专家，将拆得过细的功能点合并为一个完整的业务功能点。整理后的子 SRR 使用标准 SRR 结构（requirement/flows.happy_path.steps/flows.alternate_flows/business_rules/data_constraints/acceptance_criteria）。",
+            system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
             schema_hint={"name": str, "fp_type": str, "summary": str, "suggested_module": str, "sub_srr": dict, "test_hints": list},
             temperature=0.2,
         )
@@ -2800,7 +2807,7 @@ async def fp_merge(
         id=merged_id,
         requirement_id=req_id,
         module_id=primary.module_id,
-        name=merged.get("name", "合并功能点"),
+        name=body.merged_name or merged.get("name", "合并功能点"),
         fp_type=merged.get("fp_type", primary.fp_type),
         priority=primary.priority,
         status="pending_review",  # 合并后需重新审核

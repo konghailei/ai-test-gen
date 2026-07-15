@@ -197,13 +197,18 @@ export default function RequirementDetail() {
   const saveInlineField = async () => {
     if (!id || !inlineField) return
     const srr = JSON.parse(JSON.stringify(detail.srr_json || {}))
+    // 处理特殊字段：preconditions 是数组，按行拆分
+    let val: any = inlineValue
+    if (inlineField === 'preconditions') {
+      val = inlineValue.split('\n').map(s => s.trim()).filter(Boolean)
+    }
     const path = inlineField.split('.')
     let target: any = srr
     for (let i = 0; i < path.length - 1; i++) {
       if (!target[path[i]]) target[path[i]] = {}
       target = target[path[i]]
     }
-    target[path[path.length - 1]] = inlineValue
+    target[path[path.length - 1]] = val
     try {
       await reqApi.update(id, srr)
       setReq(prev => prev ? { ...prev, srr_json: srr } : prev)
@@ -448,14 +453,30 @@ export default function RequirementDetail() {
         )}
 
         {/* 前置条件 */}
-        {(srr.preconditions || []).length > 0 && (
-          <div>
-            <h3 className="label">前置条件</h3>
-            <ul className="list-disc list-inside text-sm text-slate-600 space-y-1">
-              {(Array.isArray(srr.preconditions) ? srr.preconditions : []).map((p: string, i: number) => <li key={i}>{p}</li>)}
-            </ul>
-          </div>
-        )}
+        <div className="relative group">
+          <h3 className="label">前置条件</h3>
+          {inlineField === 'preconditions' ? (
+            <div className="flex items-start gap-2 mt-1">
+              <textarea value={inlineValue} onChange={e => setInlineValue(e.target.value)}
+                className="input-field text-sm flex-1 resize-none" rows={3}
+                placeholder="一行一条前置条件" autoFocus />
+              <button onClick={saveInlineField} className="btn-primary text-xs px-2 py-1"><Save className="w-3 h-3" /></button>
+              <button onClick={() => setInlineField(null)} className="btn-secondary text-xs px-2 py-1"><X className="w-3 h-3" /></button>
+            </div>
+          ) : (
+            <>
+              <button onClick={() => { setInlineField('preconditions'); setInlineValue((srr.preconditions || []).join('\n')) }}
+                className="absolute right-0 top-0 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500">
+                <Edit3 className="w-3 h-3" />
+              </button>
+              {(srr.preconditions || []).length > 0 ? (
+                <ul className="list-disc list-inside text-sm text-slate-600 space-y-1">
+                  {(Array.isArray(srr.preconditions) ? srr.preconditions : []).map((p: string, i: number) => <li key={i}>{p}</li>)}
+                </ul>
+              ) : <p className="text-xs text-slate-400">（无）</p>}
+            </>
+          )}
+        </div>
 
         {/* 正常流程 */}
         {flows.happy_path?.steps?.length > 0 && (
@@ -510,19 +531,35 @@ export default function RequirementDetail() {
         )}
 
         {/* 业务规则 */}
-        {(srr.business_rules || []).length > 0 && (
-          <div>
-            <h3 className="label">业务规则</h3>
-            <div className="space-y-1.5">
-              {(Array.isArray(srr.business_rules) ? srr.business_rules : []).map((r: any, i: number) => (
-                <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
+        <div className="relative group">
+          <h3 className="label">业务规则</h3>
+          {inlineField === 'business_rules' ? (
+            <div className="flex items-start gap-2 mt-1">
+              <textarea value={inlineValue} onChange={e => setInlineValue(e.target.value)}
+                className="input-field text-sm flex-1 resize-none" rows={4}
+                placeholder="一行一条业务规则" autoFocus />
+              <button onClick={saveInlineField} className="btn-primary text-xs px-2 py-1"><Save className="w-3 h-3" /></button>
+              <button onClick={() => setInlineField(null)} className="btn-secondary text-xs px-2 py-1"><X className="w-3 h-3" /></button>
+            </div>
+          ) : (
+            <>
+              <button onClick={() => { setInlineField('business_rules'); setInlineValue((srr.business_rules || []).map((r:any) => typeof r === 'string' ? r : `${r.id}: ${r.rule}`).join('\n')) }}
+                className="absolute right-0 top-0 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500">
+                <Edit3 className="w-3 h-3" />
+              </button>
+              {(srr.business_rules || []).length > 0 ? (
+                <div className="space-y-1.5">
+                  {(Array.isArray(srr.business_rules) ? srr.business_rules : []).map((r: any, i: number) => (
+                    <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
                   <span>{r.rule}</span>
                 </div>
               ))}
             </div>
-          </div>
-        )}
+              ) : <p className="text-xs text-slate-400">（无）</p>}
+            </>
+          )}
+        </div>
 
         {/* 数据约束 */}
         {(srr.data_constraints || []).length > 0 && (

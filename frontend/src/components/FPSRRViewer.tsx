@@ -79,18 +79,27 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
     setLoading(false)
   }
 
+  const [mergeModal, setMergeModal] = useState(false)
+  const [mergeName, setMergeName] = useState('')
+
   // 多选合并
   const toggleSelect = (fpId: string) => {
     const next = new Set(selected)
     if (next.has(fpId)) next.delete(fpId); else next.add(fpId)
     setSelected(next)
   }
+  const openMergeDialog = () => {
+    // 预填：取已选中 FP 中名字最短的
+    const names = fps.filter(f => selected.has(f.id)).map(f => f.name)
+    setMergeName(names.sort((a,b) => a.length - b.length)[0] || '')
+    setMergeModal(true)
+  }
   const handleMerge = async () => {
     const ids = [...selected]
     if (ids.length < 2) return
-    if (!confirm(`确定将 ${ids.length} 个功能点合并为一个？LLM 将重新整理子 SRR。`)) return
     setMerging(true)
-    try { await reqApi.fpMerge(reqId, ids); setSelected(new Set()); await load(); await loadDeps() } catch { }
+    setMergeModal(false)
+    try { await reqApi.fpMerge(reqId, ids, mergeName); setSelected(new Set()); await load(); await loadDeps() } catch { }
     setMerging(false)
   }
 
@@ -173,7 +182,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
           </span>
           <div className="flex items-center gap-2">
             {selected.size >= 2 && (
-              <button onClick={handleMerge} disabled={merging}
+              <button onClick={openMergeDialog} disabled={merging}
                 className="btn-primary text-xs flex items-center gap-1.5">
                 {merging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <GitBranch className="w-3.5 h-3.5" />}
                 合并 {selected.size} 个
@@ -532,6 +541,31 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                 ) : (
                   <><RefreshCw className="w-4 h-4" /> 重新生成</>
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 合并弹窗 */}
+      {mergeModal && (
+        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setMergeModal(false)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <GitBranch className="w-5 h-5 text-primary-500" /> 合并功能点
+            </h2>
+            <p className="text-sm text-slate-500 mt-2">
+              将 {selected.size} 个选中的功能点合并为一个。LLM 将重新整理子 SRR，保证功能不遗漏。
+            </p>
+            <label className="block mt-3 text-xs text-slate-500">合并后名称</label>
+            <input value={mergeName} onChange={e => setMergeName(e.target.value)}
+              className="input-field mt-1 text-sm" placeholder="留空则 LLM 自动生成" autoFocus />
+            <div className="flex items-center justify-end gap-3 mt-4">
+              <button onClick={() => setMergeModal(false)} className="btn-secondary">取消</button>
+              <button onClick={handleMerge} disabled={merging}
+                className="btn-primary flex items-center gap-2 disabled:opacity-50">
+                {merging ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitBranch className="w-4 h-4" />}
+                确认合并
               </button>
             </div>
           </div>
