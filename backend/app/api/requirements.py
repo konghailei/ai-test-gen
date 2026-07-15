@@ -1433,6 +1433,32 @@ async def submit_clarify_answers(
         final_data.get("requirement", {}).get("title", ""),
     )
 
+    # v1.5.3: 澄清后 re-parse 已提取新 FP，替换旧 FP（澄清内容更完整）
+    if req_agent.last_fps:
+        try:
+            from sqlalchemy import delete as sa_del
+            # 删除旧 FP + 依赖
+            old_fps = await session.execute(
+                select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
+            )
+            old_ids = {r[0] for r in old_fps.fetchall()}
+            if old_ids:
+                await session.execute(
+                    sa_del(FPDependency).where(
+                        (FPDependency.source_fp_id.in_(old_ids)) | (FPDependency.target_fp_id.in_(old_ids))
+                    )
+                )
+                await session.execute(
+                    sa_del(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
+                )
+            await session.flush()
+            await _save_fps_to_db(session, req_id, req_agent.last_fps, record.priority)
+            await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
+            await session.commit()
+            logger.info("[Clarify] 澄清后重新提取 FP: {} 个", len(req_agent.last_fps))
+        except Exception as e:
+            logger.warning("[Clarify] FP 重新提取失败（不阻断）: {}", str(e)[:200])
+
     return ApiResponse(
         success=True,
         message="澄清完成，需求已确认",
@@ -2037,7 +2063,6 @@ async def archive_requirement(
             )
             all_fps = fp_result.scalars().all()
             for f in all_fps:
-                # 每个 FP 构造一个知识条目（含模块归属 + 子 SRR）
                 fp_meta = {
                     "type": "functional_point",
                     "requirement_id": req_id,
@@ -2046,21 +2071,22 @@ async def archive_requirement(
                     "product_id": record.product_id,
                     "status": "archived",
                 }
-                # 将 FP 的关键信息转为文本：name + summary + test_hints
-                fp_text = f"功能点：{f.name}\n模块：{f.module_id}\n类型：{f.fp_type}\n"
-                if isinstance(f.srr_json, dict):
-                    fp_text += f"描述：{f.srr_json.get('summary', '')}\n"
-                    fp_text += f"正常流程：{f.srr_json.get('flows', {}).get('happy_path', '')}\n"
-                    fp_text += f"业务规则：{'；'.join(f.srr_json.get('business_rules', []))}\n"
-                if isinstance(f.test_hints, list):
-                    fp_text += f"测试提示：{'；'.join(f.test_hints[:5])}"
+                # 构造 _srr_to_text 兼容的嵌入格式（复用子 SRR 的结构化字段）
+                embed_srr = dict(f.srr_json) if isinstance(f.srr_json, dict) else {}
+                embed_srr.setdefault("requirement", {})
+                embed_srr["requirement"]["title"] = f.name
+                if not embed_srr["requirement"].get("summary"):
+                    embed_srr["requirement"]["summary"] = (
+                        f.srr_json.get("requirement", {}).get("summary", "")
+                        if isinstance(f.srr_json, dict) else ""
+                    ) or f.name
                 # 同步写入 Milvus
                 try:
                     from app.db.milvus_store import vector_store
                     await asyncio.to_thread(
                         vector_store.add_requirement,
                         req_id=f"FP-{f.id}",
-                        srr_json={"content": fp_text, "metadata": fp_meta},
+                        srr_json=embed_srr,
                         metadata=fp_meta,
                     )
                     fp_kb_count += 1
