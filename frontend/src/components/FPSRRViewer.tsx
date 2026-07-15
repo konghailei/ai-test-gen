@@ -282,60 +282,133 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                     {/* SRR 展开内容 */}
                     {isExpanded && (
                       <div className="px-4 pb-4 bg-slate-50/50 space-y-3">
-                        {/* 子 SRR 内容 */}
+                        {/* 子 SRR 内容（兼容新旧两种格式） */}
                         {fp.srr_json && Object.keys(fp.srr_json).length > 0 && (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            {fp.srr_json.description && (
+                            {/* 描述 / summary */}
+                            {(fp.srr_json.requirement?.summary || fp.srr_json.description) && (
                               <div className="md:col-span-2">
-                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">描述</span>
-                                <p className="text-sm text-slate-600 mt-0.5">{fp.srr_json.description}</p>
+                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">概述</span>
+                                <p className="text-sm text-slate-600 mt-0.5">{fp.srr_json.requirement?.summary || fp.srr_json.description}</p>
                               </div>
                             )}
-                            {fp.srr_json.flows && (() => {
-                              const flows = fp.srr_json.flows
-                              return (
-                                <div className="md:col-span-2 space-y-2">
-                                  {flows.happy_path && (
+                            {/* 正常流程（兼容 steps[] 和纯文本） */}
+                            {fp.srr_json.flows && (
+                              <div className="md:col-span-2 space-y-2">
+                                {(() => {
+                                  const hp = fp.srr_json.flows.happy_path
+                                  if (!hp) return null
+                                  // 新格式：结构化 steps[]
+                                  if (hp.steps?.length) return (
                                     <div>
                                       <span className="text-[10px] text-slate-400 uppercase tracking-wider">正常流程</span>
-                                      <p className="text-sm text-slate-600 mt-0.5">{flows.happy_path}</p>
+                                      <ol className="mt-1 space-y-1">
+                                        {hp.steps.map((s: any) => (
+                                          <li key={s.order} className="text-sm text-slate-600 pl-2">
+                                            <span className="text-slate-400 text-xs mr-1">{s.order}.</span>
+                                            {s.action}
+                                            <span className="text-slate-400"> → </span>
+                                            <span className="text-slate-500">{s.expect}</span>
+                                          </li>
+                                        ))}
+                                      </ol>
                                     </div>
-                                  )}
-                                  {flows.alternate_flows && (
+                                  )
+                                  // 旧格式：纯文本
+                                  return (
                                     <div>
-                                      <span className="text-[10px] text-slate-400 uppercase tracking-wider">异常分支</span>
-                                      <p className="text-sm text-slate-600 mt-0.5">{flows.alternate_flows}</p>
+                                      <span className="text-[10px] text-slate-400 uppercase tracking-wider">正常流程</span>
+                                      <p className="text-sm text-slate-600 mt-0.5">{String(hp)}</p>
                                     </div>
-                                  )}
+                                  )
+                                })()}
+                                {/* 异常分支（兼容对象数组和纯文本） */}
+                                {fp.srr_json.flows.alternate_flows && (
+                                  <div>
+                                    <span className="text-[10px] text-slate-400 uppercase tracking-wider">异常分支</span>
+                                    {Array.isArray(fp.srr_json.flows.alternate_flows) && typeof fp.srr_json.flows.alternate_flows[0] === 'object' ? (
+                                      <div className="mt-1 space-y-1">
+                                        {fp.srr_json.flows.alternate_flows.map((af: any, i: number) => (
+                                          <div key={i} className="text-sm text-slate-600 pl-3 border-l-2 border-amber-200">
+                                            <span className="font-medium text-amber-700">{af.name}：</span>
+                                            {af.trigger} → <span className="text-slate-500">{af.expect}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <p className="text-sm text-slate-600 mt-0.5">{String(fp.srr_json.flows.alternate_flows)}</p>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            {/* 边界条件（新增） */}
+                            {fp.srr_json.boundary_conditions?.length > 0 && (
+                              <div>
+                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">边界条件</span>
+                                <div className="mt-1 space-y-0.5">
+                                  {fp.srr_json.boundary_conditions.map((bc: any, i: number) => (
+                                    <div key={i} className="text-xs text-slate-600">
+                                      {bc.field}：{bc.condition} → <span className="text-slate-500">{bc.expect}</span>
+                                    </div>
+                                  ))}
                                 </div>
-                              )
-                            })()}
+                              </div>
+                            )}
+                            {/* 业务规则（兼容对象数组和纯文本数组） */}
                             {fp.srr_json.business_rules?.length > 0 && (
                               <div>
                                 <span className="text-[10px] text-slate-400 uppercase tracking-wider">业务规则</span>
                                 <ul className="mt-1 space-y-0.5">
-                                  {fp.srr_json.business_rules.map((r: string, i: number) => (
-                                    <li key={i} className="text-sm text-slate-600 pl-3 border-l-2 border-slate-200">{r}</li>
+                                  {fp.srr_json.business_rules.map((r: any, i: number) => (
+                                    <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-slate-200">
+                                      {typeof r === 'string' ? r : (
+                                        <><span className="text-slate-400">{r.id}</span> <span className="text-[10px] px-1 bg-slate-100 rounded">{r.type}</span> {r.rule}</>
+                                      )}
+                                    </li>
                                   ))}
                                 </ul>
                               </div>
                             )}
+                            {/* 数据约束（兼容富对象和简对象） */}
+                            {fp.srr_json.data_constraints?.length > 0 && (
+                              <div>
+                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">数据约束</span>
+                                <ul className="mt-1 space-y-1">
+                                  {fp.srr_json.data_constraints.map((d: any, i: number) => (
+                                    <li key={i} className="text-xs text-slate-600">
+                                      <span className="font-medium">{d.field}</span>
+                                      {d.type && <span className="text-slate-400"> ({d.type})</span>}
+                                      {d.required && <span className="text-red-400">*</span>}
+                                      <span className="text-slate-500"> — {d.constraints}</span>
+                                      {d.example && <span className="text-slate-400 ml-1">例: {d.example}</span>}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {/* 验收标准（兼容对象数组和纯文本数组） */}
                             {fp.srr_json.acceptance_criteria?.length > 0 && (
                               <div>
                                 <span className="text-[10px] text-slate-400 uppercase tracking-wider">验收标准</span>
                                 <ul className="mt-1 space-y-0.5">
-                                  {fp.srr_json.acceptance_criteria.map((ac: string, i: number) => (
-                                    <li key={i} className="text-sm text-slate-600 pl-3 border-l-2 border-emerald-200">{ac}</li>
+                                  {fp.srr_json.acceptance_criteria.map((ac: any, i: number) => (
+                                    <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-emerald-200">
+                                      {typeof ac === 'string' ? ac : (
+                                        <><span className="text-slate-400">{ac.id}</span> <span className="text-[10px] px-1 bg-emerald-50 rounded">{ac.type}</span> {ac.description}</>
+                                      )}
+                                    </li>
                                   ))}
                                 </ul>
                               </div>
                             )}
+                            {/* 前置条件 */}
                             {fp.srr_json.preconditions?.length > 0 && (
                               <div>
                                 <span className="text-[10px] text-slate-400 uppercase tracking-wider">前置条件</span>
                                 <ul className="mt-1 space-y-0.5">
                                   {fp.srr_json.preconditions.map((p: string, i: number) => (
-                                    <li key={i} className="text-sm text-slate-600">• {p}</li>
+                                    <li key={i} className="text-xs text-slate-600">• {p}</li>
                                   ))}
                                 </ul>
                               </div>

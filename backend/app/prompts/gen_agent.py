@@ -154,17 +154,25 @@ def build_user_prompt(
 
 {impact_guidance}"""
 
-    # 功能点定向生成上下文（v1.4：FP 接入生成流水线）
+    # 功能点定向生成上下文（v1.4：FP 接入生成流水线 / v1.5.3：消费 SRR 统一格式）
     fp_section = ""
     fp_requirements = ""
     if functional_points:
-        # 精简 FP 信息，避免 prompt 过长（只保留生成指导所需字段）
         fp_brief = [
             {
                 "id": fp.get("id", ""),
                 "name": fp.get("name", ""),
                 "fp_type": fp.get("fp_type", "workflow"),
-                "summary": fp.get("srr_json", {}).get("summary", ""),
+                "summary": fp.get("srr_json", {}).get("requirement", {}).get("summary", fp.get("srr_json", {}).get("summary", "")),
+                "preconditions": fp.get("srr_json", {}).get("preconditions", []),
+                "happy_path_steps": fp.get("srr_json", {}).get("flows", {}).get("happy_path", {}).get("steps", []) or
+                                    ([{"order": 1, "action": fp.get("srr_json", {}).get("flows", {}).get("happy_path", ""),
+                                       "expect": ""}] if isinstance(fp.get("srr_json", {}).get("flows", {}).get("happy_path", ""), str) else []),
+                "alternate_flows": fp.get("srr_json", {}).get("flows", {}).get("alternate_flows", []),
+                "boundary_conditions": fp.get("srr_json", {}).get("boundary_conditions", []),
+                "business_rules": fp.get("srr_json", {}).get("business_rules", []),
+                "data_constraints": fp.get("srr_json", {}).get("data_constraints", []),
+                "acceptance_criteria": fp.get("srr_json", {}).get("acceptance_criteria", []),
                 "test_hints": fp.get("test_hints", []),
                 "atomicity_check": fp.get("atomicity_check", {}),
             }
@@ -176,10 +184,13 @@ def build_user_prompt(
 {json.dumps(fp_brief, ensure_ascii=False, indent=2)}"""
         fp_requirements = """
 ### 功能点覆盖要求（优先级最高）
-- 每个功能点（FP）至少生成 1 个测试用例，覆盖其 happy_path
-- 对 atomicity_check 中 result/boundary 为 true 的 FP，补充边界值用例
-- 在每个用例中添加 "related_fp" 字段，值为此用例对应的功能点 ID（来自上方功能点列表的 id 字段）
-- 若一个用例覆盖多个 FP，related_fp 填主要 FP 的 ID
+- 每个功能点（FP）至少生成 1 个测试用例，覆盖其 happy_path_steps 中的每个步骤
+- 若 alternate_flows 非空：每个异常分支生成 1 个用例（从 name/trigger/expect 推导）
+- 若 boundary_conditions 非空：每个边界条件生成 1 个边界值用例
+- 若 data_constraints 中有 required=true 的字段：补充必填校验用例
+- 若 business_rules 中有 type=security/validation/workflow 的规则：生成对应类型的用例
+- 在每个用例中添加 "related_fp" 字段，值为此用例对应的功能点 ID
+- prependitions 作为用例前置条件，acceptance_criteria 作为验收标准
 - test_hints 是该 FP 的种子测试提示，应作为用例设计的重要参考"""
 
     if enable_multi_type:

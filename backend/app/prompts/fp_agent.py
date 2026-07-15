@@ -38,17 +38,14 @@ FP 的粒度是**业务能力级**，不是操作步骤级。一个 FP 是一个
 规则 4：**异常分支不独立**。同一功能的异常场景（超时、权限不足、输入非法）属于该 FP 的 alternate_flows，不另立 FP。
   ✅ 正确：「订单支付」的 sub_srr.alternate_flows = "余额不足→提示充值；超时→取消订单"
 
-## 子 SRR 应该包含什么
+## 子 SRR 格式（与主 SRR 统一，下游 gen_agent 共享解析逻辑）
 
-每个 FP 的 sub_srr 是该功能的完整定义，包含：
-- **flows.happy_path**：正常流程（从触发到结果，完整的步骤链）
-- **flows.alternate_flows**：所有异常分支（失败、超时、权限拒绝、边��情况）
-- **business_rules**：该功能涉及的所有业务规则（含校验规则、状态流转规则）
-- **data_constraints**：输入字段的约束（类型、长度、格式、必填）
-- **preconditions**：执行该功能前必须满足的条件
-- **acceptance_criteria**：该功能被认为"完成"的标准
-- **triggers**：什么触发该功能（用户点击/API 调用/定时任务）
-- **expected_results**：功能完成后的可观察结果
+每个 FP 的 sub_srr 复用主 SRR 的结构化字段，确保：
+- flows.happy_path 使用结构化步骤（order/action/expect），不是纯文本
+- alternate_flows 用对象数组（name/trigger/expect）
+- business_rules 用对象数组（id/rule/type）
+- data_constraints 用完整对象（field/type/required/constraints/example）
+- acceptance_criteria 用对象数组（id/description/type）
 
 ## 输出格式（JSON）
 {
@@ -60,20 +57,52 @@ FP 的粒度是**业务能力级**，不是操作步骤级。一个 FP 是一个
       "summary": "用户通过账号密码完成身份认证，进入系统",
       "suggested_module": "用户中心",
       "sub_srr": {
-        "description": "用户输入账号密码后系统校验身份，成功则跳转首页并生成会话，失败则提示错误，连续 5 次失败锁定账号 30 分钟，支持记住密码和会话超时",
-        "flows": {
-          "happy_path": "1. 用户输入账号和密码 → 2. 点击登录 → 3. 系统校验账号存在且密码正确 → 4. 生成 session → 5. 跳转首页",
-          "alternate_flows": "账号不存在→提示'账号不存在'；密码错误→提示'密码错误'并累计失败次数；连续 5 次失败→锁定账号 30 分钟；会话超时→跳转登录页；记住密码→免登录进入"
+        "requirement": {
+          "title": "用户登录",
+          "summary": "用户输入账号密码后系统校验身份，成功跳转首页，失败提示错误，连续5次失败锁定30分钟",
+          "priority": "P1"
         },
-        "business_rules": ["连续 5 次登录失败锁定账号 30 分钟", "密码需至少 6 位", "登录成功后重置失败计数", "会话有效期 2 小时"],
-        "data_constraints": [{"field": "账号", "constraints": "必填，存在性校验"}, {"field": "密码", "constraints": "必填，长度 ≥6 位"}],
         "preconditions": ["用户已注册", "账号未被禁用", "账号未被锁定"],
-        "acceptance_criteria": ["正确账号密码可成功登录并跳转首页", "错误密码提示明确且不泄露账号是否存在", "连续 5 次失败后账号锁定", "锁定 30 分钟后自动解锁"],
-        "triggers": "用户点击「登录」按钮",
-        "expected_results": "用户获得有效会话，跳转系统首页"
+        "flows": {
+          "happy_path": {
+            "steps": [
+              {"order": 1, "action": "用户输入账号和密码", "expect": "输入框显示输入内容"},
+              {"order": 2, "action": "用户点击「登录」按钮", "expect": "系统开始校验身份"},
+              {"order": 3, "action": "系统校验账号密码", "expect": "校验通过，生成 session"},
+              {"order": 4, "action": "跳转首页", "expect": "页面跳转到系统首页"}
+            ]
+          },
+          "alternate_flows": [
+            {"name": "账号不存在", "trigger": "账号在系统中未找到", "expect": "提示「账号不存在」"},
+            {"name": "密码错误", "trigger": "密码不匹配", "expect": "提示「密码错误」并累计失败次数"},
+            {"name": "账号锁定", "trigger": "连续5次密码错误", "expect": "提示「账号已锁定，请30分钟后重试」"},
+            {"name": "会话超时", "trigger": "2小时无操作", "expect": "跳转登录页"}
+          ]
+        },
+        "boundary_conditions": [
+          {"field": "账号", "condition": "空值", "expect": "提示「请输入账号」"},
+          {"field": "密码", "condition": "空值", "expect": "提示「请输入密码」"},
+          {"field": "密码", "condition": "少于6位", "expect": "提示「密码至少6位」"}
+        ],
+        "business_rules": [
+          {"id": "BR-LOGIN-001", "rule": "连续5次登录失败锁定账号30分钟", "type": "security"},
+          {"id": "BR-LOGIN-002", "rule": "密码长度≥6位", "type": "validation"},
+          {"id": "BR-LOGIN-003", "rule": "登录成功后重置失败计数", "type": "workflow"},
+          {"id": "BR-LOGIN-004", "rule": "会话有效期2小时，超时自动退出", "type": "session"}
+        ],
+        "data_constraints": [
+          {"field": "账号", "type": "string", "required": true, "constraints": "唯一性校验，正则 ^[a-zA-Z0-9_-]{3,50}$", "example": "user@example.com"},
+          {"field": "密码", "type": "string", "required": true, "constraints": "长度≥6位", "example": "pass123456"}
+        ],
+        "acceptance_criteria": [
+          {"id": "AC-LOGIN-001", "description": "正确账号密码可成功登录并跳转首页", "type": "functional"},
+          {"id": "AC-LOGIN-002", "description": "错误密码提示明确且累计失败次数", "type": "functional"},
+          {"id": "AC-LOGIN-003", "description": "连续5次失败后账号锁定30分钟", "type": "security"},
+          {"id": "AC-LOGIN-004", "description": "锁定期间正确密码也无法登录", "type": "security"}
+        ]
       },
       "atomicity_check": {"trigger": true, "result": true, "boundary": true},
-      "test_hints": ["正确账号+正确密码→登录成功", "正确账号+错误密码→提示且不锁定", "连续 5 次错误密码→锁定", "锁定后正确密码→提示已锁定", "锁定 31 分钟后→可登录", "空账号→校验提示", "空密码→校验提示"]
+      "test_hints": ["正确账号+正确密码→登录成功", "错误密码→提示+累计次数", "连续5次→锁定30分钟", "锁定后正确密码→提示已锁定", "锁定31分钟后→可登录", "空账号→校验提示", "空密码→校验提示"]
     }
   ],
   "dependencies": [
