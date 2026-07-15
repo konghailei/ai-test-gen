@@ -44,6 +44,8 @@ class ReqAgent:
     def __init__(self) -> None:
         """初始化 ReqAgent。"""
         self._llm = llm_client
+        self.last_fps: list[dict] = []  # v1.5.1: 存储最近一次解析提取的功能点
+        self.last_fp_dependencies: list[dict] = []  # v1.5.1: FP 间依赖关系
 
     async def parse(
         self,
@@ -189,6 +191,20 @@ class ReqAgent:
                     srr["requirement"].get("modules", []),
                     len(hp_steps),
                     len(srr.get("data_constraints", [])))
+
+        # 6. v1.5.1: 一体式 FP 提取（从完整原始文档拆分功能点 + 子 SRR）
+        self.last_fps = []
+        self.last_fp_dependencies = []  # P0-3: 同步重置
+        try:
+            self.last_fps = await self._fp_extract_from_raw(
+                raw_text=raw_requirement,
+                srr=srr,
+                product_name=product_name,
+            )
+            logger.info("[ReqAgent] FP 提取完成: {} 个功能点", len(self.last_fps))
+        except Exception as e:
+            logger.warning("[ReqAgent] FP 提取失败（不阻断主流程）: {}", str(e)[:200])
+
         return srr
 
     def _post_process(
@@ -516,6 +532,59 @@ class ReqAgent:
                     ac["type"] = AC_TYPE_ALIAS[t]
                 else:
                     ac["type"] = "functional"
+
+    async def _fp_extract_from_raw(
+        self,
+        raw_text: str,
+        srr: dict,
+        product_name: str = "",
+    ) -> list[dict]:
+        """v1.5.1: 从原始文档一体式提取功能点。
+
+        输入完整原始文档 + 概要 SRR，LLM 一次性输出 FP 列表 + 每个 FP 的子 SRR。
+        替代旧的三步流（提取 BP → 勾选 → 逐 BP 拆分）。
+
+        Returns:
+            list[dict]: 功能点列表，每个包含 name/fp_type/sub_srr/test_hints 等字段
+        """
+        from app.core import prompt_manager as pm
+
+        req_meta = srr.get("requirement", {})
+        modules = ", ".join(req_meta.get("modules", []) or [])
+
+        # 构建概要 SRR（轻量级，给 LLM 需求概况）
+        overview_srr = json.dumps({
+            "title": req_meta.get("title", ""),
+            "summary": req_meta.get("summary", ""),
+            "priority": req_meta.get("priority", "P2"),
+            "change_type": req_meta.get("change_type", "new"),
+            "preconditions": srr.get("preconditions", [])[:5],
+        }, ensure_ascii=False)
+
+        prompt = pm.get("fp_agent", "FP_INTEGRATED_USER_PROMPT").format(
+            req_title=req_meta.get("title", "未知需求"),
+            modules=modules,
+            product_name=product_name,
+            overview_srr=overview_srr,
+            raw_text=raw_text[:96000],  # 约 64K tokens，覆盖大多数需求文档
+        )
+
+        import json as _json
+        try:
+            result = await self._llm.call_json(
+                prompt=prompt,
+                system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
+                schema_hint={"functional_points": list, "dependencies": list},
+                temperature=0.4,
+            )
+            if isinstance(result, dict):
+                self.last_fp_dependencies = result.get("dependencies", [])
+                return result.get("functional_points", [])
+            return []
+        except Exception:
+            logger.warning("[ReqAgent] FP 一体式提取 LLM 调用失败")
+            self.last_fp_dependencies = []  # P0-3: 异常时重置
+            return []
 
 
 # 全局单例

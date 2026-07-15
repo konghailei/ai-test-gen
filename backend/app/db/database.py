@@ -102,7 +102,10 @@ async def init_db() -> None:
                 ("product_id", "VARCHAR(64) DEFAULT 'PROD-DEFAULT'", "product_id"),
             ],
             # v1.4: 功能点新表（Base.metadata.create_all 自动创建）
-            "functional_points": [],
+            "functional_points": [
+                # v1.5.1: FP 独立生命周期（为 FP 级归档预留）
+                ("status", "VARCHAR(16) NOT NULL DEFAULT 'active'", "status"),
+            ],
             "fp_dependencies": [],
         }
 

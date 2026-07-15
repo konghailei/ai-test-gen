@@ -571,6 +571,116 @@ async def get_fp_dependency_graph(
 
 
 # ============================================================================
+# v1.5.1: FP 级影响分析（基于 FPDependency BFS 遍历）
+# ============================================================================
+
+@router.get("/{product_id}/fp/impact", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_fp_impact(
+    product_id: str,
+    fp_id: str = Query(..., description="目标功能点 ID"),
+    max_depth: int = Query(3, ge=1, le=10, description="BFS 最大遍历深度"),
+    session: AsyncSession = Depends(get_session),
+):
+    """基于功能点依赖关系做 BFS 影响分析。
+
+    从目标 FP 出发，沿着 depends_on/data_flows/lifecycle_scenarios 边反向 BFS，
+    找出所有受影响的功能点和模块。
+    """
+    # 1. 校验目标 FP 存在
+    fp = await session.get(FunctionalPoint, fp_id)
+    if not fp:
+        raise HTTPException(status_code=404, detail="功能点不存在")
+
+    # 2. 加载该产品下所有 FP 的依赖
+    req_ids = await session.execute(
+        select(Requirement.id).where(Requirement.product_id == product_id)
+    )
+    req_id_set = {r[0] for r in req_ids.fetchall()}
+    if not req_id_set:
+        return ApiResponse(success=True, message="该产品下无需求", data={"fp_id": fp_id, "affected": [], "total": 0})
+
+    fp_ids_result = await session.execute(
+        select(FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.module_id, FunctionalPoint.requirement_id).where(
+            FunctionalPoint.requirement_id.in_(req_id_set)
+        )
+    )
+    fp_info = {r[0]: {"name": r[1], "module_id": r[2], "req_id": r[3]} for r in fp_ids_result.fetchall()}
+    fp_id_set = set(fp_info.keys())
+
+    dep_result = await session.execute(
+        select(FPDependency).where(
+            FPDependency.source_fp_id.in_(fp_id_set) | FPDependency.target_fp_id.in_(fp_id_set)
+        )
+    )
+    deps = dep_result.scalars().all()
+
+    # 构建邻接表
+    # depends_on: target 是被依赖方 → 修改 target 影响 source（反向传播）
+    # data_flows / lifecycle_scenarios: source 是来源 → 修改 source 影响 target（正向传播）
+    adj: dict[str, set[str]] = {}
+    for d in deps:
+        if d.relation_type == "depends_on":
+            adj.setdefault(d.target_fp_id, set()).add(d.source_fp_id)
+        elif d.relation_type in ("data_flows", "lifecycle_scenarios"):
+            adj.setdefault(d.source_fp_id, set()).add(d.target_fp_id)
+
+    # 3. BFS 遍历
+    from collections import deque
+    visited: dict[str, int] = {fp_id: 0}  # fp_id → depth
+    queue = deque([fp_id])
+    while queue:
+        cur = queue.popleft()
+        cur_depth = visited[cur]
+        if cur_depth >= max_depth:
+            continue
+        for neighbor in adj.get(cur, set()):
+            if neighbor not in visited and neighbor in fp_id_set:
+                visited[neighbor] = cur_depth + 1
+                queue.append(neighbor)
+
+    # 4. 构建结果
+    affected_fps = [
+        {
+            "fp_id": fid,
+            "name": fp_info.get(fid, {}).get("name", fid),
+            "module_id": fp_info.get(fid, {}).get("module_id"),
+            "depth": depth,
+        }
+        for fid, depth in visited.items()
+        if fid != fp_id  # 排除自身
+    ]
+    affected_fps.sort(key=lambda x: x["depth"])
+
+    # 聚合受影响模块
+    affected_modules: dict[str, list[str]] = {}
+    for afp in affected_fps:
+        mod = afp["module_id"] or "_unassigned"
+        if mod not in affected_modules:
+            affected_modules[mod] = []
+        affected_modules[mod].append(afp["name"])
+
+    # 5. 生成影响摘要（供用例生成使用）
+    source_name = fp_info.get(fp_id, {}).get("name", fp.name)
+    impact_summary = f"功能点「{source_name}」变更，将影响 {len(affected_fps)} 个关联功能点："
+    for afp in affected_fps[:5]:
+        impact_summary += f"\n- [{afp['depth']} 级] {afp['name']}"
+    if len(affected_fps) > 5:
+        impact_summary += f"\n... 及其他 {len(affected_fps) - 5} 个功能点"
+
+    return ApiResponse(success=True, message="ok", data={
+        "source_fp_id": fp_id,
+        "source_fp_name": source_name,
+        "affected": affected_fps,
+        "affected_modules": [
+            {"module_id": mod, "fp_names": names}
+            for mod, names in affected_modules.items()
+        ],
+        "total": len(affected_fps),
+        "max_depth_reached": max(visited.values()) if visited else 0,
+        "impact_summary": impact_summary,
+    })
+
+# ============================================================================
 # 5. 影响分析（面向模块的 BFS 遍历）
 # ============================================================================
 

@@ -107,6 +107,7 @@
 │ ① ReqAgent 需求解析                          │
 │    原始文本 → SRR JSON (三级递进模型)        │
 │    格式检测 → 预处理 → LLM结构化 → 字段校验  │
+│  ⭐ v1.5.1: 解析后自动提取功能点(FP)+依赖关系 │
 └──────────────────┬───────────────────────────┘
                    ▼
 ┌──────────────────────────────────────────────┐
@@ -554,4 +555,6 @@ FastAPI StreamingResponse → 实时推送进度
 | 02 | [知识库架构设计](./02-knowledge-base.md) | 双引擎存储、混合检索、版本链、依赖图谱、大规模检索优化（§8）、已有项目入库（§9） |
 | 03 | [测试用例生成流程](./03-case-generation-flow.md) | GenAgent、ImpactAnalysisAgent、ReviewAgent、追溯矩阵、一致性、稳定性保障 |
 | 04 | [用例输出格式规范](./04-output-format.md) | UTCF JSON、Markdown 输出、Gherkin/pytest 转换、覆盖率矩阵 |
+| 05 | [技术选型](./05-technical-selection.md) | LLM/数据库/向量库等技术选型 |
+| 08 | [功能点（FP）子系统](./08-functional-points.md) ⭐ v1.5.1 | FP 一体式提取、子 SRR、审核流程、依赖图谱、影响分析 |
 | 05 | [技术选型分析](./05-technical-selection.md) | 全栈技术对比、稳定性组件选型、容量规划 |

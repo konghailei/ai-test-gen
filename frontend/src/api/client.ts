@@ -275,6 +275,13 @@ export const requirements = {
   },
   fpDelete: (reqId: string, fpId: string) =>
     request<{ success: boolean }>(`/requirements/${reqId}/fp/${fpId}`, { method: 'DELETE' }),
+  fpApprove: (reqId: string, fpId: string) =>
+    request<{ message: string }>(`/requirements/${reqId}/fp/${fpId}/approve`, { method: 'PATCH' }),
+  fpRegenerate: (reqId: string, fpId: string, hint?: string) =>
+    request<{ name: string; fp_type: string; srr_json: any; test_hints: any[] }>(
+      `/requirements/${reqId}/fp/${fpId}/regenerate`,
+      { method: 'PATCH', body: JSON.stringify({ hint: hint || '' }) },
+    ),
 }
 
 // ============================================================
@@ -605,6 +612,11 @@ export const dependencyGraph = {
   // 功能点依赖图谱（跨需求）
   fpGraph: (productId: string) =>
     request<{ nodes: any[]; edges: any[] }>(`/products/${productId}/fp/dependency-graph`),
+  fpImpact: (productId: string, fpId: string) =>
+    request<{
+      source_fp_name: string; affected: any[]; affected_modules: any[];
+      total: number; impact_summary: string;
+    }>(`/products/${productId}/fp/impact?fp_id=${fpId}`),
 }
 
 // ============================================================

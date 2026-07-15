@@ -114,6 +114,18 @@ _PROMPT_REGISTRY: list[dict] = [
         "default": fp_agent.FP_ASSOCIATE_SYSTEM_PROMPT,
         "description": "FP-Agent 关联分析 — 分析功能点间关联关系",
     },
+    {
+        "module": "fp_agent",
+        "name": "FP_INTEGRATED_SYSTEM_PROMPT",
+        "default": fp_agent.FP_INTEGRATED_SYSTEM_PROMPT,
+        "description": "FP-Agent 一体式拆分 — 原始文档 + SRR → FP 列表 + 子 SRR",
+    },
+    {
+        "module": "fp_agent",
+        "name": "FP_INTEGRATED_USER_PROMPT",
+        "default": fp_agent.FP_INTEGRATED_USER_PROMPT,
+        "description": "FP-Agent 一体式拆分用户提示词模板",
+    },
 ]
 
 

@@ -53,6 +53,110 @@ from app.utils.logger import logger
 
 
 # ============================================================================
+# v1.5.1: FP 自动入库辅助函数
+# ============================================================================
+
+async def _save_fps_to_db(
+    session: AsyncSession, req_id: str, fps: list[dict], priority: str = "P2",
+) -> int:
+    """将 ReqAgent 提取的功能点列表存入 functional_points 表。
+
+    每个 FP 的 sub_srr → srr_json，suggested_module 暂存不解析（用户手动分配模块）。
+    返回实际入库的 FP 数量。
+    """
+    if not fps:
+        return 0
+
+    saved = 0
+    for fp in fps:
+        fp_id = gen_requirement_id()
+        sub_srr = fp.get("sub_srr", {}) if isinstance(fp, dict) else {}
+
+        record = FunctionalPoint(
+            id=fp_id,
+            requirement_id=req_id,
+            name=((fp.get("name") or "未命名功能点") if isinstance(fp, dict) else "未命名功能点")[:255],
+            fp_type=(
+                fp.get("fp_type", "workflow") if isinstance(fp, dict) else "workflow"
+            ),
+            priority=priority,
+            srr_json={
+                **sub_srr,
+                "summary": fp.get("summary", "") if isinstance(fp, dict) else "",
+                "suggested_module": fp.get("suggested_module", "") if isinstance(fp, dict) else "",
+            },
+            atomicity_check=(
+                fp.get("atomicity_check", {}) if isinstance(fp, dict) else {}
+            ),
+            test_hints=(
+                fp.get("test_hints", []) if isinstance(fp, dict) else []
+            ),
+            status="pending_review",
+        )
+        session.add(record)
+        saved += 1
+
+    await session.flush()  # P0-1: 确保 FP 写入 DB，_save_fp_dependencies 可查询到
+    logger.info("[FP-AutoSave] 需求 {} 自动存入 {} 个功能点", req_id, saved)
+    return saved
+
+
+async def _save_fp_dependencies(
+    session: AsyncSession, req_id: str, deps: list[dict],
+) -> int:
+    """将 LLM 提取的 FP 依赖关系存入 fp_dependencies 表。
+
+    依赖关系中的 source_fp_name/target_fp_name 需先映射为实际的 FP ID。
+    返回成功创建的依赖条数。
+    """
+    if not deps:
+        return 0
+
+    # 加载该需求下所有 FP 的 name→id 映射
+    fp_result = await session.execute(
+        select(FunctionalPoint.id, FunctionalPoint.name).where(
+            FunctionalPoint.requirement_id == req_id
+        )
+    )
+    name_to_id = {row[1]: row[0] for row in fp_result.fetchall()}
+
+    saved = 0
+    for dep in deps:
+        if not isinstance(dep, dict):
+            continue
+        src_name = dep.get("source_fp_name", "")
+        tgt_name = dep.get("target_fp_name", "")
+        src_id = name_to_id.get(src_name)
+        tgt_id = name_to_id.get(tgt_name)
+        if not src_id or not tgt_id or src_id == tgt_id:
+            continue
+        relation = dep.get("relation_type", "depends_on")
+        if relation not in ("depends_on", "data_flows", "invariants", "lifecycle_scenarios", "conflicts_with"):
+            relation = "depends_on"
+        # 查重
+        dup = await session.execute(
+            select(FPDependency).where(
+                FPDependency.source_fp_id == src_id,
+                FPDependency.target_fp_id == tgt_id,
+                FPDependency.relation_type == relation,
+            )
+        )
+        if dup.scalar_one_or_none():
+            continue
+        session.add(FPDependency(
+            source_fp_id=src_id,
+            target_fp_id=tgt_id,
+            relation_type=relation,
+            description=dep.get("description", ""),
+        ))
+        saved += 1
+
+    if saved:
+        logger.info("[FP-Dep] 需求 {} 自动创建 {} 条依赖关系", req_id, saved)
+    return saved
+
+
+# ============================================================================
 # 文件校验辅助函数
 # ============================================================================
 
@@ -163,7 +267,11 @@ async def upload_requirement(
     if not req_id:
         raise HTTPException(status_code=500, detail="解析失败：未生成需求 ID")
 
-    # 若调用方指定了 title/priority/modules，覆盖 SRR 中的值
+    # v1.5.1: 自动保存 ReqAgent 一体式提取的功能点
+    await _save_fps_to_db(session, req_id, req_agent.last_fps, req.priority)
+    await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
+
+    # 若调用方指定了 title/priority/modules，覆盖 SRR 中的值（text）
     req_data = srr.setdefault("requirement", {})
     if req.title:
         req_data["title"] = req.title
@@ -431,7 +539,9 @@ async def upload_requirement_file(
         srr["requirement"]["id"] = req_id
         logger.warning("[API/requirements] req_id 冲突 (file)，重新生成: new_id={}", req_id)
 
-    # 4. 若调用方指定了 title/priority，覆盖 SRR 中的值
+    # v1.5.1: 自动保存 FP
+    await _save_fps_to_db(session, req_id, req_agent.last_fps, priority)
+    await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
     req_data = srr.setdefault("requirement", {})
     if title:
         req_data["title"] = title
@@ -538,6 +648,10 @@ async def _run_requirement_analysis(
         if not isinstance(srr, dict):
             raise RuntimeError(f"需求解析返回异常类型: {type(srr).__name__}")
 
+        # P0-2: 立即捕获 FP，避免二次 parse 覆盖
+        captured_fps = list(req_agent.last_fps)
+        captured_fp_deps = list(req_agent.last_fp_dependencies)
+
         if await _is_cancelled():
             logger.info("[Task] 任务已取消，提前退出: task_id={}", task_id)
             return
@@ -636,6 +750,15 @@ async def _run_requirement_analysis(
             )
             await s.execute(stmt)
             await s.commit()
+
+        # v1.5.1: 自动保存 ReqAgent 一体式提取的功能点 + 依赖关系
+        try:
+            async with async_session() as s:
+                await _save_fps_to_db(s, req_id, captured_fps, req_data.get("priority", "P2"))
+                await _save_fp_dependencies(s, req_id, captured_fp_deps)
+                await s.commit()
+        except Exception as e:
+            logger.warning("[Task] FP 自动保存失败（不阻断）: {}", str(e)[:200])
 
         # ===== 完成 =====
         result = {
@@ -2152,9 +2275,9 @@ class FPExtractBPRequest(BaseModel):
 
 
 class FPSplitRequest(BaseModel):
-    """FP 拆分请求。"""
+    """FP 拆分请求。bp_names 为空时 = 全量重新拆分（删除旧 FP，从原始文档重新生成）。"""
     req_id: str
-    bp_names: list[str]  # 用户选中的 BP 名称列表
+    bp_names: list[str] = []  # 空列表→重新拆分模式
 
 
 class FPUpdateRequest(BaseModel):
@@ -2226,9 +2349,50 @@ async def fp_split(
     body: FPSplitRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """在选中的 BP 范围内拆分功能点并持久化。归档后不可用。"""
+    """在选中的 BP 范围内拆分功能点并持久化。bp_names 为空时全量重新拆分。归档后不可用。"""
     req = await _load_active_requirement(req_id, session)
     srr = req.srr_json or {}
+
+    # v1.5.1: "重新拆分"模式 — 删除旧 FP + 从原始文档一体式重新生成
+    if not body.bp_names or len(body.bp_names) == 0:
+        from sqlalchemy import delete as sa_delete
+
+        logger.info("[FP] 全量重新拆分: req_id={}", req_id)
+        # 删除旧 FP + 依赖
+        old_fps = await session.execute(
+            select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
+        )
+        old_ids = {r[0] for r in old_fps.fetchall()}
+        if old_ids:
+            await session.execute(
+                sa_delete(FPDependency).where(
+                    (FPDependency.source_fp_id.in_(old_ids)) | (FPDependency.target_fp_id.in_(old_ids))
+                )
+            )
+            await session.execute(
+                sa_delete(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
+            )
+        await session.flush()
+        # 调用 ReqAgent 一体式提取
+        raw_text = req.raw_text or ""
+        from app.agents.req_agent import req_agent as _agent
+        product_name = srr.get("requirement", {}).get("product_name", "") or ""
+        try:
+            new_fps = await _agent._fp_extract_from_raw(raw_text, srr, product_name)
+        except Exception as e:
+            logger.error("[FP] 重新拆分失败: {}", str(e)[:200])
+            raise HTTPException(status_code=500, detail=f"重新拆分失败: {str(e)[:200]}")
+        saved = await _save_fps_to_db(session, req_id, new_fps, req.priority)
+        await _save_fp_dependencies(session, req_id, _agent.last_fp_dependencies)
+        await session.commit()
+        return ApiResponse(
+            success=True,
+            message=f"已重新拆分 {saved} 个功能点",
+            data={"functional_points": [
+                {"id": "", "name": fp.get("name", ""), "fp_type": fp.get("fp_type", "workflow"), "module_id": None}
+                for fp in new_fps
+            ]},
+        )
 
     # 精简 SRR
     srr_snippet = {
@@ -2340,7 +2504,7 @@ async def fp_list(req_id: str, session: AsyncSession = Depends(get_session)) -> 
         "items": [
             {
                 "id": fp.id, "name": fp.name, "fp_type": fp.fp_type,
-                "module_id": fp.module_id, "priority": fp.priority,
+                "module_id": fp.module_id, "priority": fp.priority, "status": fp.status,
                 "srr_json": fp.srr_json, "atomicity_check": fp.atomicity_check,
                 "test_hints": fp.test_hints,
                 "vectorization_status": fp.vectorization_status,
@@ -2556,3 +2720,90 @@ async def fp_delete(req_id: str, fp_id: str, session: AsyncSession = Depends(get
     await session.delete(fp)
     await session.commit()
     return ApiResponse(success=True, message="功能点已删除")
+
+
+# ============================================================================
+# v1.5.1: FP 审核 + AI 重生成
+# ============================================================================
+
+class FPRegenerateRequest(BaseModel):
+    """单 FP AI 重生成请求。"""
+    hint: str = ""  # 用户补充说明（可选，引导 LLM 调整内容）
+
+
+@router.patch("/{req_id}/fp/{fp_id}/approve", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_approve(
+    req_id: str, fp_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """审核通过单个功能点。归档后不可用。"""
+    await _load_active_requirement(req_id, session)
+    fp = await session.get(FunctionalPoint, fp_id)
+    if not fp or fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="功能点不存在")
+    if fp.status == "approved":
+        return ApiResponse(success=True, message="该功能点已审核通过")
+    fp.status = "approved"
+    await session.commit()
+    logger.info("[FP] 审核通过: fp_id={}, name={}", fp_id, fp.name)
+    return ApiResponse(success=True, message=f"功能点「{fp.name}」已审核通过")
+
+
+@router.patch("/{req_id}/fp/{fp_id}/regenerate", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_regenerate(
+    req_id: str, fp_id: str,
+    body: FPRegenerateRequest | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """AI 重新生成单个功能点的子 SRR。可传入 hint 引导生成方向。归档后不可用。"""
+    req = await _load_active_requirement(req_id, session)
+    fp = await session.get(FunctionalPoint, fp_id)
+    if not fp or fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="功能点不存在")
+
+    hint = body.hint if body and body.hint else ""
+    srr = req.srr_json or {}
+    raw_text = req.raw_text or ""
+
+    from app.core import prompt_manager as pm2
+    regenerate_prompt = f"""重新生成以下功能点的子 SRR。
+
+原始需求：{srr.get("requirement", {}).get("title", req.title)}
+功能点名称：{fp.name}
+当前功能点类型：{fp.fp_type}
+{f'用户补充说明：{hint}' if hint else ''}
+
+原始需求文档（参考）：
+{raw_text[:8000]}
+
+请严格按照一体式 FP 拆分的输出格式，只输出这一个功能点的完整 JSON（含 sub_srr）。"""
+
+    try:
+        result = await llm_client.call_json(
+            prompt=regenerate_prompt,
+            system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
+            schema_hint={"name": str, "fp_type": str, "summary": str, "sub_srr": dict, "atomicity_check": dict, "test_hints": list},
+            temperature=0.4,
+        )
+        sub_srr = result.get("sub_srr", {}) if isinstance(result, dict) else {}
+        fp.srr_json = {
+            **sub_srr,
+            "summary": result.get("summary", "") if isinstance(result, dict) else "",
+            "suggested_module": result.get("suggested_module", "") if isinstance(result, dict) else "",
+        }
+        if isinstance(result, dict):
+            fp.atomicity_check = result.get("atomicity_check", fp.atomicity_check)
+            fp.test_hints = result.get("test_hints", fp.test_hints)
+            if result.get("name") and result["name"] != fp.name:
+                fp.name = result["name"][:255]
+            if result.get("fp_type"):
+                fp.fp_type = result["fp_type"]
+        fp.status = "pending_review"  # 重生成后需重新审核
+        await session.commit()
+        return ApiResponse(
+            success=True,
+            message=f"功能点「{fp.name}」已重新生成，待审核",
+            data={"name": fp.name, "fp_type": fp.fp_type, "srr_json": fp.srr_json, "test_hints": fp.test_hints},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重生成失败: {str(e)[:200]}")

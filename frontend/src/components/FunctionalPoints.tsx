@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Loader2, Plus, Trash2, Edit3, Save, X, Search, Layers, GitBranch, AlertTriangle } from 'lucide-react'
+import { Loader2, Trash2, Edit3, Save, X, Search, Layers, RefreshCw, AlertTriangle, Sparkles } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 
 interface Props {
@@ -10,10 +10,8 @@ interface Props {
 
 export default function FunctionalPoints({ reqId, productId, status }: Props) {
   const [fps, setFps] = useState<any[]>([])
-  const [bps, setBps] = useState<any[]>([])
-  const [selectedBPs, setSelectedBPs] = useState<string[]>([])
   const [fpLoading, setFpLoading] = useState(false)
-  const [fpSplitting, setFpSplitting] = useState(false)
+  const [resplitting, setResplitting] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const [editModule, setEditModule] = useState('')
@@ -35,24 +33,15 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
     try { setModules(await prodApi.listModules(productId) || []) } catch { }
   }
 
-  const extractBP = async () => {
-    setFpLoading(true)
+  // v1.5.1: "重新拆分" — 用一体式 prompt 重新生成 FP（需先删除旧的）
+  const handleResplit = async () => {
+    if (!confirm('重新拆分会先删除当前所有功能点，然后基于原始文档重新生成。确定继续？')) return
+    setResplitting(true)
     try {
-      const r = await reqApi.fpExtractBP(reqId)
-      setBps(r.business_points || [])
+      await reqApi.fpSplit(reqId, [])  // 空 BP 列表=全量重新拆分
+      await loadFP()
     } catch { }
-    setFpLoading(false)
-  }
-
-  const splitFP = async () => {
-    if (selectedBPs.length === 0) return
-    setFpSplitting(true)
-    try {
-      const r = await reqApi.fpSplit(reqId, selectedBPs)
-      setFps(r.functional_points || [])
-      setBps([]); setSelectedBPs([])
-    } catch { }
-    setFpSplitting(false)
+    setResplitting(false)
   }
 
   const updateFP = async (fpId: string) => {
@@ -87,53 +76,35 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
       {isArchived && (
         <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-          <span>此需求已归档，功能点已锁定为只读。归档后的功能点作为知识库的组成部分，不可编辑或删除。</span>
+          <span>此需求已归档，功能点已锁定为只读。</span>
         </div>
       )}
 
-      {/* BP 提取 + 拆分 — 归档后隐藏 */}
+      {/* 操作栏 */}
       {!isArchived && (
-      <div className="flex items-center gap-3">
-        <button onClick={extractBP} disabled={fpLoading}
-          className="btn-secondary text-sm flex items-center gap-1.5">
-          {fpLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Layers className="w-4 h-4" />}
-          提取业务点
-        </button>
-        {bps.length > 0 && (
-          <span className="text-xs text-slate-400">检测到 {bps.length} 个业务点，勾选后拆分功能点：</span>
-        )}
-      </div>
-      )}
-
-      {/* BP 选择 — 归档后隐藏 */}
-      {!isArchived && bps.length > 0 && (
-        <div className="p-3 bg-slate-50 rounded-xl space-y-2">
-          {bps.map((bp: any) => {
-            const sel = selectedBPs.includes(bp.name)
-            return (
-              <label key={bp.name} className="flex items-start gap-2 cursor-pointer py-1">
-                <input type="checkbox" checked={sel} onChange={() => {
-                  setSelectedBPs(prev => sel ? prev.filter(n => n !== bp.name) : [...prev, bp.name])
-                }} className="mt-0.5" />
-                <div>
-                  <span className="text-sm font-medium text-slate-700">{bp.name}</span>
-                  <p className="text-xs text-slate-400">{bp.summary}</p>
-                </div>
-              </label>
-            )
-          })}
-          <button onClick={splitFP} disabled={selectedBPs.length === 0 || fpSplitting}
-            className="btn-primary text-xs flex items-center gap-1 mt-2">
-            {fpSplitting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-            拆分 {selectedBPs.length} 个 BP 为功能点
+        <div className="flex items-center gap-3">
+          <button onClick={handleResplit} disabled={resplitting || fpLoading}
+            className="btn-secondary text-sm flex items-center gap-1.5">
+            {resplitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            重新拆分
           </button>
+          <span className="text-xs text-slate-400">
+            上传需求时已自动拆分功能点。如不准确可重新拆分。
+          </span>
         </div>
       )}
 
       {/* FP 列表 */}
-      {fps.length > 0 && (
+      {fpLoading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-6 h-6 text-primary-500 animate-spin" />
+        </div>
+      ) : fps.length > 0 ? (
         <div>
-          <p className="text-xs text-slate-400 mb-2">共 {fps.length} 个功能点</p>
+          <p className="text-xs text-slate-400 mb-2">
+            <Sparkles className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+            共 {fps.length} 个功能点
+          </p>
           <div className="space-y-2">
             {fps.map((fp: any) => (
               <div key={fp.id} className="p-3 bg-white border border-slate-200 rounded-xl">
@@ -205,11 +176,9 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
             ))}
           </div>
         </div>
-      )}
-
-      {!fpLoading && fps.length === 0 && bps.length === 0 && (
+      ) : (
         <p className="text-sm text-slate-400 py-8 text-center">
-          {isArchived ? '此需求已归档，暂无功能点数据。' : '尚未拆分功能点。点击「提取业务点」开始。'}
+          {isArchived ? '此需求已归档，暂无功能点数据。' : '暂无功能点。点击「重新拆分」生成。'}
         </p>
       )}
     </div>

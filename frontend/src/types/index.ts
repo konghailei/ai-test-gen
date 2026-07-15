@@ -413,6 +413,7 @@ export interface FPItem {
   atomicity_check: Record<string, boolean>
   test_hints: string[]
   vectorization_status: string | null
+  status: string  // pending_review / approved / archived
   created_at: string
 }
 

@@ -606,7 +606,10 @@ class FunctionalPoint(Base):
         comment="calculation / constraint / workflow / api_behavior / data_record / config"
     )
     priority: Mapped[str] = mapped_column(String(4), default="P2")
-    srr_json: Mapped[dict] = mapped_column(JSON, default=dict, comment="功能点专属 SRR（精简版）")
+    srr_json: Mapped[dict] = mapped_column(JSON, default=dict, comment="功能点专属完整子 SRR（requirement/flows/business_rules/constraints/acceptance_criteria/test_hints）")
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending_review", comment="pending_review / approved / archived（FP 审核生命周期）"
+    )
     atomicity_check: Mapped[dict] = mapped_column(
         JSON, default=dict,
         comment="三要素自检：trigger / result / boundary，缺项标记 needs_review"
