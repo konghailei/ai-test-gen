@@ -193,6 +193,43 @@ def build_user_prompt(
 - prependitions 作为用例前置条件，acceptance_criteria 作为验收标准
 - test_hints 是该 FP 的种子测试提示，应作为用例设计的重要参考"""
 
+    # v3.0：注入 SRR 中的影响功能说明（来自依赖图谱 FP 节点点击生成）
+    impact_analysis_section = ""
+    srr_impact = srr.get("impact_analysis", []) if isinstance(srr, dict) else []
+    if srr_impact:
+        impact_brief = [
+            {
+                "fp_id": item.get("fp_id", ""),
+                "fp_name": item.get("fp_name", ""),
+                "affected_fps": [
+                    {"fp_name": f.get("fp_name", ""), "relation": f.get("relation_cn", f.get("relation_type", "")), "req_title": f.get("req_title", "")}
+                    for f in item.get("affected_fps", [])[:10]
+                ],
+                "affected_modules": [
+                    {"module_name": m.get("module_name", ""), "reason": m.get("reason", "")}
+                    for m in item.get("affected_modules", [])[:10]
+                ],
+                "affected_requirements": [
+                    {"title": r.get("title", ""), "matched_modules": r.get("matched_modules", [])}
+                    for r in item.get("affected_requirements", [])[:10]
+                ],
+                "description": item.get("description", ""),
+                "test_focus": item.get("test_focus", ""),
+            }
+            for item in srr_impact
+        ]
+        impact_analysis_section = f"""
+
+## 影响功能说明（来自依赖图谱分析，指导回归用例生成）
+{json.dumps(impact_brief, ensure_ascii=False, indent=2)}
+
+### 影响分析覆盖要求
+- 针对 description 中提到的受影响对象，生成回归测试用例
+- test_focus 列出的场景必须全部覆盖
+- 受影响 FP 的 happy_path 必须生成回归用例
+- 受影响模块下的关键需求，至少生成 1 个跨模块影响验证用例
+- 在回归用例的 related_fp 字段中标注受影响的 fp_id"""
+
     if enable_multi_type:
         gen_requirements = """## 生成要求
 1. **功能测试** (≥ 3个) — 覆盖 happy_path 和 alternate_flows
@@ -211,6 +248,7 @@ def build_user_prompt(
 {patterns_section}
 {impact_section}
 {fp_section}
+{impact_analysis_section}
 
 ## 当前需求
 {json.dumps(srr, ensure_ascii=False, indent=2)}

@@ -264,6 +264,15 @@ export const requirements = {
     }),
   fpRemoveDependency: (reqId: string, depId: number) =>
     request(`/requirements/${reqId}/fp/dependencies/${depId}`, { method: 'DELETE' }),
+  /** v3.0: 自动生成 FP 影响说明并写入 SRR */
+  generateImpactDescription: (reqId: string, fpId: string) =>
+    request<import('../types').FPImpactDescription>(`/requirements/${reqId}/fp/${fpId}/impact-description`, { method: 'POST' }),
+  /** v3.0: 保存用户编辑后的 FP 影响说明 */
+  saveImpactDescription: (reqId: string, fpId: string, payload: { description: string; test_focus?: string }) =>
+    request(`/requirements/${reqId}/impact-description/${fpId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
   fpUpdate: (reqId: string, fpId: string, updates: { name?: string; module_id?: string; fp_type?: string }) =>
     request<{ success: boolean }>(`/requirements/${reqId}/fp/${fpId}`, {
       method: 'PATCH', body: JSON.stringify(updates),

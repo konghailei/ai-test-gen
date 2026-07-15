@@ -266,6 +266,209 @@ function ModulePicker({
 }
 
 // ============================================================================
+// v3.0 Impact Description Modal — FP 节点双击打开，自动生成 + 可编辑
+// ============================================================================
+function ImpactDescriptionModal({
+  fpId, fpName, reqId, onClose,
+}: {
+  fpId: string
+  fpName: string
+  reqId: string
+  onClose: () => void
+}) {
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [data, setData] = useState<import('../types').FPImpactDescription | null>(null)
+  const [description, setDescription] = useState('')
+  const [testFocus, setTestFocus] = useState('')
+  const [error, setError] = useState('')
+
+  const generate = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const res = await reqApi.generateImpactDescription(reqId, fpId)
+      setData(res)
+      setDescription(res.description || '')
+      setTestFocus(res.test_focus || '')
+    } catch (e: any) {
+      setError(e?.message || '生成失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [reqId, fpId])
+
+  const save = useCallback(async () => {
+    setSaving(true)
+    setError('')
+    try {
+      await reqApi.saveImpactDescription(reqId, fpId, { description, test_focus: testFocus })
+      onClose()
+    } catch (e: any) {
+      setError(e?.message || '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }, [reqId, fpId, description, testFocus, onClose])
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
+      onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] flex flex-col"
+        onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+          <div className="flex items-center gap-2">
+            <GitBranch className="w-5 h-5 text-indigo-500" />
+            <h3 className="text-base font-semibold text-slate-800">影响功能说明</h3>
+            <span className="text-xs px-2 py-0.5 rounded bg-indigo-50 text-indigo-600">{fpName}</span>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {error && (
+            <div className="px-3 py-2 rounded-lg bg-red-50 text-red-600 text-sm">{error}</div>
+          )}
+
+          {!data && !loading && (
+            <div className="text-center py-8">
+              <p className="text-sm text-slate-500 mb-4">
+                点击下方按钮，基于功能点依赖图谱和模块依赖图谱自动生成影响说明
+              </p>
+              <button onClick={generate}
+                className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 text-sm font-medium">
+                生成影响说明
+              </button>
+            </div>
+          )}
+
+          {loading && (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
+              <span className="ml-2 text-sm text-slate-500">正在分析依赖图谱...</span>
+            </div>
+          )}
+
+          {data && (
+            <>
+              {/* 受影响 FP */}
+              {data.affected_fps.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-700 mb-2">
+                    受影响的功能点（{data.affected_fps.length}）
+                  </h4>
+                  <div className="space-y-1.5">
+                    {data.affected_fps.map((fp, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs px-3 py-1.5 bg-slate-50 rounded">
+                        <span className="font-medium text-slate-700">{fp.fp_name}</span>
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-600">
+                          {fp.relation_cn || fp.relation_type}
+                        </span>
+                        {fp.req_title && (
+                          <span className="text-slate-400 truncate">← {fp.req_title}</span>
+                        )}
+                        <span className="ml-auto text-slate-400">{fp.depth}跳</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 受影响模块 */}
+              {data.affected_modules.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-700 mb-2">
+                    受影响的模块（{data.affected_modules.length}）
+                  </h4>
+                  <div className="flex flex-wrap gap-1.5">
+                    {data.affected_modules.map((m, i) => (
+                      <span key={i} className="text-xs px-2 py-1 bg-cyan-50 text-cyan-700 rounded">
+                        {m.module_name}
+                        <span className="ml-1 text-cyan-400">({m.reason})</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 受影响需求 */}
+              {data.affected_requirements.length > 0 && (
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-700 mb-2">
+                    受影响的需求（{data.affected_requirements.length}）
+                  </h4>
+                  <div className="space-y-1">
+                    {data.affected_requirements.map((r, i) => (
+                      <div key={i} className="text-xs px-3 py-1.5 bg-amber-50 text-amber-700 rounded">
+                        {r.title}
+                        {r.matched_modules && r.matched_modules.length > 0 && (
+                          <span className="ml-1 text-amber-400">[{r.matched_modules.join(', ')}]</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 可编辑的影响说明 */}
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  影响说明 {data.is_auto_generated && <span className="text-xs text-slate-400 font-normal">（自动生成，可编辑）</span>}
+                </label>
+                <textarea
+                  value={description}
+                  onChange={e => setDescription(e.target.value)}
+                  rows={5}
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:border-indigo-400 focus:ring-1 focus:ring-indigo-100 resize-none"
+                  placeholder="描述本次功能点变更的影响范围..."
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  测试关注点
+                </label>
+                <textarea
+                  value={testFocus}
+                  onChange={e => setTestFocus(e.target.value)}
+                  rows={3}
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:border-indigo-400 focus:ring-1 focus:ring-indigo-100 resize-none"
+                  placeholder="列出测试用例生成时应重点关注的回归场景..."
+                />
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        {data && (
+          <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100">
+            <button onClick={generate} disabled={loading}
+              className="text-xs text-slate-500 hover:text-indigo-600 disabled:opacity-50">
+              {loading ? '重新生成中...' : '重新生成'}
+            </button>
+            <div className="flex gap-2">
+              <button onClick={onClose}
+                className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">
+                取消
+              </button>
+              <button onClick={save} disabled={saving || !description.trim()}
+                className="px-4 py-1.5 text-sm bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 disabled:opacity-50">
+                {saving ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ============================================================================
 // Main Page
 // ============================================================================
 export default function DependencyGraph() {
@@ -289,6 +492,9 @@ export default function DependencyGraph() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerExcludes, setPickerExcludes] = useState<string[]>([])
   const [pickerTarget, setPickerTarget] = useState<'new' | { nodeId: string }>('new')
+
+  // v3.0: FP 影响说明 Modal state
+  const [impactModal, setImpactModal] = useState<{ fpId: string; fpName: string; reqId: string } | null>(null)
 
   // 当前模式对应的边样式表
   const currentEdgeStyles = graphType === 'fp' ? FP_EDGE_STYLES : MODULE_EDGE_STYLES
@@ -441,9 +647,17 @@ export default function DependencyGraph() {
     try { await dependencyGraph.updateNodePosition(node.id, node.position.x, node.position.y) } catch { }
   }, [graphType])
 
-  // Double-click opens picker to swap module (FP 模式禁用)
+  // Double-click: 模块模式打开 picker 交换节点；FP 模式打开影响说明 Modal
   const onNodeDoubleClick = useCallback((_: any, node: Node) => {
-    if (graphType === 'fp') return
+    if (graphType === 'fp') {
+      // FP 模式：打开影响说明 Modal
+      const reqId = (node.data as any)?.reqId as string
+      const fpName = (node.data as any)?.label as string
+      if (reqId && node.id) {
+        setImpactModal({ fpId: node.id, fpName, reqId })
+      }
+      return
+    }
     setPickerTarget({ nodeId: node.id })
     setPickerExcludes(nodes.filter(n => n.id !== node.id).map(n => n.id))
     setPickerOpen(true)
@@ -712,7 +926,7 @@ export default function DependencyGraph() {
               <div className="mt-auto pt-3 border-t border-slate-200">
                 <p className="text-[10px] text-slate-400 leading-relaxed">
                   {graphType === 'fp'
-                    ? '拖拽节点手柄连线 · 右键删除/交换方向 · 位置不持久化'
+                    ? '双击节点生成影响说明 · 拖拽节点手柄连线 · 右键删除/交换方向 · 位置不持久化'
                     : '从工具栏拖拽模块到画布 · 拖拽节点手柄连线 · 双击节点切换模块'}
                 </p>
               </div>
@@ -844,6 +1058,15 @@ export default function DependencyGraph() {
           excludeIds={pickerExcludes}
           onPick={handlePickModule}
           onClose={() => setPickerOpen(false)}
+        />
+      )}
+
+      {impactModal && (
+        <ImpactDescriptionModal
+          fpId={impactModal.fpId}
+          fpName={impactModal.fpName}
+          reqId={impactModal.reqId}
+          onClose={() => setImpactModal(null)}
         />
       )}
     </div>

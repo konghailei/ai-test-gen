@@ -556,8 +556,8 @@ async def get_kb_diagnostics() -> ApiResponse:
                     "建议在 PostgreSQL 容器中安装 postgresql-16-zhparser 并重启。"
                 )
             break
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("[API/knowledge] zhparser 配置诊断失败: {}", str(e)[:150])
     try:
         diag["vector_db"]["connected"] = True
         model_status = await asyncio.to_thread(vector_store.model_status)

@@ -267,10 +267,6 @@ async def upload_requirement(
     if not req_id:
         raise HTTPException(status_code=500, detail="解析失败：未生成需求 ID")
 
-    # v1.5.1: 自动保存 ReqAgent 一体式提取的功能点
-    await _save_fps_to_db(session, req_id, req_agent.last_fps, req.priority)
-    await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
-
     # 若调用方指定了 title/priority/modules，覆盖 SRR 中的值（text）
     req_data = srr.setdefault("requirement", {})
     if req.title:
@@ -279,6 +275,30 @@ async def upload_requirement(
         req_data["priority"] = req.priority
     if req.modules:
         req_data["modules"] = req.modules
+
+    # P0 修复：先创建并 flush Requirement 记录，避免 _save_fps_to_db 时外键违反
+    record = Requirement(
+        id=req_id,
+        product_id=req_data.get("product_id", req.product_id or "PROD-DEFAULT"),
+        project_id=req.project_id,
+        title=req_data.get("title", ""),
+        priority=req_data.get("priority", "P2"),
+        module=req_data.get("modules", [""])[0] if req_data.get("modules") else "",
+        modules=req_data.get("modules", []),
+        tags=[],
+        version=1,
+        status="draft",  # 临时状态，后续根据 clarify 结果更新
+        srr_json=srr,
+        raw_text=req.raw_text,
+        source_type="markdown",
+        created_by="api",
+    )
+    session.add(record)
+    await session.flush()  # 确保 Requirement 落库，FP 外键可引用
+
+    # v1.5.1: 自动保存 ReqAgent 一体式提取的功能点
+    await _save_fps_to_db(session, req_id, req_agent.last_fps, req.priority)
+    await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
 
     # ===== ② ClarifyAgent 自动检测（KB 检索 + 问题生成） =====
     clarify_result = None
@@ -358,23 +378,9 @@ async def upload_requirement(
         status = "active"
         srr_json_data = final_srr_data
 
-    record = Requirement(
-        id=req_id,
-        product_id=req_data.get("product_id", req.product_id or "PROD-DEFAULT"),
-        project_id=req.project_id,
-        title=req_data.get("title", ""),
-        priority=req_data.get("priority", "P2"),
-        module=req_data.get("modules", [""])[0] if req_data.get("modules") else "",
-        modules=req_data.get("modules", []),
-        tags=[],
-        version=1,
-        status=status,
-        srr_json=srr_json_data,
-        raw_text=req.raw_text,
-        source_type="markdown",
-        created_by="api",
-    )
-    session.add(record)
+    # 更新已存在的 Requirement 记录（P0 修复：record 在 _save_fps_to_db 前已创建）
+    record.status = status
+    record.srr_json = srr_json_data
     await session.commit()
 
     logger.info(
@@ -540,15 +546,13 @@ async def upload_requirement_file(
         logger.warning("[API/requirements] req_id 冲突 (file)，重新生成: new_id={}", req_id)
 
     # v1.5.1: 自动保存 FP
-    await _save_fps_to_db(session, req_id, req_agent.last_fps, priority)
-    await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
     req_data = srr.setdefault("requirement", {})
     if title:
         req_data["title"] = title
     if priority:
         req_data["priority"] = priority
 
-    # 5. 持久化到 DB
+    # P0 修复：先创建并 flush Requirement 记录，避免 _save_fps_to_db 时外键违反
     record = Requirement(
         id=req_id,
         product_id=req_data.get("product_id", product_id),
@@ -565,6 +569,10 @@ async def upload_requirement_file(
         created_by="api",
     )
     session.add(record)
+    await session.flush()
+
+    await _save_fps_to_db(session, req_id, req_agent.last_fps, priority)
+    await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
     await session.commit()
 
     logger.info(
@@ -794,8 +802,8 @@ async def _run_requirement_analysis(
                 )
                 await s.execute(stmt)
                 await s.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[API/requirements] 失败回退 Requirement 状态失败 req_id={}: {}", req_id, str(e)[:150])
 
 
 # ============================================================================
@@ -2090,8 +2098,8 @@ async def archive_requirement(
                         metadata=fp_meta,
                     )
                     fp_kb_count += 1
-                except Exception:
-                    pass  # 单条失败不阻断
+                except Exception as e:
+                    logger.warning("[Archive] FP 写入 Milvus 失败 fp_id={}: {}", f.id, str(e)[:150])
     except Exception as e:
         logger.warning("[Archive] FP KB 写入失败（不阻断）: {}", str(e)[:200])
 
@@ -2719,6 +2727,137 @@ async def fp_remove_dependency(
 
     logger.info("[FP] 依赖删除: dep_id={} (req={})", dep_id, req_id)
     return ApiResponse(success=True, message="依赖关系已删除")
+
+
+# ============================================================================
+# v3.0: FP 影响功能说明（自动生成 + 可编辑，写入 SRR impact_analysis 字段）
+# ============================================================================
+
+class ImpactDescriptionUpdateRequest(BaseModel):
+    """FP 影响说明编辑保存请求。"""
+    description: str
+    test_focus: str = ""
+
+
+@router.post("/{req_id}/fp/{fp_id}/impact-description", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_generate_impact_description(
+    req_id: str,
+    fp_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """自动生成功能点影响说明并写入需求 SRR。
+
+    流程：
+        1. 校验 FP 存在且属于该 req_id
+        2. 调用 ImpactAnalysisAgent._analyze_fp_impact()（FP 反向 BFS + 模块 BFS + LLM 合成）
+        3. 读需求 SRR，追加/覆盖 impact_analysis 数组中同 fp_id 的条目
+        4. 写回 DB，返回生成结果
+
+    Args:
+        req_id: 需求 ID
+        fp_id: 功能点 ID
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: data 含完整的影响分析结果
+    """
+    # 1. 校验 FP 属于该 req_id
+    fp = await session.get(FunctionalPoint, fp_id)
+    if not fp:
+        raise HTTPException(status_code=404, detail="功能点不存在")
+    if fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="功能点不属于该需求")
+
+    # 2. 调用 FP 影响分析
+    from app.agents.impact_agent import impact_agent
+
+    try:
+        impact_result = await impact_agent._analyze_fp_impact(fp_id, session)
+    except Exception as e:
+        logger.error("[API/requirements] FP 影响分析失败 fp_id={}: {}", fp_id, str(e)[:200])
+        raise HTTPException(status_code=500, detail=f"影响分析失败: {str(e)[:200]}")
+
+    # 3. 写入需求 SRR 的 impact_analysis 字段
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="需求不存在")
+
+    srr = dict(req.srr_json or {})
+    impact_list = list(srr.get("impact_analysis", []))
+
+    # 同 fp_id 覆盖旧条目
+    impact_list = [item for item in impact_list if item.get("fp_id") != fp_id]
+    impact_list.append(impact_result)
+
+    srr["impact_analysis"] = impact_list
+    req.srr_json = srr
+
+    await session.commit()
+
+    logger.info(
+        "[API/requirements] FP 影响说明已生成并写入 SRR: req_id={}, fp_id={}, affected_fps={}, affected_modules={}",
+        req_id, fp_id,
+        len(impact_result.get("affected_fps", [])),
+        len(impact_result.get("affected_modules", [])),
+    )
+
+    return ApiResponse(
+        success=True,
+        message="影响说明已生成并保存到需求 SRR",
+        data=impact_result,
+    )
+
+
+@router.put("/{req_id}/impact-description/{fp_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_update_impact_description(
+    req_id: str,
+    fp_id: str,
+    body: ImpactDescriptionUpdateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """编辑保存功能点影响说明（用户手动修改后的持久化）。
+
+    Args:
+        req_id: 需求 ID
+        fp_id: 功能点 ID
+        body: 含 description / test_focus
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: 确认保存成功
+    """
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="需求不存在")
+
+    srr = dict(req.srr_json or {})
+    impact_list = list(srr.get("impact_analysis", []))
+
+    # 查找匹配条目
+    found = False
+    for item in impact_list:
+        if item.get("fp_id") == fp_id:
+            item["description"] = body.description
+            if body.test_focus:
+                item["test_focus"] = body.test_focus
+            item["is_auto_generated"] = False
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到 fp_id={fp_id} 的影响说明条目，请先调用 POST 生成",
+        )
+
+    srr["impact_analysis"] = impact_list
+    req.srr_json = srr
+
+    await session.commit()
+
+    logger.info("[API/requirements] FP 影响说明已更新: req_id={}, fp_id={}", req_id, fp_id)
+
+    return ApiResponse(success=True, message="影响说明已保存")
 
 
 # ============================================================================

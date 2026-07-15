@@ -432,3 +432,37 @@ export interface FPNameSuggestion {
   name: string
   req_id: string
 }
+
+/** v3.0: FP 影响功能说明（存于 SRR impact_analysis 数组） */
+export interface FPImpactDescription {
+  fp_id: string
+  fp_name: string
+  fp_type?: string
+  module_id?: string
+  req_id?: string
+  affected_fps: {
+    fp_id: string
+    fp_name: string
+    relation_type: string
+    relation_cn?: string
+    req_id?: string
+    req_title?: string
+    depth: number
+    description?: string
+  }[]
+  affected_modules: {
+    module_id: string
+    module_name: string
+    reason: string
+    depth: number
+  }[]
+  affected_requirements: {
+    id: string
+    title: string
+    matched_modules?: string[]
+  }[]
+  description: string
+  test_focus: string
+  generated_at: string
+  is_auto_generated: boolean
+}

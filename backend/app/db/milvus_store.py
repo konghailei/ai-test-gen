@@ -253,8 +253,8 @@ class MilvusVectorStore:
             if partition_name not in existing_partitions:
                 try:
                     collection.create_partition(partition_name)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("[Milvus] 创建分区失败 partition={}: {}", partition_name, str(e)[:150])
 
     def _get_partition_name(self, metadata: dict) -> str:
         """根据 metadata 中的模块信息选择分区名。"""
@@ -368,12 +368,12 @@ class MilvusVectorStore:
                 doc_raw = ""
                 try:
                     meta_raw = hit.entity.get("metadata")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("[Milvus] 读取 metadata 字段失败: {}", str(e)[:150])
                 try:
                     doc_raw = hit.entity.get("document")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("[Milvus] 读取 document 字段失败: {}", str(e)[:150])
                 if isinstance(meta_raw, str):
                     meta_raw = json.loads(meta_raw)
                 formatted.append({

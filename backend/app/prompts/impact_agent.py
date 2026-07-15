@@ -200,3 +200,57 @@ def build_generation_guidance(
 3. 对于删除的功能点，请在输出中标记 "operation": "delete" 对应的用例ID
 4. 回归测试用例请单独标记 "type": "regression"
 """
+
+
+# ============================================================================
+# v3.0 FP 影响说明合成 Prompt（用于 _build_fp_impact_description）
+# ============================================================================
+
+FP_IMPACT_DESCRIPTION_SYSTEM_PROMPT = """你是一个专业的变更影响分析专家。基于功能点依赖图谱和模块依赖图谱的分析结果，合成结构化的影响说明文本。
+
+## 输出要求
+输出 JSON 必须包含以下字段：
+{
+  "description": "自然语言描述本次功能点变更对其他功能点、模块、需求的影响范围。要求具体、可执行，按受影响对象分条说明。",
+  "test_focus": "针对上述影响，列出测试用例生成时应重点关注的回归场景和边界条件。"
+}
+
+## 撰写原则
+1. 基于证据：只描述图谱分析实际发现的影响关系，不编造未列出的影响
+2. 具体可执行：每条影响说明应包含「受影响对象」+「影响类型」+「影响原因」
+3. 覆盖回归：test_focus 应覆盖所有受影响 FP 的 happy_path 和关键 alternate_flows
+4. 简洁清晰：description 控制在 300 字以内，test_focus 列出 3-6 个要点"""
+
+
+def build_fp_impact_description_prompt(
+    fp: dict,
+    affected_fps: list[dict],
+    affected_modules: list[dict],
+    affected_requirements: list[dict],
+) -> str:
+    """构建 FP 影响描述合成的用户指令。
+
+    Args:
+        fp: 当前功能点信息 {fp_id, fp_name, fp_type, module_id}
+        affected_fps: 受影响的 FP 列表（反向 BFS 结果）
+        affected_modules: 受影响的模块列表（模块 BFS 结果）
+        affected_requirements: 受影响的需求列表
+
+    Returns:
+        str: 完整的用户指令
+    """
+    return f"""请基于以下图谱分析结果，合成功能点变更的影响说明。
+
+【当前功能点】
+{json.dumps(fp, ensure_ascii=False, indent=2)}
+
+【受影响的功能点（谁依赖此 FP）】
+{json.dumps(affected_fps, ensure_ascii=False, indent=2) if affected_fps else "[]"}
+
+【受影响的模块（通过 FP 所属模块的依赖关系传播）】
+{json.dumps(affected_modules, ensure_ascii=False, indent=2) if affected_modules else "[]"}
+
+【受影响的需求（受影响模块下的其他需求）】
+{json.dumps(affected_requirements, ensure_ascii=False, indent=2) if affected_requirements else "[]"}
+
+请直接输出 JSON，不要包含其他解释性文字。"""

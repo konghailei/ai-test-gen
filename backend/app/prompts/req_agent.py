@@ -157,7 +157,12 @@ SRR_SCHEMA_GUIDE = """输出 JSON 必须包含以下字段(对应 SRR Schema):
 
   // ===== 增量文档标记（v2.9: 文档自我声明为某版本增量/优化项时输出） =====
   "_is_incremental": false,         // 增量标记：true 表示本需求为增量文档，依赖历史版本（如 V1）的基础上下文
-  "_baseline_gaps": []              // 增量文档声明需从知识库（同产品历史需求）补全的基础维度列表
+  "_baseline_gaps": [],             // 增量文档声明需从知识库（同产品历史需求）补全的基础维度列表
+
+  // ===== 影响功能说明（v3.0: 由依赖图谱 FP 节点点击触发生成，可编辑） =====
+  "impact_analysis": []             // 影响分析数组，每项含 {fp_id, fp_name, affected_fps, affected_modules,
+                                    //   affected_requirements, description, test_focus, generated_at, is_auto_generated}
+                                    //   默认空数组，由后端端点 POST /requirements/{id}/fp/{fp_id}/impact-description 生成
 }"""
 
 

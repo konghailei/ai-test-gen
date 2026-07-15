@@ -27,7 +27,10 @@ from sqlalchemy import or_, select
 
 from app.core.llm_client import llm_client
 from app.db.database import async_session
-from app.db.models import ModuleDependency, Module, Requirement, TestCase as TestCaseModel
+from app.db.models import (
+    ModuleDependency, Module, Requirement, TestCase as TestCaseModel,
+    FunctionalPoint, FPDependency,
+)
 from app.prompts import impact_agent as prompts
 from app.utils.logger import logger
 
@@ -314,6 +317,270 @@ class ImpactAnalysisAgent:
             f"需删除用例: {len(case_ops.get('delete', []))} 个\n"
             f"需回归用例: {len(case_ops.get('keep', [])) + len(case_ops.get('update', []))} 个"
         )
+
+    # ========================================================================
+    # v3.0 FP 影响分析（独立触发，不依赖 optimization_context）
+    # ========================================================================
+
+    async def _analyze_fp_impact(self, fp_id: str, session) -> dict:
+        """分析功能点变更的影响范围（FP + 模块双图谱）。
+
+        步骤：
+            1. 反向 BFS FPDependency（找谁依赖此 FP，≤3 跳）
+            2. 取 FP 所属 module_id，调用 _analyze_module_impact() 找受影响模块
+            3. 用受影响模块匹配同产品其他需求
+            4. LLM 合成 description + test_focus
+
+        Args:
+            fp_id: 功能点 ID
+            session: 数据库会话
+
+        Returns:
+            dict: 含 fp 信息 / affected_fps / affected_modules / affected_requirements
+                  / description / test_focus / generated_at / is_auto_generated
+        """
+        # 1. 查询当前 FP
+        fp_record = await session.get(FunctionalPoint, fp_id)
+        if not fp_record:
+            raise ValueError(f"功能点 {fp_id} 不存在")
+
+        fp_info = {
+            "fp_id": fp_record.id,
+            "fp_name": fp_record.name,
+            "fp_type": fp_record.fp_type,
+            "module_id": fp_record.module_id or "",
+            "req_id": fp_record.requirement_id,
+        }
+
+        # 2. 反向 BFS FPDependency（找谁依赖此 FP）
+        affected_fps = await self._bfs_fp_reverse(fp_id, session)
+
+        # 3. 模块级影响分析（复用现有方法）
+        affected_modules_raw: list[dict] = []
+        affected_requirements: list[dict] = []
+        if fp_info["module_id"]:
+            module_impact = await self._analyze_module_impact([fp_info["module_id"]], session)
+            # 查询模块名称
+            mod_names: dict[str, str] = {}
+            all_mod_ids = module_impact.get("all_affected_modules", [])
+            if all_mod_ids:
+                mod_result = await session.execute(
+                    select(Module.id, Module.name).where(Module.id.in_(all_mod_ids))
+                )
+                mod_names = {row[0]: row[1] for row in mod_result.all()}
+
+            affected_modules_raw = [
+                {
+                    "module_id": m.get("module_id", ""),
+                    "module_name": mod_names.get(m.get("module_id", ""), m.get("module_id", "")),
+                    "reason": m.get("reason", ""),
+                    "depth": m.get("depth", 1),
+                }
+                for m in module_impact.get("indirect_modules", [])
+                if m.get("module_id", "") in mod_names
+            ]
+            # 直接模块也加入
+            for mid in module_impact.get("direct_modules", []):
+                if mid in mod_names:
+                    affected_modules_raw.append({
+                        "module_id": mid,
+                        "module_name": mod_names.get(mid, mid),
+                        "reason": "直接模块",
+                        "depth": 0,
+                    })
+
+            # 4. 受影响需求（复用 _find_regression_requirements 逻辑）
+            # 需要构造一个伪 SRR 来调用现有方法
+            current_req = await session.get(Requirement, fp_record.requirement_id)
+            if current_req:
+                pseudo_srr = {
+                    "requirement": {
+                        "id": current_req.id,
+                        "product_id": current_req.product_id,
+                    }
+                }
+                affected_requirements = await self._find_regression_requirements(
+                    module_impact["all_affected_modules"], pseudo_srr, session
+                )
+
+        # 5. LLM 合成 description + test_focus
+        description, test_focus = await self._build_fp_impact_description(
+            fp_info, affected_fps, affected_modules_raw, affected_requirements
+        )
+
+        from datetime import datetime, timezone
+        return {
+            **fp_info,
+            "affected_fps": affected_fps,
+            "affected_modules": affected_modules_raw,
+            "affected_requirements": affected_requirements,
+            "description": description,
+            "test_focus": test_focus,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "is_auto_generated": True,
+        }
+
+    async def _bfs_fp_reverse(self, fp_id: str, session) -> list[dict]:
+        """反向 BFS FPDependency 图，找到谁依赖此 FP。
+
+        规则：
+        - 从 fp_id 出发，沿反向边遍历（target=fp_id → source 依赖它）
+        - depends_on / data_flows / invariants / lifecycle_scenarios / conflicts_with 均遍历
+        - 最大深度 3 跳
+
+        Returns:
+            list[dict]: 每项含 {fp_id, fp_name, relation_type, req_id, req_title, depth}
+        """
+        # 查询所有以 fp_id 为 target 的依赖边
+        result = await session.execute(
+            select(FPDependency).where(
+                or_(
+                    FPDependency.target_fp_id == fp_id,
+                    FPDependency.source_fp_id == fp_id,
+                )
+            )
+        )
+        all_edges = result.scalars().all()
+
+        # 构建反向邻接表：target → [(source, relation_type, description)]
+        # 同时构建正向邻接表用于双向关系
+        reverse_adj: dict[str, list[tuple[str, str, str]]] = {}
+        forward_adj: dict[str, list[tuple[str, str, str]]] = {}
+        edge_pairs = set()
+        for e in all_edges:
+            src, tgt = e.source_fp_id, e.target_fp_id
+            edge_pairs.add((src, tgt, e.relation_type))
+            # 反向：谁指向我（target=fp_id → source 依赖我）
+            reverse_adj.setdefault(tgt, []).append((src, e.relation_type, e.description or ""))
+            # 正向：我指向谁
+            forward_adj.setdefault(src, []).append((tgt, e.relation_type, e.description or ""))
+
+        # BFS（优先反向，因为我们要找"谁依赖此 FP"）
+        visited: set[str] = {fp_id}
+        affected: list[dict] = []
+        queue: deque = deque([(fp_id, 0)])
+
+        # 收集所有受影响 FP ID（用于名称查询）
+        affected_fp_ids: set[str] = set()
+        bfs_results: list[tuple[str, str, int, str]] = []  # (fp_id, relation_type, depth, description)
+
+        while queue:
+            current, depth = queue.popleft()
+            if depth >= 3:
+                continue
+            # 反向边：谁依赖当前 FP
+            for neighbor, rtype, desc in reverse_adj.get(current, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, depth + 1))
+                    affected_fp_ids.add(neighbor)
+                    bfs_results.append((neighbor, rtype, depth + 1, desc))
+            # 正向边（仅双向关系）：conflicts_with / invariants / lifecycle_scenarios
+            for neighbor, rtype, desc in forward_adj.get(current, []):
+                if rtype in ("conflicts_with", "invariants", "lifecycle_scenarios") and neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, depth + 1))
+                    affected_fp_ids.add(neighbor)
+                    bfs_results.append((neighbor, rtype, depth + 1, desc))
+
+        if not affected_fp_ids:
+            return []
+
+        # 批量查询 FP 名称 + 所属需求
+        fp_result = await session.execute(
+            select(
+                FunctionalPoint.id, FunctionalPoint.name,
+                FunctionalPoint.requirement_id,
+            ).where(FunctionalPoint.id.in_(affected_fp_ids))
+        )
+        fp_map = {row[0]: {"name": row[1], "req_id": row[2]} for row in fp_result.all()}
+
+        # 查询需求标题
+        req_ids = {info["req_id"] for info in fp_map.values() if info["req_id"]}
+        req_title_map: dict[str, str] = {}
+        if req_ids:
+            req_result = await session.execute(
+                select(Requirement.id, Requirement.title).where(Requirement.id.in_(req_ids))
+            )
+            req_title_map = {row[0]: row[1] or "" for row in req_result.all()}
+
+        relation_cn = {
+            "depends_on": "依赖",
+            "data_flows": "数据流向",
+            "invariants": "共享约束",
+            "lifecycle_scenarios": "生命周期",
+            "conflicts_with": "冲突",
+        }
+
+        for fp_id_found, rtype, depth, desc in bfs_results:
+            info = fp_map.get(fp_id_found, {})
+            req_id = info.get("req_id", "")
+            affected.append({
+                "fp_id": fp_id_found,
+                "fp_name": info.get("name", ""),
+                "relation_type": rtype,
+                "relation_cn": relation_cn.get(rtype, rtype),
+                "req_id": req_id,
+                "req_title": req_title_map.get(req_id, ""),
+                "depth": depth,
+                "description": desc,
+            })
+
+        return affected
+
+    async def _build_fp_impact_description(
+        self,
+        fp: dict,
+        affected_fps: list[dict],
+        affected_modules: list[dict],
+        affected_requirements: list[dict],
+    ) -> tuple[str, str]:
+        """用 LLM 合成自然语言影响描述 + 测试关注点。
+
+        Args:
+            fp: 当前功能点信息
+            affected_fps: 受影响 FP 列表
+            affected_modules: 受影响模块列表
+            affected_requirements: 受影响需求列表
+
+        Returns:
+            tuple: (description, test_focus)
+        """
+        # 无任何影响时，直接返回降级文本（不调用 LLM）
+        if not affected_fps and not affected_modules and not affected_requirements:
+            return (
+                f"功能点「{fp.get('fp_name', '')}」当前无被依赖关系，变更影响范围仅限自身。",
+                f"重点验证功能点「{fp.get('fp_name', '')}」自身的 happy_path 和边界条件。",
+            )
+
+        try:
+            result = await llm_client.call_json(
+                prompt=prompts.build_fp_impact_description_prompt(
+                    fp, affected_fps, affected_modules, affected_requirements,
+                ),
+                system_prompt=prompts.FP_IMPACT_DESCRIPTION_SYSTEM_PROMPT,
+                schema_hint={"description": str, "test_focus": str},
+                temperature=0.3,
+            )
+            description = result.get("description", "")
+            test_focus = result.get("test_focus", "")
+            if not description:
+                description = f"功能点「{fp.get('fp_name', '')}」变更影响 {len(affected_fps)} 个功能点、{len(affected_modules)} 个模块、{len(affected_requirements)} 个需求。"
+            if not test_focus:
+                test_focus = "重点回归受影响功能点的核心流程。"
+            return description, test_focus
+        except Exception as e:
+            logger.warning("[ImpactAgent] FP 影响描述 LLM 合成失败，降级: {}", str(e)[:200])
+            # 降级：纯规则拼接
+            fp_names = ", ".join(f.get("fp_name", "") for f in affected_fps[:5])
+            mod_names = ", ".join(m.get("module_name", "") for m in affected_modules[:5])
+            req_titles = ", ".join(r.get("title", "") for r in affected_requirements[:5])
+            description = (
+                f"功能点「{fp.get('fp_name', '')}」变更影响："
+                f"功能点[{fp_names or '无'}]; 模块[{mod_names or '无'}]; 需求[{req_titles or '无'}]。"
+            )
+            test_focus = "重点回归受影响功能点的 happy_path 和关键 alternate_flows。"
+            return description, test_focus
 
 
 # 全局单例
