@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react'
-import { Loader2, Plus, Trash2, Edit3, Save, X, Search, Layers, GitBranch } from 'lucide-react'
+import { Loader2, Plus, Trash2, Edit3, Save, X, Search, Layers, GitBranch, AlertTriangle } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 
 interface Props {
   reqId: string
   productId?: string
+  status?: string  // 需求状态：archived 时功能点锁定为只读
 }
 
-export default function FunctionalPoints({ reqId, productId }: Props) {
+export default function FunctionalPoints({ reqId, productId, status }: Props) {
   const [fps, setFps] = useState<any[]>([])
   const [bps, setBps] = useState<any[]>([])
   const [selectedBPs, setSelectedBPs] = useState<string[]>([])
@@ -19,6 +20,7 @@ export default function FunctionalPoints({ reqId, productId }: Props) {
   const [modules, setModules] = useState<any[]>([])
   const [nameSearch, setNameSearch] = useState('')
   const [nameSuggestions, setNameSuggestions] = useState<any[]>([])
+  const isArchived = status === 'archived'
 
   useEffect(() => { loadFP(); loadModules() }, [])
 
@@ -81,7 +83,16 @@ export default function FunctionalPoints({ reqId, productId }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* BP 提取 */}
+      {/* 归档锁定提示 */}
+      {isArchived && (
+        <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+          <span>此需求已归档，功能点已锁定为只读。归档后的功能点作为知识库的组成部分，不可编辑或删除。</span>
+        </div>
+      )}
+
+      {/* BP 提取 + 拆分 — 归档后隐藏 */}
+      {!isArchived && (
       <div className="flex items-center gap-3">
         <button onClick={extractBP} disabled={fpLoading}
           className="btn-secondary text-sm flex items-center gap-1.5">
@@ -92,9 +103,10 @@ export default function FunctionalPoints({ reqId, productId }: Props) {
           <span className="text-xs text-slate-400">检测到 {bps.length} 个业务点，勾选后拆分功能点：</span>
         )}
       </div>
+      )}
 
-      {/* BP 选择 */}
-      {bps.length > 0 && (
+      {/* BP 选择 — 归档后隐藏 */}
+      {!isArchived && bps.length > 0 && (
         <div className="p-3 bg-slate-50 rounded-xl space-y-2">
           {bps.map((bp: any) => {
             const sel = selectedBPs.includes(bp.name)
@@ -175,6 +187,7 @@ export default function FunctionalPoints({ reqId, productId }: Props) {
                         </p>
                       )}
                     </div>
+                    {!isArchived && (
                     <div className="flex items-center gap-1 ml-2">
                       <button onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModule(fp.module_id || '') }}
                         className="p-1 text-slate-400 hover:text-primary-500 rounded" title="编辑">
@@ -185,6 +198,7 @@ export default function FunctionalPoints({ reqId, productId }: Props) {
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -195,7 +209,7 @@ export default function FunctionalPoints({ reqId, productId }: Props) {
 
       {!fpLoading && fps.length === 0 && bps.length === 0 && (
         <p className="text-sm text-slate-400 py-8 text-center">
-          尚未拆分功能点。点击「提取业务点」开始。
+          {isArchived ? '此需求已归档，暂无功能点数据。' : '尚未拆分功能点。点击「提取业务点」开始。'}
         </p>
       )}
     </div>

@@ -1145,7 +1145,7 @@ export default function RequirementDetail() {
               status={detail.status}
             />
           ) : activeTab === 'fp' ? (
-            <FunctionalPoints reqId={id!} productId={detail.product_id} />
+            <FunctionalPoints reqId={id!} productId={detail.product_id} status={detail.status} />
           ) : null}
         </div>
       </div>

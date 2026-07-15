@@ -63,13 +63,24 @@ const FP_TYPE_STYLES: Record<string, { label: string; bg: string; text: string }
 
 function FPNode({ data, selected }: any) {
   const fpStyle = FP_TYPE_STYLES[data.fpType] || FP_TYPE_STYLES.workflow
+  const isArchived = data.reqStatus === 'archived'
   return (
     <div className={[
-      'relative px-4 py-3 bg-white rounded-2xl border-2 shadow-md min-w-[140px] transition-all duration-200 group',
+      'relative px-4 py-3 rounded-2xl border-2 shadow-md min-w-[140px] transition-all duration-200 group',
+      isArchived
+        ? 'bg-slate-50 border-slate-300 opacity-80'
+        : 'bg-white',
       selected
         ? 'border-indigo-400 shadow-indigo-100 shadow-lg ring-2 ring-indigo-100'
-        : 'border-slate-200 hover:border-slate-300 hover:shadow-lg',
+        : isArchived
+          ? 'border-slate-300'
+          : 'border-slate-200 hover:border-slate-300 hover:shadow-lg',
     ].join(' ')}>
+      {isArchived && (
+        <span className="absolute -top-2 -right-2 text-[9px] px-1.5 py-0.5 rounded-full bg-slate-300 text-slate-500 font-medium">
+          已归档
+        </span>
+      )}
       <Handle type="target" position={Position.Left}
         className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
       <Handle type="source" position={Position.Right}
@@ -79,15 +90,21 @@ function FPNode({ data, selected }: any) {
       <Handle type="source" position={Position.Bottom} id="bottom"
         className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
       <div className="flex items-center gap-2 mb-1">
-        <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center flex-shrink-0">
-          <Boxes className="w-4 h-4 text-indigo-500" />
+        <div className={[
+          'w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0',
+          isArchived ? 'bg-slate-200' : 'bg-indigo-50',
+        ].join(' ')}>
+          <Boxes className={['w-4 h-4', isArchived ? 'text-slate-400' : 'text-indigo-500'].join(' ')} />
         </div>
-        <span className="text-sm font-semibold text-slate-800 truncate max-w-[120px]">
+        <span className={[
+          'text-sm font-semibold truncate max-w-[120px]',
+          isArchived ? 'text-slate-400' : 'text-slate-800',
+        ].join(' ')}>
           {data.label}
         </span>
       </div>
       <div className="flex items-center gap-1.5 pl-10">
-        <span className={`text-[10px] px-1.5 py-0.5 rounded ${fpStyle.bg} ${fpStyle.text} font-medium`}>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${isArchived ? 'bg-slate-100 text-slate-400' : fpStyle.bg + ' ' + fpStyle.text} font-medium`}>
           {fpStyle.label}
         </span>
         {data.priority && (
@@ -97,7 +114,10 @@ function FPNode({ data, selected }: any) {
         )}
       </div>
       {data.reqTitle && (
-        <p className="text-[11px] text-slate-400 leading-relaxed line-clamp-1 pl-10 mt-0.5">
+        <p className={[
+          'text-[11px] leading-relaxed line-clamp-1 pl-10 mt-0.5',
+          isArchived ? 'text-slate-300' : 'text-slate-400',
+        ].join(' ')}>
           {data.reqTitle}
         </p>
       )}
@@ -328,6 +348,7 @@ export default function DependencyGraph() {
           fpType: n.fp_type,
           reqId: n.req_id,           // 供 onConnect/deleteEdge 确定 POST/DELETE 路径参数
           reqTitle: n.req_title,
+          reqStatus: n.req_status,   // 归档/active，前端据此切换节点样式
           priority: n.priority,
         },
       }))

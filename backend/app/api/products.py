@@ -509,14 +509,15 @@ async def get_fp_dependency_graph(
     返回 nodes（功能点）和 edges（FP 依赖关系，含跨需求边）。
     只返回该产品下所有需求的功能点；边的两端必须都在该产品功能点集合内。
     """
-    # 1. 查询该产品下所有需求的 ID + title
-    req_stmt = select(Requirement.id, Requirement.title).where(
+    # 1. 查询该产品下所有需求的 ID + title + status
+    req_stmt = select(Requirement.id, Requirement.title, Requirement.status).where(
         Requirement.product_id == product_id
     )
     req_result = await session.execute(req_stmt)
     req_rows = req_result.all()
     req_id_set = {row[0] for row in req_rows}
     req_title_map = {row[0]: row[1] or "" for row in req_rows}
+    req_status_map = {row[0]: row[2] or "active" for row in req_rows}
 
     if not req_id_set:
         return ApiResponse(success=True, message="ok", data={"nodes": [], "edges": []})
@@ -541,6 +542,7 @@ async def get_fp_dependency_graph(
             "fp_type": row[2],
             "req_id": row[3],
             "req_title": req_title_map.get(row[3], ""),
+            "req_status": req_status_map.get(row[3], "active"),
             "priority": row[4] or "P2",
         }
         for row in fp_rows

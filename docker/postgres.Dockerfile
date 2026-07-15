@@ -15,7 +15,9 @@ RUN set -eux \
     && sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/*.sources \
     && sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list.d/*.sources \
     && apt-get update \
+    # -o Acquire::Retries=10 解决大包（llvm-19-dev 132MB）偶发 TCP 断连
     && apt-get install -y --no-install-recommends \
+        -o Acquire::Retries=10 -o Acquire::http::Timeout=30 \
         ca-certificates wget bzip2 git make gcc autoconf automake libtool \
         postgresql-server-dev-16 \
     # ===== 1. 编译安装 scws（tarball，国内源） =====

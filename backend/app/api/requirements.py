@@ -40,6 +40,7 @@ from app.utils.id_gen import gen_requirement_id, gen_task_id
 from app.agents.req_agent import req_agent
 from app.db.database import get_session, async_session
 from app.db.models import Requirement, Project, AnalysisTask, FunctionalPoint, FPDependency
+from app.db.models import TestCase, GenerationBatch, ReqDependency, Traceability
 from app.models.api_schemas import (
     ApiResponse,
     ClarifyAnswerRequest,
@@ -1615,6 +1616,65 @@ async def update_requirement(
 # 7. 删除需求（已归档不可删除）
 # ============================================================================
 
+@router.get("/{req_id}/delete-preview", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def delete_preview(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """预览删除需求将产生的级联影响。
+
+    返回各类依赖记录的计数，供前端弹窗提示用户确认。
+    """
+    record = await session.get(Requirement, req_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="需求不存在")
+
+    from sqlalchemy import func as sql_func
+
+    # 子表计数
+    tc_count = await session.scalar(
+        select(sql_func.count()).select_from(TestCase).where(TestCase.req_id == req_id)
+    )
+    gb_count = await session.scalar(
+        select(sql_func.count()).select_from(GenerationBatch).where(GenerationBatch.req_id == req_id)
+    )
+    dep_count = await session.scalar(
+        select(sql_func.count()).select_from(ReqDependency).where(
+            (ReqDependency.source_req_id == req_id) | (ReqDependency.target_req_id == req_id)
+        )
+    )
+    at_count = await session.scalar(
+        select(sql_func.count()).select_from(AnalysisTask).where(AnalysisTask.req_id == req_id)
+    )
+    tr_count = await session.scalar(
+        select(sql_func.count()).select_from(Traceability).where(Traceability.requirement_id == req_id)
+    )
+    fp_count = await session.scalar(
+        select(sql_func.count()).select_from(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
+    )
+    # superseded_by / supersedes
+    super_count = await session.scalar(
+        select(sql_func.count()).select_from(Requirement).where(
+            (Requirement.superseded_by == req_id) | (Requirement.supersedes == req_id)
+        )
+    )
+
+    return ApiResponse(success=True, message="ok", data={
+        "req_id": req_id,
+        "title": record.title,
+        "status": record.status,
+        "dependencies": {
+            "test_cases": tc_count or 0,
+            "generation_batches": gb_count or 0,
+            "req_dependencies": dep_count or 0,
+            "analysis_tasks": at_count or 0,
+            "traceability": tr_count or 0,
+            "functional_points": fp_count or 0,
+            "superseded_refs": super_count or 0,
+        },
+    })
+
+
 @router.delete("/{req_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def delete_requirement(
     req_id: str,
@@ -1646,6 +1706,53 @@ async def delete_requirement(
         )
 
     logger.info("[API/requirements] 删除需求: req_id={}, status={}", req_id, record.status)
+
+    # ---- 级联清理子表（无 ondelete=CASCADE 的 FK，显式删除）----
+    from sqlalchemy import delete as sql_delete, update as sql_update
+
+    # 测试用例
+    tc_count = await session.execute(sql_delete(TestCase).where(TestCase.req_id == req_id))
+    # 生成批次
+    gb_count = await session.execute(sql_delete(GenerationBatch).where(GenerationBatch.req_id == req_id))
+    # 需求间依赖
+    dep_count = await session.execute(
+        sql_delete(ReqDependency).where(
+            (ReqDependency.source_req_id == req_id) | (ReqDependency.target_req_id == req_id)
+        )
+    )
+    # 异步分析任务（req_id 可为 NULL，直接删除）
+    at_count = await session.execute(sql_delete(AnalysisTask).where(AnalysisTask.req_id == req_id))
+    # 需求-用例追溯
+    tr_count = await session.execute(sql_delete(Traceability).where(Traceability.requirement_id == req_id))
+
+    # 功能点（虽有 ondelete=CASCADE，但 FPDependency 也需清理）
+    fp_result = await session.execute(
+        select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
+    )
+    fp_ids = {r[0] for r in fp_result.fetchall()}
+    if fp_ids:
+        await session.execute(
+            sql_delete(FPDependency).where(
+                (FPDependency.source_fp_id.in_(fp_ids)) | (FPDependency.target_fp_id.in_(fp_ids))
+            )
+        )
+        await session.execute(
+            sql_delete(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
+        )
+
+    # 清理其他需求对当前需求的引用（superseded_by / supersedes）
+    await session.execute(
+        sql_update(Requirement).where(Requirement.superseded_by == req_id).values(superseded_by=None)
+    )
+    await session.execute(
+        sql_update(Requirement).where(Requirement.supersedes == req_id).values(supersedes=None)
+    )
+
+    logger.info(
+        "[API/requirements] 清理子表: "
+        "test_cases=%d, gen_batches=%d, req_deps=%d, analysis_tasks=%d, traceability=%d, fp=%d",
+        tc_count.rowcount, gb_count.rowcount, dep_count.rowcount, at_count.rowcount, tr_count.rowcount, len(fp_ids),
+    )
 
     await session.delete(record)
     await session.commit()
@@ -2066,15 +2173,26 @@ class FPDependencyCreateRequest(BaseModel):
     description: str = ""
 
 
+async def _load_active_requirement(req_id: str, session: AsyncSession) -> Requirement:
+    """加载需求并校验非归档状态。归档后的功能点应只读。"""
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="需求不存在")
+    if req.status == "archived":
+        raise HTTPException(
+            status_code=409,
+            detail="需求已归档，功能点已锁定，不可执行此操作。归档后的功能点仅支持查看。",
+        )
+    return req
+
+
 @router.post("/{req_id}/fp/extract-bp", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def fp_extract_bp(
     req_id: str,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """从需求 SRR 提取候选业务点（BP）。"""
-    req = await session.get(Requirement, req_id)
-    if not req:
-        raise HTTPException(status_code=404, detail="需求不存在")
+    """从需求 SRR 提取候选业务点（BP）。归档后不可用。"""
+    req = await _load_active_requirement(req_id, session)
     srr = req.srr_json or {}
     modules = ", ".join(req.modules or [])
 
@@ -2108,10 +2226,8 @@ async def fp_split(
     body: FPSplitRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """在选中的 BP 范围内拆分功能点并持久化。"""
-    req = await session.get(Requirement, req_id)
-    if not req:
-        raise HTTPException(status_code=404, detail="需求不存在")
+    """在选中的 BP 范围内拆分功能点并持久化。归档后不可用。"""
+    req = await _load_active_requirement(req_id, session)
     srr = req.srr_json or {}
 
     # 精简 SRR
@@ -2210,6 +2326,10 @@ async def fp_split(
 @router.get("/{req_id}/fp", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def fp_list(req_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
     """获取需求的功能点列表。"""
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="需求不存在")
+
     result = await session.execute(
         select(FunctionalPoint).where(
             FunctionalPoint.requirement_id == req_id
@@ -2229,6 +2349,7 @@ async def fp_list(req_id: str, session: AsyncSession = Depends(get_session)) -> 
             for fp in fps
         ],
         "total": len(fps),
+        "is_archived": req.status == "archived",
     })
 
 
@@ -2282,10 +2403,12 @@ async def fp_add_dependency(
     """创建功能点依赖关系。
 
     Note:
-        - source_fp 必须属于该 req_id
+        - source_fp 必须属于该 req_id，且 req 未归档
         - target_fp 可属于同产品下任意需求（支持跨需求依赖）
         - relation_type 必须为 5 种合法值之一
     """
+    await _load_active_requirement(req_id, session)
+
     # 校验关系类型
     if body.relation_type not in _FP_RELATION_TYPES:
         raise HTTPException(
@@ -2349,7 +2472,8 @@ async def fp_remove_dependency(
     dep_id: int,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """删除功能点依赖关系。"""
+    """删除功能点依赖关系。归档后不可用。"""
+    await _load_active_requirement(req_id, session)
     dep = await session.get(FPDependency, dep_id)
     if not dep:
         raise HTTPException(status_code=404, detail="依赖关系不存在")
@@ -2371,7 +2495,8 @@ async def fp_update(
     req_id: str, fp_id: str, body: FPUpdateRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """编辑功能点（名称/模块/类型/优先级）。"""
+    """编辑功能点（名称/模块/类型/优先级）。归档后不可用。"""
+    await _load_active_requirement(req_id, session)
     fp = await session.get(FunctionalPoint, fp_id)
     if not fp or fp.requirement_id != req_id:
         raise HTTPException(status_code=404, detail="功能点不存在")
@@ -2415,7 +2540,8 @@ async def fp_search_names(
 
 @router.delete("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def fp_delete(req_id: str, fp_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
-    """删除功能点。"""
+    """删除功能点。归档后不可用。"""
+    await _load_active_requirement(req_id, session)
     fp = await session.get(FunctionalPoint, fp_id)
     if not fp or fp.requirement_id != req_id:
         raise HTTPException(status_code=404, detail="功能点不存在")

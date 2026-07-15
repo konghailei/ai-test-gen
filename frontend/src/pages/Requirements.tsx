@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2, Search, X } from 'lucide-react'
+import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, AlertTriangle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2, Search, X } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Requirement, Product, ClarifyQuestion, Module, AnalysisTaskInfo } from '../types'
@@ -364,18 +364,45 @@ export default function Requirements() {
   // 删除需求（已归档不可删除）
   // ================================================================
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [deleteModal, setDeleteModal] = useState<{ id: string; title: string; status: string; deps: any } | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+
   const handleDelete = async (e: React.MouseEvent, r: Requirement) => {
     e.stopPropagation()
-    if (!confirm(`确定删除需求「${r.title}」吗？${r.status === 'archived' ? '\n\n⚠️ 已归档需求不可删除' : ''}`)) return
-    setDeletingId(r.id)
+    if (r.status === 'archived') {
+      alert('已归档的需求不可删除。')
+      return
+    }
+    // 拉取级联影响预览
+    setPreviewLoading(true)
     try {
-      await reqApi.delete(r.id)
-      setReqs(prev => prev.filter(item => item.id !== r.id))
+      const preview = await reqApi.deletePreview(r.id)
+      setDeleteModal({
+        id: r.id,
+        title: r.title,
+        status: r.status,
+        deps: preview.dependencies,
+      })
+    } catch {
+      // 预览失败也允许直接删除（兜底）
+      if (!confirm(`确定删除需求「${r.title}」吗？`)) return
+      await doDelete(r.id)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
+  const doDelete = async (reqId: string) => {
+    setDeletingId(reqId)
+    try {
+      await reqApi.delete(reqId)
+      setReqs(prev => prev.filter(item => item.id !== reqId))
       setTotal(prev => prev - 1)
     } catch (err: any) {
       alert(err.message || '删除失败')
     } finally {
       setDeletingId(null)
+      setDeleteModal(null)
     }
   }
 
@@ -961,6 +988,70 @@ export default function Requirements() {
           </div>
         )}
       </div>
+
+      {/* 删除确认弹窗 */}
+      {deleteModal && (
+        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setDeleteModal(null)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="w-5 h-5 text-red-600" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-slate-800">确认删除需求</h2>
+                <p className="text-sm text-slate-500 mt-0.5">
+                  「{deleteModal.title}」将被<strong className="text-red-600">永久删除</strong>，以下关联数据也将一并清除：
+                </p>
+              </div>
+            </div>
+
+            {/* 依赖清单 */}
+            <div className="mb-4 p-3 bg-slate-50 rounded-xl space-y-1.5 text-sm">
+              {deleteModal.deps.test_cases > 0 && (
+                <div className="flex justify-between"><span className="text-slate-500">测试用例</span><span className="font-medium text-slate-700">{deleteModal.deps.test_cases} 条</span></div>
+              )}
+              {deleteModal.deps.functional_points > 0 && (
+                <div className="flex justify-between"><span className="text-slate-500">功能点 + 依赖关系</span><span className="font-medium text-slate-700">{deleteModal.deps.functional_points} 个</span></div>
+              )}
+              {deleteModal.deps.generation_batches > 0 && (
+                <div className="flex justify-between"><span className="text-slate-500">生成批次记录</span><span className="font-medium text-slate-700">{deleteModal.deps.generation_batches} 条</span></div>
+              )}
+              {deleteModal.deps.req_dependencies > 0 && (
+                <div className="flex justify-between"><span className="text-slate-500">需求间依赖关系</span><span className="font-medium text-slate-700">{deleteModal.deps.req_dependencies} 条</span></div>
+              )}
+              {deleteModal.deps.analysis_tasks > 0 && (
+                <div className="flex justify-between"><span className="text-slate-500">异步分析任务记录</span><span className="font-medium text-slate-700">{deleteModal.deps.analysis_tasks} 条</span></div>
+              )}
+              {deleteModal.deps.traceability > 0 && (
+                <div className="flex justify-between"><span className="text-slate-500">需求-用例追溯记录</span><span className="font-medium text-slate-700">{deleteModal.deps.traceability} 条</span></div>
+              )}
+              {deleteModal.deps.superseded_refs > 0 && (
+                <div className="flex justify-between"><span className="text-slate-500">其他需求的替代引用</span><span className="font-medium text-slate-700">{deleteModal.deps.superseded_refs} 处（将置空）</span></div>
+              )}
+              {Object.values(deleteModal.deps).every((v: any) => v === 0) && (
+                <p className="text-slate-400 text-center py-2">未检测到关联数据</p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-3">
+              <button onClick={() => setDeleteModal(null)} className="btn-secondary" disabled={!!deletingId}>
+                取消
+              </button>
+              <button
+                onClick={() => doDelete(deleteModal.id)}
+                disabled={!!deletingId}
+                className="btn-danger bg-red-600 hover:bg-red-700 text-white px-5 py-2 rounded-xl text-sm font-medium flex items-center gap-2 disabled:opacity-50"
+              >
+                {deletingId === deleteModal.id ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> 删除中...</>
+                ) : (
+                  <><Trash2 className="w-4 h-4" /> 确认删除</>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

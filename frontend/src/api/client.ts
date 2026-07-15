@@ -182,6 +182,15 @@ export const requirements = {
     request<{ deleted: boolean; status: string; message: string }>(`/requirements/${id}`, {
       method: 'DELETE',
     }),
+  deletePreview: (id: string) =>
+    request<{
+      title: string; status: string;
+      dependencies: {
+        test_cases: number; generation_batches: number; req_dependencies: number;
+        analysis_tasks: number; traceability: number; functional_points: number;
+        superseded_refs: number;
+      }
+    }>(`/requirements/${id}/delete-preview`),
   archive: (id: string, goLiveDate?: string) =>
     request<{ req_id: string; status: string; kb_task_queued?: boolean }>(`/requirements/${id}/archive`, {
       method: 'POST',
