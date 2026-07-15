@@ -2028,6 +2028,47 @@ async def archive_requirement(
 
     logger.info("[API/requirements] 归档成功: req_id={}, old_status={}, kb_task_queued={}", req_id, old_status, kb_task_queued)
 
+    # v1.5.3: 归档时将 FP 及其依赖关系写入向量知识库
+    fp_kb_count = 0
+    try:
+        async with AsyncSession() as fp_session:
+            fp_result = await fp_session.execute(
+                select(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
+            )
+            all_fps = fp_result.scalars().all()
+            for f in all_fps:
+                # 每个 FP 构造一个知识条目（含模块归属 + 子 SRR）
+                fp_meta = {
+                    "type": "functional_point",
+                    "requirement_id": req_id,
+                    "module_id": f.module_id or "",
+                    "fp_type": f.fp_type,
+                    "product_id": record.product_id,
+                    "status": "archived",
+                }
+                # 将 FP 的关键信息转为文本：name + summary + test_hints
+                fp_text = f"功能点：{f.name}\n模块：{f.module_id}\n类型：{f.fp_type}\n"
+                if isinstance(f.srr_json, dict):
+                    fp_text += f"描述：{f.srr_json.get('summary', '')}\n"
+                    fp_text += f"正常流程：{f.srr_json.get('flows', {}).get('happy_path', '')}\n"
+                    fp_text += f"业务规则：{'；'.join(f.srr_json.get('business_rules', []))}\n"
+                if isinstance(f.test_hints, list):
+                    fp_text += f"测试提示：{'；'.join(f.test_hints[:5])}"
+                # 同步写入 Milvus
+                try:
+                    from app.db.milvus_store import vector_store
+                    await asyncio.to_thread(
+                        vector_store.add_requirement,
+                        req_id=f"FP-{f.id}",
+                        srr_json={"content": fp_text, "metadata": fp_meta},
+                        metadata=fp_meta,
+                    )
+                    fp_kb_count += 1
+                except Exception:
+                    pass  # 单条失败不阻断
+    except Exception as e:
+        logger.warning("[Archive] FP KB 写入失败（不阻断）: {}", str(e)[:200])
+
     message = "需求已归档，知识库写入任务已异步派发" if kb_task_queued else "需求已归档，但知识库写入任务派发失败（请检查 Celery 是否运行 / 嵌入模型是否就绪）"
     return ApiResponse(
         success=True,

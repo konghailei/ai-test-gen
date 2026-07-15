@@ -121,6 +121,7 @@ FP_INTEGRATED_USER_PROMPT = """请从以下需求中拆分所有功能点。
 
 原始需求文档：
 {raw_text}
+{existing_fp_hint}
 
 请严格按「系统提示词」中的粒度判定规则分析原始文档，为每个独立功能点生成完整子 SRR。
 

@@ -550,7 +550,31 @@ class ReqAgent:
         from app.core import prompt_manager as pm
 
         req_meta = srr.get("requirement", {})
-        modules = ", ".join(req_meta.get("modules", []) or [])
+        modules = req_meta.get("modules", []) or []
+        modules_str = ", ".join(modules)
+
+        # v1.5.3: 查询同模块下已有功能点，注入 prompt 避免重复命名
+        existing_fp_hint = ""
+        if modules:
+            try:
+                from app.db.database import async_session
+                from app.db.models import FunctionalPoint
+                from sqlalchemy import select as sa_select
+                async with async_session() as s:
+                    mod_fps = await s.execute(
+                        sa_select(FunctionalPoint.name).where(
+                            FunctionalPoint.module_id.in_(modules)
+                        ).distinct()
+                    )
+                    existing_names = [r[0] for r in mod_fps.fetchall() if r[0]]
+                    if existing_names:
+                        existing_fp_hint = (
+                            "\n\n## 该模块下已有功能点（请优先复用已有名称，当新需求的功能与现有功能"
+                            "相同时直接使用已有名称；若新需求有全新的功能，才创建新名称）：\n"
+                            + "\n".join(f"- {n}" for n in existing_names[:20])
+                        )
+            except Exception:
+                pass  # 查询失败不阻断
 
         # 构建概要 SRR（轻量级，给 LLM 需求概况）
         overview_srr = json.dumps({
@@ -563,10 +587,11 @@ class ReqAgent:
 
         prompt = pm.get("fp_agent", "FP_INTEGRATED_USER_PROMPT").format(
             req_title=req_meta.get("title", "未知需求"),
-            modules=modules,
+            modules=modules_str,
             product_name=product_name,
             overview_srr=overview_srr,
-            raw_text=raw_text[:96000],  # 约 64K tokens，覆盖大多数需求文档
+            raw_text=raw_text[:96000],
+            existing_fp_hint=existing_fp_hint,
         )
 
         import json as _json
