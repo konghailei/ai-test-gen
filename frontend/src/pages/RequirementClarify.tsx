@@ -7,7 +7,7 @@ import {
   RefreshCw, History,
 } from 'lucide-react'
 import { requirements as reqApi } from '../api/client'
-import type { ClarifyQuestion, KbAugmentation, FieldConflict, ClarifyHistoryEntry } from '../types'
+import type { ClarifyQuestion, KbAugmentation, FieldConflict, ClarifyHistoryEntry, AnalysisTaskInfo } from '../types'
 
 // ============================================================================
 // 草稿自动保存工具
@@ -143,6 +143,10 @@ export default function RequirementClarify() {
   const [regenDone, setRegenDone] = useState(false)
   const [history, setHistory] = useState<ClarifyHistoryEntry[]>([])
 
+  // P1 修复：异步任务轮询（与后端 _run_clarify_reparse / _run_regenerate_reparse 配合）
+  const taskPollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [taskMessage, setTaskMessage] = useState('')
+
   // ===== 加载澄清状态 =====
   useEffect(() => {
     if (!id) return
@@ -192,22 +196,47 @@ export default function RequirementClarify() {
     }).finally(() => setLoading(false))
   }, [id])
 
-  // ===== 重新生成 =====
+  // ===== 重新生成（P1 异步任务模式：立即返回 task_id → 轮询 → 完成跳转） =====
   const handleRegenerate = async () => {
     if (!id || !regenNotes.trim()) return
     setRegenerating(true)
     setError('')
+    setTaskMessage('正在提交重新生成请求...')
     try {
-      await reqApi.regenerate(id, regenNotes.trim())
-      setRegenDone(true)
-      // 刷新历史
-      reqApi.getClarifyHistory(id).then(data => setHistory(data?.items || [])).catch(() => {})
-      setTimeout(() => navigate(`/requirements/${id}`, { replace: true }), 1500)
+      const res = await reqApi.regenerate(id, regenNotes.trim())
+      const taskId = res?.task_id
+      if (!taskId) throw new Error('未返回任务 ID')
+      setTaskMessage('正在重新生成 SRR...')
+      startRegenPolling(taskId)
     } catch (e: any) {
       setError(e?.message || '重新生成失败')
-    } finally {
       setRegenerating(false)
     }
+  }
+
+  const startRegenPolling = (taskId: string) => {
+    if (taskPollingRef.current) clearInterval(taskPollingRef.current)
+    taskPollingRef.current = setInterval(async () => {
+      try {
+        const task: AnalysisTaskInfo = await reqApi.getTask(taskId)
+        setTaskMessage(task.message || '正在重新生成...')
+        if (task.status === 'completed') {
+          if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+          setRegenDone(true)
+          setRegenerating(false)
+          reqApi.getClarifyHistory(id!).then(data => setHistory(data?.items || [])).catch(() => {})
+          setTimeout(() => navigate(`/requirements/${id}`, { replace: true }), 800)
+        } else if (task.status === 'failed' || task.status === 'interrupted') {
+          if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+          setError(task.error || '重新生成失败')
+          setRegenerating(false)
+        }
+      } catch (e: any) {
+        if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+        setError(e?.message || '查询任务状态失败')
+        setRegenerating(false)
+      }
+    }, 1500)
   }
 
   // ===== 草稿自动保存（5 秒防抖） =====
@@ -300,7 +329,7 @@ export default function RequirementClarify() {
     setConflictCustomValues(prev => ({ ...prev, [field]: value }))
   }
 
-  // ===== 提交 =====
+  // ===== 提交（P1 异步任务模式：立即返回 task_id → 轮询 → 完成跳转） =====
   const handleSubmit = async () => {
     if (!id) return
     // critical 跳过警告
@@ -312,6 +341,7 @@ export default function RequirementClarify() {
     }
     setSubmitting(true)
     setError('')
+    setTaskMessage('正在提交澄清答案...')
     try {
       // 将冲突解决结果合并到 answers
       const finalAnswers = { ...answers }
@@ -325,16 +355,51 @@ export default function RequirementClarify() {
           finalAnswers[`conflict_${c.field}`] = String(c.existing_value)
         }
       })
-      await reqApi.submitClarify(id, finalAnswers, extraNotes)
+      const res = await reqApi.submitClarify(id, finalAnswers, extraNotes)
+      const taskId = res?.task_id
+      if (!taskId) throw new Error('未返回任务 ID')
       clearDraft(id)
-      setDone(true)
-      setTimeout(() => navigate(`/requirements/${id}`, { replace: true }), 1000)
+      setTaskMessage('正在调用 LLM 重新生成 SRR...')
+      startSubmitPolling(taskId)
     } catch (e: any) {
       setError(e?.message || '提交失败')
-    } finally {
       setSubmitting(false)
     }
   }
+
+  const startSubmitPolling = (taskId: string) => {
+    if (taskPollingRef.current) clearInterval(taskPollingRef.current)
+    taskPollingRef.current = setInterval(async () => {
+      try {
+        const task: AnalysisTaskInfo = await reqApi.getTask(taskId)
+        setTaskMessage(task.message || '正在重新生成 SRR...')
+        if (task.status === 'completed') {
+          if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+          setDone(true)
+          setSubmitting(false)
+          setTimeout(() => navigate(`/requirements/${id}`, { replace: true }), 800)
+        } else if (task.status === 'failed' || task.status === 'interrupted') {
+          if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+          setError(task.error || '提交后重新生成失败')
+          setSubmitting(false)
+        }
+      } catch (e: any) {
+        if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+        setError(e?.message || '查询任务状态失败')
+        setSubmitting(false)
+      }
+    }, 1500)
+  }
+
+  // 组件卸载时清理轮询 timer
+  useEffect(() => {
+    return () => {
+      if (taskPollingRef.current) {
+        clearInterval(taskPollingRef.current)
+        taskPollingRef.current = null
+      }
+    }
+  }, [])
 
   if (loading) return <div className="space-y-4 max-w-3xl mx-auto pt-8">{[1,2,3].map(i => <div key={i} className="skeleton h-20" />)}</div>
 
@@ -351,17 +416,26 @@ export default function RequirementClarify() {
         </button>
       </div>
 
+      {/* P1 修复：异步任务轮询中的进度提示（submitting/regenerating 时显示 taskMessage） */}
+      {((submitting || regenerating) && taskMessage) && (
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-2xl p-6 text-center">
+          <Loader2 className="w-10 h-10 text-blue-500 mx-auto mb-2 animate-spin" />
+          <h2 className="text-base font-semibold text-blue-800 mb-1">任务进行中</h2>
+          <p className="text-sm text-blue-600">{taskMessage}</p>
+        </div>
+      )}
+
       {done ? (
         <div className="bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-100 rounded-2xl p-8 text-center">
           <CheckCircle2 className="w-12 h-12 text-emerald-500 mx-auto mb-3" />
           <h2 className="text-lg font-semibold text-emerald-800 mb-1">澄清已提交</h2>
-          <p className="text-sm text-emerald-600">需求已确认，即将重新生成 SRR...</p>
+          <p className="text-sm text-emerald-600">{taskMessage || '需求已确认，SRR 已重新生成...'}</p>
         </div>
       ) : regenDone ? (
         <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-100 rounded-2xl p-8 text-center">
           <CheckCircle2 className="w-12 h-12 text-purple-500 mx-auto mb-3" />
           <h2 className="text-lg font-semibold text-purple-800 mb-1">需求分析已重新生成</h2>
-          <p className="text-sm text-purple-600">即将返回需求详情...</p>
+          <p className="text-sm text-purple-600">{taskMessage || '即将返回需求详情...'}</p>
         </div>
       ) : regenMode ? (
         <div className="space-y-5">

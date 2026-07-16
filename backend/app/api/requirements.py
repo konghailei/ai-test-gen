@@ -1215,6 +1215,11 @@ async def get_requirement(
             "questions_count": len(((record.srr_json or {}).get("_clarify_state", {}) or {}).get("questions", [])),
             "created_at": record.created_at.isoformat() if record.created_at else "",
             "updated_at": record.updated_at.isoformat() if record.updated_at else "",
+            # ===== 修复问题 3：补充向量化与归档相关字段 =====
+            "vectorization_status": record.vectorization_status,  # null/processing/completed/failed
+            "vectorization_error": record.vectorization_error or "",
+            "go_live_date": record.go_live_date.isoformat() if record.go_live_date else "",
+            "archived_at": record.archived_at.isoformat() if record.archived_at else "",
         },
     )
 
@@ -1289,14 +1294,13 @@ async def submit_clarify_answers(
     req: ClarifyAnswerRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """提交澄清问题答案 → 重新生成最终 SRR。
+    """提交澄清问题答案 → 异步重新生成最终 SRR。
 
-    改进流程（v2.3）：
-        1. 用户答案应用到 SRR
-        2. 使用原始文本 + 用户补充信息作为增强输入，
-           重新调用 ReqAgent 生成更完整的最终 SRR
-        3. 状态从 draft 更新为 active
-        4. 返回最终 SRR
+    v2.15 异步化（变更组 C）：
+        1. 同步：验证答案 + 构建增强文本 + 保存澄清历史快照
+        2. 创建 AnalysisTask（task_type=submit_clarify）
+        3. 启动后台协程 _run_clarify_reparse（执行 LLM parse + FP 重提取）
+        4. 立即返回 task_id，前端轮询 GET /tasks/{task_id} 获取进度
 
     Args:
         req_id: 需求 ID
@@ -1304,7 +1308,7 @@ async def submit_clarify_answers(
         session: 数据库会话
 
     Returns:
-        ApiResponse: data 含 req_id / srr（最终 SRR）/ status
+        ApiResponse: data 含 task_id / req_id / status=analyzing
     """
     if not req.answers:
         raise HTTPException(status_code=400, detail="澄清答案不能为空")
@@ -1316,6 +1320,12 @@ async def submit_clarify_answers(
 
     if record is None:
         raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    if record.status not in ("draft", "active"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前状态 {record.status} 不可提交澄清（仅 draft/active 可提交）",
+        )
 
     raw_text = record.raw_text or ""
     srr_json = dict(record.srr_json or {})
@@ -1350,7 +1360,6 @@ async def submit_clarify_answers(
             qa_pairs.append(f"- 【{field}】{question_text}\n  回答：{answer}")
 
     # v2.12: 处理字段冲突解决答案（conflict_<field> 键）
-    # 用户在前端对字段冲突选择"采用 KB"/"自定义"后，答案以 conflict_<field> 键提交
     field_conflicts = clarify_state.get("field_conflicts", []) or []
     for c in field_conflicts:
         c_field = c.get("field", "")
@@ -1382,101 +1391,192 @@ async def submit_clarify_answers(
     enhanced_raw = "\n".join(enhanced_parts)
 
     logger.info(
-        "[API/requirements] 提交澄清答案并重新生成: req_id={}, answers={}, enhanced_len={}",
+        "[API/requirements] 提交澄清答案并启动异步重新生成: req_id={}, answers={}, enhanced_len={}",
         req_id,
         len(req.answers),
         len(enhanced_raw),
     )
 
-    # ===== ② 重新调用 ReqAgent 生成最终 SRR =====
-    try:
-        final_srr = await req_agent.parse(
-            raw_requirement=enhanced_raw,
-            product_id=record.product_id,
-        )
-        logger.info("[API/requirements] 最终 SRR 生成成功: req_id={}", req_id)
-    except Exception as e:
-        logger.error("[API/requirements] 最终 SRR 生成失败: {}", str(e)[:200])
-        # 降级：使用原有 SRR + 应用答案
-        final_srr = dict(srr_json)
-        # 移除澄清状态标记
-        final_srr.pop("_clarify_state", None)
-        final_srr.pop("clarify_answers", None)
-        final_srr.pop("_field_sources", None)
-        # 标记为降级
-        final_srr["_clarify_degraded"] = True
-        logger.warning("[API/requirements] 降级使用原有 SRR: req_id={}", req_id)
-
-    # ===== ③ 更新 DB =====
-    final_data = dict(final_srr)
-    # 移除临时状态标记
-    final_data.pop("_clarify_state", None)
-    final_data.pop("clarify_answers", None)
-    final_data.pop("_field_sources", None)
-    # 保留 KB 查询日志（不在 re-parse 中丢失）
-    if original_kb_logs := (dict(record.srr_json or {}).get("_kb_query_logs")):
-        final_data["_kb_query_logs"] = original_kb_logs
-    # 保留澄清历史（re-parse 生成的新 SRR 不含 _clarify_history，需手动迁移）
-    final_data["_clarify_history"] = clarify_history
-    # 合并旧 SRR 的 KB 基线补全内容（_baseline_context / additional_details）
-    # re-parse 后是新 SRR，KB 已补全的结构化上下文需手动迁移
-    old_srr = dict(record.srr_json or {})
-    for field in ("_baseline_context", "additional_details"):
-        old_val = old_srr.get(field)
-        if old_val:
-            if field == "additional_details":
-                # additional_details 累加而非覆盖
-                existing = final_data.get("additional_details", "")
-                final_data["additional_details"] = str(old_val) + "\n" + str(existing)
-            else:
-                final_data[field] = old_val
-
-    record.srr_json = final_data
-    record.status = "active"
+    # v2.15: 标记需求为 analyzing 状态
+    record.status = "analyzing"
     await session.commit()
 
-    logger.info(
-        "[API/requirements] 澄清完成，需求已激活: req_id={}, title={}",
-        req_id,
-        final_data.get("requirement", {}).get("title", ""),
+    # ===== ② 创建 AnalysisTask + 启动后台协程 =====
+    task_id = gen_task_id()
+    task = AnalysisTask(
+        id=task_id,
+        task_type="submit_clarify",
+        req_id=req_id,
+        product_id=record.product_id,
+        status="pending",
+        phase="parse",
+        progress=0,
+        message="已接收澄清答案，准备重新生成...",
+        created_by="api",
     )
+    session.add(task)
+    await session.commit()
 
-    # v1.5.3: 澄清后 re-parse 已提取新 FP，替换旧 FP（澄清内容更完整）
-    if req_agent.last_fps:
-        try:
-            from sqlalchemy import delete as sa_del
-            # 删除旧 FP + 依赖
-            old_fps = await session.execute(
-                select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
-            )
-            old_ids = {r[0] for r in old_fps.fetchall()}
-            if old_ids:
-                await session.execute(
-                    sa_del(FPDependency).where(
-                        (FPDependency.source_fp_id.in_(old_ids)) | (FPDependency.target_fp_id.in_(old_ids))
-                    )
-                )
-                await session.execute(
-                    sa_del(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
-                )
-            await session.flush()
-            await _save_fps_to_db(session, req_id, req_agent.last_fps, record.priority)
-            await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
-            await session.commit()
-            logger.info("[Clarify] 澄清后重新提取 FP: {} 个", len(req_agent.last_fps))
-        except Exception as e:
-            logger.warning("[Clarify] FP 重新提取失败（不阻断）: {}", str(e)[:200])
+    # 启动后台协程（不 await，立即返回）
+    asyncio.create_task(_run_clarify_reparse(
+        task_id=task_id,
+        req_id=req_id,
+        enhanced_raw=enhanced_raw,
+        product_id=record.product_id,
+        clarify_history=clarify_history,
+        old_srr=srr_json,
+        priority=record.priority,
+    ))
 
     return ApiResponse(
         success=True,
-        message="澄清完成，需求已确认",
+        message="已接收澄清答案，正在后台重新生成",
         data={
+            "task_id": task_id,
             "req_id": req_id,
-            "srr": final_data,
-            "status": "active",
+            "status": "analyzing",
             "answers_count": len(req.answers),
         },
     )
+
+
+async def _run_clarify_reparse(
+    task_id: str,
+    req_id: str,
+    enhanced_raw: str,
+    product_id: str,
+    clarify_history: list,
+    old_srr: dict,
+    priority: str,
+) -> None:
+    """后台执行澄清后的 SRR 重新生成（异步协程，独立 session）。
+
+    流程：
+        1. phase=parse: req_agent.parse() 重新生成 SRR（含降级处理）
+        2. 持久化 SRR + 保留 KB 日志 + 迁移 _baseline_context / additional_details
+        3. FP 重提取（含 P3 修复：清理旧 FP 向量）
+        4. status=completed
+    """
+    from sqlalchemy import update as sa_update, delete as sa_del
+    try:
+        await _update_task(task_id, status="running", phase="parse", progress=20,
+                           message="正在调用 LLM 重新生成 SRR...")
+
+        # ===== 重新调用 ReqAgent 生成最终 SRR =====
+        try:
+            final_srr = await req_agent.parse(
+                raw_requirement=enhanced_raw,
+                product_id=product_id,
+            )
+            logger.info("[Task/Clarify] 最终 SRR 生成成功: req_id={}", req_id)
+        except Exception as e:
+            logger.error("[Task/Clarify] 最终 SRR 生成失败 → 降级: {}", str(e)[:200])
+            # 降级：使用原有 SRR
+            final_srr = dict(old_srr)
+            final_srr.pop("_clarify_state", None)
+            final_srr.pop("clarify_answers", None)
+            final_srr.pop("_field_sources", None)
+            final_srr["_clarify_degraded"] = True
+
+        # P0-2: 立即捕获 FP，避免后续操作覆盖
+        captured_fps = list(req_agent.last_fps)
+        captured_fp_deps = list(req_agent.last_fp_dependencies)
+
+        await _update_task(task_id, phase="parse", progress=60,
+                           message="SRR 生成完成，正在保存功能点...")
+
+        # ===== 持久化 =====
+        final_data = dict(final_srr)
+        final_data.pop("_clarify_state", None)
+        final_data.pop("clarify_answers", None)
+        final_data.pop("_field_sources", None)
+
+        # 保留 KB 查询日志
+        if original_kb_logs := old_srr.get("_kb_query_logs"):
+            final_data["_kb_query_logs"] = original_kb_logs
+        # 保留澄清历史
+        final_data["_clarify_history"] = clarify_history
+        # 合并旧 SRR 的 KB 基线补全内容
+        for field in ("_baseline_context", "additional_details"):
+            old_val = old_srr.get(field)
+            if old_val:
+                if field == "additional_details":
+                    existing = final_data.get("additional_details", "")
+                    final_data["additional_details"] = str(old_val) + "\n" + str(existing)
+                else:
+                    final_data[field] = old_val
+
+        async with async_session() as s:
+            await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(
+                srr_json=final_data, status="active",
+            ))
+            await s.commit()
+
+        logger.info(
+            "[Task/Clarify] 澄清完成，需求已激活: req_id={}, title={}",
+            req_id,
+            final_data.get("requirement", {}).get("title", ""),
+        )
+
+        # ===== FP 重提取（含 P3 修复：清理旧 FP 向量）=====
+        if captured_fps:
+            async with async_session() as s:
+                old_fps = await s.execute(
+                    select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
+                )
+                old_ids = {r[0] for r in old_fps.fetchall()}
+                if old_ids:
+                    await s.execute(
+                        sa_del(FPDependency).where(
+                            (FPDependency.source_fp_id.in_(old_ids)) | (FPDependency.target_fp_id.in_(old_ids))
+                        )
+                    )
+                    await s.execute(
+                        sa_del(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
+                    )
+                await s.flush()
+
+                # P3 修复：删除旧 FP 对应的 Milvus 向量
+                if old_ids:
+                    try:
+                        from app.db.milvus_store import vector_store
+                        for old_fp_id in old_ids:
+                            try:
+                                await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{old_fp_id}")
+                            except Exception as fp_err:
+                                logger.warning("[Task/Clarify] 旧 FP 向量删除失败(不阻断): fp_id={}, error={}", old_fp_id, str(fp_err)[:100])
+                        logger.info("[Task/Clarify] 已清理 {} 个旧 FP 向量", len(old_ids))
+                    except Exception as e:
+                        logger.warning("[Task/Clarify] 旧 FP 向量清理失败(不阻断): {}", str(e)[:200])
+
+                await _save_fps_to_db(s, req_id, captured_fps, priority)
+                await _save_fp_dependencies(s, req_id, captured_fp_deps)
+                await s.commit()
+                logger.info("[Task/Clarify] 澄清后重新提取 FP: {} 个", len(captured_fps))
+
+        await _update_task(
+            task_id, status="completed", phase="done", progress=100,
+            message="澄清完成，需求已激活",
+            result_json={"req_id": req_id, "status": "active"},
+            completed_at=datetime.now(timezone.utc),
+        )
+        logger.info("[Task/Clarify] 澄清重生成完成: task_id={}, req_id={}", task_id, req_id)
+
+    except Exception as e:
+        err_msg = str(e)[:500]
+        logger.error("[Task/Clarify] 澄清重生成失败: task_id={}, req_id={}, error={}", task_id, req_id, err_msg)
+        await _update_task(
+            task_id, status="failed", error=err_msg,
+            message="澄清重生成失败: " + err_msg[:200],
+            completed_at=datetime.now(timezone.utc),
+        )
+        # 失败时将需求状态回退为 draft，避免卡在 analyzing
+        try:
+            async with async_session() as s:
+                await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(status="draft"))
+                await s.commit()
+        except Exception as revert_err:
+            logger.warning("[Task/Clarify] 失败回退状态失败: req_id={}, error={}", req_id, str(revert_err)[:150])
 
 
 # ============================================================================
@@ -1607,11 +1707,17 @@ async def regenerate_requirement(
     req: RegenerateRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """补充信息后重新生成需求分析（SRR）。
+    """补充信息后异步重新生成需求分析（SRR）。
 
-    允许在 status=active（已澄清/已确认）后调用，用户通过 extra_notes 提供补充
-    说明，系统将原始文本 + 已有 KB 补全 + 补充说明拼接后重新调用 ReqAgent 解析，
-    生成新的 SRR。操作记录追加到 _clarify_history。
+    v2.15 异步化（变更组 C）：
+        1. 同步：构建增强文本
+        2. 创建 AnalysisTask（task_type=regenerate）
+        3. 启动后台协程 _run_regenerate_reparse
+        4. 立即返回 task_id，前端轮询进度
+
+    允许在 status=active（已澄清/已确认）后调用，用户通过 extra_notes 提供补充说明，
+    系统将原始文本 + 已有 KB 补全 + 补充说明拼接后重新调用 ReqAgent 解析，生成新的 SRR。
+    操作记录追加到 _clarify_history。
 
     Args:
         req_id: 需求 ID
@@ -1619,7 +1725,7 @@ async def regenerate_requirement(
         session: 数据库会话
 
     Returns:
-        ApiResponse: data 含 req_id / srr（新 SRR）/ status
+        ApiResponse: data 含 task_id / req_id / status=analyzing / previous_title
     """
     extra_notes = req.extra_notes.strip()
     if not extra_notes:
@@ -1648,72 +1754,146 @@ async def regenerate_requirement(
     enhanced_raw = "\n".join(enhanced_parts)
 
     logger.info(
-        "[API/requirements] 重新生成 SRR: req_id={}, extra_notes_len={}, enhanced_len={}",
+        "[API/requirements] 启动异步重新生成 SRR: req_id={}, extra_notes_len={}, enhanced_len={}",
         req_id, len(extra_notes), len(enhanced_raw),
     )
 
-    # 调用 ReqAgent 重新解析
-    try:
-        final_srr = await req_agent.parse(
-            raw_requirement=enhanced_raw,
-            product_id=record.product_id,
-        )
-        logger.info("[API/requirements] 重新生成 SRR 成功: req_id={}", req_id)
-    except Exception as e:
-        logger.error("[API/requirements] 重新生成 SRR 失败: {}", str(e)[:200])
-        raise HTTPException(status_code=500, detail=f"重新生成失败: {str(e)[:200]}")
-
-    # 记录历史
-    new_title = (final_srr.get("requirement", {}) or {}).get("title", "")
-    history_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "action": "regenerate",
-        "extra_notes": extra_notes,
-        "previous_title": previous_title,
-        "new_title": new_title,
-    }
-    clarify_history = list(old_srr.get("_clarify_history", []))
-    clarify_history.append(history_entry)
-
-    # 更新 DB
-    final_data = dict(final_srr)
-    # 保留 KB 查询日志
-    if original_logs := old_srr.get("_kb_query_logs"):
-        final_data["_kb_query_logs"] = original_logs
-    # 保留澄清历史
-    final_data["_clarify_history"] = clarify_history
-    # 迁移 KB 基线补全内容
-    for field in ("_baseline_context", "additional_details"):
-        old_val = old_srr.get(field)
-        if old_val:
-            if field == "additional_details":
-                existing = final_data.get("additional_details", "")
-                final_data["additional_details"] = str(old_val) + "\n" + str(existing)
-            else:
-                final_data[field] = old_val
-
-    record.srr_json = final_data
-    # 重新生成后更新标题
-    if new_title:
-        record.title = new_title
+    # v2.15: 标记需求为 analyzing 状态
+    record.status = "analyzing"
     await session.commit()
 
-    logger.info(
-        "[API/requirements] 重新生成完成: req_id={}, title={}->{}",
-        req_id, previous_title, new_title,
+    # 创建 AnalysisTask + 启动后台协程
+    task_id = gen_task_id()
+    task = AnalysisTask(
+        id=task_id,
+        task_type="regenerate",
+        req_id=req_id,
+        product_id=record.product_id,
+        status="pending",
+        phase="parse",
+        progress=0,
+        message="已接收补充说明，准备重新生成...",
+        created_by="api",
     )
+    session.add(task)
+    await session.commit()
+
+    asyncio.create_task(_run_regenerate_reparse(
+        task_id=task_id,
+        req_id=req_id,
+        enhanced_raw=enhanced_raw,
+        product_id=record.product_id,
+        previous_title=previous_title,
+        old_srr=old_srr,
+        extra_notes=extra_notes,
+    ))
 
     return ApiResponse(
         success=True,
-        message="需求分析已重新生成",
+        message="已接收补充说明，正在后台重新生成",
         data={
+            "task_id": task_id,
             "req_id": req_id,
-            "srr": final_data,
-            "status": record.status,
+            "status": "analyzing",
             "previous_title": previous_title,
-            "new_title": new_title,
         },
     )
+
+
+async def _run_regenerate_reparse(
+    task_id: str,
+    req_id: str,
+    enhanced_raw: str,
+    product_id: str,
+    previous_title: str,
+    old_srr: dict,
+    extra_notes: str,
+) -> None:
+    """后台执行重新生成 SRR（异步协程，独立 session）。
+
+    流程：
+        1. phase=parse: req_agent.parse() 重新生成 SRR
+        2. 保留 KB 日志 + 澄清历史 + KB 基线补全
+        3. 持久化 + 更新标题
+        4. status=completed
+    """
+    from sqlalchemy import update as sa_update
+    try:
+        await _update_task(task_id, status="running", phase="parse", progress=30,
+                           message="正在调用 LLM 重新生成 SRR...")
+
+        final_srr = await req_agent.parse(
+            raw_requirement=enhanced_raw,
+            product_id=product_id,
+        )
+        logger.info("[Task/Regenerate] 重新生成 SRR 成功: req_id={}", req_id)
+
+        await _update_task(task_id, phase="parse", progress=80, message="SRR 生成完成，正在保存...")
+
+        # 记录历史
+        new_title = (final_srr.get("requirement", {}) or {}).get("title", "")
+        history_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": "regenerate",
+            "extra_notes": extra_notes,
+            "previous_title": previous_title,
+            "new_title": new_title,
+        }
+        clarify_history = list(old_srr.get("_clarify_history", []))
+        clarify_history.append(history_entry)
+
+        final_data = dict(final_srr)
+        # 保留 KB 查询日志
+        if original_logs := old_srr.get("_kb_query_logs"):
+            final_data["_kb_query_logs"] = original_logs
+        # 保留澄清历史
+        final_data["_clarify_history"] = clarify_history
+        # 迁移 KB 基线补全内容
+        for field in ("_baseline_context", "additional_details"):
+            old_val = old_srr.get(field)
+            if old_val:
+                if field == "additional_details":
+                    existing = final_data.get("additional_details", "")
+                    final_data["additional_details"] = str(old_val) + "\n" + str(existing)
+                else:
+                    final_data[field] = old_val
+
+        # 持久化
+        async with async_session() as s:
+            values: dict = {"srr_json": final_data, "status": "active"}
+            if new_title:
+                values["title"] = new_title
+            await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(**values))
+            await s.commit()
+
+        logger.info(
+            "[Task/Regenerate] 重新生成完成: req_id={}, title={}->{}",
+            req_id, previous_title, new_title,
+        )
+
+        await _update_task(
+            task_id, status="completed", phase="done", progress=100,
+            message="需求分析已重新生成",
+            result_json={"req_id": req_id, "new_title": new_title, "status": "active"},
+            completed_at=datetime.now(timezone.utc),
+        )
+        logger.info("[Task/Regenerate] 重新生成完成: task_id={}, req_id={}", task_id, req_id)
+
+    except Exception as e:
+        err_msg = str(e)[:500]
+        logger.error("[Task/Regenerate] 重新生成失败: task_id={}, req_id={}, error={}", task_id, req_id, err_msg)
+        await _update_task(
+            task_id, status="failed", error=err_msg,
+            message="重新生成失败: " + err_msg[:200],
+            completed_at=datetime.now(timezone.utc),
+        )
+        # 失败时回退状态
+        try:
+            async with async_session() as s:
+                await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(status="active"))
+                await s.commit()
+        except Exception as revert_err:
+            logger.warning("[Task/Regenerate] 失败回退状态失败: req_id={}, error={}", req_id, str(revert_err)[:150])
 
 
 # ============================================================================
@@ -1914,11 +2094,22 @@ async def delete_requirement(
     await session.delete(record)
     await session.commit()
 
-    # 同步删除向量库中的记录（避免产生孤儿向量）
+    # 同步删除向量库中的记录（主需求向量 + FP-{fp_id} 向量，避免孤儿）
     try:
         from app.db.milvus_store import vector_store
+
+        # 删除主需求向量
         await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
-        logger.info("[API/requirements] 已同步删除向量库记录: req_id={}", req_id)
+        logger.info("[API/requirements] 已同步删除向量库主记录: req_id={}", req_id)
+
+        # P0 修复：级联删除 FP-{fp_id} 向量，避免孤儿
+        for fp_id in fp_ids:
+            try:
+                await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{fp_id}")
+            except Exception as fp_err:
+                logger.warning("[API/requirements] FP 向量删除失败(不阻断): fp_id={}, error={}", fp_id, str(fp_err)[:100])
+        if fp_ids:
+            logger.info("[API/requirements] 已同步删除 {} 个 FP 向量", len(fp_ids))
     except Exception as e:
         logger.warning("[API/requirements] 向量库删除失败(不阻断): req_id={}, error={}", req_id, str(e)[:100])
 
@@ -2031,6 +2222,7 @@ async def archive_requirement(
         "go_live_date": parsed_go_live.isoformat() if parsed_go_live else "",
         "project_version": project_version,
     }
+    vectorization_status = "pending"
     try:
         from app.tasks.celery_app import celery_app
 
@@ -2042,6 +2234,7 @@ async def archive_requirement(
                 queue="embedding",
             )
             kb_task_queued = True
+            vectorization_status = "processing"
             logger.info("[API/requirements] 异步写入任务已派发: req_id={}, go_live_date={}, project_version={}",
                         req_id, milvus_meta["go_live_date"], project_version)
         else:
@@ -2054,11 +2247,44 @@ async def archive_requirement(
                 metadata=milvus_meta,
             )
             kb_task_queued = True
+            vectorization_status = "completed"
             logger.info("[API/requirements] 已写入知识库(同步降级): req_id={}, go_live_date={}, project_version={}",
                         req_id, milvus_meta["go_live_date"], project_version)
     except Exception as e:
         kb_error = str(e)[:300]
-        logger.warning("[API/requirements] 知识库写入失败（不阻断）: req_id={}, error={}", req_id, kb_error[:200])
+        logger.warning("[API/requirements] Celery 派发失败，尝试同步降级写入: req_id={}, error={}", req_id, kb_error[:200])
+        # P4 修复：Celery 派发失败时立即同步降级写入，避免 KB 无数据
+        try:
+            from app.db.milvus_store import vector_store
+            await asyncio.to_thread(
+                vector_store.add_requirement,
+                req_id=record.id,
+                srr_json=record.srr_json or {},
+                metadata=milvus_meta,
+            )
+            kb_task_queued = True
+            vectorization_status = "completed"
+            logger.info("[API/requirements] Celery 派发失败，同步写入成功: req_id={}", req_id)
+        except Exception as sync_err:
+            sync_error = str(sync_err)[:300]
+            logger.error("[API/requirements] 同步降级写入也失败: req_id={}, error={}", req_id, sync_error[:200])
+            vectorization_status = "failed"
+            kb_error = sync_error
+
+    # P4 修复：回写向量化状态到 Requirement，便于前端展示与运维监控
+    if vectorization_status != "pending":
+        try:
+            from sqlalchemy import update as sa_update_vs
+            async with async_session() as vs_session:
+                await vs_session.execute(
+                    sa_update_vs(Requirement).where(Requirement.id == req_id).values(
+                        vectorization_status=vectorization_status,
+                        vectorization_error=kb_error if vectorization_status == "failed" else None,
+                    )
+                )
+                await vs_session.commit()
+        except Exception as vs_err:
+            logger.warning("[API/requirements] 向量化状态回写失败(不阻断): {}", str(vs_err)[:200])
 
     logger.info("[API/requirements] 归档成功: req_id={}, old_status={}, kb_task_queued={}", req_id, old_status, kb_task_queued)
 
@@ -2182,16 +2408,38 @@ async def update_go_live_date(
         parsed_go_live.isoformat(),
     )
 
-    # 同步更新 Milvus 向量库中的元数据
+    # 同步更新 Milvus 向量库中的元数据（主需求 + FP 向量）
     milvus_updated = False
     milvus_error = ""
     try:
         from app.db.milvus_store import vector_store
+
+        # 更新主需求向量
         await asyncio.to_thread(
             vector_store.update_requirement_metadata,
             req_id,
             {"go_live_date": parsed_go_live.isoformat()},
         )
+
+        # P2 修复：同步更新该需求下所有 FP 向量的 go_live_date
+        fp_result = await session.execute(
+            select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
+        )
+        fp_ids = [r[0] for r in fp_result.fetchall()]
+        fp_update_count = 0
+        for fp_id in fp_ids:
+            try:
+                await asyncio.to_thread(
+                    vector_store.update_requirement_metadata,
+                    f"FP-{fp_id}",
+                    {"go_live_date": parsed_go_live.isoformat()},
+                )
+                fp_update_count += 1
+            except Exception as fp_err:
+                logger.warning("[API/requirements] FP 向量元数据更新失败(不阻断): fp_id={}, error={}", fp_id, str(fp_err)[:100])
+        if fp_ids:
+            logger.info("[API/requirements] 已同步 {} 个 FP 向量的 go_live_date", fp_update_count)
+
         milvus_updated = True
     except Exception as e:
         milvus_error = str(e)[:300]
@@ -2448,6 +2696,20 @@ async def fp_split(
                 sa_delete(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
             )
         await session.flush()
+
+        # P3 修复：删除旧 FP 对应的 Milvus 向量，避免孤儿（仅清理已归档过的 FP 向量）
+        if old_ids:
+            try:
+                from app.db.milvus_store import vector_store
+                for old_fp_id in old_ids:
+                    try:
+                        await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{old_fp_id}")
+                    except Exception as fp_err:
+                        logger.warning("[FP] 旧 FP 向量删除失败(不阻断): fp_id={}, error={}", old_fp_id, str(fp_err)[:100])
+                logger.info("[FP] 已清理 {} 个旧 FP 向量", len(old_ids))
+            except Exception as e:
+                logger.warning("[FP] 旧 FP 向量清理失败(不阻断): {}", str(e)[:200])
+
         # 调用 ReqAgent 一体式提取
         raw_text = req.raw_text or ""
         from app.agents.req_agent import req_agent as _agent

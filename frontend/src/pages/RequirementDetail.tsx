@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, memo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers, Clock } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
@@ -9,6 +9,7 @@ import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
 import FunctionalPoints from '../components/FunctionalPoints'
 import FPSRRViewer from '../components/FPSRRViewer'
+import FieldEditor from '../components/FieldEditor'
 
 // ============================================================================
 // Markdown 自定义渲染组件
@@ -191,29 +192,19 @@ export default function RequirementDetail() {
     affected_requirements: { id: string; title: string; priority: string; modules: string[] }[]
   } | null>(null)
 
-  // v1.5.3: SRR 逐字段内联编辑
-  const [inlineField, setInlineField] = useState<string | null>(null)
-  const [inlineValue, setInlineValue] = useState('')
-  const saveInlineField = async () => {
-    if (!id || !inlineField) return
+  // ---- v1.6.1: 泛化 SRR 字段保存（FieldEditor 用） ----
+  const saveSrrField = async (fieldPath: string, newValue: unknown) => {
+    if (!id) return
     const srr = JSON.parse(JSON.stringify(detail.srr_json || {}))
-    // 处理特殊字段：preconditions 是数组，按行拆分
-    let val: any = inlineValue
-    if (inlineField === 'preconditions') {
-      val = inlineValue.split('\n').map(s => s.trim()).filter(Boolean)
-    }
-    const path = inlineField.split('.')
+    const path = fieldPath.split('.')
     let target: any = srr
     for (let i = 0; i < path.length - 1; i++) {
       if (!target[path[i]]) target[path[i]] = {}
       target = target[path[i]]
     }
-    target[path[path.length - 1]] = val
-    try {
-      await reqApi.update(id, srr)
-      setReq(prev => prev ? { ...prev, srr_json: srr } : prev)
-      setInlineField(null)
-    } catch { }
+    target[path[path.length - 1]] = newValue
+    await reqApi.update(id, srr)
+    setReq(prev => prev ? { ...prev, srr_json: srr } : prev)
   }
 
   // 模块名称映射（ID→名称），用于 SRR 中显示模块名称
@@ -431,152 +422,232 @@ export default function RequirementDetail() {
 
         {/* 功能概述 */}
         {reqData.summary && (
-          <div className="relative group">
-            <h3 className="label">功能概述</h3>
-            {inlineField === 'requirement.summary' ? (
-              <div className="flex items-start gap-2 mt-1">
-                <textarea value={inlineValue} onChange={e => setInlineValue(e.target.value)}
-                  className="input-field text-sm flex-1 resize-none" rows={2} autoFocus />
-                <button onClick={saveInlineField} className="btn-primary text-xs px-2 py-1"><Save className="w-3 h-3" /></button>
-                <button onClick={() => setInlineField(null)} className="btn-secondary text-xs px-2 py-1"><X className="w-3 h-3" /></button>
-              </div>
-            ) : (
+          <FieldEditor
+            label="功能概述"
+            fieldPath="requirement.summary"
+            value={reqData.summary}
+            valueType="string"
+            onSave={saveSrrField}
+            disabled={detail.status === 'archived'}
+            render={(v, toggle) => (
               <p className="text-sm text-slate-600 leading-relaxed">
-                {reqData.summary}
-                <button onClick={() => { setInlineField('requirement.summary'); setInlineValue(reqData.summary) }}
+                {String(v)}
+                <button onClick={toggle}
                   className="ml-1 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500 align-top">
                   <Edit3 className="w-3 h-3 inline" />
                 </button>
               </p>
             )}
-          </div>
+          />
         )}
 
         {/* 前置条件 */}
-        <div className="relative group">
-          <h3 className="label">前置条件</h3>
-          {inlineField === 'preconditions' ? (
-            <div className="flex items-start gap-2 mt-1">
-              <textarea value={inlineValue} onChange={e => setInlineValue(e.target.value)}
-                className="input-field text-sm flex-1 resize-none" rows={3}
-                placeholder="一行一条前置条件" autoFocus />
-              <button onClick={saveInlineField} className="btn-primary text-xs px-2 py-1"><Save className="w-3 h-3" /></button>
-              <button onClick={() => setInlineField(null)} className="btn-secondary text-xs px-2 py-1"><X className="w-3 h-3" /></button>
-            </div>
-          ) : (
-            <>
-              <button onClick={() => { setInlineField('preconditions'); setInlineValue((srr.preconditions || []).join('\n')) }}
-                className="absolute right-0 top-0 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500">
-                <Edit3 className="w-3 h-3" />
-              </button>
-              {(srr.preconditions || []).length > 0 ? (
-                <ul className="list-disc list-inside text-sm text-slate-600 space-y-1">
-                  {(Array.isArray(srr.preconditions) ? srr.preconditions : []).map((p: string, i: number) => <li key={i}>{p}</li>)}
-                </ul>
-              ) : <p className="text-xs text-slate-400">（无）</p>}
-            </>
-          )}
-        </div>
+        <FieldEditor
+          label="前置条件"
+          fieldPath="preconditions"
+          value={srr.preconditions || []}
+          valueType="string[]"
+          placeholder="一行一条前置条件"
+          onSave={saveSrrField}
+          disabled={detail.status === 'archived'}
+          render={(v, toggle) => {
+            const list = Array.isArray(v) ? v : []
+            return (
+              <>
+                {list.length > 0 ? (
+                  <ul className="list-disc list-inside text-sm text-slate-600 space-y-1">
+                    {list.map((p: string, i: number) => <li key={i}>{p}</li>)}
+                  </ul>
+                ) : <p className="text-xs text-slate-400 italic">点击编辑添加前置条件</p>}
+                <button onClick={toggle}
+                  className="ml-1 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500 align-top">
+                  <Edit3 className="w-3 h-3 inline" />
+                </button>
+              </>
+            )
+          }}
+        />
 
         {/* 正常流程 */}
-        {flows.happy_path?.steps?.length > 0 && (
-          <div>
-            <h3 className="label">正常流程</h3>
-            <div className="space-y-2">
-              {(Array.isArray(flows.happy_path?.steps) ? flows.happy_path.steps : []).map((s: any, i: number) => (
-                <div key={i} className="flex gap-3 p-3 bg-primary-50/50 rounded-xl">
-                  <span className="w-6 h-6 rounded-full bg-primary-100 text-primary-600 text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">{s.order || i + 1}</span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-slate-700">{s.action}</p>
-                    <p className="text-xs text-slate-400 mt-0.5">→ {s.expect}</p>
+        <FieldEditor
+          label="正常流程"
+          fieldPath="flows.happy_path.steps"
+          value={flows.happy_path?.steps || []}
+          valueType="object[]"
+          placeholder={'[{"order":1,"action":"用户操作","expect":"系统响应"}]'}
+          onSave={saveSrrField}
+          disabled={detail.status === 'archived'}
+          render={(v, toggle) => {
+            const steps = Array.isArray(v) ? v : []
+            if (!steps.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加正常流程步骤</button></p>
+            return (
+              <div className="space-y-2">
+                {steps.map((s: any, i: number) => (
+                  <div key={i} className="flex gap-3 p-3 bg-primary-50/50 rounded-xl">
+                    <span className="w-6 h-6 rounded-full bg-primary-100 text-primary-600 text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">{s.order || i + 1}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-700">{s.action}</p>
+                      <p className="text-xs text-slate-400 mt-0.5">→ {s.expect}</p>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+                ))}
+                <button onClick={toggle}
+                  className="opacity-0 hover:opacity-100 text-xs text-primary-500">
+                  <Edit3 className="w-3 h-3 inline mr-1" />编辑步骤
+                </button>
+              </div>
+            )
+          }}
+        />
 
         {/* 异常流程 */}
-        {(Array.isArray(flows.alternate_flows) && flows.alternate_flows.length > 0) && (
-          <div>
-            <h3 className="label">异常流程</h3>
-            <div className="space-y-2">
-              {flows.alternate_flows.map((f: any, i: number) => (
-                <div key={i} className="flex gap-3 p-3 bg-amber-50/50 rounded-xl">
-                  <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-sm font-medium text-slate-700">{f.name}</p>
-                    <p className="text-xs text-slate-500">触发: {f.trigger} → {f.expect}</p>
+        <FieldEditor
+          label="异常流程"
+          fieldPath="flows.alternate_flows"
+          value={flows.alternate_flows || []}
+          valueType="object[]"
+          placeholder={'[{"name":"异常名","trigger":"触发条件","expect":"预期结果"}]'}
+          onSave={saveSrrField}
+          disabled={detail.status === 'archived'}
+          render={(v, toggle) => {
+            const afs = Array.isArray(v) ? v : []
+            if (!afs.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加异常流程</button></p>
+            return (
+              <div className="space-y-2">
+                {afs.map((f: any, i: number) => (
+                  <div key={i} className="flex gap-3 p-3 bg-amber-50/50 rounded-xl">
+                    <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-medium text-slate-700">{f.name}</p>
+                      <p className="text-xs text-slate-500">触发: {f.trigger} → {f.expect}</p>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+                ))}
+                <button onClick={toggle}
+                  className="opacity-0 hover:opacity-100 text-xs text-primary-500">
+                  <Edit3 className="w-3 h-3 inline mr-1" />编辑异常分支
+                </button>
+              </div>
+            )
+          }}
+        />
 
         {/* 边界条件 */}
-        {(srr.boundary_conditions || []).length > 0 && (
-          <div>
-            <h3 className="label">边界条件</h3>
-            <div className="grid grid-cols-2 gap-2">
-              {(Array.isArray(srr.boundary_conditions) ? srr.boundary_conditions : []).map((b: any, i: number) => (
-                <div key={i} className="p-3 bg-slate-50 rounded-xl text-sm">
-                  <span className="font-medium text-slate-700">{b.field}: </span>
-                  <span className="text-slate-500">{b.condition}</span>
-                  <p className="text-xs text-slate-400 mt-0.5">→ {b.expect}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        <FieldEditor
+          label="边界条件"
+          fieldPath="boundary_conditions"
+          value={srr.boundary_conditions || []}
+          valueType="object[]"
+          placeholder={'[{"field":"字段名","condition":"边界条件","expect":"预期结果"}]'}
+          onSave={saveSrrField}
+          disabled={detail.status === 'archived'}
+          render={(v, toggle) => {
+            const bcs = Array.isArray(v) ? v : []
+            if (!bcs.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加边界条件</button></p>
+            return (
+              <div className="grid grid-cols-2 gap-2">
+                {bcs.map((b: any, i: number) => (
+                  <div key={i} className="p-3 bg-slate-50 rounded-xl text-sm">
+                    <span className="font-medium text-slate-700">{b.field}: </span>
+                    <span className="text-slate-500">{b.condition}</span>
+                    <p className="text-xs text-slate-400 mt-0.5">→ {b.expect}</p>
+                  </div>
+                ))}
+                <button onClick={toggle} className="opacity-0 hover:opacity-100 text-xs text-primary-500 col-span-2">
+                  <Edit3 className="w-3 h-3 inline mr-1" />编辑边界条件
+                </button>
+              </div>
+            )
+          }}
+        />
 
         {/* 业务规则 */}
-        <div className="relative group">
-          <h3 className="label">业务规则</h3>
-          {inlineField === 'business_rules' ? (
-            <div className="flex items-start gap-2 mt-1">
-              <textarea value={inlineValue} onChange={e => setInlineValue(e.target.value)}
-                className="input-field text-sm flex-1 resize-none" rows={4}
-                placeholder="一行一条业务规则" autoFocus />
-              <button onClick={saveInlineField} className="btn-primary text-xs px-2 py-1"><Save className="w-3 h-3" /></button>
-              <button onClick={() => setInlineField(null)} className="btn-secondary text-xs px-2 py-1"><X className="w-3 h-3" /></button>
-            </div>
-          ) : (
-            <>
-              <button onClick={() => { setInlineField('business_rules'); setInlineValue((srr.business_rules || []).map((r:any) => typeof r === 'string' ? r : `${r.id}: ${r.rule}`).join('\n')) }}
-                className="absolute right-0 top-0 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500">
-                <Edit3 className="w-3 h-3" />
-              </button>
-              {(srr.business_rules || []).length > 0 ? (
-                <div className="space-y-1.5">
-                  {(Array.isArray(srr.business_rules) ? srr.business_rules : []).map((r: any, i: number) => (
-                    <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
-                  <span>{r.rule}</span>
-                </div>
-              ))}
-            </div>
-              ) : <p className="text-xs text-slate-400">（无）</p>}
-            </>
-          )}
-        </div>
+        <FieldEditor
+          label="业务规则"
+          fieldPath="business_rules"
+          value={srr.business_rules || []}
+          valueType="object[]"
+          placeholder={'[{"id":"BR-001","rule":"规则描述","type":"validation"}]'}
+          onSave={saveSrrField}
+          disabled={detail.status === 'archived'}
+          render={(v, toggle) => {
+            const rules = Array.isArray(v) ? v : []
+            if (!rules.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加业务规则</button></p>
+            return (
+              <div className="space-y-1.5">
+                {rules.map((r: any, i: number) => (
+                  <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                    <span>{typeof r === 'string' ? r : `${r.id}: ${r.rule}`}</span>
+                    {typeof r !== 'string' && r.type && <span className="text-[10px] px-1 bg-slate-100 rounded text-slate-500">{r.type}</span>}
+                  </div>
+                ))}
+                <button onClick={toggle} className="opacity-0 hover:opacity-100 text-xs text-primary-500">
+                  <Edit3 className="w-3 h-3 inline mr-1" />编辑业务规则
+                </button>
+              </div>
+            )
+          }}
+        />
 
         {/* 数据约束 */}
-        {(srr.data_constraints || []).length > 0 && (
-          <div>
-            <h3 className="label">数据约束</h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead><tr className="bg-slate-50"><th className="px-3 py-2 text-left text-xs text-slate-500">字段</th><th className="px-3 py-2 text-left text-xs text-slate-500">类型</th><th className="px-3 py-2 text-left text-xs text-slate-500">必填</th><th className="px-3 py-2 text-left text-xs text-slate-500">约束</th></tr></thead>
-                <tbody>
-                  {(Array.isArray(srr.data_constraints) ? srr.data_constraints : []).map((d: any, i: number) => (
-                    <tr key={i} className="border-t border-slate-100"><td className="px-3 py-2 font-medium">{d.field}</td><td className="px-3 py-2 text-slate-500">{d.type}</td><td className="px-3 py-2">{d.required ? '✅' : ''}</td><td className="px-3 py-2 text-slate-500">{d.constraints}</td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
+        <FieldEditor
+          label="数据约束"
+          fieldPath="data_constraints"
+          value={srr.data_constraints || []}
+          valueType="object[]"
+          placeholder={'[{"field":"字段","type":"string","required":true,"constraints":"约束","example":"示例"}]'}
+          onSave={saveSrrField}
+          disabled={detail.status === 'archived'}
+          render={(v, toggle) => {
+            const dcs = Array.isArray(v) ? v : []
+            if (!dcs.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加数据约束</button></p>
+            return (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead><tr className="bg-slate-50"><th className="px-3 py-2 text-left text-xs text-slate-500">字段</th><th className="px-3 py-2 text-left text-xs text-slate-500">类型</th><th className="px-3 py-2 text-left text-xs text-slate-500">必填</th><th className="px-3 py-2 text-left text-xs text-slate-500">约束</th></tr></thead>
+                  <tbody>
+                    {dcs.map((d: any, i: number) => (
+                      <tr key={i} className="border-t border-slate-100"><td className="px-3 py-2 font-medium">{d.field}</td><td className="px-3 py-2 text-slate-500">{d.type}</td><td className="px-3 py-2">{d.required ? '✅' : ''}</td><td className="px-3 py-2 text-slate-500">{d.constraints}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+                <button onClick={toggle} className="opacity-0 hover:opacity-100 text-xs text-primary-500 mt-1">
+                  <Edit3 className="w-3 h-3 inline mr-1" />编辑数据约束
+                </button>
+              </div>
+            )
+          }}
+        />
+
+        {/* 验收标准 */}
+        <FieldEditor
+          label="验收标准"
+          fieldPath="acceptance_criteria"
+          value={srr.acceptance_criteria || []}
+          valueType="object[]"
+          placeholder={'[{"id":"AC-001","description":"验收描述","type":"functional"}]'}
+          onSave={saveSrrField}
+          disabled={detail.status === 'archived'}
+          render={(v, toggle) => {
+            const acs = Array.isArray(v) ? v : []
+            if (!acs.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加验收标准</button></p>
+            return (
+              <div className="space-y-1.5">
+                {acs.map((ac: any, i: number) => (
+                  <div key={i} className="flex items-center gap-2 text-sm text-slate-600 pl-3 border-l-2 border-emerald-200">
+                    <Clock className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                    <span>{typeof ac === 'string' ? ac : `${ac.id}: ${ac.description}`}</span>
+                    {typeof ac !== 'string' && ac.type && <span className="text-[10px] px-1 bg-emerald-50 rounded text-emerald-600">{ac.type}</span>}
+                  </div>
+                ))}
+                <button onClick={toggle} className="opacity-0 hover:opacity-100 text-xs text-primary-500">
+                  <Edit3 className="w-3 h-3 inline mr-1" />编辑验收标准
+                </button>
+              </div>
+            )
+          }}
+        />
       </div>
     )
   }

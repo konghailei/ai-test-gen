@@ -835,6 +835,21 @@ class ClarifyAgent:
                 reverse=True,
             )
 
+            # P5 修复：按 req_id 去重，避免同一需求/FP 重复展示
+            # 主需求向量以 req_id 标识，FP 向量以 FP-{fp_id} 标识。
+            # 同一 req_id 可能因重复归档或多版本产生多个匹配，保留相似度最高的。
+            # 注意：主需求与 FP 之间不互相去重（不同功能点有价值）。
+            seen_req_ids: dict[str, dict] = {}
+            for m in matched:
+                meta = m.get("metadata", {}) or {}
+                dedup_key = meta.get("req_id", m.get("id", ""))
+                if not dedup_key:
+                    continue
+                sim = m.get("similarity", 0)
+                if dedup_key not in seen_req_ids or sim > seen_req_ids[dedup_key].get("similarity", 0):
+                    seen_req_ids[dedup_key] = m
+            matched = list(seen_req_ids.values())
+
             # 从匹配需求中提取答案
             answer_text = ""
             sources = []

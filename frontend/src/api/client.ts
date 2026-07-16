@@ -174,7 +174,7 @@ export const requirements = {
     }>(`/requirements/${id}/clarify/questions`)
   },
   submitClarify: (id: string, answers: Record<string, string>, extraNotes = '') =>
-    request(`/requirements/${id}/clarify`, {
+    request<{ task_id: string; req_id: string; status: string; answers_count: number }>(`/requirements/${id}/clarify`, {
       method: 'POST',
       body: JSON.stringify({ answers, extra_notes: extraNotes }),
     }),
@@ -210,9 +210,9 @@ export const requirements = {
   /** 获取澄清与重新生成历史 */
   getClarifyHistory: (id: string) =>
     request<{ items: ClarifyHistoryEntry[]; total: number }>(`/requirements/${id}/clarify/history`),
-  /** 补充信息后重新生成需求分析（status=active 也可调用） */
+  /** 补充信息后重新生成需求分析（异步任务模式，返回 task_id 供轮询） */
   regenerate: (id: string, extraNotes: string) =>
-    request<{ req_id: string; srr: Record<string, unknown>; status: string; previous_title: string; new_title: string }>(
+    request<{ task_id: string; req_id: string; status: string; previous_title: string }>(
       `/requirements/${id}/regenerate`,
       { method: 'POST', body: JSON.stringify({ extra_notes: extraNotes }) },
     ),
