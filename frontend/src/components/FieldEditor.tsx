@@ -148,45 +148,45 @@ function getColumns(fieldPath: string): any[] {
   const base = fieldPath.split('.').pop() || fieldPath
   if (base === 'steps' || fieldPath.includes('steps')) {
     return [
-      { key: 'order', label: '序号', type: 'number' },
-      { key: 'action', label: '操作步骤', placeholder: '用户输入账号密码' },
-      { key: 'expect', label: '预期结果', placeholder: '系统校验身份' },
+      { key: 'order', label: '序号', type: 'number', flex: 0.4 },
+      { key: 'action', label: '操作步骤', placeholder: '用户输入账号密码', flex: 1.5 },
+      { key: 'expect', label: '预期结果', placeholder: '系统校验身份', flex: 1.5 },
     ]
   }
   if (base === 'alternate_flows' || fieldPath.includes('alternate_flows')) {
     return [
-      { key: 'name', label: '名称', placeholder: '登录失败' },
-      { key: 'trigger', label: '触发条件', placeholder: '密码错误' },
-      { key: 'expect', label: '预期结果', placeholder: '提示重试' },
+      { key: 'name', label: '名称', placeholder: '登录失败', flex: 1 },
+      { key: 'trigger', label: '触发条件', placeholder: '密码错误', flex: 1.2 },
+      { key: 'expect', label: '预期结果', placeholder: '提示重试', flex: 1.2 },
     ]
   }
   if (base === 'boundary_conditions') {
     return [
-      { key: 'field', label: '字段', placeholder: '用户名' },
-      { key: 'condition', label: '条件', placeholder: '为空' },
-      { key: 'expect', label: '预期', placeholder: '提示必填' },
+      { key: 'field', label: '字段', placeholder: '用户名', flex: 0.8 },
+      { key: 'condition', label: '条件', placeholder: '为空', flex: 1 },
+      { key: 'expect', label: '预期', placeholder: '提示必填', flex: 1.2 },
     ]
   }
   if (base === 'business_rules') {
     return [
-      { key: 'id', label: 'ID', placeholder: 'BR-001' },
-      { key: 'type', label: '类型', type: 'select', options: BR_TYPE_OPTIONS },
-      { key: 'rule', label: '规则描述', placeholder: '密码长度不少于8位' },
+      { key: 'id', label: 'ID', placeholder: 'BR-001', flex: 0.5 },
+      { key: 'type', label: '类型', type: 'select', options: BR_TYPE_OPTIONS, flex: 0.6 },
+      { key: 'rule', label: '规则描述', placeholder: '密码长度不少于8位', flex: 2 },
     ]
   }
   if (base === 'data_constraints') {
     return [
-      { key: 'field', label: '字段', placeholder: 'username' },
-      { key: 'type', label: '类型', type: 'select', options: FIELD_TYPE_OPTIONS },
-      { key: 'required', label: '必填', type: 'checkbox' },
-      { key: 'constraints', label: '约束', placeholder: '2-20字符，字母数字' },
+      { key: 'field', label: '字段', placeholder: 'username', flex: 0.8 },
+      { key: 'type', label: '类型', type: 'select', options: FIELD_TYPE_OPTIONS, flex: 0.7 },
+      { key: 'required', label: '必填', type: 'checkbox', flex: 0.35 },
+      { key: 'constraints', label: '约束', placeholder: '2-20字符', flex: 1.2 },
     ]
   }
   if (base === 'acceptance_criteria') {
     return [
-      { key: 'id', label: 'ID', placeholder: 'AC-001' },
-      { key: 'type', label: '类型', type: 'select', options: AC_TYPE_OPTIONS },
-      { key: 'description', label: '验收描述', placeholder: '用户可正常登录系统' },
+      { key: 'id', label: 'ID', placeholder: 'AC-001', flex: 0.5 },
+      { key: 'type', label: '类型', type: 'select', options: AC_TYPE_OPTIONS, flex: 0.6 },
+      { key: 'description', label: '验收描述', placeholder: '用户可正常登录系统', flex: 2 },
     ]
   }
   return []  // fallback

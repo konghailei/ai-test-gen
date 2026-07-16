@@ -7,6 +7,7 @@ import { requirements as reqApi, dependencyGraph, products as prodApi } from '..
 import { useNavigate } from 'react-router-dom'
 import type { FPItem } from '../types'
 import { brTypeLabel, fpTypeLabel, acTypeLabel } from '../utils/labels'
+import FieldEditor from '../components/FieldEditor'
 
 interface Props {
   reqId: string
@@ -79,6 +80,22 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
     setEditSrrFpId(fpId)
     setEditSrrJson(JSON.stringify(srrJson || {}, null, 2))
   }
+  // FieldEditor 保存回调 — 更新 FP 子 SRR 的指定字段
+  const saveFpField = (fpId: string) => async (fieldPath: string, newValue: unknown) => {
+    const fp = fps.find(f => f.id === fpId)
+    if (!fp) return
+    const srr = JSON.parse(JSON.stringify(fp.srr_json || {}))
+    const path = fieldPath.split('.')
+    let target: any = srr
+    for (let i = 0; i < path.length - 1; i++) {
+      target = target[path[i]] = target[path[i]] || {}
+    }
+    target[path[path.length - 1]] = newValue
+    await reqApi.fpUpdate(reqId, fpId, { srr_json: srr })
+    // 更新本地 fps 状态
+    setFps(prev => prev.map(f => f.id === fpId ? { ...f, srr_json: srr } : f))
+  }
+
   const handleSaveSrr = async () => {
     if (!editSrrFpId) return
     try {
@@ -354,122 +371,88 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                         {fp.srr_json && Object.keys(fp.srr_json).length > 0 && (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             {/* 描述 / summary */}
-                            {(fp.srr_json.requirement?.summary || fp.srr_json.description) && (
-                              <div className="md:col-span-2">
-                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">概述</span>
-                                <p className="text-sm text-slate-600 mt-0.5">{fp.srr_json.requirement?.summary || fp.srr_json.description}</p>
-                              </div>
-                            )}
-                            {/* 正常流程（兼容 steps[] 和纯文本） */}
-                            {fp.srr_json.flows && (
-                              <div className="md:col-span-2 space-y-2">
-                                {(() => {
-                                  const hp = fp.srr_json.flows.happy_path
-                                  if (!hp) return null
-                                  // 新格式：结构化 steps[]
-                                  if (hp.steps?.length) return (
-                                    <div>
-                                      <span className="text-[10px] text-slate-400 uppercase tracking-wider">正常流程</span>
-                                      <ol className="mt-1 space-y-1">
-                                        {hp.steps.map((s: any) => (
-                                          <li key={s.order} className="text-sm text-slate-600 pl-2">
-                                            <span className="text-slate-400 text-xs mr-1">{s.order}.</span>
-                                            {s.action}
-                                            <span className="text-slate-400"> → </span>
-                                            <span className="text-slate-500">{s.expect}</span>
-                                          </li>
-                                        ))}
-                                      </ol>
-                                    </div>
-                                  )
-                                  // 旧格式：纯文本
+                            <div className="md:col-span-2">
+                              <FieldEditor
+                                label="概述"
+                                fieldPath="requirement.summary"
+                                value={fp.srr_json.requirement?.summary || fp.srr_json.description || ''}
+                                valueType="string"
+                                onSave={saveFpField(fp.id)}
+                                disabled={isArchived}
+                                render={(v) => <p className="text-sm text-slate-600 mt-0.5">{String(v || '')}</p>}
+                              />
+                            </div>
+                            {/* 正常流程 */}
+                            <div className="md:col-span-2">
+                              <FieldEditor
+                                label="正常流程"
+                                fieldPath="flows.happy_path.steps"
+                                value={fp.srr_json.flows?.happy_path?.steps || []}
+                                valueType="object[]"
+                                onSave={saveFpField(fp.id)}
+                                disabled={isArchived}
+                                render={(v) => {
+                                  const steps = Array.isArray(v) ? v : []
+                                  if (!steps.length) return <p className="text-xs text-slate-400 italic">暂无流程步骤</p>
                                   return (
-                                    <div>
-                                      <span className="text-[10px] text-slate-400 uppercase tracking-wider">正常流程</span>
-                                      <p className="text-sm text-slate-600 mt-0.5">{String(hp)}</p>
-                                    </div>
+                                    <ol className="mt-1 space-y-1">
+                                      {steps.map((s: any) => (
+                                        <li key={s.order} className="text-sm text-slate-600 pl-2">
+                                          <span className="text-slate-400 text-xs mr-1">{s.order}.</span>
+                                          {s.action}
+                                          <span className="text-slate-400"> → </span>
+                                          <span className="text-slate-500">{s.expect}</span>
+                                        </li>
+                                      ))}
+                                    </ol>
                                   )
-                                })()}
-                                {/* 异常分支（兼容对象数组和纯文本） */}
-                                {fp.srr_json.flows.alternate_flows && (
-                                  <div>
-                                    <span className="text-[10px] text-slate-400 uppercase tracking-wider">异常分支</span>
-                                    {Array.isArray(fp.srr_json.flows.alternate_flows) && typeof fp.srr_json.flows.alternate_flows[0] === 'object' ? (
-                                      <div className="mt-1 space-y-1">
-                                        {fp.srr_json.flows.alternate_flows.map((af: any, i: number) => (
-                                          <div key={i} className="text-sm text-slate-600 pl-3 border-l-2 border-amber-200">
-                                            <span className="font-medium text-amber-700">{af.name}：</span>
-                                            {af.trigger} → <span className="text-slate-500">{af.expect}</span>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    ) : (
-                                      <p className="text-sm text-slate-600 mt-0.5">{String(fp.srr_json.flows.alternate_flows)}</p>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                            {/* 边界条件（新增） */}
-                            {fp.srr_json.boundary_conditions?.length > 0 && (
-                              <div>
-                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">边界条件</span>
-                                <div className="mt-1 space-y-0.5">
-                                  {fp.srr_json.boundary_conditions.map((bc: any, i: number) => (
-                                    <div key={i} className="text-xs text-slate-600">
-                                      {bc.field}：{bc.condition} → <span className="text-slate-500">{bc.expect}</span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-                            {/* 业务规则（兼容对象数组和纯文本数组） */}
-                            {fp.srr_json.business_rules?.length > 0 && (
-                              <div>
-                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">业务规则</span>
-                                <ul className="mt-1 space-y-0.5">
-                                  {fp.srr_json.business_rules.map((r: any, i: number) => (
-                                    <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-slate-200">
-                                      {typeof r === 'string' ? r : (
-                                        <><span className="text-slate-400">{r.id}</span> <span className="text-[10px] px-1 bg-slate-100 rounded">{brTypeLabel(r.type)}</span> {r.rule}</>
-                                      )}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-                            {/* 数据约束（兼容富对象和简对象） */}
-                            {fp.srr_json.data_constraints?.length > 0 && (
-                              <div>
-                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">数据约束</span>
-                                <ul className="mt-1 space-y-1">
-                                  {fp.srr_json.data_constraints.map((d: any, i: number) => (
-                                    <li key={i} className="text-xs text-slate-600">
-                                      <span className="font-medium">{d.field}</span>
-                                      {d.type && <span className="text-slate-400"> ({d.type})</span>}
-                                      {d.required && <span className="text-red-400">*</span>}
-                                      <span className="text-slate-500"> — {d.constraints}</span>
-                                      {d.example && <span className="text-slate-400 ml-1">例: {d.example}</span>}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-                            {/* 验收标准（兼容对象数组和纯文本数组） */}
-                            {fp.srr_json.acceptance_criteria?.length > 0 && (
-                              <div>
-                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">验收标准</span>
-                                <ul className="mt-1 space-y-0.5">
-                                  {fp.srr_json.acceptance_criteria.map((ac: any, i: number) => (
-                                    <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-emerald-200">
-                                      {typeof ac === 'string' ? ac : (
-                                        <><span className="text-slate-400">{ac.id}</span> <span className="text-[10px] px-1 bg-emerald-50 rounded">{acTypeLabel(ac.type)}</span> {ac.description}</>
-                                      )}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
+                                }}
+                              />
+                            </div>
+                            {/* 业务规则 */}
+                            <FieldEditor
+                              label="业务规则"
+                              fieldPath="business_rules"
+                              value={(fp.srr_json as any).business_rules || []}
+                              valueType="object[]"
+                              onSave={saveFpField(fp.id)}
+                              disabled={isArchived}
+                              render={(v) => {
+                                const rules = Array.isArray(v) ? v : []
+                                if (!rules.length) return <p className="text-xs text-slate-400 italic">暂无</p>
+                                return (
+                                  <ul className="mt-1 space-y-0.5">
+                                    {rules.map((r: any, i: number) => (
+                                      <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-slate-200">
+                                        {typeof r === 'string' ? r : <><span className="text-slate-400">{r.id}</span> <span className="text-[10px] px-1 bg-slate-100 rounded">{brTypeLabel(r.type)}</span> {r.rule}</>}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )
+                              }}
+                            />
+                            {/* 验收标准 */}
+                            <FieldEditor
+                              label="验收标准"
+                              fieldPath="acceptance_criteria"
+                              value={(fp.srr_json as any).acceptance_criteria || []}
+                              valueType="object[]"
+                              onSave={saveFpField(fp.id)}
+                              disabled={isArchived}
+                              render={(v) => {
+                                const acs = Array.isArray(v) ? v : []
+                                if (!acs.length) return <p className="text-xs text-slate-400 italic">暂无</p>
+                                return (
+                                  <ul className="mt-1 space-y-0.5">
+                                    {acs.map((ac: any, i: number) => (
+                                      <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-emerald-200">
+                                        {typeof ac === 'string' ? ac : <><span className="text-slate-400">{ac.id}</span> <span className="text-[10px] px-1 bg-emerald-50 rounded">{acTypeLabel(ac.type)}</span> {ac.description}</>}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                )
+                              }}
+                            />
                             {/* 前置条件 */}
                             {fp.srr_json.preconditions?.length > 0 && (
                               <div>

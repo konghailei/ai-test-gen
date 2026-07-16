@@ -8,6 +8,7 @@ interface Column {
   type?: 'text' | 'select' | 'number' | 'checkbox'
   options?: { value: string; label: string }[]  // type=select 时使用
   placeholder?: string
+  flex?: number  // 列宽比例，默认 1
 }
 
 /**
@@ -95,9 +96,9 @@ export default function ArrayEditor({
       {/* 表头 */}
       <div className="flex bg-slate-50 text-[11px] text-slate-500 font-medium border-b border-slate-200">
         {columns.map(c => (
-          <div key={c.key} className="flex-1 px-2 py-1.5">{c.label}</div>
+          <div key={c.key} className="px-2 py-1.5" style={{ flex: c.flex ?? 1 }}>{c.label}</div>
         ))}
-        <div className="w-10" />
+        <div className="w-10 flex-shrink-0" />
       </div>
 
       {/* 数据行 */}
@@ -109,11 +110,11 @@ export default function ArrayEditor({
         data.map((row, i) => (
           <div key={i} className="flex items-center border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
             {columns.map(c => (
-              <div key={c.key} className="flex-1 px-2 py-1">
+              <div key={c.key} className="px-2 py-1" style={{ flex: c.flex ?? 1 }}>
                 {renderCell(c, row[c.key], i)}
               </div>
             ))}
-            <div className="w-10 flex justify-center">
+            <div className="w-10 flex-shrink-0 flex justify-center">
               <button
                 onClick={() => deleteRow(i)}
                 className="p-1 text-slate-300 hover:text-red-500 rounded transition-colors"
