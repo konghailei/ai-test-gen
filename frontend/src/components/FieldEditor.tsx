@@ -40,7 +40,7 @@ export default function FieldEditor({
   const [saving, setSaving] = useState(false)
 
   const startEdit = () => {
-    const text = serializeValue(value, valueType)
+    const text = serializeValue(fieldPath, value, valueType)
     setDraft(text)
     setEditing(true)
   }
@@ -53,7 +53,7 @@ export default function FieldEditor({
   const commitEdit = async () => {
     setSaving(true)
     try {
-      const parsed = parseValue(draft, valueType)
+      const parsed = parseValue(fieldPath, draft, valueType)
       await onSave(fieldPath, parsed)
       setEditing(false)
     } catch {
@@ -72,9 +72,9 @@ export default function FieldEditor({
           <textarea
             value={draft}
             onChange={e => setDraft(e.target.value)}
-            className="input-field text-sm flex-1 resize-none font-mono"
+            className="input-field text-sm flex-1 resize-none"
             rows={Math.max(3, Math.min(12, draft.split('\n').length))}
-            placeholder={placeholder}
+            placeholder={placeholder || getPlaceholder(fieldPath, valueType)}
             autoFocus
           />
           <div className="flex flex-col gap-1">
@@ -113,9 +113,27 @@ export default function FieldEditor({
   )
 }
 
+// ---- 默认占位符 ----
+
+function getPlaceholder(fieldPath: string, valueType: string): string {
+  if (valueType === 'string') return '输入文本...'
+  if (valueType === 'string[]') return '一行一条'
+  const base = fieldPath.split('.').pop() || fieldPath
+  switch (base) {
+    case 'steps': return '操作描述 → 预期结果\n用户输入账号 → 校验格式\n校验通过 → 跳转首页'
+    case 'alternate_flows': return '名称|触发条件 → 预期结果\n登录失败|密码错误 → 提示重试'
+    case 'boundary_conditions': return '字段|条件 → 预期\n用户名|为空 → 提示必填'
+    case 'business_rules': return 'ID|类型|规则\nBR-001|校验|密码长度≥8位'
+    case 'data_constraints': return '字段|类型|必填|约束\nusername|string|必填|2-20字符'
+    case 'acceptance_criteria': return 'ID|类型|描述\nAC-001|功能|用户可正常登录'
+    default: return '每行一条记录，用 | 和 → 分隔字段'
+  }
+}
+
 // ---- 序列化/反序列化工具 ----
 
-function serializeValue(val: unknown, type: string): string {
+/** 序列化：将 JS 值转为可编辑的文本（非 JSON，用户友好）。 */
+function serializeValue(fieldPath: string, val: unknown, type: string): string {
   if (val == null) return ''
   switch (type) {
     case 'string':
@@ -123,14 +141,8 @@ function serializeValue(val: unknown, type: string): string {
     case 'string[]':
       return (Array.isArray(val) ? val : []).join('\n')
     case 'object[]':
-      if (!Array.isArray(val)) return '[]'
-      return JSON.stringify(
-        val.map((item: any) => {
-          const { order, ...rest } = item
-          return rest
-        }),
-        null, 2,
-      )
+      if (!Array.isArray(val) || val.length === 0) return ''
+      return serializeObjectArray(fieldPath, val as any[])
     case 'json':
       return JSON.stringify(val, null, 2)
     default:
@@ -138,21 +150,126 @@ function serializeValue(val: unknown, type: string): string {
   }
 }
 
-function parseValue(text: string, type: string): unknown {
+/** 反序列化：将编辑文本还原为 JS 值。 */
+function parseValue(fieldPath: string, text: string, type: string): unknown {
   switch (type) {
     case 'string':
       return text
     case 'string[]':
       return text.split('\n').map(s => s.trim()).filter(Boolean)
     case 'object[]':
+      return text.trim() ? parseObjectArray(fieldPath, text) : []
     case 'json': {
       const parsed = JSON.parse(text)
-      if (type === 'object[]' && Array.isArray(parsed)) {
-        return parsed.map((item: any, i: number) => ({ ...item, order: i + 1 }))
-      }
       return parsed
     }
     default:
       return text
   }
+}
+
+// ---- object[] 模板格式序列化/反序列化 ----
+
+/** 根据字段路径选择模板格式，将对象数组转为一行一条的可读文本。 */
+function serializeObjectArray(fieldPath: string, items: any[]): string {
+  const base = fieldPath.split('.').pop() || fieldPath
+
+  // steps: order → action → expect
+  if (base === 'steps' || fieldPath.includes('steps')) {
+    return items.map((s: any) =>
+      `${s.order ? s.order + '. ' : ''}${s.action || ''} → ${s.expect || ''}`
+    ).join('\n')
+  }
+  // alternate_flows: name|trigger → expect
+  if (base === 'alternate_flows' || fieldPath.includes('alternate_flows')) {
+    return items.map((f: any) =>
+      `${f.name || ''}|${f.trigger || ''} → ${f.expect || ''}`
+    ).join('\n')
+  }
+  // boundary_conditions: field|condition → expect
+  if (base === 'boundary_conditions') {
+    return items.map((b: any) =>
+      `${b.field || ''}|${b.condition || ''} → ${b.expect || ''}`
+    ).join('\n')
+  }
+  // business_rules: id|type|rule
+  if (base === 'business_rules') {
+    return items.map((r: any) =>
+      typeof r === 'string' ? r
+        : `${r.id || ''}|${r.type || ''}|${r.rule || ''}`
+    ).join('\n')
+  }
+  // data_constraints: field|type|必填/可选|constraints
+  if (base === 'data_constraints') {
+    return items.map((d: any) =>
+      `${d.field || ''}|${d.type || ''}|${d.required ? '必填' : '可选'}|${d.constraints || ''}`
+    ).join('\n')
+  }
+  // acceptance_criteria: id|type|description
+  if (base === 'acceptance_criteria') {
+    return items.map((a: any) =>
+      typeof a === 'string' ? a
+        : `${a.id || ''}|${a.type || ''}|${a.description || ''}`
+    ).join('\n')
+  }
+  // fallback: JSON for unknown object arrays
+  return JSON.stringify(items, null, 2)
+}
+
+/** 解析模板文本为对象数组。 */
+function parseObjectArray(fieldPath: string, text: string): any[] {
+  const base = fieldPath.split('.').pop() || fieldPath
+  const lines = text.split('\n').map(s => s.trim()).filter(Boolean)
+
+  // steps: "1. 操作 → 预期" or "操作 → 预期"
+  if (base === 'steps' || fieldPath.includes('steps')) {
+    return lines.map((line, i) => {
+      const parts = line.split('→').map(s => s.trim())
+      const actionPart = parts[0] || ''
+      // Extract order if present (e.g. "1. 用户操作")
+      const orderMatch = actionPart.match(/^(\d+)\.?\s*(.*)/)
+      const action = orderMatch ? orderMatch[2] : actionPart
+      const order = orderMatch ? parseInt(orderMatch[1]) : i + 1
+      return { order, action, expect: parts[1] || '' }
+    })
+  }
+  // alternate_flows: name|trigger → expect
+  if (base === 'alternate_flows' || fieldPath.includes('alternate_flows')) {
+    return lines.map((line, i) => {
+      const arrowParts = line.split('→').map(s => s.trim())
+      const leftParts = (arrowParts[0] || '').split('|').map(s => s.trim())
+      return { name: leftParts[0] || '', trigger: leftParts[1] || '', expect: arrowParts[1] || '' }
+    })
+  }
+  // boundary_conditions: field|condition → expect
+  if (base === 'boundary_conditions') {
+    return lines.map((line) => {
+      const arrowParts = line.split('→').map(s => s.trim())
+      const leftParts = (arrowParts[0] || '').split('|').map(s => s.trim())
+      return { field: leftParts[0] || '', condition: leftParts[1] || '', expect: arrowParts[1] || '' }
+    })
+  }
+  // business_rules: id|type|rule
+  if (base === 'business_rules') {
+    return lines.map((line) => {
+      const parts = line.split('|').map(s => s.trim())
+      return { id: parts[0] || '', type: parts[1] || '', rule: parts[2] || parts[0] }
+    })
+  }
+  // data_constraints: field|type|必填/可选|constraints
+  if (base === 'data_constraints') {
+    return lines.map((line) => {
+      const parts = line.split('|').map(s => s.trim())
+      return { field: parts[0] || '', type: parts[1] || '', required: parts[2] === '必填', constraints: parts[3] || '' }
+    })
+  }
+  // acceptance_criteria: id|type|description
+  if (base === 'acceptance_criteria') {
+    return lines.map((line) => {
+      const parts = line.split('|').map(s => s.trim())
+      return { id: parts[0] || '', type: parts[1] || '', description: parts[2] || parts[0] }
+    })
+  }
+  // fallback: try JSON
+  try { return JSON.parse(text) } catch { return [] }
 }
