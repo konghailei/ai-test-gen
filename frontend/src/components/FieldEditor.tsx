@@ -19,6 +19,7 @@ const BR_TYPE_OPTIONS = [
   { value: 'range', label: '范围' }, { value: 'enumeration', label: '枚举' },
   { value: 'data_format', label: '数据格式' }, { value: 'relationship', label: '关联' },
   { value: 'logic', label: '逻辑' }, { value: 'duplication', label: '去重' },
+  { value: 'presentation', label: '展示' }, { value: 'initialization', label: '初始化' },
 ]
 const AC_TYPE_OPTIONS = [
   { value: 'functional', label: '功能' }, { value: 'performance', label: '性能' },

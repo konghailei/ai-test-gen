@@ -32,6 +32,8 @@ const BR_TYPE_LABELS: Record<string, string> = {
   prerequisite: '前置条件',
   authorization: '授权',
   authentication: '认证',
+  presentation: '展示',
+  initialization: '初始化',
   data_format: '数据格式',
   range: '范围',
   enumeration: '枚举',

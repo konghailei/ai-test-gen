@@ -107,7 +107,7 @@ SRR_SCHEMA_GUIDE = """输出 JSON 必须包含以下字段(对应 SRR Schema):
     {"field": "", "condition": "", "expect": ""}
   ],
   "business_rules": [               // 业务规则
-    {"id": "BR-01", "rule": "", "type": "validation|calculation|workflow|permission"}
+    {"id": "BR-01", "rule": "", "type": "validation|calculation|workflow|permission|security|business|constraint|mandatory|uniqueness|format|range|logic|data_integrity|field_validation|access_control|authorization|authentication|prerequisite|presentation|initialization|enumeration|data_format|relationship|duplication|session|timeout|rate_limit|notification|data_retention|audit|encryption|integration"}
   ],
   "data_constraints": [             // 数据约束(必填)
     {"field": "", "type": "string|integer|date|boolean", "required": false,

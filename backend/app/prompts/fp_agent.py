@@ -88,7 +88,10 @@ FP 的粒度是**业务能力级**，不是操作步骤级。一个 FP 是一个
           {"id": "BR-LOGIN-001", "rule": "连续5次登录失败锁定账号30分钟", "type": "security"},
           {"id": "BR-LOGIN-002", "rule": "密码长度≥6位", "type": "validation"},
           {"id": "BR-LOGIN-003", "rule": "登录成功后重置失败计数", "type": "workflow"},
-          {"id": "BR-LOGIN-004", "rule": "会话有效期2小时，超时自动退出", "type": "session"}
+          {"id": "BR-LOGIN-004", "rule": "会话有效期2小时，超时自动退出", "type": "session"},
+          {"id": "BR-LOGIN-005", "rule": "密码输入框默认脱敏显示", "type": "presentation"},
+          {"id": "BR-LOGIN-006", "rule": "页面加载时清除上次未完成的登录状态", "type": "initialization"},
+
         ],
         "data_constraints": [
           {"field": "账号", "type": "string", "required": true, "constraints": "唯一性校验，正则 ^[a-zA-Z0-9_-]{3,50}$", "example": "user@example.com"},
@@ -157,7 +160,8 @@ FP_INTEGRATED_USER_PROMPT = """请从以下需求中拆分所有功能点。
 **核心约束**：
 - 一个业务概念 = 一个 FP，不要把同一业务的正常流程、异常处理、校验拆成多个 FP
 - 如果需求只描述一个业务功能（如"用户登录"），只需要输出 1 个 FP
-- 宁少勿多，每个 FP 的信息量要饱满"""
+- 宁少勿多，每个 FP 的信息量要饱满
+- **business_rules.type 只能从以下值中选择**：validation/calculation/workflow/permission/security/business/constraint/mandatory/uniqueness/format/range/logic/data_integrity/field_validation/access_control/authorization/authentication/prerequisite/presentation/initialization/enumeration/data_format/relationship/duplication/session/timeout/rate_limit/notification/data_retention/audit/encryption/integration"""
 
 # ============================================================================
 # BP 提取提示词（旧版，保留兼容）
