@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, get_current_user, require_admin, require_write
 from app.db.database import get_session
-from app.db.models import TestCase
+from app.db.models import TestCase, Traceability
 from app.models.api_schemas import ApiResponse, FeedbackRequest, TestCaseUpdateRequest
 from app.utils.logger import logger
 
@@ -275,9 +275,15 @@ async def batch_delete_by_requirement(
 ) -> ApiResponse:
     """按需求批量删除所有测试用例。"""
     from sqlalchemy import delete as sa_delete
-    from app.db.models import TestCase as TC
+    from sqlalchemy import select as sa_select
 
-    result = await session.execute(sa_delete(TC).where(TC.req_id == req_id))
+    # 先删该需求下所有用例的追溯记录
+    tc_ids_subquery = sa_select(TestCase.id).where(TestCase.req_id == req_id)
+    await session.execute(
+        sa_delete(Traceability).where(Traceability.test_case_id.in_(tc_ids_subquery))
+    )
+    # 再删用例
+    result = await session.execute(sa_delete(TestCase).where(TestCase.req_id == req_id))
     await session.commit()
 
     logger.info("[API/testcases] 批量删除: req_id={}, deleted={}", req_id, result.rowcount)
@@ -312,6 +318,9 @@ async def delete_testcase(
     if record is None:
         raise HTTPException(status_code=404, detail=f"用例 {case_id} 不存在")
 
+    # 先删追溯记录
+    from sqlalchemy import delete as _del
+    await session.execute(_del(Traceability).where(Traceability.test_case_id == case_id))
     await session.delete(record)
     await session.commit()
 

@@ -29,6 +29,12 @@ info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# ---------- 辅助函数 ----------
+# 判断是否是首次部署（有 images/ 目录）
+is_first_deploy() {
+  [ -d "$PACK_DIR/images" ] && [ "$(ls -A "$PACK_DIR/images" 2>/dev/null)" ]
+}
+
 # ---------- 解析参数 ----------
 ENV_FILE=""
 while [ $# -gt 0 ]; do
@@ -65,6 +71,158 @@ elif [ -f install.env ]; then
 elif [ -f .env ]; then
   set -a; source .env; set +a
 fi
+
+# ---------- 跳过检查（环境变量 SKIP_CHECK=true） ----------
+if [ "${SKIP_CHECK:-false}" = "true" ]; then
+  warn "环境检查已跳过 (SKIP_CHECK=true)"
+  # 选择一个可用的 compose 命令
+  if docker compose version &>/dev/null; then
+    COMPOSE_CMD="docker compose"
+  elif command -v docker-compose &>/dev/null; then
+    COMPOSE_CMD="docker-compose"
+  fi
+else
+
+# ==================================================================
+# 阶段 0: 环境预检 — Docker / 磁盘 / 内存
+# ==================================================================
+echo ""
+info "========================================"
+info "环境预检"
+info "========================================"
+
+SKIP_CHECK="${SKIP_CHECK:-false}"
+CHECK_FAILED=false
+
+# 辅助函数：语义化版本比较（左边 >= 右边返回 true）
+version_gte() {
+  # 格式: v1.v2.v3 或 1.2.3
+  local a b
+  a=$(echo "$1" | sed 's/^v//' | awk -F. '{printf "%d%03d%03d", $1,$2,$3}' 2>/dev/null)
+  b=$(echo "$2" | sed 's/^v//' | awk -F. '{printf "%d%03d%03d", $1,$2,$3}' 2>/dev/null)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -ge "$b" ] 2>/dev/null
+}
+
+# ---------- 0a. 检查 Docker Engine ----------
+if ! command -v docker &>/dev/null; then
+  error "Docker 未安装！请先安装 Docker Engine (>= 20.10)"
+  CHECK_FAILED=true
+else
+  DOCKER_VER=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
+  info "Docker Engine: $DOCKER_VER"
+  if [ "$DOCKER_VER" != "unknown" ]; then
+    if version_gte "$DOCKER_VER" "20.10"; then
+      info "  ✅ Docker Engine >= 20.10，满足要求"
+    else
+      warn "  ⚠️  Docker Engine < 20.10，建议升级到 20.10+"
+      warn "     当前版本不支持 Compose V2 插件，需要单独安装 docker-compose-plugin"
+    fi
+  fi
+fi
+
+# ---------- 0b. 检查 Docker Compose ----------
+COMPOSE_CMD=""
+if docker compose version &>/dev/null; then
+  COMPOSE_VER=$(docker compose version --short 2>/dev/null || docker compose version 2>/dev/null | grep -oP 'v?\d+\.\d+')
+  COMPOSE_CMD="docker compose"
+  info "Docker Compose: $(docker compose version 2>/dev/null | head -1)"
+  if echo "$COMPOSE_VER" | grep -qE '^v?[2-9]'; then
+    info "  ✅ Compose V2，满足要求"
+  else
+    warn "  ⚠️  Compose 版本较低 ($COMPOSE_VER)，建议升级到 v2.0+"
+  fi
+elif command -v docker-compose &>/dev/null; then
+  COMPOSE_VER=$(docker-compose version --short 2>/dev/null || echo "unknown")
+  COMPOSE_CMD="docker-compose"
+  warn "  ⚠️  检测到 docker-compose (v1)，本项目使用 Compose V2 语法"
+  warn "     请安装 docker compose 插件: https://docs.docker.com/compose/install/"
+  CHECK_FAILED=true
+else
+  error "Docker Compose 未安装！"
+  CHECK_FAILED=true
+fi
+
+# ---------- 0c. 检查 OS 类型 ----------
+if [ "$(uname -s)" = "Linux" ]; then
+  info "OS: Linux ($(uname -m))"
+  # 检查内核版本
+  KERNEL_VER=$(uname -r | grep -oP '^\d+\.\d+')
+  if version_gte "$KERNEL_VER" "4.0"; then
+    info "  ✅ Kernel >= 4.0，满足要求"
+  else
+    warn "  ⚠️  内核版本 $KERNEL_VER 偏低，建议 Linux 4.0+"
+  fi
+elif [ "$(uname -s)" = "Darwin" ]; then
+  info "OS: macOS ($(uname -m))"
+else
+  info "OS: $(uname -s) ($(uname -m))"
+  warn "  ⚠️  建议在 Linux 或 macOS 上部署"
+fi
+
+# ---------- 0d. 检查内存 ----------
+if [ -r /proc/meminfo ]; then
+  MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  MEM_GB=$((MEM_KB / 1024 / 1024))
+  info "内存: ${MEM_GB}GB"
+  if [ "$MEM_GB" -ge 8 ]; then
+    info "  ✅ 内存 >= 8GB，满足要求"
+  else
+    warn "  ⚠️  内存 ${MEM_GB}GB < 8GB，Milvus + 模型加载可能需要更多内存"
+    warn "     建议至少 8GB，推荐 16GB"
+  fi
+elif command -v free &>/dev/null; then
+  MEM_GB=$(free -g | awk '/^Mem:/{print $2}')
+  info "内存: ${MEM_GB}GB (估算)"
+  if [ "$MEM_GB" -ge 8 ]; then
+    info "  ✅ 内存 >= 8GB，满足要求"
+  else
+    warn "  ⚠️  内存 ${MEM_GB}GB 偏低"
+  fi
+fi
+
+# ---------- 0e. 检查磁盘空间 ----------
+INSTALL_DIR_PATH="${INSTALL_DIR:-$PACK_DIR}"
+AVAIL_KB=$(df "$INSTALL_DIR_PATH" 2>/dev/null | awk 'NR>1{print $4}')
+if [ -n "$AVAIL_KB" ]; then
+  AVAIL_GB=$((AVAIL_KB / 1024 / 1024))
+  info "磁盘可用: ${AVAIL_GB}GB ($(df "$INSTALL_DIR_PATH" 2>/dev/null | awk 'NR>1{print $1}'))"
+  if is_first_deploy; then
+    # 首次部署需要 30GB+
+    REQ=30
+    if [ "$AVAIL_GB" -ge "$REQ" ]; then
+      info "  ✅ 磁盘剩余 >= ${REQ}GB，满足要求"
+    else
+      warn "  ⚠️  磁盘仅剩 ${AVAIL_GB}GB，首次部署建议至少 ${REQ}GB"
+    fi
+  else
+    # 增量更新只需要 5GB+
+    REQ=5
+    if [ "$AVAIL_GB" -ge "$REQ" ]; then
+      info "  ✅ 磁盘剩余 >= ${REQ}GB，满足要求"
+    else
+      warn "  ⚠️  磁盘仅剩 ${AVAIL_GB}GB，更新建议至少 ${REQ}GB"
+    fi
+  fi
+fi
+
+# ---------- 0f. 检查 BuildKit ----------
+if docker buildx version &>/dev/null; then
+  info "BuildKit: $(docker buildx version 2>/dev/null | head -1 | grep -oP 'v?\S+')"
+  info "  ✅ BuildKit 可用，多阶段构建无问题"
+else
+  warn "  ⚠️  BuildKit 不可用，前端多阶段构建可能失败"
+fi
+
+# ---------- 0g. 最终判断 ----------
+echo ""
+if [ "$CHECK_FAILED" = true ]; then
+  error "环境检查未通过，请修复以上问题后重试"
+  warn "如需跳过检查，设置环境变量: SKIP_CHECK=true"
+  exit 1
+else
+  info "环境检查全部通过 ✅"
+fi
+fi  # SKIP_CHECK else 块结束
 
 # ==================================================================
 # 阶段 1: 加载基础镜像（仅首次部署有 images/ 目录）
