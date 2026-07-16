@@ -1,5 +1,29 @@
 import { useState } from 'react'
 import { Edit3, Save, X } from 'lucide-react'
+import ArrayEditor from './ArrayEditor'
+
+// ---- 类型选项 ----
+const BR_TYPE_OPTIONS = [
+  { value: 'validation', label: '校验' }, { value: 'calculation', label: '计算' },
+  { value: 'workflow', label: '流程' }, { value: 'permission', label: '权限' },
+  { value: 'security', label: '安全' }, { value: 'session', label: '会话' },
+  { value: 'timeout', label: '超时' }, { value: 'rate_limit', label: '限流' },
+  { value: 'notification', label: '通知' }, { value: 'data_retention', label: '数据保留' },
+  { value: 'audit', label: '审计' }, { value: 'encryption', label: '加密' },
+  { value: 'integration', label: '集成' },
+]
+const AC_TYPE_OPTIONS = [
+  { value: 'functional', label: '功能' }, { value: 'performance', label: '性能' },
+  { value: 'security', label: '安全' }, { value: 'usability', label: '易用性' },
+  { value: 'compatibility', label: '兼容性' }, { value: 'reliability', label: '可靠性' },
+]
+const FIELD_TYPE_OPTIONS = [
+  { value: 'string', label: '字符串' }, { value: 'number', label: '数字' },
+  { value: 'boolean', label: '布尔' }, { value: 'date', label: '日期' },
+  { value: 'datetime', label: '日期时间' }, { value: 'email', label: '邮箱' },
+  { value: 'url', label: 'URL' }, { value: 'array', label: '数组' },
+  { value: 'object', label: '对象' },
+]
 
 /**
  * 通用 SRR 字段编辑器。
@@ -37,58 +61,63 @@ export default function FieldEditor({
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
+  const [draftArr, setDraftArr] = useState<any[]>([])
   const [saving, setSaving] = useState(false)
 
+  const isArrayEdit = valueType === 'object[]'
   const startEdit = () => {
-    const text = serializeValue(fieldPath, value, valueType)
-    setDraft(text)
+    if (isArrayEdit && Array.isArray(value)) {
+      setDraftArr(structuredClone(value))
+    } else {
+      setDraft(serializeValue(fieldPath, value, valueType))
+    }
     setEditing(true)
   }
-
-  const cancelEdit = () => {
-    setEditing(false)
-    setDraft('')
-  }
+  const cancelEdit = () => { setEditing(false) }
 
   const commitEdit = async () => {
     setSaving(true)
     try {
-      const parsed = parseValue(fieldPath, draft, valueType)
-      await onSave(fieldPath, parsed)
+      const result = isArrayEdit ? draftArr : parseValue(fieldPath, draft, valueType)
+      await onSave(fieldPath, result)
       setEditing(false)
-    } catch {
-      // 解析失败不保存，保留编辑状态让用户修正
-    } finally {
-      setSaving(false)
-    }
+    } catch { } finally { setSaving(false) }
   }
 
   // ---- 编辑模式 ----
   if (editing) {
     return (
       <div>
-        <h3 className="label">{label}</h3>
-        <div className="flex items-start gap-2 mt-1">
-          <textarea
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            className="input-field text-sm flex-1 resize-none"
-            rows={Math.max(3, Math.min(12, draft.split('\n').length))}
-            placeholder={placeholder || getPlaceholder(fieldPath, valueType)}
-            autoFocus
-          />
-          <div className="flex flex-col gap-1">
+        <div className="flex items-center justify-between">
+          <h3 className="label">{label}</h3>
+          <div className="flex gap-1">
             <button onClick={commitEdit} disabled={saving}
-              className="p-1.5 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-50"
-              title="保存">
+              className="p-1.5 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-50" title="保存">
               <Save className="w-3.5 h-3.5" />
             </button>
             <button onClick={cancelEdit}
-              className="p-1.5 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200"
-              title="取消">
+              className="p-1.5 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200" title="取消">
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
+        </div>
+        <div className="mt-1">
+          {isArrayEdit ? (
+            <ArrayEditor
+              columns={getColumns(fieldPath)}
+              items={draftArr}
+              onChange={setDraftArr}
+            />
+          ) : (
+            <textarea
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              className="input-field text-sm w-full resize-none"
+              rows={Math.max(3, Math.min(12, draft.split('\n').length))}
+              placeholder={placeholder || getPlaceholder(fieldPath, valueType)}
+              autoFocus
+            />
+          )}
         </div>
       </div>
     )
@@ -111,6 +140,56 @@ export default function FieldEditor({
       {render(value)}
     </div>
   )
+}
+
+// ---- ArrayEditor 列配置 ----
+
+function getColumns(fieldPath: string): any[] {
+  const base = fieldPath.split('.').pop() || fieldPath
+  if (base === 'steps' || fieldPath.includes('steps')) {
+    return [
+      { key: 'order', label: '序号', type: 'number' },
+      { key: 'action', label: '操作步骤', placeholder: '用户输入账号密码' },
+      { key: 'expect', label: '预期结果', placeholder: '系统校验身份' },
+    ]
+  }
+  if (base === 'alternate_flows' || fieldPath.includes('alternate_flows')) {
+    return [
+      { key: 'name', label: '名称', placeholder: '登录失败' },
+      { key: 'trigger', label: '触发条件', placeholder: '密码错误' },
+      { key: 'expect', label: '预期结果', placeholder: '提示重试' },
+    ]
+  }
+  if (base === 'boundary_conditions') {
+    return [
+      { key: 'field', label: '字段', placeholder: '用户名' },
+      { key: 'condition', label: '条件', placeholder: '为空' },
+      { key: 'expect', label: '预期', placeholder: '提示必填' },
+    ]
+  }
+  if (base === 'business_rules') {
+    return [
+      { key: 'id', label: 'ID', placeholder: 'BR-001' },
+      { key: 'type', label: '类型', type: 'select', options: BR_TYPE_OPTIONS },
+      { key: 'rule', label: '规则描述', placeholder: '密码长度不少于8位' },
+    ]
+  }
+  if (base === 'data_constraints') {
+    return [
+      { key: 'field', label: '字段', placeholder: 'username' },
+      { key: 'type', label: '类型', type: 'select', options: FIELD_TYPE_OPTIONS },
+      { key: 'required', label: '必填', type: 'checkbox' },
+      { key: 'constraints', label: '约束', placeholder: '2-20字符，字母数字' },
+    ]
+  }
+  if (base === 'acceptance_criteria') {
+    return [
+      { key: 'id', label: 'ID', placeholder: 'AC-001' },
+      { key: 'type', label: '类型', type: 'select', options: AC_TYPE_OPTIONS },
+      { key: 'description', label: '验收描述', placeholder: '用户可正常登录系统' },
+    ]
+  }
+  return []  // fallback
 }
 
 // ---- 默认占位符 ----
