@@ -8,7 +8,6 @@ import Dashboard from './pages/Dashboard'
 import Requirements from './pages/Requirements'
 import RequirementDetail from './pages/RequirementDetail'
 import RequirementClarify from './pages/RequirementClarify'
-import Generate from './pages/Generate'
 import TestCases from './pages/TestCases'
 import KnowledgeBase from './pages/KnowledgeBase'
 import DependencyGraph from './pages/DependencyGraph'
@@ -85,8 +84,7 @@ export default function App() {
           <Route path="/requirements" element={<Requirements />} />
           <Route path="/requirements/:id" element={<RequirementDetail />} />
           <Route path="/requirements/:id/clarify" element={<RequirementClarify />} />
-          <Route path="/requirements/:id/generate" element={<Generate />} />
-          <Route path="/generate" element={<Generate />} />
+          <Route path="/requirements/:id/generate" element={<TestCases />} />
           <Route path="/testcases" element={<TestCases />} />
           <Route path="/knowledge" element={<KnowledgeBase />} />
           <Route path="/knowledge-qa" element={<KnowledgeQA />} />

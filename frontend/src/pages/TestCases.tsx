@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
-import { TestTube, Search, Filter, CheckCircle2, XCircle, ThumbsUp, ThumbsDown, Loader2, Trash2, Eye } from 'lucide-react'
-import { testCases as tcApi, requirements as reqApi } from '../api/client'
+import { TestTube, Trash2, Eye, ThumbsUp, ThumbsDown, Loader2, Play, Sparkles, RefreshCw, Filter, X } from 'lucide-react'
+import { testCases as tcApi, requirements as reqApi, generateCases } from '../api/client'
 import { useProduct } from '../store/ProductContext'
-import type { TestCase, Requirement } from '../types'
+import type { TestCase, Requirement, SSEEvent } from '../types'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
 
 export default function TestCases() {
@@ -14,7 +14,15 @@ export default function TestCases() {
   const [filterReq, setFilterReq] = useState('')
   const [reqs, setReqs] = useState<Requirement[]>([])
   const [selectedCase, setSelectedCase] = useState<TestCase | null>(null)
-  const [feedbackLoading, setFeedbackLoading] = useState<string | null>(null)
+
+  // ---- 生成状态 ----
+  const [showGenerate, setShowGenerate] = useState(false)
+  const [genReqId, setGenReqId] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const [genStage, setGenStage] = useState('')
+  const [genProgress, setGenProgress] = useState(0)
+  const [genMessage, setGenMessage] = useState('')
+  const [genDone, setGenDone] = useState(false)
 
   useEffect(() => {
     reqApi.list(1, 100, selectedProductId || undefined).then(r => setReqs(r.items || [])).catch(() => {})
@@ -30,37 +38,114 @@ export default function TestCases() {
 
   useEffect(() => { loadCases() }, [page, filterReq, selectedProductId])
 
-  const handleFeedback = async (caseId: string, accepted: boolean) => {
-    setFeedbackLoading(caseId)
-    try {
-      await tcApi.feedback(caseId, accepted)
-      loadCases()
-    } catch (e: any) {
-      alert('操作失败: ' + e.message)
-    } finally {
-      setFeedbackLoading(null)
-    }
-  }
-
   const handleDelete = async (caseId: string) => {
     if (!confirm('确认删除此用例？')) return
+    try { await tcApi.delete(caseId); loadCases() } catch (e: any) { alert('删除失败: ' + e.message) }
+  }
+
+  // 按需求批量删除
+  const handleBatchDelete = async (reqId: string) => {
+    const reqName = reqs.find(r => r.id === reqId)?.title || reqId
+    if (!confirm(`确认删除需求「${reqName}」的所有用例？此操作不可撤销。`)) return
     try {
-      await tcApi.delete(caseId)
+      await tcApi.deleteByRequirement(reqId)
       loadCases()
-    } catch {}
+    } catch (e: any) { alert('批量删除失败: ' + e.message) }
+  }
+
+  // 开始生成用例
+  const handleGenerate = () => {
+    if (!genReqId) return
+    setGenerating(true)
+    setGenStage('')
+    setGenProgress(0)
+    setGenMessage('正在启动...')
+    setGenDone(false)
+
+    const ctrl = generateCases(
+      genReqId,
+      (event: any) => {
+        const e = event as SSEEvent
+        if (e.stage) setGenStage(e.stage)
+        if (e.progress !== undefined) setGenProgress(e.progress)
+        if (e.message) setGenMessage(e.message)
+      },
+      (err) => {
+        setGenerating(false)
+        setGenMessage('生成失败: ' + err)
+      },
+      () => {
+        setGenerating(false)
+        setGenDone(true)
+        setGenProgress(100)
+        loadCases()
+      },
+    )
+    // 5 分钟超时
+    setTimeout(() => { if (!ctrl.signal.aborted) ctrl.abort() }, 300000)
   }
 
   const totalPages = Math.ceil(total / 20)
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="page-title">测试用例</h1>
           <p className="text-sm text-slate-500 mt-1">{total} 个用例</p>
         </div>
+        <button onClick={() => setShowGenerate(!showGenerate)}
+          className="btn-primary flex items-center gap-2">
+          <Sparkles className="w-4 h-4" />
+          {showGenerate ? '收起' : '生成用例'}
+        </button>
       </div>
+
+      {/* 生成面板 */}
+      {showGenerate && (
+        <div className="card p-5 space-y-4">
+          <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+            <Play className="w-4 h-4 text-primary-500" /> 生成测试用例
+          </h3>
+          <div className="flex items-end gap-3">
+            <div className="flex-1">
+              <label className="text-xs text-slate-500 block mb-1">选择需求</label>
+              <select value={genReqId} onChange={e => setGenReqId(e.target.value)}
+                className="select-field w-full text-sm" disabled={generating}>
+                <option value="">-- 请选择需求 --</option>
+                {reqs.filter(r => r.status === 'active').map(r => (
+                  <option key={r.id} value={r.id}>{r.id} — {r.title}</option>
+                ))}
+              </select>
+            </div>
+            <button onClick={handleGenerate} disabled={generating || !genReqId}
+              className="btn-primary flex items-center gap-2 disabled:opacity-50">
+              {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+              {generating ? '生成中...' : '生成'}
+            </button>
+            {genReqId && (
+              <button onClick={() => handleBatchDelete(genReqId)}
+                className="btn-secondary text-red-500 flex items-center gap-2 text-sm"
+                title={`删除需求 ${genReqId} 的所有用例`}>
+                <Trash2 className="w-4 h-4" /> 清空
+              </button>
+            )}
+          </div>
+          {(generating || genDone) && (
+            <div>
+              <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+                <span>{genMessage}</span>
+                <span>{genProgress}%</span>
+              </div>
+              <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full transition-all duration-500 ${genDone ? 'bg-emerald-500' : 'bg-primary-500'}`}
+                  style={{ width: `${genProgress}%` }} />
+              </div>
+              {genDone && <p className="text-xs text-emerald-600 mt-1">生成完成，列表已刷新</p>}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Filters */}
       <div className="card py-3 px-5">
@@ -71,6 +156,12 @@ export default function TestCases() {
             <option value="">全部需求</option>
             {reqs.map(r => <option key={r.id} value={r.id}>{r.id} — {r.title}</option>)}
           </select>
+          {filterReq && (
+            <button onClick={() => handleBatchDelete(filterReq)}
+              className="btn-secondary text-red-400 text-xs flex items-center gap-1">
+              <Trash2 className="w-3 h-3" /> 删除此需求全部用例
+            </button>
+          )}
         </div>
       </div>
 
@@ -82,7 +173,7 @@ export default function TestCases() {
           <div className="text-center py-16">
             <TestTube className="w-12 h-12 mx-auto mb-3 text-slate-300" />
             <p className="text-slate-500 font-medium">暂无用例</p>
-            <p className="text-sm text-slate-400 mt-1">选择需求并生成测试用例</p>
+            <p className="text-sm text-slate-400 mt-1">选择需求并点击「生成用例」</p>
           </div>
         ) : (
           <div>
@@ -96,7 +187,7 @@ export default function TestCases() {
                   <th className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">状态</th>
                   <th className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">置信度</th>
                   <th className="text-right text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">创建时间</th>
-                  <th className="text-right px-5 py-3.5 w-24"></th>
+                  <th className="text-right px-5 py-3.5 w-28"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
@@ -130,18 +221,6 @@ export default function TestCases() {
                         <button onClick={() => setSelectedCase(c)} className="btn-ghost p-1.5" title="查看">
                           <Eye className="w-3.5 h-3.5" />
                         </button>
-                        {c.status !== 'approved' && (
-                          <>
-                            <button onClick={() => handleFeedback(c.id, true)} disabled={feedbackLoading === c.id}
-                              className="btn-ghost p-1.5 text-success-500 hover:text-success-600" title="采纳">
-                              {feedbackLoading === c.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ThumbsUp className="w-3.5 h-3.5" />}
-                            </button>
-                            <button onClick={() => handleFeedback(c.id, false)} disabled={feedbackLoading === c.id}
-                              className="btn-ghost p-1.5 text-red-400 hover:text-red-500" title="驳回">
-                              <ThumbsDown className="w-3.5 h-3.5" />
-                            </button>
-                          </>
-                        )}
                         <button onClick={() => handleDelete(c.id)} className="btn-ghost p-1.5 text-slate-400 hover:text-red-500" title="删除">
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -151,7 +230,6 @@ export default function TestCases() {
                 ))}
               </tbody>
             </table>
-            {/* Pagination */}
             {totalPages > 1 && (
               <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100 bg-slate-50/30">
                 <span className="text-xs text-slate-400">共 {total} 条</span>

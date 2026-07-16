@@ -361,6 +361,8 @@ export const testCases = {
   update: (id: string, data: Record<string, unknown>) =>
     request(`/testcases/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id: string) => request(`/testcases/${id}`, { method: 'DELETE' }),
+  deleteByRequirement: (reqId: string) =>
+    request<{ deleted_count: number }>(`/testcases/batch/by-requirement/${reqId}`, { method: 'DELETE' }),
   feedback: (id: string, accepted: boolean, comments = '') =>
     request(`/testcases/${id}/feedback`, {
       method: 'POST',
