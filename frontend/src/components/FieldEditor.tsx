@@ -88,7 +88,7 @@ export default function FieldEditor({
     )
   }
 
-  return render(value, startEdit)
+  return <div className="group">{render(value, startEdit)}</div>
 }
 
 // ---- 序列化/反序列化工具 ----
