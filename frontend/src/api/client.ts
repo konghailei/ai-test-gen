@@ -308,10 +308,13 @@ export function generateCases(
   onDone?: () => void,
 ): AbortController {
   const controller = new AbortController()
+  const token = getToken()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
 
   fetch(`${BASE}/generate`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ req_id: reqId }),
     signal: controller.signal,
   }).then(async (res) => {
