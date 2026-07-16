@@ -195,218 +195,91 @@ async def upload_requirement(
     req: RequirementUploadRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """上传需求文本，解析为 SRR 后执行 KB 增强 + ClarifyAgent 检测。
+    """上传需求文本（异步任务模式，与文件上传统一）。
 
-    改进流程（v2.3）：
-        1. ReqAgent 初始解析
-        2. ClarifyAgent 自动执行（KB 检索 + 完整性/歧义性检测 + 问题生成）
-        3. KB 自动补全字段直接应用到 SRR
-        4. 状态设为 draft（待澄清），问题列表返回前端
-        5. 用户提交澄清答案后，重新生成最终 SRR（参见 /{id}/clarify POST）
+    v2.15: 改为异步任务模式。立即创建 Requirement(analyzing) + AnalysisTask，
+    后台协程执行 ReqAgent 解析 + ClarifyAgent 检测。立即返回 task_id + req_id，
+    前端轮询任务进度（GET /requirements/tasks/{task_id}）。
 
     Args:
-        req: 上传请求，含 raw_text（必填）/ product_id / product_name / title / priority / modules
+        req: 上传请求，含 raw_text / product_id / product_name / title / priority / modules
         session: 数据库会话（依赖注入）
 
     Returns:
-        ApiResponse: data 含 req_id / srr（已 KB 增强的初始 SRR）/ questions / status / title
+        ApiResponse: data 含 task_id / req_id / status="analyzing"
     """
     if not req.raw_text or not req.raw_text.strip():
         raise HTTPException(status_code=400, detail="需求文本不能为空")
 
     logger.info(
-        "[API/requirements] 上传需求: text_len={}, product_id={}, title={}",
+        "[API/requirements] 上传需求(raw_text 异步模式): text_len={}, product_id={}, title={}",
         len(req.raw_text),
         req.product_id,
         req.title or "(自动提取)",
     )
 
-    # ===== ① ReqAgent 解析初始 SRR =====
-    try:
-        srr = await req_agent.parse(
-            raw_requirement=req.raw_text,
-            product_id=req.product_id,
-            product_name=req.product_name,
-        )
-    except Exception as e:
-        err_msg = str(e)[:300]
-        logger.error("[API/requirements] 需求解析失败: {}", err_msg)
-        # ... 错误处理保持不变 ...
-        if "401" in err_msg or "authentication" in err_msg.lower() or "api key" in err_msg.lower():
-            hint = (
-                "LLM API Key 无效或未配置，无法解析需求。\n\n"
-                "解决办法：\n"
-                "1. 进入「系统设置」→ LLM 供应商\n"
-                "2. 点击「修改配置」，输入有效的 API Key\n"
-                "3. 保存后点击「测试连接」确认连通性\n"
-                "4. 再重新上传需求"
-            )
-        elif "model not found" in err_msg.lower() or "not found" in err_msg.lower():
-            hint = (
-                "LLM 模型不存在，请检查模型名称是否正确。\n\n"
-                "解决办法：进入「系统设置」→ 检查「模型名称」字段"
-            )
-        elif "connect" in err_msg.lower() or "timeout" in err_msg.lower() or "refused" in err_msg.lower():
-            hint = (
-                "无法连接到 LLM API，请检查网络。\n\n"
-                "解决办法：\n"
-                "1. 检查 API 地址是否正确\n"
-                "2. 确认当前网络可以访问该 API\n"
-                "3. 如需代理，请配置网络环境"
-            )
-        else:
-            hint = f"需求解析失败: {err_msg[:200]}"
+    # v2.15: 异步分析模式——立即创建 Requirement(analyzing) + AnalysisTask，后台协程执行解析
+    req_id = gen_requirement_id()
+    task_id = gen_task_id()
 
-        return ApiResponse(
-            success=False,
-            message=hint,
-            data=None,
-        )
-
-    req_id = srr.get("requirement", {}).get("id", "")
-    if not req_id:
-        raise HTTPException(status_code=500, detail="解析失败：未生成需求 ID")
-
-    # 若调用方指定了 title/priority/modules，覆盖 SRR 中的值（text）
-    req_data = srr.setdefault("requirement", {})
-    if req.title:
-        req_data["title"] = req.title
-    if req.priority:
-        req_data["priority"] = req.priority
-    if req.modules:
-        req_data["modules"] = req.modules
-
-    # P0 修复：先创建并 flush Requirement 记录，避免 _save_fps_to_db 时外键违反
+    # 立即创建 Requirement 记录（status=analyzing，分析完成后由后台协程更新）
     record = Requirement(
         id=req_id,
-        product_id=req_data.get("product_id", req.product_id or "PROD-DEFAULT"),
+        product_id=req.product_id or "PROD-DEFAULT",
         project_id=req.project_id,
-        title=req_data.get("title", ""),
-        priority=req_data.get("priority", "P2"),
-        module=req_data.get("modules", [""])[0] if req_data.get("modules") else "",
-        modules=req_data.get("modules", []),
+        title=req.title or "(分析中...)",
+        priority=req.priority,
+        module=req.modules[0] if req.modules else "",
+        modules=req.modules,
         tags=[],
         version=1,
-        status="draft",  # 临时状态，后续根据 clarify 结果更新
-        srr_json=srr,
+        status="analyzing",
+        srr_json={},
         raw_text=req.raw_text,
         source_type="markdown",
         created_by="api",
     )
     session.add(record)
-    await session.flush()  # 确保 Requirement 落库，FP 外键可引用
+    await session.flush()  # 确保 Requirement 先落库，避免 AnalysisTask 外键约束 violation
 
-    # v1.5.1: 自动保存 ReqAgent 一体式提取的功能点
-    await _save_fps_to_db(session, req_id, req_agent.last_fps, req.priority)
-    await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
-
-    # ===== ② ClarifyAgent 自动检测（KB 检索 + 问题生成） =====
-    clarify_result = None
-    questions = []
-    try:
-        clarify_result = await clarify_agent.clarify(srr, session=session)
-        questions = clarify_result.get("questions", [])
-        logger.info(
-            "[API/requirements] ClarifyAgent 检测完成: req_id={}, status={}, questions={}",
-            req_id,
-            clarify_result.get("status", ""),
-            len(questions),
-        )
-    except Exception as e:
-        logger.warning("[API/requirements] ClarifyAgent 检测失败（不阻断）: {}", str(e)[:200])
-
-    # ===== ③ 缺口判定：是否仍有需人工澄清的问题（以 clarify 返回的 status 为准） =====
-    augmented_srr = clarify_result.get("augmented_srr", srr) if clarify_result else srr
-    has_unresolved = (clarify_result.get("status") == "needs_clarification") if clarify_result else False
-
-    # ===== ④ 持久化 =====
-    # v2.8: 发现缺口→暂存draft等待澄清；无缺口→直接生成最终SRR→active
-    if has_unresolved:
-        # 有未解答问题 → 暂存 draft，等待人工澄清
-        status = "draft"
-        srr_json_data = dict(augmented_srr)
-        if clarify_result:
-            srr_json_data["_clarify_state"] = {
-                "questions": questions,
-                "auto_augmentations": clarify_result.get("auto_augmentations", []),
-                "kb_status": clarify_result.get("kb_status", {}),
-                "quality_report": clarify_result.get("quality_report", {}),
-                # v2.12: 字段冲突列表（docs/01 §4.4.1），供前端展示人工确认
-                "field_conflicts": clarify_result.get("field_conflicts", []),
-            }
-            kb_logs = clarify_result.get("kb_access_log", [])
-            if kb_logs:
-                srr_json_data["_kb_query_logs"] = kb_logs
-
-        logger.info("[API/requirements] 有未解答问题 → draft: req_id={}, pending={}",
-                    req_id, len(questions))
-
-    else:
-        # 无缺口或 KB 全解答 → 生成最终 SRR → active
-        logger.info("[API/requirements] KB已解答或无缺口 → 生成最终SRR: req_id={}", req_id)
-
-        # 融合 KB 补全信息到原始文本
-        kb_augments = clarify_result.get("auto_augmentations", []) if clarify_result else []
-        if kb_augments:
-            parts = [req.raw_text, "\n\n## KB 自动补全信息\n"]
-            for aug in kb_augments:
-                parts.append(f"- {aug.get('field', '')}: {str(aug.get('value', ''))[:300]}")
-            enhanced_raw = "\n".join(parts)
-        else:
-            enhanced_raw = req.raw_text
-
-        try:
-            final_srr = await req_agent.parse(
-                raw_requirement=enhanced_raw,
-                product_id=req.product_id or "PROD-DEFAULT",
-            )
-            final_srr_data = dict(final_srr)
-        except Exception as e:
-            logger.error("[API/requirements] 最终SRR生成失败→降级: {}", str(e)[:200])
-            final_srr_data = dict(srr)
-            final_srr_data["_finalize_degraded"] = True
-
-        # 保留 KB 日志
-        if clarify_result:
-            kb_logs = clarify_result.get("kb_access_log", [])
-            if kb_logs:
-                final_srr_data["_kb_query_logs"] = kb_logs
-
-        final_srr_data.pop("_clarify_state", None)
-        # v2.12: 清理临时字段来源标记（不写入正式 SRR Schema）
-        final_srr_data.pop("_field_sources", None)
-        status = "active"
-        srr_json_data = final_srr_data
-
-    # 更新已存在的 Requirement 记录（P0 修复：record 在 _save_fps_to_db 前已创建）
-    record.status = status
-    record.srr_json = srr_json_data
+    # 创建任务记录
+    task = AnalysisTask(
+        id=task_id,
+        task_type="upload_requirement",
+        req_id=req_id,
+        product_id=req.product_id or "PROD-DEFAULT",
+        status="pending",
+        phase="parse",
+        progress=0,
+        message="已接收需求文本，准备开始分析...",
+        created_by="api",
+    )
+    session.add(task)
     await session.commit()
 
-    logger.info(
-        "[API/requirements] 需求已保存: req_id={}, title={}, status={}, questions={}",
-        req_id,
-        req_data.get("title", ""),
-        status,
-        len(questions),
-    )
+    # 启动后台协程（不 await，立即返回）
+    asyncio.create_task(_run_requirement_analysis(
+        task_id=task_id,
+        req_id=req_id,
+        combined_raw=req.raw_text,
+        product_id=req.product_id or "PROD-DEFAULT",
+        product_name=req.product_name,
+        title=req.title,
+        priority=req.priority,
+        project_id=req.project_id or "",
+        module_list=req.modules,
+        source_files=[],
+    ))
+
+    logger.info("[API] raw_text 上传已派发异步分析: task_id={}, req_id={}", task_id, req_id)
 
     return ApiResponse(
         success=True,
-        message="需求分析完成" + ("，有未解答问题待人工澄清" if has_unresolved else "，已自动生成最终SRR"),
+        message="已接收需求文本，正在后台分析",
         data={
+            "task_id": task_id,
             "req_id": req_id,
-            "srr": srr_json_data,
-            "title": req_data.get("title", ""),
-            "priority": req_data.get("priority", ""),
-            "status": status,
-            "questions": questions,
-            "has_unanswered_questions": has_unresolved,
-            "kb_answered": clarify_result.get("kb_answered_count", 0) if clarify_result else 0,
-            "kb_total": clarify_result.get("kb_total_count", 0) if clarify_result else 0,
-            "kb_status": clarify_result.get("kb_status", {}) if clarify_result else {},
-            "auto_augmentations_count": len(clarify_result.get("auto_augmentations", [])) if clarify_result else 0,
-            "kb_empty": clarify_result.get("kb_status", {}).get("kb_empty", True) if clarify_result else True,
+            "status": "analyzing",
         },
     )
 

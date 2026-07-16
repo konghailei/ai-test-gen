@@ -429,13 +429,10 @@ export default function RequirementDetail() {
             valueType="string"
             onSave={saveSrrField}
             disabled={detail.status === 'archived'}
-            render={(v, toggle) => (
+            render={(v) => (
               <p className="text-sm text-slate-600 leading-relaxed">
                 {String(v)}
-                <button onClick={toggle}
-                  className="ml-1 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500 align-top">
-                  <Edit3 className="w-3 h-3 inline" />
-                </button>
+                
               </p>
             )}
           />
@@ -450,7 +447,7 @@ export default function RequirementDetail() {
           placeholder="一行一条前置条件"
           onSave={saveSrrField}
           disabled={detail.status === 'archived'}
-          render={(v, toggle) => {
+          render={(v) => {
             const list = Array.isArray(v) ? v : []
             return (
               <>
@@ -459,10 +456,7 @@ export default function RequirementDetail() {
                     {list.map((p: string, i: number) => <li key={i}>{p}</li>)}
                   </ul>
                 ) : <p className="text-xs text-slate-400 italic">点击编辑添加前置条件</p>}
-                <button onClick={toggle}
-                  className="ml-1 opacity-0 group-hover:opacity-100 text-slate-400 hover:text-primary-500 align-top">
-                  <Edit3 className="w-3 h-3 inline" />
-                </button>
+                
               </>
             )
           }}
@@ -477,9 +471,9 @@ export default function RequirementDetail() {
           placeholder={'[{"order":1,"action":"用户操作","expect":"系统响应"}]'}
           onSave={saveSrrField}
           disabled={detail.status === 'archived'}
-          render={(v, toggle) => {
+          render={(v) => {
             const steps = Array.isArray(v) ? v : []
-            if (!steps.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加正常流程步骤</button></p>
+            if (!steps.length) return <p className="text-xs text-slate-400 italic"></p>
             return (
               <div className="space-y-2">
                 {steps.map((s: any, i: number) => (
@@ -491,10 +485,7 @@ export default function RequirementDetail() {
                     </div>
                   </div>
                 ))}
-                <button onClick={toggle}
-                  className="opacity-0 hover:opacity-100 text-xs text-primary-500">
-                  <Edit3 className="w-3 h-3 inline mr-1" />编辑步骤
-                </button>
+                
               </div>
             )
           }}
@@ -509,9 +500,9 @@ export default function RequirementDetail() {
           placeholder={'[{"name":"异常名","trigger":"触发条件","expect":"预期结果"}]'}
           onSave={saveSrrField}
           disabled={detail.status === 'archived'}
-          render={(v, toggle) => {
+          render={(v) => {
             const afs = Array.isArray(v) ? v : []
-            if (!afs.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加异常流程</button></p>
+            if (!afs.length) return <p className="text-xs text-slate-400 italic"></p>
             return (
               <div className="space-y-2">
                 {afs.map((f: any, i: number) => (
@@ -523,10 +514,7 @@ export default function RequirementDetail() {
                     </div>
                   </div>
                 ))}
-                <button onClick={toggle}
-                  className="opacity-0 hover:opacity-100 text-xs text-primary-500">
-                  <Edit3 className="w-3 h-3 inline mr-1" />编辑异常分支
-                </button>
+                
               </div>
             )
           }}
@@ -541,9 +529,9 @@ export default function RequirementDetail() {
           placeholder={'[{"field":"字段名","condition":"边界条件","expect":"预期结果"}]'}
           onSave={saveSrrField}
           disabled={detail.status === 'archived'}
-          render={(v, toggle) => {
+          render={(v) => {
             const bcs = Array.isArray(v) ? v : []
-            if (!bcs.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加边界条件</button></p>
+            if (!bcs.length) return <p className="text-xs text-slate-400 italic"></p>
             return (
               <div className="grid grid-cols-2 gap-2">
                 {bcs.map((b: any, i: number) => (
@@ -553,9 +541,7 @@ export default function RequirementDetail() {
                     <p className="text-xs text-slate-400 mt-0.5">→ {b.expect}</p>
                   </div>
                 ))}
-                <button onClick={toggle} className="opacity-0 hover:opacity-100 text-xs text-primary-500 col-span-2">
-                  <Edit3 className="w-3 h-3 inline mr-1" />编辑边界条件
-                </button>
+                
               </div>
             )
           }}
@@ -570,9 +556,9 @@ export default function RequirementDetail() {
           placeholder={'[{"id":"BR-001","rule":"规则描述","type":"validation"}]'}
           onSave={saveSrrField}
           disabled={detail.status === 'archived'}
-          render={(v, toggle) => {
+          render={(v) => {
             const rules = Array.isArray(v) ? v : []
-            if (!rules.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加业务规则</button></p>
+            if (!rules.length) return <p className="text-xs text-slate-400 italic"></p>
             return (
               <div className="space-y-1.5">
                 {rules.map((r: any, i: number) => (
@@ -582,9 +568,7 @@ export default function RequirementDetail() {
                     {typeof r !== 'string' && r.type && <span className="text-[10px] px-1 bg-slate-100 rounded text-slate-500">{r.type}</span>}
                   </div>
                 ))}
-                <button onClick={toggle} className="opacity-0 hover:opacity-100 text-xs text-primary-500">
-                  <Edit3 className="w-3 h-3 inline mr-1" />编辑业务规则
-                </button>
+                
               </div>
             )
           }}
@@ -599,9 +583,9 @@ export default function RequirementDetail() {
           placeholder={'[{"field":"字段","type":"string","required":true,"constraints":"约束","example":"示例"}]'}
           onSave={saveSrrField}
           disabled={detail.status === 'archived'}
-          render={(v, toggle) => {
+          render={(v) => {
             const dcs = Array.isArray(v) ? v : []
-            if (!dcs.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加数据约束</button></p>
+            if (!dcs.length) return <p className="text-xs text-slate-400 italic"></p>
             return (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -612,9 +596,7 @@ export default function RequirementDetail() {
                     ))}
                   </tbody>
                 </table>
-                <button onClick={toggle} className="opacity-0 hover:opacity-100 text-xs text-primary-500 mt-1">
-                  <Edit3 className="w-3 h-3 inline mr-1" />编辑数据约束
-                </button>
+                
               </div>
             )
           }}
@@ -629,9 +611,9 @@ export default function RequirementDetail() {
           placeholder={'[{"id":"AC-001","description":"验收描述","type":"functional"}]'}
           onSave={saveSrrField}
           disabled={detail.status === 'archived'}
-          render={(v, toggle) => {
+          render={(v) => {
             const acs = Array.isArray(v) ? v : []
-            if (!acs.length) return <p className="text-xs text-slate-400 italic"><button onClick={toggle} className="text-primary-500 hover:underline">点击添加验收标准</button></p>
+            if (!acs.length) return <p className="text-xs text-slate-400 italic"></p>
             return (
               <div className="space-y-1.5">
                 {acs.map((ac: any, i: number) => (
@@ -641,9 +623,7 @@ export default function RequirementDetail() {
                     {typeof ac !== 'string' && ac.type && <span className="text-[10px] px-1 bg-emerald-50 rounded text-emerald-600">{ac.type}</span>}
                   </div>
                 ))}
-                <button onClick={toggle} className="opacity-0 hover:opacity-100 text-xs text-primary-500">
-                  <Edit3 className="w-3 h-3 inline mr-1" />编辑验收标准
-                </button>
+                
               </div>
             )
           }}

@@ -113,7 +113,7 @@ export const requirements = {
       body: JSON.stringify({ srr_json: srrJson, raw_text: rawText }),
     }),
   upload: (raw: string, meta?: Record<string, string>) =>
-    request<{ req_id: string; srr: Record<string, unknown> }>('/requirements/upload', {
+    request<{ task_id: string; req_id: string; status: string }>('/requirements/upload', {
       method: 'POST',
       body: JSON.stringify({ raw_text: raw, ...meta }),
     }),

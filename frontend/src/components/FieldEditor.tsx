@@ -2,16 +2,19 @@ import { useState } from 'react'
 import { Edit3, Save, X } from 'lucide-react'
 
 /**
- * 通用 SRR 字段编辑器 — hover 显示编辑图标，点击进入内联编辑。
+ * 通用 SRR 字段编辑器。
+ *
+ * - 展示模式：显示标签 + 内容 + 编辑按钮（始终可见）
+ * - 编辑模式：标签 + textarea + 保存/取消按钮
  *
  * @param label       标签文本（如「功能概述」）
- * @param fieldPath   字段路径，点号分隔（如 'requirement.summary' | 'flows.happy_path.steps'）
- * @param value       当前值（字符串/对象/数组）
- * @param valueType   值类型：'string' 直接编辑 | 'object[]' JSON 编辑 | 可扩展
+ * @param fieldPath   字段路径，点号分隔
+ * @param value       当前值
+ * @param valueType   值类型：'string' | 'string[]' | 'object[]' | 'json'
  * @param onSave      保存回调 (fieldPath, newValue) => Promise<void>
- * @param render      展示模式渲染函数 (value, setEditMode) => JSX
+ * @param render      展示模式内容渲染函数 (value) => JSX
  * @param placeholder 编辑模式占位符
- * @param disabled    是否禁用编辑（如归档状态）
+ * @param disabled    是否禁用编辑（归档状态）
  */
 export default function FieldEditor({
   label,
@@ -27,7 +30,7 @@ export default function FieldEditor({
   fieldPath: string
   value: unknown
   onSave: (path: string, val: unknown) => Promise<void>
-  render: (value: unknown, toggle: () => void) => React.ReactNode
+  render: (value: unknown) => React.ReactNode
   valueType?: 'string' | 'string[]' | 'object[]' | 'json'
   placeholder?: string
   disabled?: boolean
@@ -60,6 +63,7 @@ export default function FieldEditor({
     }
   }
 
+  // ---- 编辑模式 ----
   if (editing) {
     return (
       <div>
@@ -69,17 +73,19 @@ export default function FieldEditor({
             value={draft}
             onChange={e => setDraft(e.target.value)}
             className="input-field text-sm flex-1 resize-none font-mono"
-            rows={Math.max(3, draft.split('\n').length)}
+            rows={Math.max(3, Math.min(12, draft.split('\n').length))}
             placeholder={placeholder}
             autoFocus
           />
           <div className="flex flex-col gap-1">
             <button onClick={commitEdit} disabled={saving}
-              className="p-1.5 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-50">
+              className="p-1.5 bg-primary-500 text-white rounded-lg hover:bg-primary-600 disabled:opacity-50"
+              title="保存">
               <Save className="w-3.5 h-3.5" />
             </button>
             <button onClick={cancelEdit}
-              className="p-1.5 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200">
+              className="p-1.5 bg-slate-100 text-slate-500 rounded-lg hover:bg-slate-200"
+              title="取消">
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -88,7 +94,23 @@ export default function FieldEditor({
     )
   }
 
-  return <div className="group">{render(value, startEdit)}</div>
+  // ---- 展示模式 ----
+  return (
+    <div className="group">
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="label">{label}</h3>
+        {!disabled && (
+          <button onClick={startEdit}
+            className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-slate-400 border border-slate-200 rounded-md
+                       hover:text-primary-600 hover:border-primary-300 hover:bg-primary-50 transition-colors">
+            <Edit3 className="w-3 h-3" />
+            编辑
+          </button>
+        )}
+      </div>
+      {render(value)}
+    </div>
+  )
 }
 
 // ---- 序列化/反序列化工具 ----
@@ -102,7 +124,6 @@ function serializeValue(val: unknown, type: string): string {
       return (Array.isArray(val) ? val : []).join('\n')
     case 'object[]':
       if (!Array.isArray(val)) return '[]'
-      // 去掉 id/order 等推导字段，只保留核心内容
       return JSON.stringify(
         val.map((item: any) => {
           const { order, ...rest } = item
@@ -127,7 +148,6 @@ function parseValue(text: string, type: string): unknown {
     case 'json': {
       const parsed = JSON.parse(text)
       if (type === 'object[]' && Array.isArray(parsed)) {
-        // 补回 order 字段
         return parsed.map((item: any, i: number) => ({ ...item, order: i + 1 }))
       }
       return parsed

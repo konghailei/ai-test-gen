@@ -16,8 +16,9 @@
 | Step 4 编译验证 | ✅ 已完成 | BACKEND OK + FRONTEND OK |
 | Step 5 启动服务 | ✅ 已完成 | backend / celery_worker 重启，frontend 重建 |
 | Step 6 端到端测试 | ✅ 已完成 | TC-01 ~ TC-25 全部执行 |
-| Step 7 记录问题 | ⏳ 进行中 | 3 个问题已确认，本文件即记录 |
-| Step 8 修复 Bug | ⏳ 待执行 | 修复问题 3（需求详情 API 缺失字段） |
+| Step 7 记录问题 | ✅ 已完成 | 3 个问题已确认并记录 |
+| Step 8 修复 Bug | ✅ 已完成 | 问题 3（API 缺失字段）已修复验证 |
+| Step 9 方案 A | ✅ 已完成 | 问题 1（raw_text 异步化）已修复验证 |
 
 ---
 
@@ -49,20 +50,34 @@
 
 ## 三、测试问题记录
 
-### 问题 1：raw_text 上传模式不返回 task_id
+### 问题 1：raw_text 上传模式不返回 task_id ✅ 已修复（方案 A）
 
 - **严重程度**：Medium
-- **类型**：设计决策（非 Bug）
+- **类型**：设计决策 → 已采用方案 A 修复
 - **复现步骤**：
   1. 调用 `POST /api/requirements/upload`，使用 `raw_text` 字段上传
   2. 响应中 `task_id` 字段为 `None`
   3. 仅文件上传（`MultiDocUploadRequest`）才会返回 `task_id` 进入异步任务模式
 - **根因**：raw_text 模式走同步解析路径，仅在解析耗时较长时才转为异步任务。当前实现下，raw_text 走完整的同步链路（含 ClarifyAgent），耗时虽长但直接返回最终结果。
 - **影响**：前端 `Requirements.tsx` 在 raw_text 上传后无法启动任务轮询，进度条立即消失；用户刷新页面后无法在任务管理页查看该任务。
-- **建议**：
-  - 方案 A（推荐）：保持 raw_text 同步模式不变，但在后端将 raw_text 也包装为异步任务（与文件上传统一），统一返回 task_id。需要调整 `upload_requirement` 端点逻辑。
-  - 方案 B：前端在 raw_text 上传后，若 task_id 为空则降级为同步等待模式，显示"解析中..."Loading 直到响应返回。
-- **是否已修复**：否（待用户决策方案）
+- **修复方案（方案 A）**：后端将 raw_text 也包装为异步任务（与文件上传统一），统一返回 task_id。
+- **修复内容**：
+  - **后端** [backend/app/api/requirements.py](file:///d:/git_down/ai-test-gen/backend/app/api/requirements.py#L193-L284) L193-284：重写 `upload_requirement` 端点为异步任务模式
+    - 立即创建 Requirement(status="analyzing") + AnalysisTask(status="pending")
+    - `await session.flush()` 确保 Requirement 落库（遵循 project_memory 中的 FK 约束约定）
+    - `asyncio.create_task(_run_requirement_analysis(...))` 启动后台协程
+    - 立即返回 `{task_id, req_id, status="analyzing"}`
+    - 复用 `_run_requirement_analysis` 后台协程（与文件上传共享同一解析流程）
+  - **前端** [frontend/src/api/client.ts](file:///d:/git_down/ai-test-gen/frontend/src/api/client.ts#L115-L119) L115-119：更新 `upload` 方法返回类型为 `{task_id, req_id, status}`
+- **验证结果**：
+  - ✅ 编译验证通过（BACKEND OK + tsc 无错误）
+  - ✅ 服务重启成功
+  - ✅ raw_text 上传返回 `task_id='TASK-1784168317780-3663'`, `req_id='REQ-1784168317780-8084'`, `status='analyzing'`
+  - ✅ 任务进度正常更新：parse(10%) → kb_search(40%) → clarify(70%) → done(100%)
+  - ✅ 任务最终完成：`status=completed, phase=done, progress=100%`
+  - ✅ 结果正确：8 个澄清问题，需求状态为 draft（待澄清）
+  - 注：总耗时约 3-4 分钟（LLM 调用慢，属于已知问题 2 性能范畴）
+- **是否已修复**：是 ✅
 
 ### 问题 2：submit_clarify 任务耗时约 2 分钟
 
