@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_admin, require_write, get_current_user, CurrentUser
 from app.agents.clarify_agent import clarify_agent
+from app.agents.impact_agent import ImpactAnalysisAgent
 from app.utils.id_gen import gen_requirement_id, gen_task_id
 from app.agents.req_agent import req_agent
 from app.db.database import get_session, async_session
@@ -2908,6 +2909,94 @@ class ImpactDescriptionUpdateRequest(BaseModel):
     """FP 影响说明编辑保存请求。"""
     description: str
     test_focus: str = ""
+
+
+# ============================================================================
+# v1.7: 需求级影响分析（模块+FP 依赖 + KB + 人工审核）
+# ============================================================================
+
+class ImpactConfirmRequest(BaseModel):
+    """人工审核确认受影响的 FP 列表。"""
+    confirmed_fp_ids: list[str]  # 确认影响的 FP ID 列表
+    edited_descriptions: dict[str, str] = {}  # fp_id → 编辑后的影响说明
+
+
+@router.post("/{req_id}/impact-analysis", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def run_impact_analysis(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """全量影响分析：模块依赖 + FP 依赖 + KB 查询。
+
+    Returns:
+        - requirement: 当前需求信息
+        - module_impact: 模块级影响
+        - affected_fps: 受影响 FP 列表（含 KB 上下文）
+        - total_affected: 受影响 FP 总数
+    """
+    await _load_active_requirement(req_id, session)
+    agent = ImpactAnalysisAgent()
+    result = await agent.analyze_requirement_impact(req_id, session)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return ApiResponse(success=True, data=result)
+
+
+@router.post("/{req_id}/impact-analysis/confirm", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def confirm_impact_analysis(
+    req_id: str,
+    body: ImpactConfirmRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """人工审核确认受影响 FP，写入 SRR impact_analysis。
+
+    操作：
+        1. 校验 FP 存在
+        2. 将确认的 FP 写入 SRR.impact_analysis，标记 is_affected=true
+        3. 已存在的同 fp_id 条目覆盖
+    """
+    req = await _load_active_requirement(req_id, session)
+    srr = req.srr_json or {}
+
+    impact_list = list(srr.get("impact_analysis", []))
+    confirmed_fps = []
+
+    for fp_id in body.confirmed_fp_ids:
+        fp = await session.get(FunctionalPoint, fp_id)
+        if not fp:
+            continue
+        entry = {
+            "fp_id": fp.id,
+            "fp_name": fp.name,
+            "fp_type": fp.fp_type,
+            "module_id": fp.module_id,
+            "source_req_id": fp.requirement_id,
+            "is_affected": True,
+            "impact_description": body.edited_descriptions.get(fp_id, f"受需求[{req.title}]影响"),
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        # 覆盖旧条目
+        impact_list = [e for e in impact_list if e.get("fp_id") != fp_id]
+        impact_list.append(entry)
+        confirmed_fps.append(entry)
+
+    srr["impact_analysis"] = impact_list
+    req.srr_json = srr
+
+    # 同时标记 FP 自身
+    for entry in confirmed_fps:
+        fp_in_scope = await session.get(FunctionalPoint, entry["fp_id"])
+        if fp_in_scope and fp_in_scope.requirement_id == req_id:
+            fp_in_scope.test_hints = fp_in_scope.test_hints or []
+            if "回归测试" not in fp_in_scope.test_hints:
+                fp_in_scope.test_hints.append("回归测试")
+
+    await session.commit()
+    logger.info("[ImpactAnalysis] 确认: req={}, confirmed_fps={}", req_id, len(confirmed_fps))
+    return ApiResponse(
+        success=True,
+        data={"confirmed_count": len(confirmed_fps), "impact_analysis": impact_list},
+    )
 
 
 @router.post("/{req_id}/fp/{fp_id}/impact-description", response_model=ApiResponse, dependencies=[Depends(require_write)])

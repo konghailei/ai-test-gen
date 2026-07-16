@@ -582,6 +582,126 @@ class ImpactAnalysisAgent:
             test_focus = "重点回归受影响功能点的 happy_path 和关键 alternate_flows。"
             return description, test_focus
 
+    # ========================================================================
+    # v1.7: 需求级影响分析（模块+FP 依赖全景 + KB 上下文 + 人工审核）
+    # ========================================================================
+
+    async def analyze_requirement_impact(
+        self,
+        req_id: str,
+        session,
+    ) -> dict:
+        """对一条需求做全量影响分析。"""
+        from sqlalchemy import func
+        from app.api.knowledge import search_kb
+
+        # 1. 加载需求和 FP
+        req_data = await session.get(Requirement, req_id)
+        if not req_data:
+            return {"error": f"需求 {req_id} 不存在"}
+
+        srr = req_data.srr_json or {}
+        involved_modules = list(set((req_data.modules or [])[:]))
+
+        fp_result = await session.execute(
+            select(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
+        )
+        own_fps = fp_result.scalars().all()
+        own_fp_ids = {fp.id for fp in own_fps}
+
+        # 2. 模块 BFS
+        mod_impact = await self._analyze_module_impact(involved_modules, session) if involved_modules else {
+            "direct_modules": [], "indirect_modules": [], "all_affected_modules": [],
+        }
+
+        # 3. FP 反向 BFS
+        all_affected_fps: dict[str, dict] = {}
+        for fp in own_fps:
+            try:
+                reverse_fps = await self._bfs_fp_reverse(fp.id, session)
+                for rf in reverse_fps:
+                    fid = rf["fp_id"]
+                    if fid not in own_fp_ids and fid not in all_affected_fps:
+                        all_affected_fps[fid] = {
+                            "fp_id": rf["fp_id"],
+                            "fp_name": rf["fp_name"],
+                            "reason": f"依赖 FP「{fp.name}」（{rf.get('relation_type','')}），深度 {rf['depth']}",
+                            "depth": rf["depth"],
+                            "source_fp_id": fp.id,
+                            "source_fp_name": fp.name,
+                        }
+            except Exception as e:
+                logger.warning("[ImpactAgent] FP BFS 失败 fp={}: {}", fp.id, str(e)[:100])
+
+        # 4. KB 查询
+        kb_contexts: dict[str, str] = {}
+        for fid, fp_info in list(all_affected_fps.items())[:10]:
+            try:
+                kb_hits = await search_kb(
+                    query=f"{fp_info['fp_name']} 功能 规格 规则",
+                    top_k=2,
+                )
+                if kb_hits:
+                    texts = []
+                    for h in kb_hits[:2]:
+                        t = h.get("content") or h.get("text") or ""
+                        texts.append(t[:500])
+                    kb_contexts[fid] = "\n\n".join(texts)
+            except Exception as e:
+                logger.warning("[ImpactAgent] KB 查询失败 fp={}: {}", fid, e)
+
+        # 5. 补充模块名
+        fp_ids_list = list(all_affected_fps.keys())
+        fp_mod_map: dict[str, str] = {}
+        if fp_ids_list:
+            mr = await session.execute(
+                select(FunctionalPoint.id, FunctionalPoint.module_id).where(FunctionalPoint.id.in_(fp_ids_list))
+            )
+            fp_mod_map = {row[0]: row[1] or "" for row in mr.all()}
+        mod_ids = {v for v in fp_mod_map.values() if v}
+        mod_name_map: dict[str, str] = {}
+        if mod_ids:
+            mn = await session.execute(select(Module.id, Module.name).where(Module.id.in_(mod_ids)))
+            mod_name_map = {row[0]: row[1] for row in mn.all()}
+
+        # 用例数
+        from app.db.models import TestCase
+        case_counts: dict[str, int] = {}
+        for fid in fp_ids_list:
+            cnt = await session.execute(
+                select(func.count()).select_from(TestCase).where(TestCase.functional_point_id == fid)
+            )
+            case_counts[fid] = cnt.scalar() or 0
+
+        affected_fps_list = []
+        for fid, info in all_affected_fps.items():
+            mid = fp_mod_map.get(fid, "")
+            affected_fps_list.append({
+                "fp_id": info["fp_id"],
+                "fp_name": info["fp_name"],
+                "module_id": mid,
+                "module_name": mod_name_map.get(mid, ""),
+                "impact_reason": info["reason"],
+                "depth": info["depth"],
+                "source_fp_name": info["source_fp_name"],
+                "kb_context": kb_contexts.get(fid, ""),
+                "existing_cases_count": case_counts.get(fid, 0),
+            })
+
+        return {
+            "requirement": {
+                "id": req_id,
+                "title": req_data.title,
+                "modules": involved_modules,
+                "fp_count": len(own_fps),
+            },
+            "module_impact": {
+                "direct": mod_impact.get("direct_modules", []),
+                "indirect": mod_impact.get("indirect_modules", []),
+            },
+            "affected_fps": affected_fps_list,
+            "total_affected": len(affected_fps_list),
+        }
 
 # 全局单例
 impact_agent = ImpactAnalysisAgent()
