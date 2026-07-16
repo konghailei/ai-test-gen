@@ -17,6 +17,24 @@ const BR_TYPE_LABELS: Record<string, string> = {
   audit: '审计',
   encryption: '加密',
   integration: '集成',
+  // LLM 常见变体
+  business: '业务',
+  constraint: '约束',
+  data_integrity: '数据完整性',
+  field_validation: '字段校验',
+  access_control: '访问控制',
+  format: '格式',
+  duplication: '去重',
+  mandatory: '必填',
+  uniqueness: '唯一性',
+  relationship: '关联',
+  logic: '逻辑',
+  prerequisite: '前置条件',
+  authorization: '授权',
+  authentication: '认证',
+  data_format: '数据格式',
+  range: '范围',
+  enumeration: '枚举',
 }
 
 // 验收标准类型

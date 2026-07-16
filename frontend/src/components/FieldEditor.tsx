@@ -10,7 +10,15 @@ const BR_TYPE_OPTIONS = [
   { value: 'timeout', label: '超时' }, { value: 'rate_limit', label: '限流' },
   { value: 'notification', label: '通知' }, { value: 'data_retention', label: '数据保留' },
   { value: 'audit', label: '审计' }, { value: 'encryption', label: '加密' },
-  { value: 'integration', label: '集成' },
+  { value: 'integration', label: '集成' }, { value: 'business', label: '业务' },
+  { value: 'constraint', label: '约束' }, { value: 'data_integrity', label: '数据完整性' },
+  { value: 'field_validation', label: '字段校验' }, { value: 'access_control', label: '访问控制' },
+  { value: 'format', label: '格式' }, { value: 'mandatory', label: '必填' },
+  { value: 'uniqueness', label: '唯一性' }, { value: 'authorization', label: '授权' },
+  { value: 'authentication', label: '认证' }, { value: 'prerequisite', label: '前置条件' },
+  { value: 'range', label: '范围' }, { value: 'enumeration', label: '枚举' },
+  { value: 'data_format', label: '数据格式' }, { value: 'relationship', label: '关联' },
+  { value: 'logic', label: '逻辑' }, { value: 'duplication', label: '去重' },
 ]
 const AC_TYPE_OPTIONS = [
   { value: 'functional', label: '功能' }, { value: 'performance', label: '性能' },
