@@ -122,6 +122,8 @@ export default function Layout() {
                           onClick={() => {
                             setSelectedProduct(p.id, p.name)
                             setShowProductMenu(false)
+                            // 切换产品后刷新页面，保证所有数据重新加载
+                            window.location.reload()
                           }}
                           className={`flex items-center gap-2.5 w-full px-3 py-2 text-sm transition-all ${
                             selectedProductId === p.id

@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react'
 import { TestTube, Search, Filter, CheckCircle2, XCircle, ThumbsUp, ThumbsDown, Loader2, Trash2, Eye } from 'lucide-react'
 import { testCases as tcApi, requirements as reqApi } from '../api/client'
+import { useProduct } from '../store/ProductContext'
 import type { TestCase, Requirement } from '../types'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
 
 export default function TestCases() {
+  const { selectedProductId } = useProduct()
   const [cases, setCases] = useState<TestCase[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -15,18 +17,18 @@ export default function TestCases() {
   const [feedbackLoading, setFeedbackLoading] = useState<string | null>(null)
 
   useEffect(() => {
-    reqApi.list(1, 100).then(r => setReqs(r.items || [])).catch(() => {})
-  }, [])
+    reqApi.list(1, 100, selectedProductId || undefined).then(r => setReqs(r.items || [])).catch(() => {})
+  }, [selectedProductId])
 
   const loadCases = () => {
     setLoading(true)
-    tcApi.list(filterReq || undefined, page).then(r => {
+    tcApi.list(filterReq || undefined, page, 20, selectedProductId || undefined).then(r => {
       setCases(r.items || [])
       setTotal(r.total || 0)
     }).catch(() => {}).finally(() => setLoading(false))
   }
 
-  useEffect(() => { loadCases() }, [page, filterReq])
+  useEffect(() => { loadCases() }, [page, filterReq, selectedProductId])
 
   const handleFeedback = async (caseId: string, accepted: boolean) => {
     setFeedbackLoading(caseId)

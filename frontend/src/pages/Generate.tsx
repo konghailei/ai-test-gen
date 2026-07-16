@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle } from 'lucide-react'
 import { requirements as reqApi, generateCases, testCases as tcApi } from '../api/client'
+import { useProduct } from '../store/ProductContext'
 import type { SSEEvent, Requirement, TestCase } from '../types'
 import SSEProgress from '../components/SSEProgress'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
@@ -11,6 +12,7 @@ const SSE_STAGES = ['parse', 'select_channel', 'clarify', 'gate', 'impact', 'ret
 export default function Generate() {
   const { id: paramId } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const { selectedProductId } = useProduct()
   const [reqs, setReqs] = useState<Requirement[]>([])
   const [selectedReq, setSelectedReq] = useState(paramId || '')
   const [loadingReqs, setLoadingReqs] = useState(true)
@@ -30,8 +32,8 @@ export default function Generate() {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    reqApi.list(1, 100).then(r => setReqs(r.items || [])).catch(() => {}).finally(() => setLoadingReqs(false))
-  }, [])
+    reqApi.list(1, 100, selectedProductId || undefined).then(r => setReqs(r.items || [])).catch(() => {}).finally(() => setLoadingReqs(false))
+  }, [selectedProductId])
 
   useEffect(() => {
     if (paramId) setSelectedReq(paramId)
