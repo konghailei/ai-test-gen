@@ -10,6 +10,7 @@ import rehypeRaw from 'rehype-raw'
 import FunctionalPoints from '../components/FunctionalPoints'
 import FPSRRViewer from '../components/FPSRRViewer'
 import FieldEditor from '../components/FieldEditor'
+import { brTypeLabel, acTypeLabel } from '../utils/labels'
 
 // ============================================================================
 // Markdown 自定义渲染组件
@@ -565,7 +566,7 @@ export default function RequirementDetail() {
                   <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
                     <span>{typeof r === 'string' ? r : `${r.id}: ${r.rule}`}</span>
-                    {typeof r !== 'string' && r.type && <span className="text-[10px] px-1 bg-slate-100 rounded text-slate-500">{r.type}</span>}
+                    {typeof r !== 'string' && r.type && <span className="text-[10px] px-1 bg-slate-100 rounded text-slate-500">{brTypeLabel(r.type)}</span>}
                   </div>
                 ))}
                 
@@ -620,7 +621,7 @@ export default function RequirementDetail() {
                   <div key={i} className="flex items-center gap-2 text-sm text-slate-600 pl-3 border-l-2 border-emerald-200">
                     <Clock className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
                     <span>{typeof ac === 'string' ? ac : `${ac.id}: ${ac.description}`}</span>
-                    {typeof ac !== 'string' && ac.type && <span className="text-[10px] px-1 bg-emerald-50 rounded text-emerald-600">{ac.type}</span>}
+                    {typeof ac !== 'string' && ac.type && <span className="text-[10px] px-1 bg-emerald-50 rounded text-emerald-600">{acTypeLabel(ac.type)}</span>}
                   </div>
                 ))}
                 

@@ -273,9 +273,9 @@ export const requirements = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
-  fpUpdate: (reqId: string, fpId: string, updates: { name?: string; module_id?: string; fp_type?: string }) =>
-    request<{ success: boolean }>(`/requirements/${reqId}/fp/${fpId}`, {
-      method: 'PATCH', body: JSON.stringify(updates),
+  fpUpdate: (reqId: string, fpId: string, updates: { name?: string; module_id?: string; fp_type?: string; srr_json?: any }) =>
+    request<{ id: string; name: string }>(`/requirements/${reqId}/fp/${fpId}`, {
+      method: 'PUT', body: JSON.stringify(updates),
     }),
   fpSearchNames: (reqId: string, q: string, productId?: string) => {
     const p = new URLSearchParams({ q })

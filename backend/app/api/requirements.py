@@ -2865,6 +2865,42 @@ async def fp_remove_dependency(
 
 
 # ============================================================================
+# v1.6.1: FP 子 SRR 手动编辑保存
+# ============================================================================
+
+class FPUpdateRequest(BaseModel):
+    name: str | None = None
+    module_id: str | None = None
+    srr_json: dict | None = None
+
+
+@router.put("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_update(
+    req_id: str,
+    fp_id: str,
+    body: FPUpdateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """更新功能点名称 / 模块 / 子 SRR。"""
+    await _load_active_requirement(req_id, session)
+    fp = await session.get(FunctionalPoint, fp_id)
+    if not fp or fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="功能点不存在")
+
+    if body.name is not None:
+        fp.name = body.name
+    if body.module_id is not None:
+        fp.module_id = body.module_id
+    if body.srr_json is not None:
+        fp.srr_json = body.srr_json
+
+    await session.commit()
+    logger.info("[FP] 更新: fp_id={}, fields={}", fp_id,
+                [k for k, v in {"name": body.name, "module_id": body.module_id, "srr_json": body.srr_json is not None}.items() if v])
+    return ApiResponse(success=True, message="功能点已更新", data={"id": fp.id, "name": fp.name})
+
+
+# ============================================================================
 # v3.0: FP 影响功能说明（自动生成 + 可编辑，写入 SRR impact_analysis 字段）
 # ============================================================================
 

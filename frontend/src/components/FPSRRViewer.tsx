@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import {
   ChevronDown, ChevronRight, Check, AlertTriangle, Sparkles, RefreshCw,
-  Loader2, Edit3, Save, X, Clock, ExternalLink, Layers, GitBranch, Share2,
+  Loader2, Edit3, Save, X, Clock, ExternalLink, Layers, GitBranch, Share2, FileCode,
 } from 'lucide-react'
 import { requirements as reqApi, dependencyGraph, products as prodApi } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import type { FPItem } from '../types'
+import { brTypeLabel, fpTypeLabel, acTypeLabel } from '../utils/labels'
 
 interface Props {
   reqId: string
@@ -41,6 +42,8 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
   const [impactLoading, setImpactLoading] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [merging, setMerging] = useState(false)
+  const [editSrrFpId, setEditSrrFpId] = useState<string | null>(null)
+  const [editSrrJson, setEditSrrJson] = useState('')
   const isArchived = status === 'archived'
   const navigate = useNavigate()
 
@@ -70,6 +73,21 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
 
   const approved = fps.filter(f => f.status === 'approved').length
   const allApproved = fps.length > 0 && approved === fps.length
+
+  // 编辑 FP 子 SRR
+  const handleEditSrr = (fpId: string, srrJson: any) => {
+    setEditSrrFpId(fpId)
+    setEditSrrJson(JSON.stringify(srrJson || {}, null, 2))
+  }
+  const handleSaveSrr = async () => {
+    if (!editSrrFpId) return
+    try {
+      const parsed = JSON.parse(editSrrJson)
+      await reqApi.fpUpdate(reqId, editSrrFpId, { srr_json: parsed })
+      await load()
+      setEditSrrFpId(null)
+    } catch { }
+  }
 
   // 全量重新拆分
   const handleResplit = async () => {
@@ -242,7 +260,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium text-slate-700">{fp.name}</span>
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
-                              {FP_TYPE_LABELS[fp.fp_type] || fp.fp_type}
+                              {fpTypeLabel(fp.fp_type)}
                             </span>
                             {fp.status === 'approved' ? (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-600">
@@ -279,6 +297,13 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                               title="AI 重新生成"
                             >
                               <RefreshCw className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleEditSrr(fp.id, fp.srr_json)}
+                              className="p-1.5 text-indigo-500 hover:bg-indigo-50 rounded-lg"
+                              title="编辑子 SRR"
+                            >
+                              <FileCode className="w-3.5 h-3.5" />
                             </button>
                             {editingId === fp.id ? (
                               <>
@@ -406,7 +431,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                                   {fp.srr_json.business_rules.map((r: any, i: number) => (
                                     <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-slate-200">
                                       {typeof r === 'string' ? r : (
-                                        <><span className="text-slate-400">{r.id}</span> <span className="text-[10px] px-1 bg-slate-100 rounded">{r.type}</span> {r.rule}</>
+                                        <><span className="text-slate-400">{r.id}</span> <span className="text-[10px] px-1 bg-slate-100 rounded">{brTypeLabel(r.type)}</span> {r.rule}</>
                                       )}
                                     </li>
                                   ))}
@@ -438,7 +463,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                                   {fp.srr_json.acceptance_criteria.map((ac: any, i: number) => (
                                     <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-emerald-200">
                                       {typeof ac === 'string' ? ac : (
-                                        <><span className="text-slate-400">{ac.id}</span> <span className="text-[10px] px-1 bg-emerald-50 rounded">{ac.type}</span> {ac.description}</>
+                                        <><span className="text-slate-400">{ac.id}</span> <span className="text-[10px] px-1 bg-emerald-50 rounded">{acTypeLabel(ac.type)}</span> {ac.description}</>
                                       )}
                                     </li>
                                   ))}
@@ -566,6 +591,26 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                 className="btn-primary flex items-center gap-2 disabled:opacity-50">
                 {merging ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitBranch className="w-4 h-4" />}
                 确认合并
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 编辑 FP 子 SRR 弹窗 */}
+      {editSrrFpId && (
+        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setEditSrrFpId(null)}>
+          <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[80vh] p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <FileCode className="w-5 h-5 text-indigo-500" /> 编辑子 SRR
+            </h2>
+            <p className="text-xs text-slate-400 mt-1 mb-3">修改 JSON 后点击保存，将替换当前功能点的子 SRR。</p>
+            <textarea value={editSrrJson} onChange={e => setEditSrrJson(e.target.value)}
+              className="input-field w-full text-xs font-mono resize-none" rows={20} autoFocus />
+            <div className="flex items-center justify-end gap-3 mt-4">
+              <button onClick={() => setEditSrrFpId(null)} className="btn-secondary">取消</button>
+              <button onClick={handleSaveSrr} className="btn-primary flex items-center gap-2">
+                <Save className="w-4 h-4" /> 保存子 SRR
               </button>
             </div>
           </div>

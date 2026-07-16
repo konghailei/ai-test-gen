@@ -1,11 +1,18 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { ReactNode } from 'react'
 import {
   Upload, FileText, Database, FolderTree, Settings, Search,
   BookOpen, ArrowLeft, Workflow, Cpu, GitBranch, ShieldCheck,
-  Layers, Zap,
+  Layers, Zap, Image, TestTube,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { health } from '../api/client'
+
+interface ManualStep {
+  title: string
+  desc: string
+  img?: string
+}
 
 interface ManualSection {
   id: string
@@ -17,6 +24,7 @@ interface ManualSection {
   logic: { step: string; detail: string }[]
   config?: { key: string; value: string; note?: string }[]
   diagram?: ReactNode
+  steps?: ManualStep[]
 }
 
 /* ===================== 架构图组件 ===================== */
@@ -146,6 +154,10 @@ const SECTIONS: ManualSection[] = [
     title: '系统架构总览',
     subtitle: 'LangGraph DAG 流水线 + 存储分层',
     color: 'text-slate-600 bg-slate-50',
+    steps: [
+      { title: '登录系统', desc: '使用默认管理员账号 admin / 888888 登录；登录后可在顶部栏「切换产品」选择当前工作产品。', img: 'login.png' },
+      { title: '查看系统仪表盘', desc: '登录后进入「仪表盘」，总览需求数、测试用例数、LLM 配置状态与最近活动，快速掌握系统运行概况。', img: 'dashboard.png' },
+    ],
     features: [
       { label: '流水线', desc: '上传 → 解析 → 澄清 → 质量门禁 → 影响分析 → KB 检索 → 生成 → 审核，由 LangGraph 编排' },
       { label: '通道选择', desc: 'select_channel 按需求复杂度分流：FULL 走澄清闭环，FAST 直接进质量门禁' },
@@ -179,6 +191,12 @@ const SECTIONS: ManualSection[] = [
     title: '需求管理',
     subtitle: '上传 → 解析 → KB 补全 → 澄清 → 归档',
     color: 'text-blue-600 bg-blue-50',
+    steps: [
+      { title: '上传需求文档', desc: '在「需求管理」点击「上传需求」，填写需求名称、选择所属项目/版本与关联模块，上传 .md/.docx/.txt 后点击「上传并解析」，系统进入 LLM 分析 → KB 检索 → 澄清 → 影响分析流水线。', img: 'requirements-upload.png' },
+      { title: '查看需求列表', desc: '解析完成后在列表中查看需求，支持按项目/状态/优先级筛选与标题模糊搜索，快速定位目标需求。', img: 'requirements-list.png' },
+      { title: '查看需求详情', desc: '点击需求进入详情页，可查看结构化 SRR、功能点、影响分析与追溯矩阵，并支持修改上线时间。', img: 'requirement-detail.png' },
+      { title: '回答澄清问题', desc: '对待补充的需求进入「澄清」页，逐条回答系统基于 KB 检索与维度检测生成的问题并提交，系统据此重新生成更精确的 SRR。', img: 'requirement-clarify.png' },
+    ],
     features: [
       { label: '上传需求', desc: 'POST /requirements/upload 传入 raw_text（.md/.docx 原文），系统自动解析为结构化 SRR JSON' },
       { label: '自动解析', desc: 'ReqAgent 调用 LLM 将非结构化文本转为标准化需求格式' },
@@ -224,6 +242,11 @@ const SECTIONS: ManualSection[] = [
     title: '增量需求与基线补全',
     subtitle: '优化需求参考历史版本自动补全',
     color: 'text-indigo-600 bg-indigo-50',
+    steps: [
+      { title: '先归档 V1 完整需求', desc: '先上传并归档原始完整需求（如「登录」），使其写入 Milvus，成为后续增量检索的基线来源。', img: 'requirements-list.png' },
+      { title: '上传 V2 优化需求', desc: '上传仅描述增量优化的 V2 需求（如「登录功能优化需求 V2.0：增加图形验证码」），系统自动判定为增量需求并检索 V1。', img: 'requirement-detail.png' },
+      { title: '确认基线自动补全', desc: '在需求详情查看自动继承的 happy_path / business_rules / data_constraints 等字段（写入 _baseline_context），无需人工重复录入。', img: 'requirement-detail.png' },
+    ],
     features: [
       { label: '增量识别', desc: '需求文本含"本文档仅描述""完整上下文请参见"等信号 → _looks_like_incremental 判定为增量需求' },
       { label: '历史检索', desc: 'ClarifyAgent 在同 product_id 下检索已归档的历史需求，作为基线来源' },
@@ -261,6 +284,11 @@ const SECTIONS: ManualSection[] = [
     title: '测试用例生成',
     subtitle: 'SRR → 多维用例 → 审核 → 导出',
     color: 'text-green-600 bg-green-50',
+    steps: [
+      { title: '进入用例生成', desc: '选择已就绪（active）的需求进入「用例生成」页，确认 SRR 后点击「开始生成」，系统基于 SRR 与测试模式 SSE 流式生成多维用例（功能/边界/异常/安全）。', img: 'generate.png' },
+      { title: '查看生成结果与质量评分', desc: '生成完成后逐条查看用例与 ReviewAgent 质量评分（完整度/明确性/可执行性），可逐条接受 / 拒绝 / 编辑。', img: 'generate.png' },
+      { title: '在任务管理查看进度', desc: '生成任务可在顶部「任务管理」实时查看进度与状态（含失败/中断提示），无需阻塞等待。', img: 'tasks.png' },
+    ],
     features: [
       { label: '生成用例', desc: '选择已澄清（active）的需求，AI 自动生成多维测试用例（功能/边界/异常/安全）' },
       { label: '审核编辑', desc: '生成后可逐条审核、编辑、接受或拒绝用例' },
@@ -298,6 +326,10 @@ const SECTIONS: ManualSection[] = [
     title: '知识库',
     subtitle: 'Milvus 向量检索 + PostgreSQL 结构化存储',
     color: 'text-purple-600 bg-purple-50',
+    steps: [
+      { title: '查看知识库', desc: '在「知识库」查看已归档需求，绿色「已归档」= PostgreSQL 已存储，蓝色「已向量化」= Milvus 已索引；支持标题搜索与向量化状态筛选。', img: 'knowledge.png' },
+      { title: '知识问答', desc: '在「知识问答」输入自然语言问题，系统基于 Milvus 检索 + LLM 流式输出回答，支持连续追问；可配置知识库专属 LLM。', img: 'knowledge-qa.png' },
+    ],
     features: [
       { label: '归档入库', desc: '需求归档后写入 Milvus 向量库，同时 PostgreSQL 保留结构化数据，供后续检索增强' },
       { label: '知识问答', desc: '基于知识库的自然语言问答，支持 SSE 流式输出和追问' },
@@ -345,6 +377,10 @@ const SECTIONS: ManualSection[] = [
     title: '项目与模块',
     subtitle: '标签页管理 + 版本号 + 依赖图谱',
     color: 'text-amber-600 bg-amber-50',
+    steps: [
+      { title: '管理项目与模块', desc: '在「项目与模块」分标签页管理项目（含语义化版本号，如 1.0 / 2.1.0）与功能模块，需求可关联多个模块。', img: 'projects-modules.png' },
+      { title: '查看依赖图谱', desc: '在「依赖图谱」可视化模块 / 功能点依赖关系，支持拖拽编辑连线，并基于 BFS 进行影响分析。', img: 'dependency-graph.png' },
+    ],
     features: [
       { label: '项目管理', desc: '按产品管理项目，每个项目含版本号（如 1.0、2.1.0），用于 KB 检索版本溯源' },
       { label: '模块管理', desc: '管理产品下的功能模块，需求可关联多个模块' },
@@ -378,6 +414,11 @@ const SECTIONS: ManualSection[] = [
     title: '管理后台',
     subtitle: '产品 / 用户 / 角色 / LLM / 提示词 / KB 诊断',
     color: 'text-red-600 bg-red-50',
+    steps: [
+      { title: '管理产品 / 用户 / 角色', desc: '在管理后台维护产品（可见性）、用户账号与角色权限，实现 RBAC 最小化授权。', img: 'admin-products.png' },
+      { title: '配置 LLM 与提示词', desc: '在「系统设置」配置多供应商 LLM（主备模式）；在「提示词管理」维护 6 个 Agent 的 Prompt 模板，支持恢复默认。', img: 'admin-settings.png' },
+      { title: '查看知识库诊断', desc: '在管理后台「知识库」查看 Milvus 连接状态、各集合实体数与 Embedding 模型状态，快速定位 KB 问题。', img: 'admin-kb.png' },
+    ],
     features: [
       { label: '产品管理', desc: '创建/删除产品，配置产品可见性（指定用户可见）' },
       { label: '用户管理', desc: '创建用户、分配角色、管理权限' },
@@ -418,6 +459,10 @@ const SECTIONS: ManualSection[] = [
     title: 'KB 检索规则',
     subtitle: '混合检索 + 阈值 + 二次校验 + 版本去重',
     color: 'text-indigo-600 bg-indigo-50',
+    steps: [
+      { title: '查看检索诊断面板', desc: '管理员在管理后台「知识库」诊断面板查看混合检索（向量 + BM25 + RRF + 重排）状态、集合数量与元数据，验证检索链路健康。', img: 'admin-kb.png' },
+      { title: '理解检索规则', desc: '同一功能检索出多个需求时以上线时间靠后为准；问答相似度阈值 0.40、基线补全阈值 0.85；仅检索 status=archived；向量 / BM25 互为降级。', img: 'admin-kb.png' },
+    ],
     features: [
       { label: '上线时间优先', desc: '当知识库中同一功能检索出两个内容不同的需求时，以上线时间靠后的为准' },
       { label: '版本溯源', desc: '检索结果标注来源项目版本号，清晰区分哪个版本新增或变更了需求' },
@@ -467,14 +512,96 @@ const SECTIONS: ManualSection[] = [
       { key: 'KB 查询日志', value: 'srr_json._kb_query_logs', note: '顶层 key，记录每次检索的查询和结果' },
     ],
   },
+  {
+    id: 'functional-points',
+    icon: Layers,
+    title: '功能点管理',
+    subtitle: '原始文档 → FP 拆分 → 子 SRR → 审核 → 用例',
+    color: 'text-teal-600 bg-teal-50',
+    features: [
+      { label: '一体式提取', desc: 'ReqAgent 解析 SRR 后自动从原始文档拆分功能点（FP），每个 FP 含 name / fp_type / sub_srr / test_hints' },
+      { label: 'FP 审核', desc: '用户在「功能点 SRR」Tab 审核通过（approved）后解锁用例生成；AI 重生成后回退 pending_review' },
+      { label: '依赖关系', desc: '上传时自动提取 FP 间 5 种依赖：depends_on / data_flows / invariants / lifecycle_scenarios / conflicts_with' },
+      { label: '依赖图谱', desc: '跨需求 FP 依赖可视化，「依赖图谱」页展示并支持影响分析' },
+      { label: '影响分析', desc: '基于 FP 依赖 BFS 遍历传播变更影响（默认 3 层），返回受影响功能点与聚合模块' },
+    ],
+    logic: [
+      {
+        step: 'FP 拆分',
+        detail: 'ReqAgent._fp_extract_from_raw 在 SRR 解析后自动触发，按业务能力粒度拆分（单功能 1-2 个 FP，复杂需求 6-12 个），输出 functional_points[] 与 dependencies[]，存入 functional_points / fp_dependencies 表',
+      },
+      {
+        step: '审核闭环',
+        detail: '每个 FP 初始 pending_review；用户在需求详情「功能点 SRR」Tab 审核通过 → approved，所有 FP 通过后解锁用例生成；AI 重生成（fp_regenerate）后状态回退 pending_review 需重新审核',
+      },
+      {
+        step: '依赖与影响',
+        detail: 'FP 依赖存入 fp_dependencies 表；ImpactAnalysis 基于 BFS 遍历（depends_on 反向传播、data_flows / lifecycle_scenarios 正向传播），默认深度 3 层，返回受影响 FP 与聚合模块列表',
+      },
+    ],
+    config: [
+      { key: 'FP 状态机', value: 'pending_review / approved / archived', note: '审核通过后方可生成用例' },
+      { key: '依赖类型', value: 'depends_on / data_flows / invariants / lifecycle_scenarios / conflicts_with', note: '5 种功能点间依赖' },
+      { key: 'BFS 深度', value: '默认 3 层', note: '影响分析传播上限' },
+      { key: '拆分粒度', value: '业务能力级', note: '如「登录」= 1 个 FP' },
+    ],
+    steps: [
+      { title: '查看功能点', desc: '在需求详情「功能点」/「功能点 SRR」Tab 按模块分组查看自动拆分的功能点及其子 SRR（flows / business_rules / constraints / acceptance_criteria）。', img: 'requirement-fp.png' },
+      { title: '审核与 AI 重生成', desc: '对功能点审核通过（approved 后方可生成用例），或输入提示让 AI 重新生成子 SRR（重生成后回退待审核）。', img: 'requirement-fp.png' },
+      { title: '查看功能点依赖图谱', desc: '在「依赖图谱」查看功能点间 depends_on / data_flows 等依赖关系与变更影响范围。', img: 'dependency-graph.png' },
+    ],
+  },
+  {
+    id: 'testcases',
+    icon: TestTube,
+    title: '测试用例管理',
+    subtitle: '浏览 / 审核 / 编辑 / 多格式导出',
+    color: 'text-cyan-600 bg-cyan-50',
+    features: [
+      { label: '用例浏览', desc: '按需求 / 模块 / 状态筛选查看生成的测试用例，支持标题搜索' },
+      { label: '审核编辑', desc: '逐条查看用例（标题/步骤/预期/优先级/类别），可编辑、接受或拒绝' },
+      { label: '追溯矩阵', desc: '用例与需求双向追溯，覆盖率矩阵可视化' },
+      { label: '多格式导出', desc: '支持 UTCF JSON / Markdown / Gherkin / pytest 多格式导出，对接既有测试框架' },
+    ],
+    logic: [
+      {
+        step: '用例存储',
+        detail: '生成完成后用例批量写入 PostgreSQL test_cases 表，关联 requirement_id 与 module_id，支持按需求 / 模块检索与状态过滤',
+      },
+      {
+        step: '追溯关系',
+        detail: '每条用例记录来源需求与功能点，构建需求-用例追溯矩阵，计算覆盖率（已生成用例 / 需求功能点）',
+      },
+      {
+        step: '多格式导出',
+        detail: '前端按选中格式（UTCF / Markdown / Gherkin / pytest）将用例序列化导出，便于直接导入测试框架执行',
+      },
+    ],
+    config: [
+      { key: '导出格式', value: 'UTCF JSON / Markdown / Gherkin / pytest', note: '覆盖主流测试框架' },
+      { key: '关联字段', value: 'requirement_id + module_id + fp_id', note: '支撑双向追溯' },
+      { key: '优先级联动', value: 'P0-P3', note: '与需求优先级保持一致' },
+    ],
+    steps: [
+      { title: '浏览测试用例', desc: '在「测试用例」按需求 / 模块 / 状态筛选查看生成的用例列表，快速定位目标用例。', img: 'testcases.png' },
+      { title: '审核与编辑用例', desc: '逐条查看用例的标题、步骤、预期与优先级，可编辑内容或接受 / 拒绝。', img: 'testcases.png' },
+      { title: '多格式导出', desc: '选择 UTCF JSON / Markdown / Gherkin / pytest 等格式导出用例，直接对接既有测试框架。', img: 'testcases.png' },
+    ],
+  },
 ]
 
 export default function UserManual() {
   const navigate = useNavigate()
   const [activeId, setActiveId] = useState(SECTIONS[0].id)
+  const [version, setVersion] = useState('')
 
   const active = SECTIONS.find(s => s.id === activeId) || SECTIONS[0]
   const ActiveIcon = active.icon
+
+  // 版本号统一取自后端 /api/health（app.__version__），与系统版本保持一致
+  useEffect(() => {
+    health().then(h => setVersion(h.version || '')).catch(() => {})
+  }, [])
 
   return (
     <div className="flex gap-6 h-[calc(100vh-8rem)]">
@@ -528,8 +655,16 @@ export default function UserManual() {
               <ActiveIcon className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-slate-800">{active.title}</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-bold text-slate-800">{active.title}</h1>
+                {version && (
+                  <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 text-xs font-mono">v{version}</span>
+                )}
+              </div>
               <p className="text-xs text-slate-400 mt-0.5">{active.subtitle}</p>
+              {version && (
+                <p className="text-[11px] text-slate-300 mt-0.5">📌 用户手册 v{version} · 与系统版本保持一致</p>
+              )}
             </div>
           </div>
         </div>
@@ -550,6 +685,37 @@ export default function UserManual() {
               ))}
             </div>
           </section>
+
+          {/* 操作步骤（截图 + 文字） */}
+          {active.steps && active.steps.length > 0 && (
+            <section>
+              <div className="flex items-center gap-2 mb-4">
+                <Image className="w-4 h-4 text-primary-500" />
+                <h2 className="text-base font-semibold text-slate-700">操作步骤</h2>
+              </div>
+              <div className="space-y-6">
+                {active.steps.map((s, i) => (
+                  <div key={i} className="rounded-xl border border-slate-100 overflow-hidden">
+                    <div className="flex items-center gap-2 px-4 py-3 bg-slate-50/60 border-b border-slate-100">
+                      <span className="w-6 h-6 rounded-full bg-primary-500 text-white flex items-center justify-center text-xs font-bold shrink-0">{i + 1}</span>
+                      <span className="text-sm font-semibold text-slate-700">{s.title}</span>
+                    </div>
+                    <div className="p-4 space-y-3">
+                      <p className="text-sm text-slate-600 leading-relaxed">{s.desc}</p>
+                      {s.img && (
+                        <img
+                          src={`/manual-imgs/${s.img}`}
+                          alt={s.title}
+                          loading="lazy"
+                          className="w-full rounded-lg border border-slate-100"
+                        />
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           {/* 架构图 */}
           {active.diagram && (
