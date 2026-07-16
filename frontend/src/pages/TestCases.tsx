@@ -4,6 +4,7 @@ import { testCases as tcApi, requirements as reqApi, generateCases } from '../ap
 import { useProduct } from '../store/ProductContext'
 import type { TestCase, Requirement, SSEEvent } from '../types'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
+import { caseTypeLabel } from '../utils/labels'
 
 export default function TestCases() {
   const { selectedProductId } = useProduct()
@@ -200,7 +201,7 @@ export default function TestCases() {
                       <p className="text-sm font-medium text-slate-700 truncate max-w-[250px]">{c.title}</p>
                     </td>
                     <td className="px-5 py-3 text-center">
-                      <span className="badge bg-blue-50 text-blue-600">{c.type}</span>
+                      <span className="badge bg-blue-50 text-blue-600">{caseTypeLabel(c.type)}</span>
                     </td>
                     <td className="px-5 py-3 text-center">
                       <span className={priorityBadge(c.priority)}>{c.priority}</span>
@@ -261,7 +262,7 @@ export default function TestCases() {
             <div className="grid grid-cols-4 gap-3 mb-4">
               <div className="text-center p-2 bg-slate-50 rounded-lg">
                 <p className="text-xs text-slate-400">类型</p>
-                <p className="text-sm font-medium text-slate-700">{selectedCase.type}</p>
+                <p className="text-sm font-medium text-slate-700">{caseTypeLabel(selectedCase.type)}</p>
               </div>
               <div className="text-center p-2 bg-slate-50 rounded-lg">
                 <p className="text-xs text-slate-400">置信度</p>

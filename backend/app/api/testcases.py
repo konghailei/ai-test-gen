@@ -265,7 +265,27 @@ async def update_testcase(
 
 
 # ============================================================================
-# 4. 删除用例
+# 4. 批量删除（按需求）
+# ============================================================================
+
+@router.delete("/batch/by-requirement/{req_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def batch_delete_by_requirement(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """按需求批量删除所有测试用例。"""
+    from sqlalchemy import delete as sa_delete
+    from app.db.models import TestCase as TC
+
+    result = await session.execute(sa_delete(TC).where(TC.req_id == req_id))
+    await session.commit()
+
+    logger.info("[API/testcases] 批量删除: req_id={}, deleted={}", req_id, result.rowcount)
+    return ApiResponse(success=True, data={"deleted_count": result.rowcount})
+
+
+# ============================================================================
+# 5. 删除单个用例
 # ============================================================================
 
 @router.delete("/{case_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
@@ -302,22 +322,6 @@ async def delete_testcase(
         message="用例已删除",
         data={"deleted_id": case_id},
     )
-
-
-@router.delete("/batch/by-requirement/{req_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
-async def batch_delete_by_requirement(
-    req_id: str,
-    session: AsyncSession = Depends(get_session),
-) -> ApiResponse:
-    """按需求批量删除所有测试用例。"""
-    from sqlalchemy import delete as sa_delete
-    from app.db.models import TestCase as TC
-
-    result = await session.execute(sa_delete(TC).where(TC.req_id == req_id))
-    await session.commit()
-
-    logger.info("[API/testcases] 批量删除: req_id={}, deleted={}", req_id, result.rowcount)
-    return ApiResponse(success=True, data={"deleted_count": result.rowcount})
 
 
 # ============================================================================

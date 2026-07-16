@@ -73,3 +73,22 @@ export function acTypeLabel(type: string): string {
 export function fpTypeLabel(type: string): string {
   return FP_TYPE_LABELS[type] || type
 }
+
+// 测试用例类型
+const CASE_TYPE_LABELS: Record<string, string> = {
+  functional: '功能',
+  boundary: '边界',
+  exception: '异常',
+  security: '安全',
+  performance: '性能',
+  regression: '回归',
+  integration: '集成',
+  ui: '界面',
+  api: '接口',
+  data: '数据',
+}
+
+/** 获取测试用例类型的中文名 */
+export function caseTypeLabel(type: string): string {
+  return CASE_TYPE_LABELS[type] || type
+}
