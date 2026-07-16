@@ -734,7 +734,7 @@ class Orchestrator:
         impact_result = state.get("impact_result", {}) or {}
         req_id = state.get("req_id", "")
 
-        enable_multi_type = channel_config.get("enable_multi_type_generation", False)
+        enable_multi_type = channel_config.get("enable_multi_type_generation", True)
         impact_guidance = impact_result.get("generation_guidance", "") or ""
 
         # v1.4：从 DB 加载已拆分的功能点，用于 FP 定向生成
