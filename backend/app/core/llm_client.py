@@ -213,6 +213,9 @@ class LLMClient:
         self._provider_disabled_until: dict[str, float] = {}
         # 最近一次调用使用的模型名（用于错误报告）
         self._last_model: str = ""
+        # 优化 4：LLM 响应缓存（进程内 LRU，仅缓存 temperature=0 的确定性调用）
+        self._response_cache: dict[str, str] = {}
+        self._CACHE_MAX_SIZE = 100
 
     async def call(
         self,
@@ -250,6 +253,15 @@ class LLMClient:
         if not self._breaker.allow_request():
             raise LLMBreakerOpenError("LLM 断路器开启，服务暂不可用（错误率超阈值）")
 
+        # 优化 4：LLM 响应缓存（仅缓存 temperature=0 的确定性调用）
+        import hashlib
+        cache_key = hashlib.md5(
+            f"{prompt}|{system_prompt or ''}|{temperature}|{model or ''}".encode()
+        ).hexdigest()
+        if temperature == 0 and cache_key in self._response_cache:
+            logger.debug("[LLM] 缓存命中: key={}", cache_key[:12])
+            return self._response_cache[cache_key]
+
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -268,6 +280,12 @@ class LLMClient:
                 )
                 self._breaker.record_success()
                 self._provider_failures.pop(provider["key"], None)
+                # 优化 4：写入缓存（仅 temperature=0 的确定性调用）
+                if temperature == 0:
+                    if len(self._response_cache) >= self._CACHE_MAX_SIZE:
+                        self._response_cache.pop(next(iter(self._response_cache)))
+                    self._response_cache[cache_key] = result
+                    logger.debug("[LLM] 缓存写入: key={}", cache_key[:12])
                 return result
             except _RetryableError as e:
                 # 重试耗尽 → 记录失败，尝试下一提供商

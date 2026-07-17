@@ -25,6 +25,7 @@ from __future__ import annotations
 from app.exporters.markdown import export_markdown
 from app.exporters.gherkin import export_gherkin
 from app.exporters.pytest_code import export_pytest
+from app.exporters.xmind import export_to_xmind
 from app.utils.logger import logger
 
 
@@ -32,7 +33,7 @@ from app.utils.logger import logger
 # 支持的导出格式
 # ============================================================================
 
-SUPPORTED_FORMATS: tuple[str, ...] = ("json", "markdown", "gherkin", "pytest")
+SUPPORTED_FORMATS: tuple[str, ...] = ("json", "markdown", "gherkin", "pytest", "xmind")
 
 # 每种格式对应的 MIME 类型和文件后缀
 _FORMAT_META: dict[str, tuple[str, str]] = {
@@ -40,6 +41,7 @@ _FORMAT_META: dict[str, tuple[str, str]] = {
     "markdown": ("text/markdown; charset=utf-8", "testcases.md"),
     "gherkin": ("text/plain; charset=utf-8", "testcases.feature"),
     "pytest": ("text/x-python; charset=utf-8", "testcases.py"),
+    "xmind": ("application/zip", "testcases.xmind"),
 }
 
 
@@ -78,6 +80,8 @@ def export_cases(cases: list[dict], fmt: str) -> tuple[str, str, str]:
         content = export_gherkin(cases)
     elif fmt == "pytest":
         content = export_pytest(cases)
+    elif fmt == "xmind":
+        content = export_to_xmind(cases)
     else:
         # json 由 API 层处理，此处不会执行
         import json

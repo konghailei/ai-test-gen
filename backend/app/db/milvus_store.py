@@ -622,6 +622,21 @@ class MilvusVectorStore:
         """从知识库删除用例。"""
         self.delete_test_case(case_id)
 
+    def delete_cases_by_req_id(self, req_id: str) -> None:
+        """按 req_id 批量删除用例向量（优化 2：重新生成前清理旧用例）。
+
+        Args:
+            req_id: 需求 ID
+
+        Note:
+            Milvus delete 不返回删除计数，仅保证删除完成后无残留。
+            调用方应在重新生成用例前调用，避免同一 req_id 产生重复用例。
+        """
+        self._ensure_connected()
+        collection = self._get_collection("test_cases")
+        collection.delete(f'metadata["req_id"] == "{_safe_id(req_id, "req_id")}"')
+        collection.flush()
+
     # ========================================================================
     # 模式向量操作
     # ========================================================================

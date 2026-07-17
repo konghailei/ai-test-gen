@@ -29,6 +29,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from app.config import settings
 from app.core.llm_client import llm_client
 from app.core import prompt_manager
 from app.db.milvus_store import vector_store
@@ -84,6 +85,14 @@ class GenAgent:
         logger.info("[GenAgent] ▶ 开始生成: req_id={}, multi_type={}, has_impact_guidance={}, fp_count={}",
                     req_id, enable_multi_type, bool(impact_guidance), len(functional_points or []))
 
+        # 0. 清理该 req_id 的旧用例向量（优化 2：避免重新生成时产生重复用例）
+        if req_id:
+            try:
+                await asyncio.to_thread(vector_store.delete_cases_by_req_id, req_id)
+                logger.info("[GenAgent] 已清理旧用例向量: req_id={}", req_id)
+            except Exception as e:
+                logger.debug("[GenAgent] 清理旧用例失败（不阻断）: {}", str(e)[:120])
+
         # 1. 检索 KB 相似用例（Few-shot）
         few_shot_cases = await asyncio.to_thread(self._search_similar_cases, srr)
 
@@ -103,15 +112,23 @@ class GenAgent:
         )
         logger.debug("[GenAgent] Prompt 构建完成: len={}", len(user_prompt))
 
-        # 4. 调用 LLM 生成用例
+        # 4. 调用 LLM 生成用例（优化 3：根据 FP 数量动态调整 max_tokens）
+        fp_count = len(functional_points or [])
+        if fp_count > 10:
+            dynamic_max_tokens = 16384  # 大需求翻倍，避免用例数不足
+        elif fp_count > 5:
+            dynamic_max_tokens = 12288
+        else:
+            dynamic_max_tokens = 8192  # 默认，防止 LLM 退化
         try:
-            logger.info("[GenAgent] 调用 LLM: temperature=0.4, multi_type={}", enable_multi_type)
+            logger.info("[GenAgent] 调用 LLM: temperature=0.4, multi_type={}, max_tokens={} (fp_count={})",
+                        enable_multi_type, dynamic_max_tokens, fp_count)
             raw_cases = await self._llm.call_json(
                 prompt=user_prompt,
                 system_prompt=prompt_manager.get("gen_agent", "SYSTEM_PROMPT"),
                 schema_hint={"test_suite": list} if False else None,
                 temperature=0.4,  # 用例生成需要一定创造性
-                max_tokens=8192,  # 限制生成长度，防止 LLM 退化（连续重复字符）
+                max_tokens=dynamic_max_tokens,
             )
         except Exception as e:
             logger.error("[GenAgent] LLM 调用失败: {}", str(e)[:200])
@@ -135,11 +152,11 @@ class GenAgent:
         logger.info("[GenAgent] 后处理完成: cases={}, module_prefix={}, type_dist={}",
                     len(cases), module_prefix, type_dist)
 
-        # 7. 写入向量库（v2.2: metadata 增加 product_id）
+        # 7. 写入向量库（优化 1：并发写入，N 个用例 asyncio.gather 并发执行）
         product_id = srr.get("requirement", {}).get("product_id", "")
-        vb_success = 0
-        vb_fail = 0
-        for case in cases:
+
+        async def _write_one_case(case: dict) -> bool:
+            """并发写入单个用例向量，返回是否成功。"""
             try:
                 await asyncio.to_thread(
                     vector_store.add_test_case,
@@ -152,13 +169,23 @@ class GenAgent:
                         "priority": case.get("priority", ""),
                     },
                 )
-                vb_success += 1
+                return True
             except Exception as e:
-                vb_fail += 1
                 logger.debug("[GenAgent] 向量库写入失败（不阻断）: case_id={}, err={}",
                              case.get("id", ""), str(e)[:120])
+                return False
+
+        import time as _time
+        _vb_t0 = _time.time()
+        results = await asyncio.gather(*[_write_one_case(c) for c in cases])
+        vb_success = sum(1 for r in results if r)
+        vb_fail = sum(1 for r in results if not r)
+        _vb_duration = int((_time.time() - _vb_t0) * 1000)
         if vb_fail > 0:
-            logger.warning("[GenAgent] 向量库写入: 成功={}, 失败={}", vb_success, vb_fail)
+            logger.warning("[GenAgent] 向量库写入: 成功={}, 失败={}, 耗时={}ms",
+                           vb_success, vb_fail, _vb_duration)
+        else:
+            logger.info("[GenAgent] 向量库写入完成: 成功={}, 耗时={}ms", vb_success, _vb_duration)
 
         logger.info("[GenAgent] ◀ 生成完成 ▶ 下一节点 ReviewAgent: "
                     "cases={}, types={}, batch_id={}",
@@ -181,7 +208,7 @@ class GenAgent:
                 query=summary, top_k=3, product_id=product_id or None,
             )
             # 仅保留高相似度的用例作为 Few-shot
-            return [r for r in results if r.get("similarity", 0) > 0.7]
+            return [r for r in results if r.get("similarity", 0) > settings.FEW_SHOT_SIMILARITY_THRESHOLD]
         except Exception as e:
             logger.debug("[GenAgent] KB 检索相似用例失败（不阻断）: {}", str(e)[:120])
             return []

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { TestTube, Trash2, Eye, ThumbsUp, ThumbsDown, Loader2, Play, Sparkles, RefreshCw, Filter, X } from 'lucide-react'
-import { testCases as tcApi, requirements as reqApi, generateCases } from '../api/client'
+import { TestTube, Trash2, Eye, Loader2, Play, Sparkles, Filter, Download } from 'lucide-react'
+import { testCases as tcApi, requirements as reqApi, generateCases, exportCases } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { TestCase, Requirement, SSEEvent } from '../types'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
@@ -86,6 +86,21 @@ export default function TestCases() {
     setTimeout(() => { if (!ctrl.signal.aborted) ctrl.abort() }, 300000)
   }
 
+  // 导出
+  const handleExport = async (format: string) => {
+    if (cases.length === 0) { alert('没有可导出的用例'); return }
+    const ids = cases.map(c => c.id)
+    try {
+      const blob = await exportCases.download(format, ids)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `testcases.${format === 'markdown' ? 'md' : format === 'gherkin' ? 'feature' : format === 'pytest' ? 'py' : format === 'xmind' ? 'xmind' : 'json'}`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e: any) { alert('导出失败: ' + e.message) }
+  }
+
   const totalPages = Math.ceil(total / 20)
 
   return (
@@ -95,14 +110,28 @@ export default function TestCases() {
           <h1 className="page-title">测试用例</h1>
           <p className="text-sm text-slate-500 mt-1">{total} 个用例</p>
         </div>
-        <button onClick={() => setShowGenerate(!showGenerate)}
-          className="btn-primary flex items-center gap-2">
-          <Sparkles className="w-4 h-4" />
-          {showGenerate ? '收起' : '生成用例'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setShowGenerate(!showGenerate)}
+            className="btn-primary flex items-center gap-2">
+            <Sparkles className="w-4 h-4" />
+            {showGenerate ? '收起' : '生成用例'}
+          </button>
+          {/* 导出下拉 */}
+          <div className="relative group">
+            <button className="btn-secondary flex items-center gap-2">
+              <Download className="w-4 h-4" /> 导出
+            </button>
+            <div className="absolute right-0 top-full mt-1 w-36 bg-white rounded-lg shadow-lg border border-slate-200 py-1 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+              {['json', 'markdown', 'gherkin', 'pytest', 'xmind'].map(fmt => (
+                <button key={fmt} onClick={() => handleExport(fmt)}
+                  className="block w-full text-left px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50">
+                  {fmt === 'markdown' ? 'Markdown' : fmt === 'gherkin' ? 'Gherkin' : fmt === 'pytest' ? 'Pytest' : fmt === 'xmind' ? 'XMind' : 'JSON'}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
-
-      {/* 生成面板 */}
       {showGenerate && (
         <div className="card p-5 space-y-4">
           <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">

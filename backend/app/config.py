@@ -142,6 +142,9 @@ class Settings(BaseSettings):
     """最低相似度阈值"""
     MATCH_SIMILARITY_THRESHOLD: float = 0.70
 
+    """GenAgent Few-shot 注入相似度阈值（优化 5：可配置，默认 0.70）"""
+    FEW_SHOT_SIMILARITY_THRESHOLD: float = 0.70
+
     """是否启用 RRF 融合"""
     MATCH_ENABLE_RRF: bool = True
 

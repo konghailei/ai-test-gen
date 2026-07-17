@@ -85,6 +85,16 @@ async def export_testcases(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # xmind 返回 bytes（ZIP 二进制），其他格式返回 str
+    if isinstance(content, bytes):
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            },
+        )
+
     return Response(
         content=content,
         media_type=media_type,
