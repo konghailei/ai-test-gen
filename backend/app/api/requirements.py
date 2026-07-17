@@ -585,7 +585,8 @@ async def _run_requirement_analysis(
                 srr_json_data["_kb_query_logs"] = kb_logs
 
         needs_clarify = (clarify_result.get("status") == "needs_clarification") if clarify_result else (len(questions) > 0)
-        final_status = "draft" if needs_clarify else "active"
+        # v1.6：分析完成后进入 pending_review（待确认），等待用户确认 SRR/FP/影响分析
+        final_status = "draft" if needs_clarify else "pending_review"
 
         # ===== phase 3: regenerate（无澄清问题时生成最终 SRR）=====
         if not needs_clarify:
@@ -971,7 +972,7 @@ async def list_requirements(
     status: str | None = Query(default=None, description="按状态筛选 draft/active/archived"),
     search: str | None = Query(default=None, description="按标题模糊搜索"),
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
-    page_size: int = Query(default=20, ge=1, le=100, description="每页条数，最大 100"),
+    page_size: int = Query(default=20, ge=1, le=300, description="每页条数，最大 300"),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """获取需求列表（分页）。
@@ -1195,11 +1196,14 @@ async def submit_clarify_answers(
     if record is None:
         raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
 
-    if record.status not in ("draft", "active"):
+    if record.status not in ("draft", "pending_review", "confirmed"):
         raise HTTPException(
             status_code=409,
-            detail=f"当前状态 {record.status} 不可提交澄清（仅 draft/active 可提交）",
+            detail=f"当前状态 {record.status} 不可提交澄清（仅 draft/pending_review/confirmed 可提交）",
         )
+    # 重新生成时重置状态为 draft（等待重新分析完成后自动进入 pending_review）
+    if record.status == "confirmed":
+        record.status = "draft"
 
     raw_text = record.raw_text or ""
     srr_json = dict(record.srr_json or {})
@@ -1296,6 +1300,7 @@ async def submit_clarify_answers(
         task_id=task_id,
         req_id=req_id,
         enhanced_raw=enhanced_raw,
+        original_raw=record.raw_text or "",  # v1.6: 传入原始文本用于 FP 提取，避免增强文本导致 FP 偏差
         product_id=record.product_id,
         clarify_history=clarify_history,
         old_srr=srr_json,
@@ -1318,6 +1323,7 @@ async def _run_clarify_reparse(
     task_id: str,
     req_id: str,
     enhanced_raw: str,
+    original_raw: str,  # v1.6: 原始需求文本（用于 FP 提取，避免增强文本导致 FP 偏差）
     product_id: str,
     clarify_history: list,
     old_srr: dict,
@@ -1328,7 +1334,7 @@ async def _run_clarify_reparse(
     流程：
         1. phase=parse: req_agent.parse() 重新生成 SRR（含降级处理）
         2. 持久化 SRR + 保留 KB 日志 + 迁移 _baseline_context / additional_details
-        3. FP 重提取（含 P3 修复：清理旧 FP 向量）
+        3. FP 重提取（使用 original_raw 而非 enhanced_raw，确保与需求分析时一致）
         4. status=completed
     """
     from sqlalchemy import update as sa_update, delete as sa_del
@@ -1353,8 +1359,24 @@ async def _run_clarify_reparse(
             final_srr["_clarify_degraded"] = True
 
         # P0-2: 立即捕获 FP，避免后续操作覆盖
-        captured_fps = list(req_agent.last_fps)
-        captured_fp_deps = list(req_agent.last_fp_dependencies)
+        # v1.6: 使用 original_raw（原始需求文本）进行 FP 提取，而非 enhanced_raw。
+        # 增强文本包含 KB 补全和澄清答案，会导致 LLM 提取更多/不同的功能点，
+        # 与需求分析时提取的 FP 不一致。使用原始文本确保 FP 提取结果稳定一致。
+        if original_raw:
+            try:
+                captured_fps = await req_agent._fp_extract_from_raw(
+                    raw_text=original_raw,
+                    srr=final_srr,
+                )
+                captured_fp_deps = list(req_agent.last_fp_dependencies)
+                logger.info("[Task/Clarify] FP 重提取完成（基于原始文本）: {} 个", len(captured_fps))
+            except Exception as fp_e:
+                logger.warning("[Task/Clarify] FP 重提取失败（降级使用 enhanced_raw 结果）: {}", str(fp_e)[:200])
+                captured_fps = list(req_agent.last_fps)
+                captured_fp_deps = list(req_agent.last_fp_dependencies)
+        else:
+            captured_fps = list(req_agent.last_fps)
+            captured_fp_deps = list(req_agent.last_fp_dependencies)
 
         await _update_task(task_id, phase="parse", progress=60,
                            message="SRR 生成完成，正在保存功能点...")
@@ -1382,12 +1404,12 @@ async def _run_clarify_reparse(
 
         async with async_session() as s:
             await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(
-                srr_json=final_data, status="active",
+                srr_json=final_data, status="pending_review",
             ))
             await s.commit()
 
         logger.info(
-            "[Task/Clarify] 澄清完成，需求已激活: req_id={}, title={}",
+            "[Task/Clarify] 澄清重解析完成，需求进入待确认: req_id={}, title={}",
             req_id,
             final_data.get("requirement", {}).get("title", ""),
         )
@@ -1430,8 +1452,8 @@ async def _run_clarify_reparse(
 
         await _update_task(
             task_id, status="completed", phase="done", progress=100,
-            message="澄清完成，需求已激活",
-            result_json={"req_id": req_id, "status": "active"},
+            message="澄清完成，需求进入待确认",
+            result_json={"req_id": req_id, "status": "pending_review"},
             completed_at=datetime.now(timezone.utc),
         )
         logger.info("[Task/Clarify] 澄清重生成完成: task_id={}, req_id={}", task_id, req_id)
@@ -1632,6 +1654,9 @@ async def regenerate_requirement(
         req_id, len(extra_notes), len(enhanced_raw),
     )
 
+    # v2.16: 冲突检测
+    await _check_no_running_task(req_id)
+
     # v2.15: 标记需求为 analyzing 状态
     record.status = "analyzing"
     await session.commit()
@@ -1734,21 +1759,21 @@ async def _run_regenerate_reparse(
 
         # 持久化
         async with async_session() as s:
-            values: dict = {"srr_json": final_data, "status": "active"}
+            values: dict = {"srr_json": final_data, "status": "pending_review"}
             if new_title:
                 values["title"] = new_title
             await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(**values))
             await s.commit()
 
         logger.info(
-            "[Task/Regenerate] 重新生成完成: req_id={}, title={}->{}",
+            "[Task/Regenerate] 重新生成完成，需求进入待确认: req_id={}, title={}->{}",
             req_id, previous_title, new_title,
         )
 
         await _update_task(
             task_id, status="completed", phase="done", progress=100,
-            message="需求分析已重新生成",
-            result_json={"req_id": req_id, "new_title": new_title, "status": "active"},
+            message="需求分析已重新生成，进入待确认",
+            result_json={"req_id": req_id, "new_title": new_title, "status": "pending_review"},
             completed_at=datetime.now(timezone.utc),
         )
         logger.info("[Task/Regenerate] 重新生成完成: task_id={}, req_id={}", task_id, req_id)
@@ -1768,6 +1793,114 @@ async def _run_regenerate_reparse(
                 await s.commit()
         except Exception as revert_err:
             logger.warning("[Task/Regenerate] 失败回退状态失败: req_id={}, error={}", req_id, str(revert_err)[:150])
+
+
+async def _run_fp_merge_task(
+    task_id: str, req_id: str, fp_ids: list[str],
+    merged_name: str, product_id: str,
+) -> None:
+    """后台协程：执行功能点 LLM 合并。
+
+    Args:
+        task_id: AnalysisTask ID
+        req_id: 需求 ID
+        fp_ids: 待合并的功能点 ID 列表
+        merged_name: 用户指定的合并后名称
+        product_id: 产品 ID
+    """
+    try:
+        await _update_task(task_id, status="running", progress=10, message="正在加载功能点...")
+        async with async_session() as s:
+            fps_to_merge = []
+            for fid in fp_ids:
+                fp = await s.get(FunctionalPoint, fid)
+                if fp and fp.requirement_id == req_id:
+                    fps_to_merge.append(fp)
+            if len(fps_to_merge) < 2:
+                raise ValueError("有效功能点不足，无法合并")
+
+            # 序列化功能点子 SRR
+            import json as _j
+            fp_jsons = []
+            for fp in fps_to_merge:
+                d = {"name": fp.name, "fp_type": fp.fp_type, "test_hints": fp.test_hints or []}
+                if isinstance(fp.srr_json, dict):
+                    d["sub_srr"] = fp.srr_json
+                fp_jsons.append(d)
+
+        custom_name_hint = f"\n\n**用户指定的合并后名称：{merged_name}**" if merged_name else ""
+        merge_prompt = f"""将以下多个功能点合并为一个完整的功能点。
+
+这些功能点原本属于同一个业务功能，因需求拆解过细被分成了多个。请按标准 SRR 格式重新生成一份**完整**的子 SRR，保证所有功能细节不遗漏。{custom_name_hint}
+
+合并规则：
+- 如果上面提供了用户指定名称，使用该名称；否则取一个最能概括所有子功能点的名称
+- fp_type 选最匹配的（workflow/constraint/calculation/api_behavior/data_record/config）
+- flows.happy_path.steps：将各子 FP 的步骤整合为一条完整的步骤链
+- flows.alternate_flows：所有异常分支合并且去重
+- boundary_conditions / business_rules / data_constraints / acceptance_criteria / preconditions：合并去重
+- test_hints：合并去重
+
+原始功能点：
+{_j.dumps(fp_jsons, ensure_ascii=False, indent=2)}
+
+请输出合并后的功能点 JSON。子 SRR 必须使用标准格式。"""
+
+        await _update_task(task_id, progress=30, message="LLM 正在合并功能点...")
+        merged = await llm_client.call_json(
+            prompt=merge_prompt,
+            system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
+            schema_hint={"name": str, "fp_type": str, "summary": str, "suggested_module": str, "sub_srr": dict, "test_hints": list},
+            temperature=0.2,
+        )
+
+        # 持久化
+        await _update_task(task_id, progress=80, message="保存合并结果...")
+        async with async_session() as s:
+            primary_fp = await s.get(FunctionalPoint, fp_ids[0])
+            merged_id = gen_requirement_id()
+
+            merged_fp = FunctionalPoint(
+                id=merged_id, requirement_id=req_id,
+                module_id=primary_fp.module_id if primary_fp else None,
+                name=merged_name or merged.get("name", "合并功能点"),
+                fp_type=merged.get("fp_type", "workflow"),
+                priority="P1", status="pending_review",
+                srr_json=merged.get("sub_srr", {}),
+                test_hints=merged.get("test_hints", []),
+                atomicity_check={"trigger": True, "result": True, "boundary": True},
+            )
+            s.add(merged_fp)
+
+            # 删除旧 FP
+            from sqlalchemy import delete as _del
+            old_ids = set(fp_ids)
+            await s.execute(_del(FPDependency).where(
+                (FPDependency.source_fp_id.in_(old_ids)) | (FPDependency.target_fp_id.in_(old_ids))
+            ))
+            for fid in fp_ids:
+                fp = await s.get(FunctionalPoint, fid)
+                if fp:
+                    await s.delete(fp)
+            await s.commit()
+
+        logger.info("[Task/FP-Merge] 合并完成: {} → {}, req={}", fp_ids, merged_fp.name, req_id)
+
+        await _update_task(
+            task_id, status="completed", phase="done", progress=100,
+            message=f"已将 {len(fp_ids)} 个功能点合并为「{merged_fp.name}」",
+            result_json={"fp_id": merged_fp.id, "name": merged_fp.name, "req_id": req_id},
+            completed_at=datetime.now(timezone.utc),
+        )
+
+    except Exception as e:
+        err_msg = str(e)[:500]
+        logger.error("[Task/FP-Merge] 合并失败: task_id={}, req_id={}, error={}", task_id, req_id, err_msg)
+        await _update_task(
+            task_id, status="failed", error=err_msg,
+            message="功能点合并失败: " + err_msg[:200],
+            completed_at=datetime.now(timezone.utc),
+        )
 
 
 # ============================================================================
@@ -2506,6 +2639,115 @@ async def _load_active_requirement(req_id: str, session: AsyncSession) -> Requir
     return req
 
 
+@router.post("/{req_id}/confirm", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def confirm_requirement(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """确认需求完成——标记为 confirmed（确认完成），允许生成测试用例。
+
+    前置条件：
+        - 需求状态为 pending_review（待确认）
+        - 用户已确认 SRR 内容、功能点、影响分析无误
+
+    确认后：
+        - status → confirmed（确认完成）
+        - 只有 confirmed 状态的需求可以触发用例生成
+
+    如果后续需要重新生成，用户可再次提交澄清或重新分析，
+    状态会自动重置为 pending_review 或 draft。
+    """
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    if req.status != "pending_review":
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前状态 {req.status} 不可确认（仅 pending_review 可确认）",
+        )
+
+    # v1.6: 校验功能点审核状态——所有 FP 必须已审核通过
+    from app.db.models import FunctionalPoint as FpModel
+    fp_stmt = select(FpModel).where(
+        FpModel.requirement_id == req_id,
+        FpModel.status != "approved",
+    )
+    fp_result = await session.execute(fp_stmt)
+    unapproved_fps = fp_result.scalars().all()
+    if unapproved_fps:
+        fp_names = [fp.name for fp in unapproved_fps[:5]]
+        suffix = "..." if len(unapproved_fps) > 5 else ""
+        raise HTTPException(
+            status_code=409,
+            detail=f"存在 {len(unapproved_fps)} 个未审核的功能点（{', '.join(fp_names)}{suffix}），"
+                   f"请先审核所有功能点后再确认",
+        )
+
+    # v1.6: 校验影响分析确认状态
+    # 若 SRR 中存在 impact_analysis 且包含未确认的受影响 FP，则阻止确认
+    srr = req.srr_json or {}
+    impact_list = srr.get("impact_analysis", []) or []
+    if impact_list:
+        unconfirmed_impacts = [item for item in impact_list if not item.get("is_affected")]
+        if unconfirmed_impacts:
+            fp_names = [item.get("fp_name", "") for item in unconfirmed_impacts[:5]]
+            suffix = "..." if len(unconfirmed_impacts) > 5 else ""
+            raise HTTPException(
+                status_code=409,
+                detail=f"存在 {len(unconfirmed_impacts)} 个未确认的影响范围功能点"
+                       f"（{', '.join(fp_names)}{suffix}），"
+                       f"请先通过影响分析确认功能点后再确认",
+            )
+
+    req.status = "confirmed"
+    await session.commit()
+
+    logger.info("[API/requirements] 需求确认完成: req_id={}, title={}", req_id, req.title)
+    return ApiResponse(
+        success=True,
+        data={"req_id": req_id, "status": "confirmed"},
+    )
+
+
+async def _check_no_running_task(req_id: str, exclude_task_id: str | None = None) -> None:
+    """检查需求是否有进行中的任务（分析/重生成/FP合并），如有则拒绝。
+
+    互斥规则：同一需求同时只能有一个 running/pending 的分析类任务。
+    - upload_requirement / regenerate / merge_fp 三种操作互斥
+    - 已有任务 running/pending 时抛 HTTPException 409
+
+    Args:
+        req_id: 需求 ID
+        exclude_task_id: 排除的任务 ID（用于同一个任务的幂等重试场景）
+
+    Raises:
+        HTTPException 409: 存在冲突任务
+    """
+    from sqlalchemy import select as _s, or_ as _or_
+    async with async_session() as s:
+        stmt = _s(AnalysisTask).where(
+            AnalysisTask.req_id == req_id,
+            AnalysisTask.status.in_(["pending", "running"]),
+            _or_(
+                AnalysisTask.task_type == "upload_requirement",
+                AnalysisTask.task_type == "regenerate",
+                AnalysisTask.task_type == "merge_fp",
+            ),
+        )
+        if exclude_task_id:
+            stmt = stmt.where(AnalysisTask.id != exclude_task_id)
+        result = await s.execute(stmt)
+        conflict = result.scalar_one_or_none()
+        if conflict:
+            labels = {"upload_requirement": "需求解析", "regenerate": "重新生成", "merge_fp": "功能点合并"}
+            label = labels.get(conflict.task_type, conflict.task_type)
+            raise HTTPException(
+                status_code=409,
+                detail=f"需求正在进行「{label}」任务（{conflict.id}），请等待完成后再操作",
+            )
+
+
 @router.post("/{req_id}/fp/extract-bp", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def fp_extract_bp(
     req_id: str,
@@ -3135,11 +3377,19 @@ async def fp_merge(
     body: FPMergeRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """将多个功能点合并为一个，LLM 重新整理子 SRR 保证功能不遗漏。"""
+    """将多个功能点合并为一个（异步任务模式）。
+
+    v2.16 异步化 + 冲突检测：
+        1. 校验冲突（不能与其他分析任务同时进行）
+        2. 创建 AnalysisTask（task_type=merge_fp）
+        3. 后台协程执行 LLM 合并
+        4. 立即返回 task_id
+    """
     if len(body.fp_ids) < 2:
         raise HTTPException(status_code=400, detail="至少需要 2 个功能点才能合并")
 
-    await _load_active_requirement(req_id, session)
+    req = await _load_active_requirement(req_id, session)
+    await _check_no_running_task(req_id)
 
     # 加载所有 FP
     fps_to_merge = []
@@ -3152,87 +3402,34 @@ async def fp_merge(
     if len(fps_to_merge) < 2:
         raise HTTPException(status_code=400, detail="有效功能点不足，无法合并")
 
-    # 用 LLM 整理合并后的子 SRR — 序列化完整子 SRR 避免字段遗漏
-    import json as _j
-    fp_jsons = []
-    for fp in fps_to_merge:
-        d = {
-            "name": fp.name,
-            "fp_type": fp.fp_type,
-            "test_hints": fp.test_hints or [],
-        }
-        if isinstance(fp.srr_json, dict):
-            d["sub_srr"] = fp.srr_json
-        fp_jsons.append(d)
-
-    custom_name_hint = f"\n\n**用户指定的合并后名称：{body.merged_name}**" if body.merged_name else ""
-
-    merge_prompt = f"""将以下多个功能点合并为一个完整的功能点。
-
-这些功能点原本属于同一个业务功能，因需求拆解过细被分成了多个。请按标准 SRR 格式重新生成一份**完整**的子 SRR，保证所有功能细节不遗漏。{custom_name_hint}
-
-合并规则：
-- 如果上面提供了用户指定名称，使用该名称；否则取一个最能概括所有子功能点的名称
-- fp_type 选最匹配的（workflow/constraint/calculation/api_behavior/data_record/config）
-- flows.happy_path.steps：将各子 FP 的步骤整合为一条完整的步骤链（order/action/expect）
-- flows.alternate_flows：所有异常分支合并且去重（name/trigger/expect）
-- boundary_conditions：保留所有边界条件
-- business_rules：保留所有业务规则（id/rule/type），去重
-- data_constraints：保留所有字段约束（field/type/required/constraints/example），去重
-- acceptance_criteria：保留所有验收标准（id/description/type），去重
-- preconditions：取并集去重
-- test_hints：合并去重
-
-原始功能点（完整子 SRR）：
-{_j.dumps(fp_jsons, ensure_ascii=False, indent=2)}
-
-请输出合并后的功能点 JSON。子 SRR 必须使用标准格式（requirement/flows.happy_path.steps/flows.alternate_flows/boundary_conditions/business_rules/data_constraints/acceptance_criteria/preconditions）。"""
-
-    try:
-        merged = await llm_client.call_json(
-            prompt=merge_prompt,
-            system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
-            schema_hint={"name": str, "fp_type": str, "summary": str, "suggested_module": str, "sub_srr": dict, "test_hints": list},
-            temperature=0.2,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"合并失败：LLM 调用出错：{str(e)[:200]}")
-
-    # 创建合并后的 FP
-    merged_id = gen_requirement_id()
-    primary = fps_to_merge[0]  # 以第一个 FP 的模块归属为准
-
-    merged_fp = FunctionalPoint(
-        id=merged_id,
-        requirement_id=req_id,
-        module_id=primary.module_id,
-        name=body.merged_name or merged.get("name", "合并功能点"),
-        fp_type=merged.get("fp_type", primary.fp_type),
-        priority=primary.priority,
-        status="pending_review",  # 合并后需重新审核
-        srr_json=merged.get("sub_srr", {}),
-        test_hints=merged.get("test_hints", []),
-        atomicity_check={"trigger": True, "result": True, "boundary": True},
+    # 创建任务
+    task_id = gen_task_id()
+    task = AnalysisTask(
+        id=task_id,
+        task_type="merge_fp",
+        req_id=req_id,
+        product_id=req.product_id,
+        status="pending",
+        phase="merge",
+        progress=0,
+        message=f"正在合并 {len(fps_to_merge)} 个功能点...",
+        created_by="api",
     )
-    session.add(merged_fp)
-
-    # 删除旧 FP（先删依赖）
-    old_ids = {fp.id for fp in fps_to_merge}
-    from sqlalchemy import delete as _del
-    await session.execute(
-        _del(FPDependency).where(
-            (FPDependency.source_fp_id.in_(old_ids)) | (FPDependency.target_fp_id.in_(old_ids))
-        )
-    )
-    for fp in fps_to_merge:
-        await session.delete(fp)
-
+    session.add(task)
     await session.commit()
-    logger.info("[FP] 合并完成: {} → {}, req={}", [fp.name for fp in fps_to_merge], merged_fp.name, req_id)
+
+    fp_ids = [fp.id for fp in fps_to_merge]
+    asyncio.create_task(
+        _run_fp_merge_task(
+            task_id=task_id, req_id=req_id, fp_ids=fp_ids,
+            merged_name=body.merged_name, product_id=req.product_id,
+        )
+    )
+
     return ApiResponse(
         success=True,
-        message=f"已将 {len(fps_to_merge)} 个功能点合并为「{merged_fp.name}」",
-        data={"id": merged_fp.id, "name": merged_fp.name, "fp_type": merged_fp.fp_type},
+        message="功能点合并已启动",
+        data={"task_id": task_id, "req_id": req_id, "fp_count": len(fp_ids)},
     )
 
 

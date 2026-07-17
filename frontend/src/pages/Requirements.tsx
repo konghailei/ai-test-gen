@@ -442,6 +442,9 @@ export default function Requirements() {
             className="select-field text-sm max-w-[120px]">
             <option value="">全部状态</option>
             <option value="draft">待澄清</option>
+            <option value="analyzing">分析中</option>
+            <option value="pending_review">待确认</option>
+            <option value="confirmed">确认完成</option>
             <option value="active">已就绪</option>
             <option value="archived">已归档</option>
             <option value="superseded">已替代</option>

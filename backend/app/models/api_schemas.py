@@ -130,11 +130,14 @@ class TestCaseUpdateRequest(BaseModel):
 
 class ExportRequest(BaseModel):
     """导出请求。"""
-    format: Literal["markdown", "gherkin", "pytest", "json"] = Field(
+    format: Literal["markdown", "gherkin", "pytest", "json", "xmind"] = Field(
         default="markdown", description="导出格式"
     )
     case_ids: list[str] | None = Field(
         default=None, description="指定用例 ID（留空则导出全部）"
+    )
+    project_name: str = Field(
+        default="", max_length=255, description="项目名称（XMind 导出时作为根标题）"
     )
 
 

@@ -49,7 +49,7 @@ _FORMAT_META: dict[str, tuple[str, str]] = {
 # 工厂函数
 # ============================================================================
 
-def export_cases(cases: list[dict], fmt: str) -> tuple[str, str, str]:
+def export_cases(cases: list[dict], fmt: str, project_name: str = "") -> tuple[str, str, str]:
     """导出用例为指定格式（工厂函数）。
 
     Args:
@@ -81,7 +81,7 @@ def export_cases(cases: list[dict], fmt: str) -> tuple[str, str, str]:
     elif fmt == "pytest":
         content = export_pytest(cases)
     elif fmt == "xmind":
-        content = export_to_xmind(cases)
+        content = export_to_xmind(cases, project_name=project_name)
     else:
         # json 由 API 层处理，此处不会执行
         import json

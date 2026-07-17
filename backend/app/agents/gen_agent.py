@@ -96,8 +96,23 @@ class GenAgent:
         # 1. 检索 KB 相似用例（Few-shot）
         few_shot_cases = await asyncio.to_thread(self._search_similar_cases, srr)
 
-        # 2. 检索匹配的测试模式
+        # 2. 检索匹配的测试模式（v1.6：若 SRR 含功能点，额外用 FP 类型/名称检索）
         matched_patterns = await asyncio.to_thread(self._search_patterns, srr)
+        functional_points = functional_points or []
+        if functional_points:
+            fp_types = list({fp.get("fp_type", "") for fp in functional_points if fp.get("fp_type")})
+            fp_names = [fp.get("name", "") for fp in functional_points[:3] if fp.get("name")]
+            fp_query = " ".join(fp_types + fp_names)
+            if fp_query:
+                fp_patterns = await asyncio.to_thread(
+                    self._search_patterns_by_query, fp_query
+                )
+                # 合并去重（按 id 去重，保持顺序）
+                seen_ids = set(p.get("id", "") for p in matched_patterns)
+                for p in fp_patterns:
+                    if p.get("id", "") not in seen_ids:
+                        matched_patterns.append(p)
+                        seen_ids.add(p.get("id", ""))
         logger.info("[GenAgent] KB 检索: few_shot_cases={}, matched_patterns={}",
                     len(few_shot_cases), len(matched_patterns))
 
@@ -112,23 +127,18 @@ class GenAgent:
         )
         logger.debug("[GenAgent] Prompt 构建完成: len={}", len(user_prompt))
 
-        # 4. 调用 LLM 生成用例（优化 3：根据 FP 数量动态调整 max_tokens）
-        fp_count = len(functional_points or [])
-        if fp_count > 10:
-            dynamic_max_tokens = 16384  # 大需求翻倍，避免用例数不足
-        elif fp_count > 5:
-            dynamic_max_tokens = 12288
-        else:
-            dynamic_max_tokens = 8192  # 默认，防止 LLM 退化
+        # 4. 调用 LLM 生成用例（v1.6：移除 max_tokens 限制，利用 1M 上下文窗口，
+        # 确保 LLM 能生成足够多的用例，不再因 token 限制被截断）
         try:
-            logger.info("[GenAgent] 调用 LLM: temperature=0.4, multi_type={}, max_tokens={} (fp_count={})",
-                        enable_multi_type, dynamic_max_tokens, fp_count)
+            logger.info("[GenAgent] 调用 LLM: temperature=0.4, multi_type={}, fp_count={}, "
+                        "max_tokens=unlimited (1M 上下文)",
+                        enable_multi_type, len(functional_points or []))
             raw_cases = await self._llm.call_json(
                 prompt=user_prompt,
                 system_prompt=prompt_manager.get("gen_agent", "SYSTEM_PROMPT"),
                 schema_hint={"test_suite": list} if False else None,
                 temperature=0.4,  # 用例生成需要一定创造性
-                max_tokens=dynamic_max_tokens,
+                max_tokens=None,  # 不限制，利用 1M 上下文窗口
             )
         except Exception as e:
             logger.error("[GenAgent] LLM 调用失败: {}", str(e)[:200])
@@ -220,6 +230,16 @@ class GenAgent:
             return vector_store.search_patterns(query=summary, top_k=3)
         except Exception as e:
             logger.debug("[GenAgent] KB 检索测试模式失败（不阻断）: {}", str(e)[:120])
+            return []
+
+    def _search_patterns_by_query(self, query: str) -> list[dict]:
+        """按自定义查询检索测试模式（v1.6：FP 类型/名称检索）。"""
+        if not query:
+            return []
+        try:
+            return vector_store.search_patterns(query=query, top_k=3)
+        except Exception as e:
+            logger.debug("[GenAgent] KB 检索测试模式(FP)失败（不阻断）: {}", str(e)[:120])
             return []
 
     # ========================================================================

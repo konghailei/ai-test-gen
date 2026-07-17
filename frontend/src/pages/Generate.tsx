@@ -12,7 +12,8 @@ const SSE_STAGES = ['parse', 'select_channel', 'clarify', 'gate', 'impact', 'ret
 export default function Generate() {
   const { id: paramId } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const { selectedProductId } = useProduct()
+  const { selectedProductId, products } = useProduct()
+  const selectedProductName = products.find(p => p.id === selectedProductId)?.name || selectedProductId
   const [reqs, setReqs] = useState<Requirement[]>([])
   const [selectedReq, setSelectedReq] = useState(paramId || '')
   const [loadingReqs, setLoadingReqs] = useState(true)
@@ -128,6 +129,19 @@ export default function Generate() {
               开始生成
             </button>
           </div>
+          {loadingReqs && (
+            <p className="text-sm text-slate-400 flex items-center gap-2">
+              <Loader2 className="w-3 h-3 animate-spin" /> 正在加载需求列表...
+            </p>
+          )}
+          {!loadingReqs && reqs.length === 0 && (
+            <p className="text-sm text-amber-600 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4" />
+              {selectedProductId
+                ? `当前产品「${selectedProductName}」下暂无需求，请切换产品或在「需求管理」中上传需求`
+                : '暂无可用需求，请先在「需求管理」中上传需求'}
+            </p>
+          )}
           {selectedReq && req && (
             <div className="flex items-center gap-4 p-3 bg-slate-50 rounded-xl text-sm">
               <span className="font-mono text-xs text-slate-400">{req.id}</span>

@@ -216,6 +216,9 @@ export const requirements = {
       `/requirements/${id}/regenerate`,
       { method: 'POST', body: JSON.stringify({ extra_notes: extraNotes }) },
     ),
+  /** v1.6: 确认需求完成（pending_review → confirmed），允许生成测试用例 */
+  confirm: (id: string) =>
+    request<{ req_id: string; status: string }>(`/requirements/${id}/confirm`, { method: 'POST' }),
   /** 运行影响分析（基于需求关联模块的依赖图谱 BFS 遍历） */
   analyzeImpact: (reqId: string) =>
     request<{
@@ -351,9 +354,11 @@ export function generateCases(
 // 用例管理
 // ============================================================
 export const testCases = {
-  list: (reqId?: string, page = 1, pageSize = 20, productId?: string) => {
+  list: (reqId?: string, projectId?: string, search?: string, page = 1, pageSize = 20, productId?: string) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
     if (reqId) params.set('req_id', reqId)
+    if (projectId) params.set('project_id', projectId)
+    if (search) params.set('search', search)
     if (productId) params.set('product_id', productId)
     return request<PaginatedData<TestCase>>(`/testcases?${params}`)
   },
@@ -542,14 +547,16 @@ export const auth = {
 // 导出
 // ============================================================
 export const exportCases = {
-  download: async (format: string, caseIds?: string[]) => {
+  download: async (format: string, caseIds?: string[], projectName?: string) => {
     const params = new URLSearchParams({ format })
     const url = `${BASE}/export?${params}`
     if (caseIds?.length) {
+      const body: Record<string, unknown> = { format, case_ids: caseIds }
+      if (projectName) body.project_name = projectName
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ format, case_ids: caseIds }),
+        body: JSON.stringify(body),
       })
       return res.blob()
     }

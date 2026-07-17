@@ -39,7 +39,7 @@ class Requirement(Base):
     modules: Mapped[list] = mapped_column(JSON, default=list)  # 替代 module，支持多模块关联
     tags: Mapped[list] = mapped_column(JSON, default=list)
     version: Mapped[int] = mapped_column(Integer, default=1)
-    status: Mapped[str] = mapped_column(String(16), default="active")  # active/superseded/deprecated/archived
+    status: Mapped[str] = mapped_column(String(16), default="analyzing")  # analyzing/draft/pending_review/confirmed/active/superseded/deprecated/archived
     srr_json: Mapped[dict] = mapped_column(JSON, default=dict)
     raw_text: Mapped[str] = mapped_column(Text, default="")
     source_type: Mapped[str] = mapped_column(String(32), default="markdown")
@@ -420,7 +420,7 @@ class AnalysisTask(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # TASK-{ms}-{seq}
     task_type: Mapped[str] = mapped_column(String(32), index=True)
-    # upload_requirement / submit_clarify / regenerate / analyze_impact / generate_cases
+    # upload_requirement / submit_clarify / regenerate / analyze_impact / generate_cases / merge_fp
     req_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("requirements.id"), nullable=True, index=True)
     product_id: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)

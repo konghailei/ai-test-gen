@@ -75,52 +75,32 @@ class ChannelConfig(BaseModel):
 # ============================================================================
 
 def select_channel(srr: dict) -> ChannelConfig:
-    """根据需求复杂度选择处理通道。
+    """选择处理通道——v1.6 全部走 FULL 通道，确保高质量生成。
 
-    判定规则（docs/00 §9.1）：
-        is_complex = (priority == "P0") or (len(happy_path.steps) > 5) or has_optimization_context
+    所有需求统一走 FULL 通道：
+        - 启用 ClarifyAgent 需求澄清
+        - 启用 ImpactAnalysisAgent 影响分析
+        - 4 类型分类并行生成（功能/边界/异常/安全）
+        - 启用 ReviewAgent 完整审核
 
-    - 复杂 → FULL 通道
-    - 简单 → FAST 通道
+    不再根据 priority/steps/FP 数量做 FAST/FAST 分级，
+    确保每个需求都获得完整的用例生成流程，不再出现因通道选择错误
+    导致只生成少量用例的问题（如 REQ-1784269856180-7617 只生成1个用例）。
 
     Args:
-        srr: SRR JSON 字典。需包含 requirement.priority / flows.happy_path.steps /
-            optimization_context 字段（缺失按默认值处理）
+        srr: SRR JSON 字典（兼容原有参数签名，不再使用判定逻辑）
 
     Returns:
-        ChannelConfig: 通道配置实例
-
-    Note:
-        - priority 实际位于 srr["requirement"]["priority"]，而非 srr["priority"]
-          （修复说明 P2-6，docs/00 §9.1）
-        - 优化需求通过 optimization_context 是否存在判断，SRR 中无 is_optimization 字段
-        - 本函数为纯函数，无副作用，便于在 LangGraph 入口节点统一调用
+        ChannelConfig: FULL 通道配置
     """
-    priority = srr.get("requirement", {}).get("priority", "P2")
-    happy_steps = srr.get("flows", {}).get("happy_path", {}).get("steps", []) or []
     has_opt_context = bool(srr.get("optimization_context"))
 
-    # 复杂需求判定：P0 优先级 / happy_path 步骤 >5 / 优化需求
-    is_complex = priority == "P0" or len(happy_steps) > 5 or has_opt_context
-
-    if is_complex:
-        # 复杂需求 → 完整通道
-        return ChannelConfig(
-            channel="FULL",
-            enable_clarify=True,
-            # 仅优化需求触发影响分析（非优化的 P0/复杂新需求不需要）
-            enable_impact_analysis=has_opt_context,
-            # 4 类型并行：功能/边界/异常/安全
-            enable_multi_type_generation=True,
-            enable_full_review=True,
-        )
-    else:
-        # 简单需求 → 快速通道（MVP 链路）
-        return ChannelConfig(
-            channel="FAST",
-            enable_clarify=False,
-            enable_impact_analysis=False,
-            # 单次批量生成，不分类并行
-            enable_multi_type_generation=False,
-            enable_full_review=False,
-        )
+    return ChannelConfig(
+        channel="FULL",
+        enable_clarify=True,
+        # 仅优化需求触发影响分析
+        enable_impact_analysis=has_opt_context,
+        # 4 类型并行：功能/边界/异常/安全
+        enable_multi_type_generation=True,
+        enable_full_review=True,
+    )

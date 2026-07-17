@@ -313,32 +313,47 @@ class Orchestrator:
     # ========================================================================
 
     async def _parse_node(self, state: PipelineState) -> dict:
-        """节点 1：ReqAgent 解析原始需求为 SRR。
+        """节点 1：使用已确认的 SRR（需求分析/澄清后形成的最终结构化需求）。
 
         对应 docs/00 §3 阶段①。
+        生成用例必须使用已确认的 SRR，不允许回退到 LLM 重新解析原始文本，
+        防止 SRR 简化导致通道选择错误和用例质量下降。
+
+        Raises:
+            ValueError: state 中无有效的 srr_json
 
         Returns:
             dict: state 更新，含 srr / req_id / clarify_iteration / start_time
         """
-        raw = state.get("raw_requirement", "")
         product_id = state.get("product_id", "")
-        product_name = state.get("product_name", "")
 
-        logger.info(
-            "[Orchestrator] ▶ 节点 parse: raw_len={}, product_id={}",
-            len(raw),
-            product_id,
-        )
+        pre_parsed_srr = state.get("srr_json")
+        if not pre_parsed_srr or not pre_parsed_srr.get("requirement"):
+            logger.error(
+                "[Orchestrator] _parse_node: SRR 为空，无法生成用例。"
+                "req_id={}, 请确保需求已完成分析确认流程。",
+                state.get("existing_req_id", ""),
+            )
+            raise ValueError(
+                "SRR 为空，无法生成测试用例。请先完成需求分析流程（需求解析→澄清→确认）。"
+            )
 
-        srr = await req_agent.parse(raw, product_id, product_name)
+        srr = pre_parsed_srr
         req_id = srr.get("requirement", {}).get("id", "")
 
-        # 如果传入了已有 req_id（从 DB 取的需求），覆盖新解析的 req_id
-        # 避免重新解析生成新 req_id 导致 test_cases 外键违反
+        logger.info(
+            "[Orchestrator] ▶ 节点 parse (使用已有 SRR): req_id={}, title={}, "
+            "flows.steps={}",
+            req_id,
+            srr.get("requirement", {}).get("title", ""),
+            len(srr.get("flows", {}).get("happy_path", {}).get("steps", []) or []),
+        )
+
+        # 如果传入了已有 req_id（从 DB 取的需求），覆盖 SRR 中的 req_id
         existing_req_id = state.get("existing_req_id", "")
         if existing_req_id:
             logger.info(
-                "[Orchestrator] 使用已有 req_id 覆盖新解析 req_id: {} → {}",
+                "[Orchestrator] 使用已有 req_id 覆盖 SRR 中的 req_id: {} → {}",
                 req_id, existing_req_id,
             )
             req_id = existing_req_id
@@ -1007,6 +1022,7 @@ class Orchestrator:
     async def run_pipeline(
         self,
         raw_requirement: str,
+        srr_json: dict | None = None,
         product_id: str = "",
         product_name: str = "",
         clarify_answers: dict | None = None,
@@ -1018,7 +1034,10 @@ class Orchestrator:
         每个节点完成后 yield 一个 SSE 事件，最终 yield done 事件含完整结果。
 
         Args:
-            raw_requirement: 原始需求文本
+            raw_requirement: 原始需求文本（当 srr_json 为空时用作回退解析）
+            srr_json: 需求分析/澄清后形成的最终 SRR（优先使用）。
+                传入时 _parse_node 跳过 LLM 重新解析，直接使用此 SRR，
+                避免通道选择错误（问题：REQ-1784269856180-7617 只生成1个用例）。
             product_id: 产品 ID（可选）
             product_name: 产品名称（可选）
             clarify_answers: 交互式澄清答案（可选，首轮不传；D2 决策 API 驱动）
@@ -1039,6 +1058,7 @@ class Orchestrator:
         """
         initial_state: PipelineState = {
             "raw_requirement": raw_requirement,
+            "srr_json": srr_json,
             "product_id": product_id,
             "product_name": product_name,
             "clarify_answers": clarify_answers or {},

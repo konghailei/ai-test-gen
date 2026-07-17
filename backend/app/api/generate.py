@@ -81,12 +81,36 @@ async def generate_test_cases(req: GenerateRequest):
         raise HTTPException(status_code=404, detail=f"需求 {req.req_id} 不存在")
 
     raw_text = requirement.raw_text or ""
-    if not raw_text:
-        logger.warning("[API/generate] 需求 raw_text 为空，无法生成: req_id={}", req.req_id)
-        raise HTTPException(status_code=400, detail="需求原始文本为空，无法生成测试用例")
+    srr_json = requirement.srr_json or {}
+
+    # v1.6：仅 confirmed（确认完成）状态的需求可生成测试用例。
+    # 用户需先确认 SRR 内容、功能点、影响分析无误后，通过 POST /{req_id}/confirm 确认，
+    # 状态变为 confirmed 后方可生成。
+    if requirement.status != "confirmed":
+        logger.warning(
+            "[API/generate] 需求状态非 confirmed，拒绝生成: req_id={}, status={}",
+            req.req_id, requirement.status,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"需求状态为 {requirement.status}，仅 confirmed（确认完成）状态可生成测试用例。"
+                   f"请先确认需求分析结果（SRR/功能点/影响分析）后再试。",
+        )
+
+    # 生成用例必须使用已确认的 SRR（需求分析/澄清后形成的最终结构化需求），
+    # 不允许回退到原始文本，防止 SRR 简化导致通道选择错误和用例质量下降。
+    has_srr = bool(srr_json.get("requirement"))
+    if not has_srr:
+        logger.error(
+            "[API/generate] 需求 SRR 为空，无法生成: req_id={}, status={}",
+            req.req_id, requirement.status,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="需求 SRR 为空，无法生成测试用例。请先完成需求分析流程。",
+        )
 
     # 从 srr_json 提取澄清答案（由 /requirements/{id}/clarify 端点存入）
-    srr_json = requirement.srr_json or {}
     clarify_answers = srr_json.get("clarify_answers") or None
 
     # v1.4：创建 AnalysisTask 记录（保持 SSE 流式，仅追加任务可见性）
@@ -108,11 +132,12 @@ async def generate_test_cases(req: GenerateRequest):
 
     logger.info(
         "[API/generate] 启动 SSE 流式生成: req_id={}, task_id={}, expected_channel={}, "
-        "has_clarify_answers={}, raw_text_len={}",
+        "has_clarify_answers={}, has_srr={}, raw_text_len={}",
         req.req_id,
         task_id,
         req.channel,
         bool(clarify_answers),
+        has_srr,
         len(raw_text),
     )
 
@@ -138,6 +163,7 @@ async def generate_test_cases(req: GenerateRequest):
         try:
             async for event in orchestrator.run_pipeline(
                 raw_requirement=raw_text,
+                srr_json=srr_json if has_srr else None,
                 product_id=requirement.product_id,
                 product_name=srr_json.get("requirement", {}).get("product_name", ""),
                 clarify_answers=clarify_answers,

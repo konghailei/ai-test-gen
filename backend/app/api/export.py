@@ -81,7 +81,7 @@ async def export_testcases(
         raise HTTPException(status_code=400, detail=f"不支持的导出格式: {req.format}")
 
     try:
-        content, media_type, filename = export_cases(cases, req.format)
+        content, media_type, filename = export_cases(cases, req.format, project_name=req.project_name)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -15,6 +15,7 @@ const TASK_TYPE_LABELS: Record<string, { label: string; icon: any; color: string
   regenerate: { label: '重新生成', icon: Sparkles, color: 'success' },
   analyze_impact: { label: '影响分析', icon: Share2, color: 'violet' },
   generate_cases: { label: '用例生成', icon: FileText, color: 'accent' },
+  merge_fp: { label: '功能点合并', icon: Share2, color: 'indigo' },
 }
 
 const STATUS_LABELS: Record<string, { label: string; color: string; icon: any }> = {

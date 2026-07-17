@@ -4,6 +4,7 @@ export interface Requirement {
   id: string
   title: string
   product_id: string
+  project_id?: string
   priority: string
   status: string
   source_type?: string
@@ -115,6 +116,10 @@ export interface TestCase {
   priority: string
   status: string
   confidence: number
+  functional_point: string
+  description: string
+  preconditions: string[]
+  steps: { step: number; action: string; expected: string }[]
   created_at: string
   case_json?: Record<string, unknown>
 }

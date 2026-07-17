@@ -35,6 +35,13 @@ from app.models.api_schemas import ApiResponse, FeedbackRequest, TestCaseUpdateR
 from app.utils.logger import logger
 
 
+def _extract_fp(case_json: dict | None) -> str:
+    """从 case_json 中提取功能点名称。"""
+    if not case_json:
+        return ""
+    return case_json.get("related_fp", "") or case_json.get("functional_point", "") or ""
+
+
 router = APIRouter()
 
 
@@ -46,6 +53,8 @@ router = APIRouter()
 async def list_testcases(
     req_id: str | None = Query(default=None, description="按需求 ID 筛选"),
     product_id: str | None = Query(default=None, description="按产品 ID 筛选"),
+    project_id: str | None = Query(default=None, description="按项目 ID 筛选"),
+    search: str | None = Query(default=None, description="标题模糊检索"),
     case_type: str | None = Query(default=None, description="按用例类型筛选 functional/boundary/exception/security"),
     priority: str | None = Query(default=None, description="按优先级筛选 P0-P3"),
     status: str | None = Query(default=None, description="按状态筛选 draft/reviewed/approved/rejected"),
@@ -56,19 +65,8 @@ async def list_testcases(
 ) -> ApiResponse:
     """获取测试用例列表（支持多维度筛选 + 分页）。
 
-    Args:
-        req_id: 按需求 ID 筛选
-        product_id: 按产品 ID 筛选
-        case_type: 按用例类型筛选
-        priority: 按优先级筛选
-        status: 按状态筛选
-        min_confidence: 最低置信度阈值
-        page: 页码
-        page_size: 每页条数
-        session: 数据库会话
-
-    Returns:
-        ApiResponse: data 含 items / total / page / page_size
+    筛选条件：req_id、product_id、project_id、case_type、priority、status、min_confidence
+    分页：page / page_size，按创建时间倒序
     """
     # 构建查询条件
     conditions = []
@@ -76,6 +74,14 @@ async def list_testcases(
         conditions.append(TestCase.req_id == req_id)
     if product_id:
         conditions.append(TestCase.product_id == product_id)
+    if project_id:
+        # 按项目筛选：先找出该项目下所有需求，再按需求ID查用例
+        from app.db.models import Requirement
+        conditions.append(
+            TestCase.req_id.in_(
+                select(Requirement.id).where(Requirement.project_id == project_id)
+            )
+        )
     if case_type:
         conditions.append(TestCase.type == case_type)
     if priority:
@@ -84,6 +90,8 @@ async def list_testcases(
         conditions.append(TestCase.status == status)
     if min_confidence is not None:
         conditions.append(TestCase.confidence >= min_confidence)
+    if search:
+        conditions.append(TestCase.title.ilike(f"%{search}%"))
 
     # 计算总数
     count_stmt = select(func.count(TestCase.id))
@@ -110,6 +118,10 @@ async def list_testcases(
             "status": r.status,
             "confidence": r.confidence,
             "gen_batch_id": r.gen_batch_id,
+            "functional_point": _extract_fp(r.case_json),
+            "description": (r.case_json or {}).get("description", ""),
+            "preconditions": (r.case_json or {}).get("preconditions", []),
+            "steps": (r.case_json or {}).get("steps", []),
             "created_at": r.created_at.isoformat() if r.created_at else "",
         }
         for r in rows

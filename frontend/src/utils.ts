@@ -22,7 +22,7 @@ export function statusBadge(s: string): string {
   return map[s] || 'badge-draft'
 }
 
-/** 需求状态中文映射（v2.1 新增） */
+/** 需求状态中文映射（v2.1 新增，v1.6 增加 pending_review / confirmed） */
 export const STATUS_LABELS: Record<string, string> = {
   active: '活动中',
   archived: '已归档',
@@ -30,6 +30,8 @@ export const STATUS_LABELS: Record<string, string> = {
   deprecated: '已废弃',
   draft: '草稿',
   analyzing: '分析中',
+  pending_review: '待确认',
+  confirmed: '确认完成',
 }
 
 /** 用例状态中文映射 */

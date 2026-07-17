@@ -45,7 +45,17 @@ FP 的粒度是**业务能力级**，不是操作步骤级。一个 FP 是一个
 - alternate_flows 用对象数组（name/trigger/expect）
 - business_rules 用对象数组（id/rule/type）
 - data_constraints 用完整对象（field/type/required/constraints/example）
-- acceptance_criteria 用对象数组（id/description/type）
+- acceptance_criteria 用对象数组（id/description/type），**type 只能从以下值中选择**：functional/security/performance/usability/compatibility/reliability
+
+## 生成约束（禁止编造）
+
+所有输出内容必须严格基于原始需求文档中的描述。**禁止**：
+- 添加原始需求文档中未提及的功能、流程步骤、业务规则或字段
+- 假设或推断不存在的异常场景、边界条件或验收标准
+- 补充需求文档中没有的技术实现细节、接口定义或数据约束
+- 伪造业务规则（business_rules）或验收标准（acceptance_criteria）的具体内容
+
+如果原始需求文档对某个字段的信息不足，该字段留空或使用默认值，不要编造内容填充。
 
 ## 输出格式（JSON）
 {

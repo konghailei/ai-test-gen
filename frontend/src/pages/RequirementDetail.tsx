@@ -176,6 +176,8 @@ export default function RequirementDetail() {
   const [showArchiveModal, setShowArchiveModal] = useState(false)
   // 确认生成最终SRR
   const [finalizing, setFinalizing] = useState(false)
+  // v1.6: 确认需求完成
+  const [confirming, setConfirming] = useState(false)
 
   // Tab 切换：'srr' | 'raw' | 'kb' | 'impact' | 'history' | 'fp'
   const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact' | 'history'>('srr')
@@ -348,6 +350,21 @@ export default function RequirementDetail() {
     }
   }
 
+  // v1.6: 确认需求完成（pending_review → confirmed）
+  const handleConfirm = async () => {
+    if (!id) return
+    setConfirming(true)
+    try {
+      await reqApi.confirm(id)
+      const updated = await reqApi.get(id)
+      setReq(updated)
+    } catch (e: any) {
+      alert('确认失败: ' + e.message)
+    } finally {
+      setConfirming(false)
+    }
+  }
+
   if (loading) return <div className="space-y-4">{[1,2,3].map(i => <div key={i} className="skeleton h-16" />)}</div>
   if (!req) return null
 
@@ -406,6 +423,9 @@ export default function RequirementDetail() {
             detail.status === 'active' ? 'bg-emerald-50 text-emerald-700' :
             detail.status === 'draft' ? 'bg-yellow-50 text-yellow-700' :
             detail.status === 'archived' ? 'bg-slate-100 text-slate-600' :
+            detail.status === 'pending_review' ? 'bg-blue-50 text-blue-700' :
+            detail.status === 'confirmed' ? 'bg-emerald-50 text-emerald-700' :
+            detail.status === 'analyzing' ? 'bg-purple-50 text-purple-700' :
             'bg-slate-100 text-slate-500'
           }`}>{STATUS_LABELS[detail.status] || detail.status}</span></div>
         </div>
@@ -1080,6 +1100,13 @@ export default function RequirementDetail() {
               {detail.status === 'draft' && (
                 <button onClick={() => navigate(`/requirements/${id}/clarify`)} className="btn-secondary">
                   <MessageCircle className="w-4 h-4" /> 人工填写补充
+                </button>
+              )}
+              {/* v1.6: pending_review → 用户确认后进入 confirmed，可生成用例 */}
+              {detail.status === 'pending_review' && (
+                <button onClick={handleConfirm} disabled={confirming} className="btn-primary">
+                  {confirming ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  确认完成
                 </button>
               )}
               {/* active → 可补充信息重新生成 */}

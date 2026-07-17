@@ -22,7 +22,7 @@ export default function Dashboard() {
       knowledge.stats(selectedProductId),
       health(),
       requirements.list(1, 5, selectedProductId),
-      testCases.list(undefined, 1, 5, selectedProductId),
+      testCases.list(undefined, undefined, undefined, 1, 5, selectedProductId),
     ]).then(([s, h, r, c]) => {
       setStats(s)
       setHealth(h)
