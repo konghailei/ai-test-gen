@@ -35,7 +35,7 @@ export default function Sidebar({ collapsed, onToggle }: { collapsed: boolean; o
         </div>
         {!collapsed && (
           <div className="overflow-hidden">
-            <h1 className="text-sm font-bold text-slate-800 leading-tight">AI-Test-Gen</h1>
+            <h1 className="text-sm font-bold text-slate-800 leading-tight">AI测试用例生成系统</h1>
             <p className="text-[10px] text-slate-400 leading-tight">测试用例自动生成</p>
           </div>
         )}

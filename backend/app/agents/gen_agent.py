@@ -301,9 +301,9 @@ class GenAgent:
         processed: list[dict] = []
 
         for case in cases:
-            # 生成用例 ID（若缺失）
-            if not case.get("id"):
-                case["id"] = gen_test_case_id(module_prefix)
+            # ⚠️ 始终覆盖 LLM 生成的占位 ID（如 TC-AUTH-0001-0001），
+            # 避免同模块重复生成时 UniqueViolationError
+            case["id"] = gen_test_case_id(module_prefix)
 
             # 补全关联需求
             case.setdefault("related_requirement", req_id)

@@ -44,7 +44,7 @@ export default function Dashboard() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="page-title">仪表盘</h1>
-          <p className="text-sm text-slate-500 mt-1">AI-Test-Gen 系统概览与快速操作</p>
+          <p className="text-sm text-slate-500 mt-1">AI测试用例生成系统 概览与快速操作</p>
         </div>
         <Link to="/generate" className="btn-primary">
           <Play className="w-4 h-4" /> 开始生成

@@ -24,16 +24,33 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 def _id(): return uuid.uuid4().hex
 
 
-def _topic(parent: Element, title: str, tid: str | None = None) -> Element:
-    t = SubElement(parent, "topic", {"id": tid or _id(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
+def _topic(title: str, tid: str | None = None) -> Element:
+    """创建独立 topic 元素（不附加到任何父节点）。
+
+    用 Element() 而非 SubElement() 创建，避免在调用方未明确 append 的情况下
+    被意外挂到错误父节点上（修复原 _topic(req_node, ...) 误用 SubElement 的问题）。
+    """
+    t = Element("topic", {"id": tid or _id(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
     te = SubElement(t, "title"); te.text = str(title)
     return t
 
 
 def _children(parent: Element, kids: list[Element]) -> None:
-    ce = SubElement(parent, "children")
-    te = SubElement(ce, "topics", {"type": "attached"})
-    for k in kids: te.append(k)
+    """把 kids 作为 parent 的子节点。
+
+    若 parent 已有 <children>，则复用其 <topics>；否则创建。
+    修复原实现每次调用都新建 <children> 导致 case_node 同时有 steps 和
+    preconditions 时出现两个 <children> 子元素（违反 XMind 格式规范）。
+    """
+    ce = parent.find("children")
+    if ce is None:
+        ce = SubElement(parent, "children")
+    te = ce.find("topics")
+    if te is None:
+        te = SubElement(ce, "topics", {"type": "attached"})
+    for k in kids:
+        # detach-on-append：若 k 已挂到其他父节点，ElementTree 会先移除再追加
+        te.append(k)
 
 
 def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
@@ -71,29 +88,29 @@ def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
     # 3. 构建 XML 树
     sheet = Element("sheet", {"id": _id(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
     SubElement(sheet, "title").text = root_title
-    root_topic = _topic(sheet, root_title)
+    root_topic = _topic(root_title)
+    sheet.append(root_topic)
 
     req_nodes = []
     for rid, rg in sorted(req_groups.items()):
-        req_node = Element("topic", {"id": _id(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
-        SubElement(req_node, "title").text = f"{rid} {rg['title']}"
+        req_node = _topic(f"{rid} {rg['title']}")
 
         fp_nodes = []
         for fp_name, fp_cases in sorted(rg["fp_groups"].items()):
-            fp_node = _topic(req_node, fp_name)
+            fp_node = _topic(fp_name)
             case_nodes = []
             for c in fp_cases:
-                case_node = _topic(req_node, f"[{c.get('type', '')}] {c.get('title', '')}")
+                case_node = _topic(f"[{c.get('type', '')}] {c.get('title', '')}")
                 # 步骤作为子节点
                 steps = c.get("steps") or (c.get("case_json") or {}).get("steps", [])
                 if steps:
-                    step_nodes = [_topic(req_node, f"{s.get('step', i+1)}. {s.get('action', '')}  →  {s.get('expected', '')}")
+                    step_nodes = [_topic(f"{s.get('step', i+1)}. {s.get('action', '')}  →  {s.get('expected', '')}")
                                   for i, s in enumerate(steps) if isinstance(s, dict) and s.get('action')]
                     if step_nodes: _children(case_node, step_nodes)
-                # 前置条件
+                # 前置条件（复用同一 <children>，修复原重复创建问题）
                 precond = c.get("preconditions") or (c.get("case_json") or {}).get("preconditions", [])
                 if precond:
-                    _children(case_node, [_topic(req_node, f"前置: {p}") for p in precond if p])
+                    _children(case_node, [_topic(f"前置: {p}") for p in precond if p])
                 case_nodes.append(case_node)
             if case_nodes: _children(fp_node, case_nodes)
             fp_nodes.append(fp_node)
@@ -122,7 +139,7 @@ def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("content.xml", xml_bytes)
         zf.writestr("manifest.json", json.dumps({"file-entries": {"content.xml": {}, "metadata.json": {}}}).encode("utf-8"))
-        zf.writestr("metadata.json", json.dumps({"creator": {"name": "AI-Test-Gen", "version": "1.0"}}).encode("utf-8"))
+        zf.writestr("metadata.json", json.dumps({"creator": {"name": "AI测试用例生成系统", "version": "1.0"}}).encode("utf-8"))
     return buf.getvalue()
 
 

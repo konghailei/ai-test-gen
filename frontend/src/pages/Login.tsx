@@ -59,7 +59,7 @@ export default function Login() {
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-primary-400 to-accent-400 shadow-lg shadow-primary-500/25 mb-4">
             <Sparkles className="w-8 h-8 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-white">AI-Test-Gen</h1>
+          <h1 className="text-2xl font-bold text-white">AI测试用例生成系统</h1>
           <p className="text-sm text-slate-400 mt-1">AI 驱动测试用例自动生成系统</p>
         </div>
 
@@ -132,7 +132,7 @@ export default function Login() {
 
         {/* Footer */}
         <p className="text-center text-xs text-slate-500 mt-6">
-          AI-Test-Gen{version ? ` v${version}` : ''} — 安全审计版本
+          AI测试用例生成系统{version ? ` v${version}` : ''} — 安全审计版本
         </p>
       </div>
     </div>

@@ -121,6 +121,7 @@ class TestCaseUpdateRequest(BaseModel):
     title: str | None = None
     type: str | None = None
     priority: str | None = None
+    description: str | None = None
     preconditions: list[str] | None = None
     steps: list[dict] | None = None
     expected: str | None = None

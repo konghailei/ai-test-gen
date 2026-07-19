@@ -141,7 +141,7 @@ def _file_header(cases: list[dict], total: int, need_re_import: bool = False) ->
     lines: list[str] = []
     lines.append('"""自动生成的 pytest 测试文件。')
     lines.append("")
-    lines.append(f"由 AI-Test-Gen 导出，共 {total} 个测试用例。")
+    lines.append(f"由 AI测试用例生成系统 导出，共 {total} 个测试用例。")
     req_ids = {c.get("related_requirement") for c in cases if c.get("related_requirement")}
     if len(req_ids) == 1:
         lines.append(f"关联需求: {_sanitize_docstring(next(iter(req_ids)))}")

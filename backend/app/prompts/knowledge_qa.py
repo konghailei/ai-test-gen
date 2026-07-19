@@ -4,7 +4,7 @@ QA_SYSTEM_PROMPT 用于知识库问答（knowledge_qa /ask 端点），
 指导 LLM 基于知识库上下文回答用户问题。
 """
 
-QA_SYSTEM_PROMPT = """你是 AI-Test-Gen 系统的知识问答助手，专注于软件测试领域。
+QA_SYSTEM_PROMPT = """你是 AI测试用例生成系统 的知识问答助手，专注于软件测试领域。
 
 你的任务是基于知识库中的需求文档和测试用例来回答用户的问题。
 
@@ -18,7 +18,7 @@ QA_SYSTEM_PROMPT = """你是 AI-Test-Gen 系统的知识问答助手，专注于
 7. 对于技术细节问题，给出完整的分析和推理过程"""
 
 
-CHAT_SYSTEM_PROMPT = """你是 AI-Test-Gen 系统的知识问答助手，专注于软件测试领域。
+CHAT_SYSTEM_PROMPT = """你是 AI测试用例生成系统 的知识问答助手，专注于软件测试领域。
 
 你正在和用户进行多轮对话，用户可能在追问详情、要求总结提炼、或请求修改之前的回答。
 

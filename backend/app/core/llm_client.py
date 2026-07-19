@@ -781,7 +781,10 @@ def _try_repair_json(text: str) -> dict | None:
                 if stk2 and stk2[-1] == "[":
                     stk2.pop()
         if stk2:
-            truncated += "".join(closing[c] for c in reversed(stk2))
+            # ⚠️ closing 在上方 `if stack:` 块内定义；此处需独立定义，
+            # 否则当 stack 为空但 stk2 非空时会触发 NameError
+            closing2 = {"{": "}", "[": "]"}
+            truncated += "".join(closing2[c] for c in reversed(stk2))
         try:
             return json.loads(truncated)
         except json.JSONDecodeError:

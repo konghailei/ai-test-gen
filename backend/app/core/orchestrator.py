@@ -109,6 +109,10 @@ class PipelineState(TypedDict, total=False):
     product_name: str
     clarify_answers: dict
     existing_req_id: str
+    # ⚠️ srr_json：调用方传入的预解析 SRR（用于 _parse_node 跳过 LLM 重新解析）。
+    # 必须在 PipelineState 中显式声明，否则 LangGraph StateGraph 会过滤掉
+    # 未定义字段（initial_state 中传入也会被丢弃），导致 _parse_node 读到 None。
+    srr_json: dict
 
     # 节点输出
     srr: dict

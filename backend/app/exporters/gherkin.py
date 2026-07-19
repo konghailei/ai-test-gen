@@ -62,7 +62,7 @@ def export_gherkin(cases: list[dict]) -> str:
     else:
         feature_title = "Feature: 测试用例集"
     lines.append(feature_title)
-    lines.append(f"  # 共 {len(cases)} 个场景，导出于 AI-Test-Gen")
+    lines.append(f"  # 共 {len(cases)} 个场景，导出于 AI测试用例生成系统")
     lines.append("")
 
     # ========================================================================

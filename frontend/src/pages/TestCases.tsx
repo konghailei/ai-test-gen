@@ -1,12 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
-import { TestTube, Trash2, Loader2, Play, Sparkles, Filter, Download, ChevronDown, ChevronRight, ListChecks, AlertTriangle, FileText, Search, X } from 'lucide-react'
+import { TestTube, Trash2, Loader2, Play, Sparkles, Filter, Download, ChevronDown, ChevronRight, ListChecks, AlertTriangle, FileText, Search, X, Network, List, CheckCircle, XCircle, Edit3 } from 'lucide-react'
 import { testCases as tcApi, requirements as reqApi, generateCases, exportCases, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { TestCase, Requirement, Project, SSEEvent } from '../types'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
 import { caseTypeLabel } from '../utils/labels'
+import CaseEditDialog from '../components/CaseEditDialog'
+import XMindEditor from '../components/XMindEditor'
 
 const PAGE_SIZE = 20
+type ViewMode = 'list' | 'xmind'
 
 function groupByFP(cases: TestCase[]) {
   const map: Record<string, TestCase[]> = {}
@@ -63,6 +66,14 @@ export default function TestCases() {
     return r.id.toLowerCase().includes(s) || r.title.toLowerCase().includes(s)
   })
 
+  // 视图模式：list / xmind
+  const [viewMode, setViewMode] = useState<ViewMode>('list')
+  // XMind 视图下加载全部用例（不分页）
+  const [allCases, setAllCases] = useState<TestCase[]>([])
+  const [allCasesLoading, setAllCasesLoading] = useState(false)
+  // 编辑对话框
+  const [editingCase, setEditingCase] = useState<TestCase | null>(null)
+
   // 加载需求（先按产品过滤，无结果回退全部）
   useEffect(() => {
     const pid = selectedProductId || undefined
@@ -98,6 +109,37 @@ export default function TestCases() {
 
   useEffect(() => { loadCases() }, [page, filterReq, filterProject, filterSearch, selectedProductId])
 
+  // 切换到 XMind 视图时加载全部用例
+  useEffect(() => {
+    if (viewMode === 'xmind') loadAllCases()
+  }, [viewMode, filterReq, filterProject, filterSearch, selectedProductId])
+
+  const loadAllCases = async () => {
+    setAllCasesLoading(true)
+    try {
+      // 后端限制 page_size <= 100，循环分页加载全部用例
+      const all: TestCase[] = []
+      let p = 1
+      const pageSize = 100
+      // 最多取 50 页 = 5000 条，避免无限循环
+      while (p <= 50) {
+        const r = await tcApi.list(
+          filterReq || undefined,
+          filterProject || undefined,
+          filterSearch || undefined,
+          p, pageSize,
+          selectedProductId || undefined,
+        )
+        const items = r.items || []
+        all.push(...items)
+        if (items.length < pageSize || all.length >= (r.total || 0)) break
+        p++
+      }
+      setAllCases(all)
+    } catch { setAllCases([]) }
+    finally { setAllCasesLoading(false) }
+  }
+
   // 关闭下拉（点击外部）
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -113,9 +155,68 @@ export default function TestCases() {
   const toggleGroup = (key: string) => setExpandedGroups(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
   const toggleCase = (id: string) => setExpandedCases(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
 
+  // 删除用例（列表视图 + XMind 视图同步）
   const handleDelete = async (caseId: string) => {
-    if (!confirm('确认删除此用例？')) return
-    try { await tcApi.delete(caseId); loadCases() } catch (e: any) { alert('删除失败: ' + e.message) }
+    if (!confirm('确认删除此用例？此操作不可撤销。')) return
+    try {
+      await tcApi.delete(caseId)
+      // 列表视图刷新
+      loadCases()
+      // XMind 视图本地同步移除
+      setAllCases(prev => prev.filter(c => c.id !== caseId))
+    } catch (e: any) { alert('删除失败: ' + e.message) }
+  }
+
+  // 编辑用例：保存后两个视图同步更新
+  const handleEditSave = (updated: TestCase) => {
+    setEditingCase(null)
+    // XMind 视图本地同步
+    setAllCases(prev => prev.map(c => c.id === updated.id ? updated : c))
+    // 列表视图刷新
+    loadCases()
+  }
+
+  // 审核通过
+  const handleApprove = async (caseId: string) => {
+    try {
+      await tcApi.feedback(caseId, true, '审核通过')
+      setAllCases(prev => prev.map(c => c.id === caseId ? { ...c, status: 'approved' } : c))
+      loadCases()
+    } catch (e: any) { alert('审核失败: ' + e.message) }
+  }
+
+  // 审核驳回
+  const handleReject = async (caseId: string) => {
+    const reason = prompt('请输入驳回原因（可选）：', '') ?? ''
+    try {
+      await tcApi.feedback(caseId, false, reason || '审核驳回')
+      setAllCases(prev => prev.map(c => c.id === caseId ? { ...c, status: 'rejected' } : c))
+      loadCases()
+    } catch (e: any) { alert('驳回失败: ' + e.message) }
+  }
+
+  // 新增用例：列表视图下提示切换需求；XMind 视图下直接打开空表单（如果未选需求则提示）
+  const handleAddNew = () => {
+    if (!filterReq) {
+      alert('请先在筛选栏选择一个需求，新增用例需关联到具体需求')
+      return
+    }
+    const newCase: TestCase = {
+      id: '',  // 后端创建时生成（当前后端无 POST 端点，此处用编辑模式打开已有用例的快捷方式提示）
+      req_id: filterReq,
+      title: '',
+      type: 'functional',
+      priority: 'P1',
+      status: 'draft',
+      confidence: 0,
+      functional_point: '',
+      description: '',
+      preconditions: [],
+      steps: [{ step: 1, action: '', expected: '' }],
+      created_at: new Date().toISOString(),
+    }
+    alert('暂不支持直接新增用例，请通过「生成用例」按钮由 AI 生成，或在已有用例上点击编辑按钮进行修改')
+    void newCase
   }
 
   // 批量删除：按当前筛选条件 + 项目
@@ -188,6 +289,17 @@ export default function TestCases() {
           <p className="text-sm text-slate-500 mt-1">{total} 个用例，{groups.length} 个功能点</p>
         </div>
         <div className="flex items-center gap-2">
+          {/* 视图切换 */}
+          <div className="flex items-center bg-slate-100 rounded-lg p-0.5">
+            <button onClick={() => setViewMode('list')}
+              className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center gap-1 transition-colors ${viewMode === 'list' ? 'bg-white text-primary-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+              <List className="w-3.5 h-3.5" />列表
+            </button>
+            <button onClick={() => setViewMode('xmind')}
+              className={`px-2.5 py-1.5 rounded-md text-xs font-medium flex items-center gap-1 transition-colors ${viewMode === 'xmind' ? 'bg-white text-primary-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>
+              <Network className="w-3.5 h-3.5" />XMind 编辑器
+            </button>
+          </div>
           <button onClick={() => setShowGenerate(!showGenerate)} className="btn-primary flex items-center gap-2">
             <Sparkles className="w-4 h-4" />{showGenerate ? '收起' : '生成用例'}
           </button>
@@ -199,11 +311,13 @@ export default function TestCases() {
               重新生成
             </button>
           )}
-          <button onClick={handleBatchDelete} disabled={batchDeleting || total === 0}
-            className="btn-secondary text-red-500 flex items-center gap-2 disabled:opacity-50">
-            {batchDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
-            批量删除
-          </button>
+          {viewMode === 'list' && (
+            <button onClick={handleBatchDelete} disabled={batchDeleting || total === 0}
+              className="btn-secondary text-red-500 flex items-center gap-2 disabled:opacity-50">
+              {batchDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+              批量删除
+            </button>
+          )}
           <button onClick={handleExportXMind} disabled={exporting || !filterProject || cases.length === 0}
             className="btn-secondary flex items-center gap-2 disabled:opacity-50">
             {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
@@ -324,7 +438,8 @@ export default function TestCases() {
         </div>
       </div>
 
-      {/* 用例列表 */}
+      {/* 用例列表视图 */}
+      {viewMode === 'list' && (
       <div className="card p-0 overflow-hidden">
         {loading ? (
           <div className="p-6 space-y-4">{[1,2,3,4,5].map(i => <div key={i} className="skeleton h-14" />)}</div>
@@ -366,6 +481,21 @@ export default function TestCases() {
                                 <span className={priorityBadge(c.priority)}>{c.priority}</span>
                                 <span className={statusBadge(c.status)}>{CASE_STATUS_LABELS[c.status] || c.status}</span>
                                 <span className={`text-xs font-mono font-medium ${confidenceColor(c.confidence)}`}>{(c.confidence * 100).toFixed(0)}%</span>
+                                {/* 审核按钮 */}
+                                {c.status !== 'approved' && (
+                                  <button onClick={e => { e.stopPropagation(); handleApprove(c.id) }} className="btn-ghost p-1 text-slate-400 hover:text-emerald-600" title="审核通过">
+                                    <CheckCircle className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                {c.status !== 'rejected' && (
+                                  <button onClick={e => { e.stopPropagation(); handleReject(c.id) }} className="btn-ghost p-1 text-slate-400 hover:text-red-500" title="驳回">
+                                    <XCircle className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                {/* 编辑按钮 */}
+                                <button onClick={e => { e.stopPropagation(); setEditingCase(c) }} className="btn-ghost p-1 text-slate-400 hover:text-primary-600" title="编辑">
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                </button>
                                 <button onClick={e => { e.stopPropagation(); handleDelete(c.id) }} className="btn-ghost p-1 text-slate-400 hover:text-red-500" title="删除"><Trash2 className="w-3.5 h-3.5" /></button>
                               </div>
                             </div>
@@ -397,6 +527,36 @@ export default function TestCases() {
           </div>
         )}
       </div>
+      )}
+
+      {/* XMind 编辑器视图 */}
+      {viewMode === 'xmind' && (
+        <>
+          {allCasesLoading ? (
+            <div className="card p-6 space-y-4">{[1,2,3,4,5].map(i => <div key={i} className="skeleton h-14" />)}</div>
+          ) : (
+            <XMindEditor
+              cases={allCases}
+              reqs={reqs}
+              selectedProjectName={selectedProject?.name || filterProject || '所有用例'}
+              onEdit={(c) => setEditingCase(c)}
+              onDelete={handleDelete}
+              onApprove={handleApprove}
+              onReject={handleReject}
+              onAddNew={handleAddNew}
+            />
+          )}
+        </>
+      )}
+
+      {/* 编辑用例对话框 */}
+      {editingCase && (
+        <CaseEditDialog
+          caseData={editingCase}
+          onClose={() => setEditingCase(null)}
+          onSaved={handleEditSave}
+        />
+      )}
     </div>
   )
 }

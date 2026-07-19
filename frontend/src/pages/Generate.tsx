@@ -86,15 +86,23 @@ export default function Generate() {
   }
 
   const handleExport = async (format: string) => {
+    if (generatedCases.length === 0) {
+      setError('没有可导出的用例')
+      return
+    }
     try {
       const { exportCases } = await import('../api/client')
-      const blob = await exportCases.download(format)
+      // ⚠️ 必须传 case_ids：后端 export_testcases 要求 case_ids 非空，否则 400
+      const blob = await exportCases.download(format, generatedCases.map(c => c.id))
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
-      a.href = url; a.download = `testcases.${format === 'markdown' ? 'md' : format === 'gherkin' ? 'feature' : format === 'pytest' ? 'py' : 'json'}`
+      const ext = format === 'markdown' ? 'md' : format === 'gherkin' ? 'feature' : format === 'pytest' ? 'py' : 'json'
+      a.href = url; a.download = `testcases.${ext}`
       a.click()
       URL.revokeObjectURL(url)
-    } catch {}
+    } catch (e: any) {
+      setError(e?.message || '导出失败')
+    }
   }
 
   const req = reqs.find(r => r.id === selectedReq)

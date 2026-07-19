@@ -550,17 +550,32 @@ export const exportCases = {
   download: async (format: string, caseIds?: string[], projectName?: string) => {
     const params = new URLSearchParams({ format })
     const url = `${BASE}/export?${params}`
+    // ⚠️ 必须携带 Authorization 头：后端 export_testcases 依赖 Depends(get_current_user)
+    const token = getToken()
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (token) headers['Authorization'] = `Bearer ${token}`
     if (caseIds?.length) {
       const body: Record<string, unknown> = { format, case_ids: caseIds }
       if (projectName) body.project_name = projectName
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(body),
       })
+      if (res.status === 401) { forceLogout(); throw new Error('登录已过期，请重新登录') }
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error(j.detail || j.message || `导出失败 (${res.status})`)
+      }
       return res.blob()
     }
-    const res = await fetch(url)
+    // 无 caseIds 时仍需 POST + 空 body 以匹配后端签名（后端要求 case_ids 非空，会返回 400）
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ format }) })
+    if (res.status === 401) { forceLogout(); throw new Error('登录已过期，请重新登录') }
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      throw new Error(j.detail || j.message || `导出失败 (${res.status})`)
+    }
     return res.blob()
   },
 }

@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
     # ===== 启动阶段 =====
     setup_logger()
     logger.info("=" * 60)
-    logger.info("AI-Test-Gen v{} 启动中...", __version__)
+    logger.info("AI测试用例生成系统 v{} 启动中...", __version__)
     logger.info("LLM 提供商: {}", settings.LLM_PROVIDER)
     logger.info("数据库: PostgreSQL")
     logger.info("向量存储后端: {}", settings.VECTOR_STORE)
@@ -110,12 +110,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("向量库预热失败（不影响启动）: {}", str(e)[:120])
 
-    logger.info("AI-Test-Gen 启动完成，监听端口 {}", settings.APP_PORT)
+    logger.info("AI测试用例生成系统 启动完成，监听端口 {}", settings.APP_PORT)
 
     yield
 
     # ===== 关闭阶段 =====
-    logger.info("AI-Test-Gen 正在关闭...")
+    logger.info("AI测试用例生成系统 正在关闭...")
 
 
 # ============================================================================
@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
 # ============================================================================
 
 app = FastAPI(
-    title="AI-Test-Gen API",
+    title="AI测试用例生成系统 API",
     description=(
         "AI 驱动的测试用例自动生成系统。\n\n"
         "将非结构化软件需求经 5 个 Agent 流水线（ReqAgent → ClarifyAgent → "

@@ -236,7 +236,7 @@ async def update_testcase(
     # 更新 case_json 中的内容字段
     case_json = dict(record.case_json or {})
     json_fields = [
-        "preconditions", "steps", "expected", "test_data", "assertions",
+        "description", "preconditions", "steps", "expected", "test_data", "assertions",
     ]
     for field in json_fields:
         value = getattr(req, field)

@@ -133,7 +133,7 @@ def export_markdown(cases: list[dict]) -> str:
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append("**AI 生成备注**: 此文档由 AI-Test-Gen 生成，如有问题请在 Review 中标注。")
+    lines.append("**AI 生成备注**: 此文档由 AI测试用例生成系统 生成，如有问题请在 Review 中标注。")
     lines.append("")
 
     logger.debug("[Exporter/Markdown] 生成完成: cases={}, types={}", len(cases), list(type_counts.keys()))
