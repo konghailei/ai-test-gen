@@ -31,6 +31,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1597,6 +1598,91 @@ async def get_clarify_history(
     )
 
 
+# ============================================================================
+# v2.0 需求历史版本管理：列出/查看历次重新分析前的 SRR 快照
+# ============================================================================
+
+@router.get("/{req_id}/versions", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def list_requirement_versions(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """列出需求的历史版本（重新分析前的 SRR 快照）。
+
+    历史版本按时间倒序返回（最新快照在前）。每条记录含：
+        - version_index: 版本序号（从 1 开始递增）
+        - snapshot_at: 快照时间（ISO8601）
+        - title: 当时的需求标题
+        - trigger: 触发原因（regenerate / clarify 等）
+        - extra_notes: 用户补充说明
+    """
+    stmt = select(Requirement).where(Requirement.id == req_id)
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    versions = list((record.srr_json or {}).get("_version_history", []))
+    # 列表视图：剥离 srr 大字段，仅返回摘要
+    summary = [{
+        "version_index": v.get("version_index", idx + 1),
+        "snapshot_at": v.get("snapshot_at", ""),
+        "title": v.get("title", ""),
+        "trigger": v.get("trigger", ""),
+        "extra_notes": (v.get("extra_notes", "") or "")[:200],
+    } for idx, v in enumerate(versions)]
+    summary.reverse()  # 最新在前
+
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data={
+            "items": summary,
+            "total": len(summary),
+            "current_title": record.title,
+            "current_status": record.status,
+            "current_updated_at": record.updated_at.isoformat() if record.updated_at else "",
+        },
+    )
+
+
+@router.get("/{req_id}/versions/{version_index}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_requirement_version(
+    req_id: str,
+    version_index: int,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """查看指定历史版本的完整 SRR 快照。
+
+    Args:
+        req_id: 需求 ID
+        version_index: 版本序号（从 1 开始）
+    """
+    stmt = select(Requirement).where(Requirement.id == req_id)
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    versions = list((record.srr_json or {}).get("_version_history", []))
+    target = next((v for v in versions if v.get("version_index") == version_index), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"版本 v{version_index} 不存在（共 {len(versions)} 个历史版本）")
+
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data={
+            "version_index": target.get("version_index"),
+            "snapshot_at": target.get("snapshot_at", ""),
+            "title": target.get("title", ""),
+            "trigger": target.get("trigger", ""),
+            "extra_notes": target.get("extra_notes", ""),
+            "srr": target.get("srr", {}),
+        },
+    )
+
+
 @router.post("/{req_id}/regenerate", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def regenerate_requirement(
     req_id: str,
@@ -1715,6 +1801,10 @@ async def _run_regenerate_reparse(
         2. 保留 KB 日志 + 澄清历史 + KB 基线补全
         3. 持久化 + 更新标题
         4. status=completed
+
+    v2.0 历史版本管理：
+        重新生成前把原 srr_json 完整快照保存到 _version_history 数组，
+        保留历次重新分析前的需求分析结果，供用户回溯。
     """
     from sqlalchemy import update as sa_update
     try:
@@ -1742,6 +1832,23 @@ async def _run_regenerate_reparse(
         clarify_history.append(history_entry)
 
         final_data = dict(final_srr)
+
+        # ===== v2.0 历史版本管理：把原 srr_json 完整快照保存到 _version_history =====
+        # 快照只保留业务字段（剔除内部状态字段，避免重复堆积）
+        SNAPSHOT_EXCLUDE_KEYS = {"_clarify_state", "_kb_query_logs", "_clarify_history", "_version_history"}
+        old_snapshot = {k: v for k, v in old_srr.items() if k not in SNAPSHOT_EXCLUDE_KEYS}
+        version_history = list(old_srr.get("_version_history", []))
+        version_history.append({
+            "version_index": len(version_history) + 1,
+            "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            "title": previous_title or old_snapshot.get("requirement", {}).get("title", ""),
+            "trigger": "regenerate",
+            "extra_notes": extra_notes,
+            "srr": old_snapshot,
+        })
+        final_data["_version_history"] = version_history
+        # ===== end 历史版本管理 =====
+
         # 保留 KB 查询日志
         if original_logs := old_srr.get("_kb_query_logs"):
             final_data["_kb_query_logs"] = original_logs
@@ -1766,14 +1873,15 @@ async def _run_regenerate_reparse(
             await s.commit()
 
         logger.info(
-            "[Task/Regenerate] 重新生成完成，需求进入待确认: req_id={}, title={}->{}",
-            req_id, previous_title, new_title,
+            "[Task/Regenerate] 重新生成完成，需求进入待确认: req_id={}, title={}->{}, history_versions={}",
+            req_id, previous_title, new_title, len(version_history),
         )
 
         await _update_task(
             task_id, status="completed", phase="done", progress=100,
             message="需求分析已重新生成，进入待确认",
-            result_json={"req_id": req_id, "new_title": new_title, "status": "pending_review"},
+            result_json={"req_id": req_id, "new_title": new_title, "status": "pending_review",
+                         "version_count": len(version_history)},
             completed_at=datetime.now(timezone.utc),
         )
         logger.info("[Task/Regenerate] 重新生成完成: task_id={}, req_id={}", task_id, req_id)
@@ -3626,3 +3734,70 @@ async def fp_regenerate(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重生成失败: {str(e)[:200]}")
+
+
+# ============================================================================
+# 17. 需求 SRR → XMind 导出
+# ============================================================================
+
+@router.get("/{req_id}/export/xmind", dependencies=[Depends(get_current_user)])
+async def export_requirement_xmind(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """导出需求 SRR 为 XMind 思维导图（.xmind ZIP 文件）。
+
+    树结构：
+        需求标题（根）
+          ├── 基本信息（优先级/类型/摘要）
+          ├── 主流程（Happy Path 步骤）
+          ├── 异常分支
+          ├── 业务规则 / 边界条件 / 数据约束 / 验收标准 / 前置条件
+          ├── 功能点（含子 SRR）
+          └── 附加详情
+
+    Args:
+        req_id: 需求 ID
+        session: 数据库会话
+
+    Returns:
+        Response: .xmind 文件（application/zip）
+    """
+    stmt = select(Requirement).where(Requirement.id == req_id)
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    srr = record.srr_json or {}
+    if not isinstance(srr, dict):
+        srr = {}
+
+    # 安全文件名（去除路径分隔符等特殊字符）
+    raw_title = (srr.get("requirement") or {}).get("title") if isinstance(srr.get("requirement"), dict) else record.title
+    raw_title = str(raw_title or req_id)
+    safe_title = "".join(c for c in raw_title if c not in '\\/:*?"<>|\r\n\t').strip()[:60] or req_id
+
+    try:
+        from app.exporters.req_xmind import export_requirement_to_xmind
+        content = export_requirement_to_xmind(srr, req_title=record.title or "", req_id=req_id)
+    except Exception as e:
+        logger.exception("[API/requirements] XMind 导出失败: req_id={}", req_id)
+        raise HTTPException(status_code=500, detail=f"XMind 导出失败: {str(e)[:200]}")
+
+    filename = f"{safe_title}_{req_id}.xmind"
+    # RFC 5987: 中文文件名需用 filename* 编码（Starlette header 用 latin-1，不支持中文）
+    from urllib.parse import quote
+    filename_ascii = f"requirement_{req_id}.xmind"  # ASCII fallback
+    filename_utf8 = quote(filename, safe="")  # URL 编码后的中文文件名
+    logger.info("[API/requirements] XMind 导出: req_id={}, size={} bytes", req_id, len(content))
+
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{filename_ascii}\"; filename*=UTF-8''{filename_utf8}",
+            "Content-Length": str(len(content)),
+        },
+    )

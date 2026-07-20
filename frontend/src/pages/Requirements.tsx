@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, AlertTriangle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2, Search, X } from 'lucide-react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, AlertTriangle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2, Search, X, Download } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Requirement, Product, ClarifyQuestion, Module, AnalysisTaskInfo } from '../types'
@@ -35,6 +35,9 @@ export default function Requirements() {
   const [filterPriority, setFilterPriority] = useState('')
   const [searchKeyword, setSearchKeyword] = useState('')
   const [projects, setProjects] = useState<Record<string, { id: string; name: string }[]>>({})
+
+  // 从 URL query 读取 project_id（支持从项目管理页面跳转过来）
+  const [searchParams, setSearchParams] = useSearchParams()
 
   // Upload modal
   const [showUpload, setShowUpload] = useState(false)
@@ -75,7 +78,13 @@ export default function Requirements() {
 
   // 头部产品变更时重置筛选，加载该产品的项目/模块
   useEffect(() => {
-    setFilterProject('')
+    // 优先从 URL 读取 project_id（由项目管理页面跳转过来时携带）
+    const qProj = searchParams.get('project_id') || ''
+    setFilterProject(qProj)
+    if (qProj) {
+      // 清掉 query 参数，避免后续刷新重复带上
+      setSearchParams({}, { replace: true })
+    }
     if (selectedProductId) loadProjects(selectedProductId)
     else { setModules([]); setSelModules([]) }
     setPage(1)
@@ -366,6 +375,21 @@ export default function Requirements() {
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [deleteModal, setDeleteModal] = useState<{ id: string; title: string; status: string; deps: any } | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
+  // v2.0 导出 XMind
+  const [exportingId, setExportingId] = useState<string | null>(null)
+
+  const handleExportXmind = async (e: React.MouseEvent, r: Requirement) => {
+    e.stopPropagation()
+    setExportingId(r.id)
+    try {
+      const res = await reqApi.exportXmind(r.id)
+      alert(`已导出 XMind 文件：${res.filename}（${(res.size / 1024).toFixed(1)} KB）`)
+    } catch (err: any) {
+      alert('XMind 导出失败: ' + (err?.message || '未知错误'))
+    } finally {
+      setExportingId(null)
+    }
+  }
 
   const handleDelete = async (e: React.MouseEvent, r: Requirement) => {
     e.stopPropagation()
@@ -957,6 +981,17 @@ export default function Requirements() {
                     <div className="flex items-center justify-end gap-1">
                       <button onClick={e => { e.stopPropagation(); navigate(`/requirements/${r.id}`) }} className="btn-ghost p-1.5" title="查看详情">
                         <ArrowRight className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={e => handleExportXmind(e, r)}
+                        disabled={exportingId === r.id}
+                        className="p-1.5 rounded-lg transition-colors text-slate-400 hover:text-violet-500 hover:bg-violet-50 disabled:opacity-50"
+                        title="导出 XMind 思维导图"
+                      >
+                        {exportingId === r.id
+                          ? <Loader2 className="w-4 h-4 animate-spin" />
+                          : <Download className="w-4 h-4" />
+                        }
                       </button>
                       <button
                         onClick={e => handleDelete(e, r)}

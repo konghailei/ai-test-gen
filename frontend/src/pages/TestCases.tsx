@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { TestTube, Trash2, Loader2, Play, Sparkles, Filter, Download, ChevronDown, ChevronRight, ListChecks, AlertTriangle, FileText, Search, X, Network, List, CheckCircle, XCircle, Edit3 } from 'lucide-react'
 import { testCases as tcApi, requirements as reqApi, generateCases, exportCases, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
@@ -75,6 +76,17 @@ export default function TestCases() {
   const [editingCase, setEditingCase] = useState<TestCase | null>(null)
 
   // 加载需求（先按产品过滤，无结果回退全部）
+  const [searchParams, setSearchParams] = useSearchParams()
+  // 从 URL query 读取 project_id（支持从项目管理页面跳转过来）
+  useEffect(() => {
+    const qProj = searchParams.get('project_id') || ''
+    if (qProj) {
+      setFilterProject(qProj)
+      // 清掉 query 参数，避免后续刷新重复带上
+      setSearchParams({}, { replace: true })
+    }
+  }, [])
+
   useEffect(() => {
     const pid = selectedProductId || undefined
     const load = async () => {

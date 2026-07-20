@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   ReactFlow, useNodesState, useEdgesState, Background, Controls, MiniMap,
   MarkerType, ReactFlowProvider, Panel, Handle, Position,
@@ -480,6 +481,32 @@ export default function DependencyGraph() {
   const rfInstance = useRef<any>(null)
   const toggleFullscreen = () => setFullscreen(!fullscreen)
 
+  // 从 URL query 读取 module_id（支持从模块管理页面跳转过来后定位）
+  const [searchParams, setSearchParams] = useSearchParams()
+  const pendingFocusModuleId = useRef<string | null>(null)
+  useEffect(() => {
+    const mid = searchParams.get('module_id') || ''
+    if (mid) {
+      pendingFocusModuleId.current = mid
+      setSearchParams({}, { replace: true })
+    }
+  }, [])
+
+  /** 节点加载完成后，根据 pendingFocusModuleId 选中并居中该节点 */
+  const focusPendingModule = useCallback(() => {
+    const mid = pendingFocusModuleId.current
+    if (!mid || !rfInstance.current) return
+    const target = nodes.find(n => n.id === mid)
+    if (target) {
+      // 选中该节点（视觉高亮）
+      setNodes(nds => nds.map(n => ({ ...n, selected: n.id === mid })))
+      // 居中显示
+      const { x, y } = target.position
+      rfInstance.current.setCenter(x, y, { zoom: 1.4, duration: 600 })
+      pendingFocusModuleId.current = null
+    }
+  }, [nodes, setNodes])
+
   const [allModules, setAllModules] = useState<ModuleType[]>([])
   const [edgeType, setEdgeType] = useState('depends_on')
   const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null)
@@ -510,6 +537,14 @@ export default function DependencyGraph() {
       setNodes([]); setEdges([]); setAllModules([])
     }
   }, [selectedProductId, graphType])
+
+  // 节点加载后尝试聚焦 pendingFocusModuleId
+  useEffect(() => {
+    if (pendingFocusModuleId.current && nodes.length > 0) {
+      const t = setTimeout(focusPendingModule, 200)
+      return () => clearTimeout(t)
+    }
+  }, [nodes, focusPendingModule])
 
   function autoLayout(index: number, total: number) {
     const cols = Math.ceil(Math.sqrt(total))
@@ -715,9 +750,9 @@ export default function DependencyGraph() {
       if (!confirm(`删除 ${selEdgeIds.length} 条依赖连线？`)) return
     }
     if (graphType === 'modules') {
-      selNodeIds.forEach(id => removeNodeFromGraph(id))
+      selNodeIds.forEach((id: string) => removeNodeFromGraph(id))
     }
-    selEdgeIds.forEach(id => deleteEdge(id))
+    selEdgeIds.forEach((id: string) => deleteEdge(id))
   }
 
   // ========== Picker handler ==========
@@ -732,38 +767,38 @@ export default function DependencyGraph() {
 
   const openAddPicker = () => {
     setPickerTarget('new')
-    setPickerExcludes(nodes.map(n => n.id))
+    setPickerExcludes(nodes.map((n: any) => n.id))
     setPickerOpen(true)
   }
 
   // ========== Context menu actions ==========
   const contextEdit = () => {
     if (!ctxMenu?.nodeId) return
-    const node = nodes.find(n => n.id === ctxMenu.nodeId)
+    const node = nodes.find((n: any) => n.id === ctxMenu.nodeId)
     if (!node) return
     setPickerTarget({ nodeId: node.id })
-    setPickerExcludes(nodes.filter(n => n.id !== node.id).map(n => n.id))
+    setPickerExcludes(nodes.filter((n: any) => n.id !== node.id).map((n: any) => n.id))
     setPickerOpen(true)
     setCtxMenu(null)
   }
 
   const swapEdge = async () => {
     if (!ctxMenu?.edgeId) return
-    const edge = edges.find(e => e.id === ctxMenu.edgeId)
+    const edge = edges.find((e: any) => e.id === ctxMenu.edgeId)
     if (!edge) return
-    const srcName = String(nodes.find(n => n.id === edge.source)?.data?.label || edge.source)
-    const tgtName = String(nodes.find(n => n.id === edge.target)?.data?.label || edge.target)
+    const srcName = String(nodes.find((n: any) => n.id === edge.source)?.data?.label || edge.source)
+    const tgtName = String(nodes.find((n: any) => n.id === edge.target)?.data?.label || edge.target)
     if (!confirm(`将依赖方向从 "${srcName} → ${tgtName}" 改为 "${tgtName} → ${srcName}"？`)) return
     try {
       if (graphType === 'fp') {
         const depId = (edge.data as any)?.depId
-        const sourceNode = nodes.find(n => n.id === edge.source)
+        const sourceNode = nodes.find((n: any) => n.id === edge.source)
         const reqId = sourceNode?.data?.reqId as string
         const eType = (edge.data as any)?.eType || 'depends_on'
         if (!reqId || !depId) { alert('无法交换：缺少依赖 ID'); return }
         await reqApi.fpRemoveDependency(reqId, depId)
         // 创建反向依赖（target 的 reqId）
-        const targetNode = nodes.find(n => n.id === edge.target)
+        const targetNode = nodes.find((n: any) => n.id === edge.target)
         const targetReqId = targetNode?.data?.reqId as string
         if (!targetReqId) { alert('无法交换：缺少目标功能点所属需求'); return }
         await reqApi.fpAddDependency(targetReqId, edge.target, edge.source, eType)
@@ -790,7 +825,7 @@ export default function DependencyGraph() {
   }
 
   // ========== Helpers ==========
-  const onGraphNodes = allModules.filter(m => !nodes.some(n => n.id === m.id))
+  const onGraphNodes = allModules.filter(m => !nodes.some((n: any) => n.id === m.id))
   const productName = selectedProductId
     ? products.find(p => p.id === selectedProductId)?.name || selectedProductId
     : null
@@ -959,7 +994,7 @@ export default function DependencyGraph() {
                 nodes={nodes} edges={edges}
                 onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
-                onInit={(inst) => { rfInstance.current = inst }}
+                onInit={(inst: any) => { rfInstance.current = inst }}
                 onNodeDragStop={onNodeDragStop}
                 onNodeDoubleClick={onNodeDoubleClick}
                 onNodeContextMenu={onNodeContextMenu}

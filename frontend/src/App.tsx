@@ -12,6 +12,8 @@ import TestCases from './pages/TestCases'
 import KnowledgeBase from './pages/KnowledgeBase'
 import DependencyGraph from './pages/DependencyGraph'
 import ProjectsModules from './pages/ProjectsModules'
+import ProjectManagement from './pages/ProjectManagement'
+import ModuleManagement from './pages/ModuleManagement'
 import KnowledgeQA from './pages/KnowledgeQA'
 import Settings from './pages/Settings'
 import Products from './pages/Products'
@@ -90,6 +92,8 @@ export default function App() {
           <Route path="/knowledge-qa" element={<KnowledgeQA />} />
           <Route path="/dependency-graph" element={<DependencyGraph />} />
           <Route path="/projects-modules" element={<ProjectsModules />} />
+          <Route path="/projects" element={<ProjectManagement />} />
+          <Route path="/modules" element={<ModuleManagement />} />
           <Route path="/manual" element={<UserManual />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/settings" element={<Navigate to="/admin/settings" replace />} />

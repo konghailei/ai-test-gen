@@ -6,6 +6,7 @@ import type {
   KnowledgeStats, ClarifyQuestion, PaginatedData, LLMConfig, HealthStatus, KbFlowback, KbEntry, KbQAAskResponse, KbQAReference, KbQARecord,
   KbAugmentation, FieldConflict, ClarifyHistoryEntry, KbDiagnostics, KbModelStatus, AnalysisTaskInfo,
   FPBusinessPoint, FPItem, FPDependencyItem, FPNameSuggestion,
+  ReqVersionSummary, ReqVersionDetail,
 } from '../types'
 
 const BASE = '/api'
@@ -210,6 +211,43 @@ export const requirements = {
   /** 获取澄清与重新生成历史 */
   getClarifyHistory: (id: string) =>
     request<{ items: ClarifyHistoryEntry[]; total: number }>(`/requirements/${id}/clarify/history`),
+  /** v2.0 需求历史版本管理：列出所有历史版本（重新分析前的 SRR 快照摘要） */
+  listVersions: (id: string) =>
+    request<{
+      items: ReqVersionSummary[];
+      total: number;
+      current_title: string;
+      current_status: string;
+      current_updated_at: string;
+    }>(`/requirements/${id}/versions`),
+  /** v2.0 查看指定历史版本的完整 SRR 快照 */
+  getVersion: (id: string, versionIndex: number) =>
+    request<ReqVersionDetail>(`/requirements/${id}/versions/${versionIndex}`),
+  /** v2.0 需求 SRR → XMind 思维导图导出（直接触发浏览器下载 .xmind 文件） */
+  exportXmind: async (id: string): Promise<{ filename: string; size: number }> => {
+    const resp = await fetch(`${BASE}/requirements/${id}/export/xmind`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    })
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => resp.statusText)
+      throw new Error(`导出失败 (${resp.status}): ${msg.slice(0, 200)}`)
+    }
+    // 从 Content-Disposition 解析文件名
+    const cd = resp.headers.get('Content-Disposition') || ''
+    const m = cd.match(/filename="?([^";]+)"?/i)
+    const filename = m ? m[1] : `requirement_${id}.xmind`
+    const blob = await resp.blob()
+    // 触发浏览器下载
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    return { filename, size: blob.size }
+  },
   /** 补充信息后重新生成需求分析（异步任务模式，返回 task_id 供轮询） */
   regenerate: (id: string, extraNotes: string) =>
     request<{ task_id: string; req_id: string; status: string; previous_title: string }>(

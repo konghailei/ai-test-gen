@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, memo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers, Clock } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers, Clock, Download } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
@@ -10,6 +10,7 @@ import rehypeRaw from 'rehype-raw'
 import FunctionalPoints from '../components/FunctionalPoints'
 import FPSRRViewer from '../components/FPSRRViewer'
 import FieldEditor from '../components/FieldEditor'
+import VersionHistoryPanel from '../components/VersionHistoryPanel'
 import { brTypeLabel, acTypeLabel } from '../utils/labels'
 
 // ============================================================================
@@ -178,9 +179,24 @@ export default function RequirementDetail() {
   const [finalizing, setFinalizing] = useState(false)
   // v1.6: 确认需求完成
   const [confirming, setConfirming] = useState(false)
+  // v2.0: 导出 XMind
+  const [exporting, setExporting] = useState(false)
 
-  // Tab 切换：'srr' | 'raw' | 'kb' | 'impact' | 'history' | 'fp'
-  const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact' | 'history'>('srr')
+  const handleExportXmind = async () => {
+    if (!id) return
+    setExporting(true)
+    try {
+      const res = await reqApi.exportXmind(id)
+      alert(`已导出 XMind 文件：${res.filename}（${(res.size / 1024).toFixed(1)} KB）`)
+    } catch (e: any) {
+      alert('XMind 导出失败: ' + (e?.message || '未知错误'))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  // Tab 切换：'srr' | 'raw' | 'kb' | 'impact' | 'history' | 'versions'
+  const [activeTab, setActiveTab] = useState<'srr' | 'raw' | 'kb' | 'impact' | 'history' | 'versions'>('srr')
 
   // 澄清历史
   const [clarifyHistory, setClarifyHistory] = useState<ClarifyHistoryEntry[]>([])
@@ -1120,6 +1136,11 @@ export default function RequirementDetail() {
                   <Edit3 className="w-4 h-4" /> 编辑 SRR
                 </button>
               )}
+              {/* v2.0: 导出 XMind 思维导图（任何状态都可导出） */}
+              <button onClick={handleExportXmind} disabled={exporting} className="btn-secondary">
+                {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                导出 XMind
+              </button>
               {/* active / confirmed → 可归档（归档后导入知识库） */}
               {(detail.status === 'active' || detail.status === 'confirmed') && (
                 <button onClick={() => setShowArchiveModal(true)} className="btn-secondary">
@@ -1253,6 +1274,17 @@ export default function RequirementDetail() {
               </span>
             )}
           </button>
+          <button
+            onClick={() => setActiveTab('versions')}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-all duration-150 ${
+              activeTab === 'versions'
+                ? 'border-primary-500 text-primary-700'
+                : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+            }`}
+          >
+            <Layers className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
+            历史版本
+          </button>
         </div>
 
         {/* Tab 内容 */}
@@ -1298,6 +1330,8 @@ export default function RequirementDetail() {
               onNavigateToClarify={() => navigate(`/requirements/${id}/clarify`)}
               status={detail.status}
             />
+          ) : activeTab === 'versions' ? (
+            <VersionHistoryPanel reqId={String(id)} />
           ) : null}
         </div>
       </div>

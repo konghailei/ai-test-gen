@@ -108,6 +108,25 @@ export interface ClarifyHistoryEntry {
   new_title?: string
 }
 
+/** v2.0 需求历史版本摘要（列表） */
+export interface ReqVersionSummary {
+  version_index: number
+  snapshot_at: string
+  title: string
+  trigger: string
+  extra_notes: string
+}
+
+/** v2.0 需求历史版本详情（含完整 SRR 快照） */
+export interface ReqVersionDetail {
+  version_index: number
+  snapshot_at: string
+  title: string
+  trigger: string
+  extra_notes: string
+  srr: Record<string, unknown>
+}
+
 export interface TestCase {
   id: string
   req_id: string

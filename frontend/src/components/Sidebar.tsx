@@ -2,7 +2,7 @@ import { Link, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, FileText, TestTube, Database, Play,
   ChevronLeft, ChevronRight, Sparkles, Share2,
-  MessageSquare, Building2, FolderTree, ShieldCheck
+  MessageSquare, Building2, FolderTree, FolderOpen, Puzzle, ShieldCheck
 } from 'lucide-react'
 import { useAuth } from '../auth'
 
@@ -10,14 +10,16 @@ function navItems(permissions: string[]) {
   const has = (p: string) => permissions.length === 0 || permissions.includes(p)
   const items = [
     { key: 'dashboard', path: '/dashboard', label: '仪表盘', icon: LayoutDashboard },
-    { key: 'projects_modules', path: '/projects-modules', label: '项目与模块', icon: FolderTree },
+    { key: 'project_management', path: '/projects', label: '项目管理', icon: FolderOpen },
+    { key: 'module_management', path: '/modules', label: '模块管理', icon: Puzzle },
     { key: 'requirements', path: '/requirements', label: '需求管理', icon: FileText },
     { key: 'testcases', path: '/testcases', label: '测试用例', icon: TestTube },
     { key: 'dependency_graph', path: '/dependency-graph', label: '依赖图谱', icon: Share2 },
     { key: 'knowledge', path: '/knowledge', label: '知识库', icon: Database },
     { key: 'knowledge_qa', path: '/knowledge-qa', label: '知识问答', icon: MessageSquare },
   ]
-  return items.filter(i => has(i.key))
+  // 兼容旧权限：projects_modules 同时允许访问项目管理/模块管理
+  return items.filter(i => has(i.key) || (i.key === 'project_management' && has('projects_modules')) || (i.key === 'module_management' && has('projects_modules')))
 }
 
 export default function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
