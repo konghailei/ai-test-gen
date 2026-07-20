@@ -321,6 +321,19 @@ export function generateCases(
     body: JSON.stringify({ req_id: reqId }),
     signal: controller.signal,
   }).then(async (res) => {
+    // 错误响应处理：后端可能返回 400/404/409 等，body 为 JSON 错误信息而非 SSE 流
+    // 不检查 res.ok 会导致前端尝试读取错误响应体作为 SSE 流，无法解析出任何 data: 事件，看起来像是卡住
+    if (!res.ok) {
+      let errMsg = `生成请求失败（HTTP ${res.status}）`
+      try {
+        const errBody = await res.json()
+        // 后端 ApiResponse 或 FastAPI HTTPException 错误格式兼容
+        const detail = errBody?.detail || errBody?.message || errBody?.error
+        if (detail) errMsg = typeof detail === 'string' ? detail : JSON.stringify(detail)
+      } catch { /* 非 JSON 响应体，使用默认错误消息 */ }
+      onError?.(errMsg)
+      return
+    }
     const reader = res.body?.getReader()
     if (!reader) return
     const decoder = new TextDecoder()
@@ -609,6 +622,11 @@ export const products = {
     request(`/products/modules/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ name, description }),
+    }),
+  updateProject: (id: string, name: string, description = '', version = '1.0') =>
+    request(`/products/projects/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name, description, version }),
     }),
 }
 

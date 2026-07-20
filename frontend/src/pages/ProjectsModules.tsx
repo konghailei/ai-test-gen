@@ -6,14 +6,15 @@ import type { Project, Module } from '../types'
 
 /** 编辑弹窗 */
 function EditModal({
-  title, name, description, onSave, onClose, saving
+  title, name, description, version, showVersion, onSave, onClose, saving
 }: {
-  title: string; name: string; description: string;
-  onSave: (name: string, desc: string) => Promise<void>;
+  title: string; name: string; description: string; version?: string; showVersion?: boolean;
+  onSave: (name: string, desc: string, version?: string) => Promise<void>;
   onClose: () => void; saving: boolean
 }) {
   const [n, setN] = useState(name)
   const [d, setD] = useState(description)
+  const [v, setV] = useState(version || '1.0')
   return (
     <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !saving && onClose()}>
       <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
@@ -32,10 +33,17 @@ function EditModal({
             <textarea value={d} onChange={e => setD(e.target.value)}
               className="input-field text-sm resize-none" rows={3} placeholder="可选" />
           </div>
+          {showVersion && (
+            <div>
+              <label className="label">版本号</label>
+              <input value={v} onChange={e => setV(e.target.value)}
+                className="input-field text-sm" placeholder="如 1.0、2.1.0" />
+            </div>
+          )}
         </div>
         <div className="flex justify-end gap-3 mt-5">
           <button onClick={onClose} className="btn-secondary" disabled={saving}><X className="w-4 h-4" /> 取消</button>
-          <button onClick={() => onSave(n, d)} disabled={!n.trim() || saving} className="btn-primary">
+          <button onClick={() => onSave(n, d, showVersion ? v : undefined)} disabled={!n.trim() || saving} className="btn-primary">
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} 保存
           </button>
         </div>
@@ -99,7 +107,7 @@ export default function ProjectsModulesPage() {
 
   // 编辑
   const [editModal, setEditModal] = useState<{
-    type: 'project' | 'module'; id: string; name: string; description: string
+    type: 'project' | 'module'; id: string; name: string; description: string; version?: string
   } | null>(null)
   const [saving, setSaving] = useState(false)
 
@@ -150,14 +158,15 @@ export default function ProjectsModulesPage() {
     } catch (e: any) { alert('删除失败: ' + e.message) }
   }
 
-  const handleEditSave = async (name: string, desc: string) => {
+  const handleEditSave = async (name: string, desc: string, version?: string) => {
     if (!editModal || !activeProductId) return
     setSaving(true)
     try {
       if (editModal.type === 'module') {
         await prodApi.updateModule(editModal.id, name.trim(), desc.trim())
+      } else {
+        await prodApi.updateProject(editModal.id, name.trim(), desc.trim(), version?.trim() || '1.0')
       }
-      // 项目编辑暂不支持（后端未提供 update project API）
       await loadData(activeProductId)
       setEditModal(null)
     } catch (e: any) { alert('保存失败: ' + e.message) }
@@ -301,10 +310,16 @@ export default function ProjectsModulesPage() {
                         <p className="text-xs text-slate-400 truncate">{proj.description || proj.id}</p>
                       </div>
                     </div>
-                    <button onClick={() => handleDelete('project', proj.id, activeProductId)}
-                      className="btn-ghost p-1 text-slate-300 opacity-0 group-hover:opacity-100 hover:text-red-500 flex-shrink-0">
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+                      <button onClick={() => setEditModal({ type: 'project', id: proj.id, name: proj.name, description: proj.description, version: proj.version })}
+                        className="btn-ghost p-1 text-slate-300 hover:text-slate-600">
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => handleDelete('project', proj.id, activeProductId)}
+                        className="btn-ghost p-1 text-slate-300 hover:text-red-500">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -346,14 +361,16 @@ export default function ProjectsModulesPage() {
 
       {/* 编辑弹窗 */}
       {editModal && (
-        <EditModal
-          title={editModal.type === 'project' ? '编辑项目' : '编辑模块'}
-          name={editModal.name}
-          description={editModal.description}
-          saving={saving}
-          onSave={handleEditSave}
-          onClose={() => setEditModal(null)}
-        />
+      <EditModal
+        title={editModal.type === 'project' ? '编辑项目' : '编辑模块'}
+        name={editModal.name}
+        description={editModal.description}
+        version={editModal.version}
+        showVersion={editModal.type === 'project'}
+        saving={saving}
+        onSave={handleEditSave}
+        onClose={() => setEditModal(null)}
+      />
       )}
     </div>
   )

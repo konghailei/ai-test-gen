@@ -2826,7 +2826,7 @@ async def fp_split(
             except Exception as e:
                 logger.warning("[FP] 旧 FP 向量清理失败(不阻断): {}", str(e)[:200])
 
-        # 调用 ReqAgent 一体式提取
+        # 调用 ReqAgent 一体式提取（仅新 FP；已有 FP 名称已跳过 LLM）
         raw_text = req.raw_text or ""
         from app.agents.req_agent import req_agent as _agent
         product_name = srr.get("requirement", {}).get("product_name", "") or ""
@@ -2835,12 +2835,52 @@ async def fp_split(
         except Exception as e:
             logger.error("[FP] 重新拆分失败: {}", str(e)[:200])
             raise HTTPException(status_code=500, detail=f"重新拆分失败: {str(e)[:200]}")
+
+        # ── v1.6: 复制已有 FP 到当前需求 ──
+        copied_count = 0
+        modules = req.modules or []
+        if modules:
+            try:
+                existing_fp_rows = await session.execute(
+                    select(FunctionalPoint).where(FunctionalPoint.module_id.in_(modules))
+                )
+                seen_names: set[str] = set()
+                for efp in existing_fp_rows.scalars().all():
+                    if efp.name and efp.name not in seen_names:
+                        seen_names.add(efp.name)
+                        fp_copy = FunctionalPoint(
+                            id=gen_requirement_id(),
+                            requirement_id=req_id,
+                            module_id=efp.module_id,
+                            name=efp.name,
+                            fp_type=efp.fp_type,
+                            priority=efp.priority,
+                            srr_json=dict(efp.srr_json) if isinstance(efp.srr_json, dict) else {},
+                            atomicity_check=dict(efp.atomicity_check) if isinstance(efp.atomicity_check, dict) else {},
+                            test_hints=list(efp.test_hints or []),
+                            status="pending",
+                        )
+                        session.add(fp_copy)
+                        copied_count += 1
+                await session.flush()
+                if copied_count:
+                    logger.info("[FP] 已从已有 FP 复制 {} 个到当前需求", copied_count)
+            except Exception as e:
+                logger.warning("[FP] 复制已有 FP 失败(不阻断): {}", str(e)[:200])
+
         saved = await _save_fps_to_db(session, req_id, new_fps, req.priority)
         await _save_fp_dependencies(session, req_id, _agent.last_fp_dependencies)
+
+        # ── v1.6: 使用交互层 SRR 作为主需求的 srr_json ──
+        if _agent.interaction_srr and isinstance(_agent.interaction_srr, dict):
+            req.srr_json = _agent.interaction_srr
+            logger.info("[FP] 已用交互层 SRR 更新主需求 srr_json")
+
         await session.commit()
+        total_fps = copied_count + saved
         return ApiResponse(
             success=True,
-            message=f"已重新拆分 {saved} 个功能点",
+            message=f"已拆分 {total_fps} 个功能点（新增 {saved} + 复用已有 {copied_count}）",
             data={"functional_points": [
                 {"id": "", "name": fp.get("name", ""), "fp_type": fp.get("fp_type", "workflow"), "module_id": None}
                 for fp in new_fps

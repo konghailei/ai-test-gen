@@ -27,9 +27,7 @@ DAG 结构：
            ↓     ↓      ↓       ↓
         clarify impact impact   ↓
                   ↓      ↓      ↓
-               retrieve ←──────┘
-                  ↓
-                generate
+               generate ←──────┘
                   ↓
                  review
                   ↓
@@ -37,7 +35,7 @@ DAG 结构：
 
 关键决策（plan §五 D1-D10）：
     - D2：Clarify 流程采用 API 驱动，不使用 LangGraph interrupt
-    - D3：MatchAgent 检索逻辑合并到 orchestrator 的 retrieve_node
+    - D3：用例生成不再检索知识库（v3.1 起移除 retrieve_node，直接基于 SRR 生成）
     - D4：SSE 用 sse-starlette（本模块只产事件 dict，序列化由 API 层负责）
 """
 
@@ -89,7 +87,6 @@ class PipelineState(TypedDict, total=False):
         clarify_result: ClarifyAgent 输出
         gate_result: QualityGate 输出（dict 形式）
         impact_result: ImpactAnalysisAgent 输出
-        few_shot_context: retrieve_node 的 KB 检索结果
         test_cases: GenAgent 生成的用例列表
         review_result: ReviewAgent 审核报告
         reviewed_cases: ReviewAgent 更新后的用例列表
@@ -122,7 +119,6 @@ class PipelineState(TypedDict, total=False):
     clarify_result: dict
     gate_result: dict
     impact_result: dict
-    few_shot_context: dict
     test_cases: list
     review_result: dict
     reviewed_cases: list
@@ -141,15 +137,14 @@ class PipelineState(TypedDict, total=False):
 # SSE 事件构造（plan §T4 第 389-395 行，doc-00 §9.2）
 # ============================================================================
 
-# stage → progress 百分比映射（doc-00 §9.2）
+# stage → progress 百分比映射（doc-00 §9.2，v3.1 移除 retrieve）
 STAGE_PROGRESS: dict[str, int] = {
     "parse": 20,
     "select_channel": 25,
     "clarify": 30,
     "gate": 40,
     "impact": 50,
-    "retrieve": 55,
-    "generate": 75,
+    "generate": 70,
     "review": 90,
     "done": 100,
     "error": 100,
@@ -160,7 +155,7 @@ def make_sse_event(stage: str, message: str, **extra: Any) -> dict:
     """构造 SSE 事件字典。
 
     Args:
-        stage: 阶段名称（parse/select_channel/clarify/gate/impact/retrieve/generate/review/done/error）
+        stage: 阶段名称（parse/select_channel/clarify/gate/impact/generate/review/done/error）
         message: 人类可读的进度消息
         **extra: 附加字段（如 req_id、channel、cases_count 等）
 
@@ -265,7 +260,7 @@ class Orchestrator:
     def _build_graph(self):
         """构建 LangGraph 状态图。
 
-        节点：parse / select_channel / clarify / gate / impact / retrieve / generate / review
+        节点：parse / select_channel / clarify / gate / impact / generate / review
         条件边：
             - select_channel → clarify (FULL) / gate (FAST)
             - gate → impact (通过或强制) / clarify (回环重试)
@@ -275,24 +270,22 @@ class Orchestrator:
         """
         graph: StateGraph = StateGraph(PipelineState)
 
-        # 注册节点
+        # 注册节点（v3.1：移除 retrieve 节点，SRR 足够详细无需 KB 检索）
         graph.add_node("parse", self._parse_node)
         graph.add_node("select_channel", self._select_channel_node)
         graph.add_node("clarify", self._clarify_node)
         graph.add_node("gate", self._gate_node)
         graph.add_node("impact", self._impact_node)
-        graph.add_node("retrieve", self._retrieve_node)
         graph.add_node("generate", self._gen_node)
         graph.add_node("review", self._review_node)
 
         # 入口
         graph.set_entry_point("parse")
 
-        # 固定边
+        # 固定边（v3.1：impact → generate 直达，跳过 retrieve）
         graph.add_edge("parse", "select_channel")
         graph.add_edge("clarify", "gate")
-        graph.add_edge("impact", "retrieve")
-        graph.add_edge("retrieve", "generate")
+        graph.add_edge("impact", "generate")
         graph.add_edge("generate", "review")
         graph.add_edge("review", END)
 
@@ -564,7 +557,7 @@ class Orchestrator:
         guidance_len = len(result.get("generation_guidance", "") or "")
 
         logger.info(
-            "[Orchestrator] ◀ 节点 impact 完成 ▶ 下一节点 retrieve: "
+            "[Orchestrator] ◀ 节点 impact 完成 ▶ 下一节点 generate: "
             "is_optimization={}, guidance_len={}, original_cases={}",
             is_opt,
             guidance_len,
@@ -573,169 +566,8 @@ class Orchestrator:
 
         return {"impact_result": result}
 
-    async def _retrieve_node(self, state: PipelineState) -> dict:
-        """节点 6：KB 检索（MatchAgent 合并到编排器，D3 决策）。
-
-        执行综合 KB 检索（相似需求 + 相似用例 + 测试模式），结果存入 state。
-
-        Note:
-            ClarifyAgent 和 GenAgent 内部已各自检索 KB，此节点主要起
-            "预热缓存 + 日志 + SSE stage" 作用，不破坏 Agent 封装。
-            retrieve_node 的检索结果存入 state.few_shot_context 供日志和调试用，
-            GenAgent 仍使用自身的检索逻辑。
-
-        Returns:
-            dict: state 更新，含 few_shot_context
-        """
-        srr = state.get("srr", {})
-        req_id = state.get("req_id", "")
-        summary = srr.get("requirement", {}).get("summary", "")
-        product_id = srr.get("requirement", {}).get("product_id", "")
-        modules = srr.get("requirement", {}).get("modules", []) or []
-
-        logger.info("[Orchestrator] ▶ 节点 retrieve: req_id={}", req_id)
-
-        few_shot_context: dict[str, list] = {
-            "similar_reqs": [],
-            "similar_cases": [],
-            "patterns": [],
-        }
-
-        # 构建 KB 查询日志
-        kb_logs = []
-
-        # 相似需求
-        req_error = None
-        try:
-            few_shot_context["similar_reqs"] = await asyncio.to_thread(
-                vector_store.search_similar_requirements,
-                query=summary, product_id=product_id, modules=modules, top_k=3,
-            )
-        except Exception as e:
-            req_error = str(e)[:150]
-            logger.debug(
-                "[Orchestrator] retrieve 相似需求失败（不阻断）: {}",
-                str(e)[:120],
-            )
-        kb_logs.append({
-            "type": "similar_requirements",
-            "label": "需求检索",
-            "query": f"查找与当前需求功能相似的同类历史需求，为 Few-Shot 生成提供参考模板",
-            "query_detail": summary,
-            "result_count": len(few_shot_context["similar_reqs"]),
-            "results": [
-                {
-                    "id": r.get("id", ""),
-                    "title": r.get("title", ""),
-                    "summary": r.get("summary", "")[:200],
-                    "similarity": r.get("distance", r.get("similarity", 0)),
-                }
-                for r in few_shot_context["similar_reqs"][:5]
-            ],
-            "error": req_error,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        })
-
-        # 相似用例（v2.2: 按 product_id 过滤）
-        case_error = None
-        try:
-            few_shot_context["similar_cases"] = await asyncio.to_thread(
-                vector_store.search_similar_cases,
-                query=summary, top_k=3, product_id=product_id or None,
-            )
-        except Exception as e:
-            case_error = str(e)[:150]
-            logger.debug(
-                "[Orchestrator] retrieve 相似用例失败（不阻断）: {}",
-                str(e)[:120],
-            )
-        kb_logs.append({
-            "type": "similar_cases",
-            "label": "用例检索",
-            "query": "检索历史上为同类需求生成的测试用例，为当前用例生成提供 Few-Shot 参考",
-            "query_detail": summary,
-            "result_count": len(few_shot_context["similar_cases"]),
-            "results": [
-                {
-                    "id": c.get("id", ""),
-                    "title": c.get("title", ""),
-                    "type": c.get("type", ""),
-                    "similarity": c.get("distance", c.get("similarity", 0)),
-                }
-                for c in few_shot_context["similar_cases"][:5]
-            ],
-            "error": case_error,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        })
-
-        # 测试模式（v2.2: 按 product_id 过滤）
-        pattern_error = None
-        try:
-            few_shot_context["patterns"] = await asyncio.to_thread(
-                vector_store.search_patterns,
-                query=summary, top_k=3, product_id=product_id or None,
-            )
-        except Exception as e:
-            pattern_error = str(e)[:150]
-            logger.debug(
-                "[Orchestrator] retrieve 测试模式失败（不阻断）: {}",
-                str(e)[:120],
-            )
-        kb_logs.append({
-            "type": "patterns",
-            "label": "模式检索",
-            "query": "检索适合当前需求类型的测试模式（CRUD/状态机/认证/...)，为用例生成提供结构模板",
-            "query_detail": summary,
-            "result_count": len(few_shot_context["patterns"]),
-            "results": [
-                {
-                    "id": p.get("id", ""),
-                    "name": p.get("name", ""),
-                    "category": p.get("category", ""),
-                    "similarity": p.get("distance", p.get("similarity", 0)),
-                }
-                for p in few_shot_context["patterns"][:5]
-            ],
-            "error": pattern_error,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        })
-
-        # 持久化 KB 日志到需求记录的 srr_json 中
-        try:
-            from sqlalchemy import select
-            from app.db.database import async_session
-            from app.db.models import Requirement
-
-            async with async_session() as db_session:
-                stmt = select(Requirement).where(Requirement.id == req_id)
-                result = await db_session.execute(stmt)
-                record = result.scalar_one_or_none()
-                if record and record.srr_json is not None:
-                    srr_data = dict(record.srr_json)
-                    existing_logs = srr_data.get("_kb_query_logs", [])
-                    if isinstance(existing_logs, list):
-                        existing_logs.extend(kb_logs)
-                        srr_data["_kb_query_logs"] = existing_logs
-                    else:
-                        srr_data["_kb_query_logs"] = kb_logs
-                    record.srr_json = srr_data
-                    await db_session.commit()
-                    logger.debug(
-                        "[Orchestrator] KB 日志已持久化: req_id={}, logs={}",
-                        req_id, len(kb_logs),
-                    )
-        except Exception as e:
-            logger.debug("[Orchestrator] KB 日志持久化失败（不阻断）: {}", str(e)[:120])
-
-        logger.info(
-            "[Orchestrator] ◀ 节点 retrieve 完成 ▶ 下一节点 generate: "
-            "similar_reqs={}, similar_cases={}, patterns={}",
-            len(few_shot_context["similar_reqs"]),
-            len(few_shot_context["similar_cases"]),
-            len(few_shot_context["patterns"]),
-        )
-
-        return {"few_shot_context": few_shot_context}
+    # v3.1：已移除 KB 检索节点（原 _retrieve_node）。用例生成直接基于 SRR，
+    # 不再从知识库检索相似需求/用例/模式注入（该节点已不注册进 LangGraph）。
 
     async def _gen_node(self, state: PipelineState) -> dict:
         """节点 7：GenAgent 生成测试用例。
@@ -1050,7 +882,7 @@ class Orchestrator:
 
         Yields:
             dict: SSE 事件，格式：
-                {"stage": "parse|select_channel|clarify|gate|impact|retrieve|generate|review|done|error",
+                {"stage": "parse|select_channel|clarify|gate|impact|generate|review|done|error",
                  "message": "...",
                  "progress": 0-100,
                  ...附加字段}
@@ -1078,7 +910,6 @@ class Orchestrator:
             "clarify": "clarify",
             "gate": "gate",
             "impact": "impact",
-            "retrieve": "retrieve",
             "generate": "generate",
             "review": "review",
         }
@@ -1090,7 +921,6 @@ class Orchestrator:
             "clarify": "ClarifyAgent 需求澄清中...",
             "gate": "QualityGate 质量门禁检查中...",
             "impact": "ImpactAnalysisAgent 影响分析中...",
-            "retrieve": "知识库检索中...",
             "generate": "GenAgent 生成测试用例中...",
             "review": "ReviewAgent 审核用例中...",
         }
@@ -1163,7 +993,6 @@ class Orchestrator:
                 clarify_result=final_state.get("clarify_result", {}),
                 gate_result=final_state.get("gate_result", {}),
                 impact_result=final_state.get("impact_result", {}),
-                few_shot_context=final_state.get("few_shot_context", {}),
                 kb_flowback=final_state.get("kb_flowback", {}),
                 duration_ms=int(duration * 1000),
             )

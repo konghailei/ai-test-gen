@@ -695,6 +695,34 @@ class ClarifyAgent:
         return block
 
     @staticmethod
+    def _detect_baseline_focus(question: str) -> list[str]:
+        """根据基线问题文本推断用户真正关心的 SRR 维度。
+
+        修复「全量回答」：增量文档基线补全时，每个基线问题（如「正常流程」「业务规则」）
+        只需返回对应维度，而非把整篇历史 SRR 块当作答案。本方法从问题文本识别出
+        命中的维度 key，供 _query_kb_for_answers 精准提取与格式化。
+
+        返回命中的维度 key 列表；未命中任何关键词时返回空列表（调用方回退到整块）。
+        """
+        q = (question or "").lower()
+        hits: list[str] = []
+        # 先判异常/边界（避免「异常流程」被「流程」误命中为正常流程）
+        if any(k in q for k in ["异常", "边界", "分支", "alternate", "异常流程", "边界流程"]):
+            hits.append("alternate_flows")
+        # 正常流程 / 主流程 / 登录流程（不含裸「流程」，否则会误带异常流程）
+        if any(k in q for k in ["正常流程", "主流程", "登录流程", "happy_path", "happy path"]):
+            hits.append("happy_path")
+        if any(k in q for k in ["数据约束", "数据字段", "字段约束", "字段", "约束", "data_constraint"]):
+            hits.append("data_constraints")
+        if any(k in q for k in ["业务规则", "业务", "规则", "business_rule"]):
+            hits.append("business_rules")
+        if any(k in q for k in ["前置", "前提", "precondition"]):
+            hits.append("preconditions")
+        if any(k in q for k in ["验收", "acceptance"]):
+            hits.append("acceptance_criteria")
+        return hits
+
+    @staticmethod
     def _format_baseline_summary(block: dict, max_chars: int = 800) -> str:
         """将基线上下文块格式化为可读文本摘要，供 answer_text 展示。
 
@@ -747,6 +775,15 @@ class ClarifyAgent:
             parts.append("【前置条件】")
             for p in pc[:3]:
                 parts.append(f"  · {p if isinstance(p, str) else str(p)[:80]}")
+
+        ac = block.get("acceptance_criteria")
+        if isinstance(ac, list) and ac:
+            parts.append("【验收标准】")
+            for c in ac[:8]:
+                if isinstance(c, dict):
+                    parts.append(f"  · {c.get('description', c.get('criterion', str(c)))}")
+                else:
+                    parts.append(f"  · {str(c)[:120]}")
 
         summary = "\n".join(parts)
         if len(summary) > max_chars:
@@ -887,7 +924,22 @@ class ClarifyAgent:
                         pass
 
                 if baseline_block:
-                    summary = self._format_baseline_summary(baseline_block)
+                    # 精准补全：只返回问题关心的维度，而非把整篇历史 SRR 块当作答案
+                    focus_keys = self._detect_baseline_focus(q.get("question", ""))
+                    if focus_keys:
+                        focus_block: dict = {}
+                        flows = src_srr.get("flows", {}) or {}
+                        for k in focus_keys:
+                            if k in ("happy_path", "alternate_flows"):
+                                if flows.get(k):
+                                    focus_block[k] = flows[k]
+                            elif src_srr.get(k):
+                                focus_block[k] = src_srr[k]
+                        if not focus_block:
+                            focus_block = baseline_block
+                    else:
+                        focus_block = baseline_block
+                    summary = self._format_baseline_summary(focus_block)
                     answer_text += (
                         f"• {req_id}{meta_suffix}：\n"
                         f"{summary}\n"
@@ -896,7 +948,8 @@ class ClarifyAgent:
                         "id": req_id,
                         "similarity": round(m.get("similarity", 0), 3),
                         "field": q["field"],
-                        "value": baseline_block,
+                        "value": focus_block,          # 精准维度（前端展示 / 来源详情）
+                        "value_full": baseline_block,  # 完整历史 SRR 块（仅用于 _baseline_context 完整性）
                         # 整篇 SRR 文档（截断），供 _verify_kb_answers 的 LLM
                         # 从中提取「针对问题的具体片段」，而非返回整字段/整块
                         "document_full": json.dumps(src_srr, ensure_ascii=False)[:3000] if src_srr else "",
@@ -1009,10 +1062,14 @@ class ClarifyAgent:
                 if idx is None or idx >= len(answers):
                     continue
                 if v.get("relevant"):
-                    # LLM 确认相关：用 LLM 提取的答案替换机械答案
-                    extracted = v.get("extracted_answer", "")
-                    if extracted:
-                        answers[idx]["answer"] = extracted
+                    # 基线补全：answer 已是精准维度摘要，不再用整篇文档覆盖（修复「全量回答」）
+                    if answers[idx].get("_is_baseline"):
+                        pass
+                    else:
+                        # LLM 确认相关：用 LLM 提取的答案替换机械答案
+                        extracted = v.get("extracted_answer", "")
+                        if extracted:
+                            answers[idx]["answer"] = extracted
                     # 保留 answered=True
                 else:
                     # LLM 判定不相关：拒收
@@ -1201,19 +1258,22 @@ class ClarifyAgent:
             if a.get("_is_baseline") and isinstance(value, dict) and value:
                 existing = srr.get("_baseline_context")
                 existing = existing if isinstance(existing, dict) else {}
-                merged = dict(value)
+                # 用完整历史块（value_full）保证 _baseline_context 维度完整；
+                # value 本身是精准维度，仅用于来源展示，不丢失其他维度。
+                full_block = best.get("value_full") or value
+                merged = dict(full_block)
                 for k, v in existing.items():
                     merged.setdefault(k, v)
                 srr["_baseline_context"] = merged
                 add = srr.get("additional_details", "") or ""
-                base_txt = "\n\n【来自知识库历史版本补全的基础上下文】\n" + json.dumps(value, ensure_ascii=False)[:1500]
+                base_txt = "\n\n【来自知识库历史版本补全的基础上下文】\n" + json.dumps(full_block, ensure_ascii=False)[:1500]
                 srr["additional_details"] = add + base_txt
                 a["auto_filled"] = True
                 augmentations.append({
                     "field": field,
                     "source_req_id": best["id"],
                     "similarity": best["similarity"],
-                    "value": value,
+                    "value": full_block,
                     "_is_baseline": True,
                 })
                 continue

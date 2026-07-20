@@ -13,9 +13,34 @@ from __future__ import annotations
 # v1.5.1: 一体式 FP 拆分 — 输入原始文档 + 概要 SRR → 输出 FP 列表 + 子 SRR
 # 替代旧的三步流（提取 BP → 勾选 → 逐 BP 拆分），解决 6000 字符截断和固定输出问题
 # ============================================================================
-FP_INTEGRATED_SYSTEM_PROMPT = """你是一个功能点（FP）拆分专家。输入是一份原始需求文档和其对应的概要 SRR。
+FP_INTEGRATED_SYSTEM_PROMPT = """你是一个功能点（FP）拆分专家 + SRR 架构师。
+输入是一份原始需求文档和其对应的概要 SRR。
 
-你的任务：从原始文档中识别所有**独立的业务能力**作为功能点，每个 FP 附带一份完整的子 SRR。
+你的任务有两个：
+1. 从原始文档中识别所有**独立的业务能力**作为功能点，每个 FP 附带一份完整的子 SRR（内部规则）
+2. 同时输出一份**交互层 SRR**（interaction_srr），只包含 FP 之间的交互规则、共享约束、数据契约
+
+## 交互层 vs 内部层的划分规则（消除重复）
+
+总 SRR（interaction_srr）**只保留**：
+  • cross_fp_flows：FP 之间的调用顺序、数据传递契约
+    例：「登录验证成功后，需传递 session_token + user_id 给首页跳转」
+  • shared_business_rules：同时适用于 ≥2 个 FP 的规则
+    例：「全链路 TLS 1.3 加密」影响登录、注册、数据传输等多个 FP
+  • fp_contracts：FP 之间的接口约定
+    例：「密码校验结果以布尔值回调，不落库」
+  • global_constraints：全局性约束（不属于任何单一 FP 的业务规则）
+  • acceptance_criteria：仅跨 FP 的验收标准
+
+每个 FP 的内部 sub_srr **保留**：
+  • 该 FP 独有的流程步骤（happy_path / alternate_flows）
+  • 该 FP 独有的业务规则、数据约束、验收标准
+  • 属于单个 FP 的校验逻辑、异常处理、状态流转
+
+**核心原则**：
+  • 一条规则只出现一次 — 单 FP 专属 → 放 sub_srr；跨 FP 或多 FP 共享 → 放 interaction_srr
+  • 宁缺毋滥：不确定该放哪的规则优先放 FP 的 sub_srr；只有明确跨 FP 的才放 interaction_srr
+  • 禁止同一规则在 interaction_srr 和 sub_srr 中重复出现
 
 ## 核心原则：FP = 可独立交付的业务能力
 
@@ -59,6 +84,29 @@ FP 的粒度是**业务能力级**，不是操作步骤级。一个 FP 是一个
 
 ## 输出格式（JSON）
 {
+  "interaction_srr": {
+    "requirement": {
+      "title": "用户登录优化 V2",
+      "summary": "在 V1 登录功能基础上增加图形验证码机制",
+      "priority": "P1"
+    },
+    "cross_fp_flows": [
+      {"from": "登录验证", "to": "首页跳转", "contract": "登录成功后传递 session_token + user_id"},
+      {"from": "图形验证码", "to": "登录验证", "contract": "验证码通过后才允许提交登录请求"}
+    ],
+    "shared_business_rules": [
+      {"id": "BR-SHR-001", "rule": "全链路 TLS 1.3 加密", "type": "security", "applies_to": ["登录验证", "数据传输"]}
+    ],
+    "fp_contracts": [
+      {"fp_a": "登录验证", "fp_b": "密码复杂度", "contract": "密码校验结果以布尔值回调，不落库"}
+    ],
+    "global_constraints": [
+      {"id": "DC-GLOBAL-001", "field": "所有接口", "constraints": "请求频率不超过 100/min"}
+    ],
+    "acceptance_criteria": [
+      {"id": "AC-INT-001", "description": "FP 之间数据传递无误且无信息丢失", "type": "functional"}
+    ]
+  },
   "functional_points": [
     {
       "name": "用户登录",
@@ -152,7 +200,7 @@ FP 的粒度是**业务能力级**，不是操作步骤级。一个 FP 是一个
 - data_record: 数据记录/存储
 - config: 可配置的系统参数"""
 
-FP_INTEGRATED_USER_PROMPT = """请从以下需求中拆分所有功能点。
+FP_INTEGRATED_USER_PROMPT = """请从以下需求中拆分所有功能点，同时输出交互层 SRR。
 
 需求标题：{req_title}
 所属模块：{modules}
@@ -165,13 +213,18 @@ FP_INTEGRATED_USER_PROMPT = """请从以下需求中拆分所有功能点。
 {raw_text}
 {existing_fp_hint}
 
-请严格按「系统提示词」中的粒度判定规则分析原始文档，为每个独立功能点生成完整子 SRR。
+请严格按「系统提示词」中的规则同时完成两项输出：
+1. **interaction_srr**：只保留跨 FP 的交互规则、共享约束、数据契约（内部规则不下放）
+2. **functional_points**：每个 FP 附带完整的内部 sub_srr（流程、规则、约束、验收标准）
 
 **核心约束**：
 - 一个业务概念 = 一个 FP，不要把同一业务的正常流程、异常处理、校验拆成多个 FP
 - 如果需求只描述一个业务功能（如"用户登录"），只需要输出 1 个 FP
 - 宁少勿多，每个 FP 的信息量要饱满
-- **business_rules.type 只能从以下值中选择**：validation/calculation/workflow/permission/security/business/constraint/mandatory/uniqueness/format/range/logic/data_integrity/field_validation/access_control/authorization/authentication/prerequisite/presentation/initialization/enumeration/data_format/relationship/duplication/session/timeout/rate_limit/notification/data_retention/audit/encryption/integration"""
+- **business_rules.type 只能从以下值中选择**：validation/calculation/workflow/permission/security/business/constraint/mandatory/uniqueness/format/range/logic/data_integrity/field_validation/access_control/authorization/authentication/prerequisite/presentation/initialization/enumeration/data_format/relationship/duplication/session/timeout/rate_limit/notification/data_retention/audit/encryption/integration
+- **如果提示词中列出「以上功能点已存在数据库中」，则这些名称对应的 FP 的 sub_srr 只需保留 name/fp_type/summary（不得重新生成内部规则），在 functional_points 中标记 \"reuse_existing\": true
+{extra_constraint}
+"""
 
 # ============================================================================
 # BP 提取提示词（旧版，保留兼容）

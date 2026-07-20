@@ -1109,8 +1109,8 @@ export default function RequirementDetail() {
                   确认完成
                 </button>
               )}
-              {/* active → 可补充信息重新生成 */}
-              {detail.status === 'active' && (
+              {/* active / confirmed → 可补充信息重新生成 */}
+              {(detail.status === 'active' || detail.status === 'confirmed') && (
                 <button onClick={() => navigate(`/requirements/${id}/clarify`)} className="btn-secondary">
                   <RefreshCw className="w-4 h-4" /> 补充重新生成
                 </button>
@@ -1120,13 +1120,15 @@ export default function RequirementDetail() {
                   <Edit3 className="w-4 h-4" /> 编辑 SRR
                 </button>
               )}
-              {detail.status === 'active' && (
+              {/* active / confirmed → 可归档（归档后导入知识库） */}
+              {(detail.status === 'active' || detail.status === 'confirmed') && (
                 <button onClick={() => setShowArchiveModal(true)} className="btn-secondary">
                   <Archive className="w-4 h-4" />
                   归档
                 </button>
               )}
-              {detail.status === 'active' && (
+              {/* v1.6: confirmed → 允许生成测试用例（active 兼容旧数据） */}
+              {(detail.status === 'active' || detail.status === 'confirmed') && (
                 <button onClick={() => navigate(`/requirements/${id}/generate`)} className="btn-primary">
                   <Play className="w-4 h-4" /> 生成用例
                 </button>

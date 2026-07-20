@@ -46,6 +46,7 @@ class ReqAgent:
         self._llm = llm_client
         self.last_fps: list[dict] = []  # v1.5.1: 存储最近一次解析提取的功能点
         self.last_fp_dependencies: list[dict] = []  # v1.5.1: FP 间依赖关系
+        self.interaction_srr: dict | None = None  # v1.6: 交互层 SRR（跨 FP 规则）
 
     async def parse(
         self,
@@ -562,45 +563,59 @@ class ReqAgent:
         srr: dict,
         product_name: str = "",
     ) -> list[dict]:
-        """v1.5.1: 从原始文档一体式提取功能点。
+        """v1.6: 从原始文档一体式提取功能点 + 交互层 SRR。
 
-        输入完整原始文档 + 概要 SRR，LLM 一次性输出 FP 列表 + 每个 FP 的子 SRR。
-        替代旧的三步流（提取 BP → 勾选 → 逐 BP 拆分）。
+        流程：
+          1. 查询同模块已有 FP → 已存在的名称不再让 LLM 重新生成
+          2. LLM 一次性输出 interaction_srr + functional_points（仅新 FP）
+          3. 已有 FP + LLM 新生成 FP = 完整 FP 列表
+
+        返回仅含**新生成**的 FP；已有 FP 由调用方从 DB 复制。
 
         Returns:
-            list[dict]: 功能点列表，每个包含 name/fp_type/sub_srr/test_hints 等字段
+            list[dict]: 仅 LLM 新生成的功能点（不含复用已有 FP）
         """
         from app.core import prompt_manager as pm
+        import json as _json
+
+        self.interaction_srr = None  # 重置
 
         req_meta = srr.get("requirement", {})
         modules = req_meta.get("modules", []) or []
         modules_str = ", ".join(modules)
 
-        # v1.5.3: 查询同模块下已有功能点，注入 prompt 避免重复命名
-        existing_fp_hint = ""
-        if modules:
-            try:
-                from app.db.database import async_session
-                from app.db.models import FunctionalPoint
-                from sqlalchemy import select as sa_select
-                async with async_session() as s:
-                    mod_fps = await s.execute(
-                        sa_select(FunctionalPoint.name).where(
-                            FunctionalPoint.module_id.in_(modules)
-                        ).distinct()
-                    )
-                    existing_names = [r[0] for r in mod_fps.fetchall() if r[0]]
-                    if existing_names:
-                        existing_fp_hint = (
-                            "\n\n## 该模块下已有功能点（请优先复用已有名称，当新需求的功能与现有功能"
-                            "相同时直接使用已有名称；若新需求有全新的功能，才创建新名称）：\n"
-                            + "\n".join(f"- {n}" for n in existing_names[:20])
-                        )
-            except Exception:
-                pass  # 查询失败不阻断
+        # ── v1.6: 查询同模块已有 FP，跳过 LLM 生成 ──
+        existing_names: list[str] = []
+        extra_constraint = ""
+        try:
+            from app.db.database import async_session
+            from app.db.models import FunctionalPoint
+            from sqlalchemy import select as sa_select
+            async with async_session() as s:
+                mod_fps = await s.execute(
+                    sa_select(FunctionalPoint.name).where(
+                        FunctionalPoint.module_id.in_(modules)
+                    ).distinct()
+                )
+                existing_names = [r[0] for r in mod_fps.fetchall() if r[0]]
+        except Exception:
+            pass
 
-        # 构建概要 SRR（轻量级，给 LLM 需求概况）
-        overview_srr = json.dumps({
+        if existing_names:
+            existing_fp_hint = (
+                "\n\n## 以下功能点已存在数据库中——请勿重新生成，只需保留名称和类型"
+                "（在 functional_points 中标记 \"reuse_existing\": true，sub_srr 留空）：\n"
+                + "\n".join(f"- {n}" for n in existing_names[:30])
+            )
+            extra_constraint = (
+                "\n\n**硬性约束**：以上已存在的功能点名称，禁止在 functional_points 中重新生成内部 sub_srr。"
+                "只需输出 name/fp_type/summary 并标记 \"reuse_existing\": true，sub_srr 必须为空对象 {{}}。"
+            )
+        else:
+            existing_fp_hint = ""
+
+        # 构建概要 SRR
+        overview_srr = _json.dumps({
             "title": req_meta.get("title", ""),
             "summary": req_meta.get("summary", ""),
             "priority": req_meta.get("priority", "P2"),
@@ -615,23 +630,28 @@ class ReqAgent:
             overview_srr=overview_srr,
             raw_text=raw_text[:96000],
             existing_fp_hint=existing_fp_hint,
+            extra_constraint=extra_constraint,
         )
 
-        import json as _json
         try:
             result = await self._llm.call_json(
                 prompt=prompt,
                 system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
-                schema_hint={"functional_points": list, "dependencies": list},
-                temperature=0.2,  # v1.5.2: 降到 0.2 避免随机拆分
+                schema_hint={"interaction_srr": dict, "functional_points": list, "dependencies": list},
+                temperature=0.2,
             )
             if isinstance(result, dict):
+                self.interaction_srr = result.get("interaction_srr")
                 self.last_fp_dependencies = result.get("dependencies", [])
-                return result.get("functional_points", [])
+                # 过滤掉 LLM 标记为 reuse_existing 的（已在 DB 中，只保留真正新生成的）
+                all_fps = result.get("functional_points", [])
+                new_fps = [f for f in all_fps if not f.get("reuse_existing")]
+                return new_fps
             return []
         except Exception:
             logger.warning("[ReqAgent] FP 一体式提取 LLM 调用失败")
-            self.last_fp_dependencies = []  # P0-3: 异常时重置
+            self.last_fp_dependencies = []
+            self.interaction_srr = None
             return []
 
 

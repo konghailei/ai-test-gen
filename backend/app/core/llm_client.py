@@ -315,40 +315,28 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int | None = None,
         provider: str | None = None,
+        allow_array: bool = False,
     ) -> dict | list:
         """调用 LLM 并解析为 JSON 对象或数组。
 
         Args:
-            prompt: 用户提示词（应明确要求返回 JSON）
-            system_prompt: 系统指令（可选）
-            schema_hint: 期望的 JSON 结构提示（用于校验关键字段存在性）。如 {"id": str, "steps": list}
-            temperature: 采样温度。默认 0.2（JSON 输出需更稳定）
-            model: 指定模型名
-            max_tokens: 最大生成 token 数。None 表示不限（长 JSON 建议设置以防止 LLM 退化）
-            provider: 指定供应商名称。若指定且可用，仅使用该供应商。
-
-        Returns:
-            dict: 解析后的 JSON 对象
-
-        Raises:
-            RuntimeError: LLM 调用失败或 JSON 解析失败
-
-        Note:
-            自动在 prompt 末尾追加 JSON 格式约束提示。
-            若 schema_hint 提供，校验其键是否存在于结果中。
+            allow_array: True 时不启用 response_format="json"（避免 json_object 约束
+                         阻止 LLM 输出 JSON 数组）。调用方 prompt 应自行约束输出格式。
         """
         formatted_prompt = prompt
         if schema_hint:
             keys = ", ".join(schema_hint.keys())
             formatted_prompt += f"\n\n请严格返回 JSON 对象，包含以下字段：{keys}。不要返回任何额外文本。"
+        elif allow_array:
+            pass  # 不追加格式约束，由调用方 prompt 控制
         else:
-            formatted_prompt += "\n\n请严格返回 JSON 对象，不要返回任何额外文本。"
+            formatted_prompt += "\n\n请严格返回 JSON，不要返回任何额外文本。"
 
         text = await self.call(
             formatted_prompt,
             system_prompt=system_prompt,
             temperature=temperature,
-            response_format="json",
+            response_format=None if allow_array else "json",
             model=model,
             max_tokens=max_tokens,
             provider=provider,
@@ -495,6 +483,9 @@ class LLMClient:
                     kwargs["response_format"] = {"type": "json_object"}
                 if max_tokens:
                     kwargs["max_tokens"] = max_tokens
+                else:
+                    # 默认 max_tokens=16384，防止 LLM 提供商使用过小的默认值导致输出截断
+                    kwargs["max_tokens"] = 16384
 
                 response = await litellm.acompletion(**kwargs)
                 content = response.choices[0].message.content
@@ -647,38 +638,99 @@ class _NonRetryableError(Exception):
 # 辅助函数
 # ============================================================================
 
-def _extract_json_block(text: str) -> dict | None:
-    """从文本中提取首个 JSON 对象块。
+def _try_parse_json(text: str) -> Any:
+    """尝试解析 JSON，失败返回 None（不抛异常）。
 
-    用于 LLM 输出包含额外说明文字时容错解析。
+    用于容错解析链中多处尝试，避免重复 try/except 样板。
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _find_first_json_start(text: str) -> int:
+    """返回文本中首个 { 或 [ 的位置（取更靠前者）；都不存在返回 -1。"""
+    i_obj = text.find("{")
+    i_arr = text.find("[")
+    candidates = [i for i in (i_obj, i_arr) if i != -1]
+    return min(candidates) if candidates else -1
+
+
+def _find_matching_bracket(text: str, start: int) -> int:
+    """从 start（须为 { 或 [）做括号配对，返回匹配的右括号位置；找不到返回 -1。
+
+    正确处理字符串与转义字符，避免把字符串字面量内的括号误判为结构括号。
+    """
+    if start < 0 or start >= len(text) or text[start] not in ("{", "["):
+        return -1
+    open_ch = text[start]
+    close_ch = "}" if open_ch == "{" else "]"
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _extract_json_block(text: str) -> dict | list | None:
+    """从文本中提取首个 JSON 对象或数组块。
+
+    用于 LLM 输出包含额外说明文字、markdown 代码块包裹、或输出被截断时容错解析。
+    同时兼容对象 {...} 与数组 [...] 两种形态（GenAgent 允许数组输出）。
 
     Args:
         text: 可能包含 JSON 的文本
 
     Returns:
-        dict | None: 解析成功返回 dict；否则 None
+        dict | list | None: 解析成功返回对象或数组；否则 None
     """
-    # 优先匹配 ```json ... ``` 代码块
     import re
-    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if code_block:
-        try:
-            return json.loads(code_block.group(1))
-        except json.JSONDecodeError:
-            pass
 
-    # 回退：匹配首个 { 到最后一个 } 的范围
-    start = text.find("{")
+    # 1. 优先提取 ```json ... ``` 或 ``` ... ``` 代码块（兼容 [ 与 { 开头）
+    code_block = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.DOTALL)
+    if code_block:
+        block = code_block.group(1).strip()
+        data = _try_parse_json(block)
+        if data is not None:
+            return data
+        # 代码块内 JSON 损坏（如被截断）→ 尝试修复块内内容
+        repaired = _try_repair_json(block)
+        if repaired is not None:
+            return repaired
+
+    # 2. 回退：括号配对提取最外层 { 或 [ 块（v3.1 修复数组解析缺陷）
+    start = _find_first_json_start(text)
     if start == -1:
         return None
-    end = text.rfind("}")
-    if end == -1 or end <= start:
-        return None
-    try:
-        return json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        # 尝试修复后解析
-        return _try_repair_json(text[start : end + 1])
+    end = _find_matching_bracket(text, start)
+    if end == -1:
+        # 截断场景：从 start 到文本末尾尝试修复补全缺失括号
+        return _try_repair_json(text[start:])
+    block = text[start : end + 1]
+    data = _try_parse_json(block)
+    if data is not None:
+        return data
+    # 括号内 JSON 损坏（如尾随逗号）→ 尝试修复
+    return _try_repair_json(block)
 
 
 def _try_repair_json(text: str) -> dict | None:

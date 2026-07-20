@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth import require_admin, require_write, get_current_user
@@ -28,7 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_session
 from app.db.models import (
     Product, Project, Module, Requirement, ModuleDependency, TestCase, User,
-    FunctionalPoint, FPDependency,
+    FunctionalPoint, FPDependency, AnalysisTask, GenerationBatch, ReqDependency,
+    Traceability,
 )
 from app.models.api_schemas import ApiResponse
 from app.utils.logger import logger
@@ -66,6 +68,13 @@ class CreateProjectRequest(BaseModel):
     description: str = Field(default="", max_length=1024, description="项目描述")
     id: str | None = Field(default=None, max_length=64, description="项目 ID（可选）")
     version: str = Field(default="1.0", max_length=32, description="项目版本号")
+
+
+class UpdateProjectRequest(BaseModel):
+    """更新项目的请求模型（字段均可选，按需更新）。"""
+    name: str | None = Field(default=None, min_length=1, max_length=128, description="项目名称")
+    description: str | None = Field(default=None, max_length=1024, description="项目描述")
+    version: str | None = Field(default=None, max_length=32, description="项目版本号（同一产品内不可重复）")
 
 
 class CreateModuleRequest(BaseModel):
@@ -158,20 +167,17 @@ async def update_product(pid: str, body: UpdateProductRequest, session: AsyncSes
 @router.delete("/products/{pid}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def delete_product(pid: str, session: AsyncSession = Depends(get_session)):
     """删除产品及关联的项目、模块（级联）。"""
-    # 先查该产品下所有需求，以便同步清理向量库
+    # 查该产品下所有需求，用于级联删除与清理向量库
     req_result = await session.execute(
         select(Requirement.id).where(Requirement.product_id == pid)
     )
     req_ids = [row[0] for row in req_result.all()]
 
-    # 级联删除关联数据
-    await session.execute(delete(Project).where(Project.product_id == pid))
+    # 应用层级联删除关联数据（先子表后父表，避免外键冲突）
+    # 必须先删引用 Project/Requirement 的子表，最后再删 Project 与 Product 本身
     await session.execute(delete(Module).where(Module.product_id == pid))
-    # 先删除该产品所有需求关联的测试用例，再删除需求本身（外键约束关闭，需应用层显式级联）
-    if req_ids:
-        await session.execute(delete(TestCase).where(TestCase.req_id.in_(req_ids)))
-    await session.execute(delete(Requirement).where(Requirement.product_id == pid))
-    # 删除产品本身
+    await _cascade_delete_requirements(session, req_ids)
+    await session.execute(delete(Project).where(Project.product_id == pid))
     await session.execute(delete(Product).where(Product.id == pid))
     await session.commit()
 
@@ -214,9 +220,20 @@ async def create_project(pid: str, body: CreateProjectRequest, session: AsyncSes
         rand_suffix = random.randint(100, 999)
         proj_id = f"PROJ-{pid.split('-')[-1]}-{ts:05d}-{rand_suffix}"
 
+    # 版本号查重（同一产品内不可重复）
+    version = (body.version or "1.0").strip()
+    dup_version = await session.execute(
+        select(Project).where(Project.product_id == pid, Project.version == version)
+    )
+    if dup_version.scalars().first():
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目版本号「{version}」在当前产品下已存在，请使用其他版本号",
+        )
+
     record = Project(
         id=proj_id, product_id=pid, name=body.name, description=body.description,
-        version=body.version or "1.0",
+        version=version,
     )
     session.add(record)
     try:
@@ -229,21 +246,121 @@ async def create_project(pid: str, body: CreateProjectRequest, session: AsyncSes
     return ApiResponse(success=True, message="项目已创建", data={"id": proj_id, "name": body.name})
 
 
+@router.put("/projects/{proj_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def update_project(proj_id: str, body: UpdateProjectRequest, session: AsyncSession = Depends(get_session)):
+    """更新项目名称、描述、版本号。版本号在同一产品内不可重复。"""
+    result = await session.execute(select(Project).where(Project.id == proj_id))
+    proj = result.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    new_name = body.name.strip() if body.name else None
+    new_desc = body.description if body.description is not None else None
+    new_version = body.version.strip() if body.version else None
+
+    # 名称查重（同产品内不能与其他项目重名）
+    if new_name is not None and new_name != proj.name:
+        dup_name = await session.execute(
+            select(Project).where(
+                Project.product_id == proj.product_id,
+                Project.name == new_name,
+                Project.id != proj_id,
+            )
+        )
+        if dup_name.scalars().first():
+            raise HTTPException(status_code=409, detail=f"项目名称「{new_name}」在当前产品下已存在")
+
+    # 版本号查重（同一产品内不可重复）
+    if new_version is not None and new_version != proj.version:
+        dup_version = await session.execute(
+            select(Project).where(
+                Project.product_id == proj.product_id,
+                Project.version == new_version,
+                Project.id != proj_id,
+            )
+        )
+        if dup_version.scalars().first():
+            raise HTTPException(
+                status_code=409,
+                detail=f"项目版本号「{new_version}」在当前产品下已存在，请使用其他版本号",
+            )
+
+    if new_name is not None:
+        proj.name = new_name
+    if new_desc is not None:
+        proj.description = new_desc
+    if new_version is not None:
+        proj.version = new_version
+    proj.updated_at = datetime.now(timezone.utc)
+
+    try:
+        await session.commit()
+    except sa_exc.IntegrityError as e:
+        await session.rollback()
+        if _is_unique_violation(e, "uq_project_product_name"):
+            raise HTTPException(status_code=409, detail=f"项目名称「{new_name}」在当前产品下已存在")
+        if _is_unique_violation(e, "uq_project_product_version"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"项目版本号「{new_version}」在当前产品下已存在，请使用其他版本号",
+            )
+        raise HTTPException(status_code=500, detail="更新项目失败")
+    return ApiResponse(
+        success=True,
+        message="项目已更新",
+        data={"id": proj_id, "name": proj.name, "version": proj.version},
+    )
+
+
+async def _cascade_delete_requirements(session: AsyncSession, req_ids: list[str]) -> None:
+    """应用层级联删除一批需求及其所有子表。
+
+    这些子表对 requirements.id 的外键均为 RESTRICT（未设 ondelete=CASCADE），
+    必须显式先删子表再删需求，否则触发外键冲突（ForeignKeyViolationError）。
+    顺序：Traceability（同时引用 test_cases 与 requirements，须最先）→ TestCase →
+    AnalysisTask / GenerationBatch / ReqDependency；Requirement 最后删除，
+    FunctionalPoint 由 DB ondelete=CASCADE 自动级联。
+    """
+    if not req_ids:
+        return
+    # 收集这批需求关联的测试用例 ID，用于清理追溯矩阵（test_case_id 维度）
+    tc_rows = await session.execute(select(TestCase.id).where(TestCase.req_id.in_(req_ids)))
+    tc_ids = [r[0] for r in tc_rows.all()]
+
+    # 1) 追溯矩阵：同时引用 test_cases 与 requirements，必须在 TestCase 之前删除
+    trace_cond = Traceability.requirement_id.in_(req_ids)
+    if tc_ids:
+        trace_cond = trace_cond | Traceability.test_case_id.in_(tc_ids)
+    await session.execute(delete(Traceability).where(trace_cond))
+    # 2) 测试用例
+    await session.execute(delete(TestCase).where(TestCase.req_id.in_(req_ids)))
+    # 3) 其余引用需求的子表
+    await session.execute(delete(AnalysisTask).where(AnalysisTask.req_id.in_(req_ids)))
+    await session.execute(delete(GenerationBatch).where(GenerationBatch.req_id.in_(req_ids)))
+    await session.execute(
+        delete(ReqDependency).where(
+            ReqDependency.source_req_id.in_(req_ids) | ReqDependency.target_req_id.in_(req_ids)
+        )
+    )
+    # 4) 需求本身（FunctionalPoint 经 ondelete=CASCADE 自动级联）
+    await session.execute(delete(Requirement).where(Requirement.id.in_(req_ids)))
+
+
 @router.delete("/projects/{proj_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def delete_project(proj_id: str, session: AsyncSession = Depends(get_session)):
     """删除项目及关联的需求、用例（级联），并清理向量库。
 
-    PostgreSQL 原生支持外键约束（ondelete=CASCADE），但为确保跨表级联完整性，仍显式处理。
+    所有引用 requirements.id 的外键均为 RESTRICT，故由 _cascade_delete_requirements
+    显式按"先子表后父表"顺序清理，避免外键冲突。
     """
-    # 先收该项目下所有需求 ID，用于删除用例与清理向量库
+    # 先收该项目下所有需求 ID，用于级联删除与清理向量库
     req_result = await session.execute(
         select(Requirement.id).where(Requirement.project_id == proj_id)
     )
     req_ids = [r[0] for r in req_result.all()]
 
-    if req_ids:
-        await session.execute(delete(TestCase).where(TestCase.req_id.in_(req_ids)))
-        await session.execute(delete(Requirement).where(Requirement.id.in_(req_ids)))
+    # 应用层级联删除需求及其所有子表（analysis_tasks / traceability 等）
+    await _cascade_delete_requirements(session, req_ids)
     await session.execute(delete(Project).where(Project.id == proj_id))
     await session.commit()
 
@@ -458,7 +575,7 @@ async def add_dependency_edge(
             ModuleDependency.relation_type == relation_type,
         )
     )
-    if existing.scalar_one_or_none():
+    if existing.scalars().first():
         raise HTTPException(409, "该依赖关系已存在")
 
     record = ModuleDependency(

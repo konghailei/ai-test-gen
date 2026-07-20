@@ -25,6 +25,7 @@ interface ManualSection {
   config?: { key: string; value: string; note?: string }[]
   diagram?: ReactNode
   steps?: ManualStep[]
+  terms?: { term: string; desc: string }[]
 }
 
 /* ===================== 架构图组件 ===================== */
@@ -48,14 +49,13 @@ function DagPipelineDiagram() {
           <path d="M2 1L8 5L2 9" fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
         </marker>
       </defs>
-      {node(60, 40, 150, 44, '#E6F1FB', '#185FA5', 'parse', 'ReqAgent 解析')}
+      {node(60, 40, 150, 44, '#E6F1FB', '#185FA5', 'parse', '需求解析')}
       {node(250, 40, 170, 44, '#EEEDFE', '#534AB7', 'select_channel', '通道选择')}
-      {node(60, 140, 150, 44, '#FAEEDA', '#BA7517', 'clarify', 'ClarifyAgent')}
-      {node(250, 140, 150, 44, '#FAECE7', '#993C1D', 'gate', 'QualityGate')}
-      {node(450, 140, 150, 44, '#E1F5EE', '#0F6E56', 'impact', 'ImpactAgent')}
-      {node(450, 230, 150, 44, '#E1F5EE', '#0F6E56', 'retrieve', 'KB 检索')}
-      {node(450, 320, 150, 44, '#EAF3DE', '#3B6D11', 'generate', 'GenAgent')}
-      {node(250, 320, 150, 44, '#FBEAF0', '#993556', 'review', 'ReviewAgent')}
+      {node(60, 140, 150, 44, '#FAEEDA', '#BA7517', 'clarify', '需求澄清(含KB补全)')}
+      {node(250, 140, 150, 44, '#FAECE7', '#993C1D', 'gate', '质量门禁')}
+      {node(450, 140, 150, 44, '#E1F5EE', '#0F6E56', 'impact', '影响分析')}
+      {node(450, 230, 150, 44, '#EAF3DE', '#3B6D11', 'generate', '用例生成')}
+      {node(250, 320, 150, 44, '#FBEAF0', '#993556', 'review', '用例审核')}
       {node(60, 320, 100, 44, '#F1EFE8', '#5F5E5A', 'END', '')}
       {arrow(210, 62, 250, 62)}
       {arrow(282, 84, 165, 140)}
@@ -64,8 +64,7 @@ function DagPipelineDiagram() {
       {arrow(400, 162, 450, 162)}
       {arrow(250, 162, 212, 162, true)}
       {arrow(525, 184, 525, 230)}
-      {arrow(525, 274, 525, 320)}
-      {arrow(450, 342, 400, 342)}
+      {arrow(450, 252, 400, 342)}
       {arrow(250, 342, 160, 342)}
       <text x="222" y="104" fontSize={10} fill="#94a3b8">FULL</text>
       <text x="352" y="118" fontSize={10} fill="#94a3b8">FAST</text>
@@ -145,6 +144,43 @@ function IncrementalFlowDiagram() {
   )
 }
 
+// 图：需求分析生命周期（上传 → 解析 → 澄清 → 门禁 → 归档）
+function RequirementAnalysisDiagram() {
+  const node = (x: number, y: number, w: number, h: number, fill: string, stroke: string, title: string, sub: string) => (
+    <g key={title}>
+      <rect x={x} y={y} width={w} height={h} rx={10} fill={fill} stroke={stroke} strokeWidth={1.5} />
+      <text x={x + w / 2} y={y + h / 2 - 4} textAnchor="middle" fontSize={12.5} fontWeight={600} fill="#1e293b">{title}</text>
+      {sub && <text x={x + w / 2} y={y + h / 2 + 13} textAnchor="middle" fontSize={10.5} fill="#64748b">{sub}</text>}
+    </g>
+  )
+  const arrow = (x1: number, y1: number, x2: number, y2: number, dashed = false) => (
+    <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#94a3b8" strokeWidth={1.5} markerEnd="url(#ra-arrow)" strokeDasharray={dashed ? '4 3' : undefined} />
+  )
+  return (
+    <svg viewBox="0 0 680 320" width="100%" className="my-2">
+      <defs>
+        <marker id="ra-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M2 1L8 5L2 9" fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
+        </marker>
+      </defs>
+      {node(20, 50, 130, 46, '#E6F1FB', '#185FA5', '上传需求', '.md/.docx/.txt 原文')}
+      {node(175, 50, 130, 46, '#EEEDFE', '#534AB7', 'ReqAgent 解析', '原始文本 → SRR')}
+      {node(330, 50, 135, 46, '#E1F5EE', '#0F6E56', 'ClarifyAgent 澄清', '含知识库基线补全')}
+      {node(500, 50, 160, 46, '#FAECE7', '#993C1D', 'QualityGate 门禁', '完整性 / 歧义 / 遗漏')}
+      {node(500, 160, 160, 46, '#EAF3DE', '#3B6D11', '归档入库', 'PostgreSQL + Milvus')}
+      {node(330, 160, 135, 46, '#F1EFE8', '#5F5E5A', 'END', '需求就绪可生成')}
+      {arrow(150, 73, 175, 73)}
+      {arrow(305, 73, 330, 73)}
+      {arrow(465, 73, 500, 73)}
+      {arrow(580, 96, 580, 160)}
+      {arrow(500, 183, 465, 183)}
+      <polyline points="500,73 460,73 460,290 380,290 380,96" fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="4 3" markerEnd="url(#ra-arrow)" />
+      <text x="506" y="132" fontSize={10} fill="#0F6E56">通过</text>
+      <text x="300" y="306" fontSize={10} fill="#94a3b8">未通过（最多 3 轮回澄清重试）</text>
+    </svg>
+  )
+}
+
 /* ===================== 章节数据 ===================== */
 
 const SECTIONS: ManualSection[] = [
@@ -159,23 +195,23 @@ const SECTIONS: ManualSection[] = [
       { title: '查看系统仪表盘', desc: '登录后进入「仪表盘」，总览需求数、测试用例数、LLM 配置状态与最近活动，快速掌握系统运行概况。', img: 'dashboard.png' },
     ],
     features: [
-      { label: '流水线', desc: '上传 → 解析 → 澄清 → 质量门禁 → 影响分析 → KB 检索 → 生成 → 审核，由 LangGraph 编排' },
-      { label: '通道选择', desc: 'select_channel 按需求复杂度分流：FULL 走澄清闭环，FAST 直接进质量门禁' },
-      { label: '质量门禁', desc: 'gate 评估完整性；未通过且可重试则回到 clarify，达到上限强制通过' },
-      { label: '存储分层', desc: 'PostgreSQL（结构化）+ Milvus（向量）+ MinIO（对象存储）+ etcd（元数据）' },
+      { label: '流水线', desc: '需求分析到用例生成的端到端链路（由 LangGraph 编排）：上传 → 解析 → 澄清（含知识库基线补全）→ 质量门禁 → 影响分析 → 生成 → 审核' },
+      { label: '通道选择', desc: 'select_channel（通道选择）按需求复杂度分流：FULL 走澄清闭环，FAST 直接进质量门禁' },
+      { label: '质量门禁', desc: 'gate（质量门禁）评估完整性；未通过且可重试则回到 clarify，达到上限强制通过' },
+      { label: '存储分层', desc: 'PostgreSQL（关系型数据库，存结构化数据）+ Milvus（向量数据库）+ MinIO（对象存储，存向量数据文件）+ etcd（元数据服务）' },
     ],
     logic: [
       {
         step: 'DAG 编排',
-        detail: 'LangGraph StateGraph 编译，固定节点依次为 parse → select_channel → clarify → gate → impact → retrieve → generate → review。select_channel 条件分支（FULL/FAST），gate 条件分支（impact / clarify 重试）',
+        detail: 'LangGraph（LLM 应用编排框架）的 StateGraph（状态图）把节点编译为可执行 DAG（有向无环图）。固定节点依次为：parse（解析）→ select_channel（通道选择）→ clarify（澄清）→ gate（质量门禁）→ impact（影响分析）→ generate（生成）→ review（审核）。select_channel 按条件分支（FULL / FAST），gate 按条件分支（通过进 impact / 未通过回 clarify 重试）。注意：用例生成阶段不再单独检索知识库，需求所需的上下文在澄清阶段已通过知识库基线补全写入 SRR。',
       },
       {
         step: '双写落库',
-        detail: '需求归档时同时写入 PostgreSQL（结构化字段）与 Milvus（1024 维向量 + srr_json 全文），保证 KB 检索能拿到完整 SRR 用于基线补全',
+        detail: '需求归档时同时写入 PostgreSQL（关系型数据库，存结构化字段）与 Milvus（向量数据库，存 1024 维向量 + srr_json 全文），保证知识库检索能拿到完整 SRR 用于基线补全',
       },
       {
         step: '向量化',
-        detail: 'bge-large-zh 将 SRR 文本编码为 1024 维向量写入 Milvus 的 5 个集合：requirements / test_cases / patterns / req_pats / errors',
+        detail: 'bge-large-zh（中文文本向量化模型 / Embedding 模型）将 SRR 文本编码为 1024 维向量，写入 Milvus 的 5 个集合：requirements（需求）/ test_cases（用例）/ patterns（测试模式）/ req_pats（需求模式）/ errors（错误案例）',
       },
     ],
     config: [
@@ -188,53 +224,67 @@ const SECTIONS: ManualSection[] = [
   {
     id: 'requirements',
     icon: Upload,
-    title: '需求管理',
-    subtitle: '上传 → 解析 → KB 补全 → 澄清 → 归档',
+    title: '需求分析与管理',
+    subtitle: '上传 → 解析(SRR) → 澄清(含KB补全) → 质量门禁 → 归档',
     color: 'text-blue-600 bg-blue-50',
     steps: [
-      { title: '上传需求文档', desc: '在「需求管理」点击「上传需求」，填写需求名称、选择所属项目/版本与关联模块，上传 .md/.docx/.txt 后点击「上传并解析」，系统进入 LLM 分析 → KB 检索 → 澄清 → 影响分析流水线。', img: 'requirements-upload.png' },
-      { title: '查看需求列表', desc: '解析完成后在列表中查看需求，支持按项目/状态/优先级筛选与标题模糊搜索，快速定位目标需求。', img: 'requirements-list.png' },
-      { title: '查看需求详情', desc: '点击需求进入详情页，可查看结构化 SRR、功能点、影响分析与追溯矩阵，并支持修改上线时间。', img: 'requirement-detail.png' },
-      { title: '回答澄清问题', desc: '对待补充的需求进入「澄清」页，逐条回答系统基于 KB 检索与维度检测生成的问题并提交，系统据此重新生成更精确的 SRR。', img: 'requirement-clarify.png' },
+      { title: '上传需求文档', desc: '在「需求管理」点击「上传需求」，填写需求名称、选择所属项目/版本与关联模块，上传 .md/.docx/.txt 原文后点击「上传并解析」，系统调用 POST /requirements/upload（需求上传接口）进入解析 → 澄清 → 质量门禁 → 归档流程。', img: 'requirements-upload.png' },
+      { title: '查看需求列表', desc: '解析完成后在列表中查看需求，支持按项目 / status（状态：draft 草稿 / active 已就绪 / archived 已归档）/ priority（优先级）筛选与标题模糊搜索，快速定位目标需求。', img: 'requirements-list.png' },
+      { title: '查看需求详情', desc: '点击需求进入详情页，可查看结构化 SRR（Structured Requirement Representation，结构化需求表示）、功能点、影响分析与追溯矩阵，并支持修改上线时间。', img: 'requirement-detail.png' },
+      { title: '回答澄清问题', desc: '对待补充的需求进入「澄清」页，逐条回答系统基于知识库检索与维度检测生成的问题并提交，系统据此重新生成更精确的 SRR。', img: 'requirement-clarify.png' },
     ],
     features: [
-      { label: '上传需求', desc: 'POST /requirements/upload 传入 raw_text（.md/.docx 原文），系统自动解析为结构化 SRR JSON' },
-      { label: '自动解析', desc: 'ReqAgent 调用 LLM 将非结构化文本转为标准化需求格式' },
-      { label: 'KB 检索补全', desc: '自动检索知识库中相似历史需求，补全缺失字段（问答匹配 > 0.40，字段基线补全 > 0.85）' },
-      { label: '人工澄清', desc: '系统动态生成需人工确认的问题（KB 查询、缺失维度、字段冲突），用户回答后重新生成 SRR' },
-      { label: '重新生成', desc: '在澄清页面可补充备注并重新解析需求，操作记录保存在澄清历史中' },
-      { label: '归档', desc: '需求完成后归档入库，需填写上线时间（精确到分钟），同时写入 PostgreSQL 与 Milvus，供后续 KB 检索' },
-      { label: '修改上线时间', desc: '已归档需求可随时修改上线时间，同步更新 Milvus 元数据，保证版本排序准确' },
-      { label: '搜索筛选', desc: '需求列表支持按状态（draft/active/archived）/优先级筛选 + 标题模糊搜索，快速定位目标需求' },
+      { label: '上传需求', desc: '调用 POST /requirements/upload（需求上传接口）传入 raw_text（原始需求文本，支持 .md / .docx / .txt 原文），系统自动解析为结构化 SRR（Structured Requirement Representation，结构化需求表示）JSON。' },
+      { label: '自动解析', desc: 'ReqAgent（需求解析智能体）调用 LLM（大语言模型）将非结构化文本转为标准化需求格式（SRR JSON）。' },
+      { label: '知识库补全', desc: 'ClarifyAgent（需求澄清智能体）检索知识库（Milvus 向量库）中相似历史需求，自动补全缺失字段：问答匹配相似度 > 0.40，字段基线补全 > 0.85。' },
+      { label: '人工澄清', desc: '系统动态生成需人工确认的问题（知识库查询、缺失维度、字段冲突），用户回答后重新生成 SRR。问题输入类型 input_type 支持 text（文本）/ select（单选）/ multi_select（多选）。' },
+      { label: '重新生成', desc: '在澄清页面可补充备注并重新解析需求，操作记录保存在澄清历史中。' },
+      { label: '归档', desc: '需求完成后归档入库，需填写上线时间 go_live_date（格式 YYYY-MM-DDTHH:MM，年月日时分），同时写入 PostgreSQL（关系型数据库）与 Milvus（向量库），供后续检索。' },
+      { label: '修改上线时间', desc: '已归档需求可随时修改上线时间，同步更新 Milvus 元数据，保证版本排序准确。' },
+      { label: '搜索筛选', desc: '需求列表支持按 status（状态：draft 草稿 / active 已就绪 / archived 已归档）/ priority（优先级）筛选 + 标题模糊搜索，快速定位目标需求。' },
+    ],
+    terms: [
+      { term: 'SRR', desc: 'Structured Requirement Representation（结构化需求表示）——系统内部统一的需求 JSON 格式，是需求解析、澄清、生成用例的共同载体。' },
+      { term: 'ReqAgent', desc: '需求解析智能体（Requirement Agent）——负责把原始需求文本解析为 SRR JSON。' },
+      { term: 'ClarifyAgent', desc: '需求澄清智能体——检测需求缺失 / 歧义 / 遗漏，结合知识库补全并生成澄清问题。' },
+      { term: 'QualityGate', desc: '质量门禁——对澄清后的 SRR 做最终质量检查，达标才允许进入用例生成。' },
+      { term: 'Milvus', desc: '向量数据库——存储需求的向量化表示（Embedding），支撑语义检索与基线补全。' },
+      { term: 'bge-large-zh', desc: '中文文本向量化模型（Embedding 模型）——将 SRR 文本编码为 1024 维向量。' },
+      { term: 'PostgreSQL', desc: '关系型数据库——存储需求 / 项目 / 模块 / 用户等结构化数据。' },
+      { term: 'Celery', desc: '异步任务队列——归档时异步计算向量并写入 Milvus，避免阻塞接口返回。' },
+      { term: 'product_id', desc: '产品 ID——需求归属的产品标识，用于知识库隔离（跨产品不互相补全）。' },
+      { term: 'status', desc: '需求状态：draft（草稿）/ active（已澄清、可生成用例）/ archived（已归档、进入知识库检索范围）。' },
     ],
     logic: [
       {
-        step: '文件上传 → SRR 生成',
-        detail: '用户提交 raw_text → POST /requirements/upload → ReqAgent.parse() 调用 LLM 将文本解析为 SRR JSON，含 overview / modules / boundary_conditions / happy_path / alternate_flows / business_rules / data_constraints / preconditions 等字段 → 解析完成即调用 vector_store.add_requirement() 将需求写入 Milvus（此时 status 尚非 archived，仅建立向量索引）',
+        step: '上传 → SRR 生成',
+        detail: '用户提交 raw_text（原始需求文本）→ 调用 POST /requirements/upload（需求上传接口）→ ReqAgent.parse()（需求解析）调用 LLM（大语言模型）将文本解析为 SRR JSON，含 overview（功能概述）/ modules（关联模块）/ boundary_conditions（边界条件）/ happy_path（正常流程）/ alternate_flows（异常流程）/ business_rules（业务规则）/ data_constraints（数据约束）/ preconditions（前置条件）等字段。',
       },
       {
-        step: 'KB 检索补全',
-        detail: 'ClarifyAgent._query_kb_for_answers() 调用 vector_store.search_similar_requirements() 检索 Milvus requirements 集合（仅 status=archived），bge-large-zh 生成 embedding → 问答余弦相似度 > 0.40 的结果保留 → LLM _verify_kb_answers() 二次校验过滤误匹配 → 命中的 baseline block（happy_path/business_rules/data_constraints 等）按字段基线补全阈值 > 0.85 自动补全到 SRR',
+        step: '知识库补全',
+        detail: 'ClarifyAgent（需求澄清智能体）调用 vector_store.search_similar_requirements()（向量检索相似需求）检索 Milvus 的 requirements 集合（仅 status=archived 已归档需求），bge-large-zh（中文向量模型）生成 embedding（向量化表示）→ 问答余弦相似度 > 0.40 的结果保留 → LLM 二次校验 _verify_kb_answers() 过滤误匹配 → 命中的 baseline（基础上下文）块（happy_path / business_rules / data_constraints 等）按字段基线补全阈值 > 0.85 自动补全到 SRR。',
       },
       {
-        step: '人工澄清问题生成',
-        detail: '动态分析当前 SRR：① KB 检索到的缺失字段 ② requirement_patterns.py 检测的缺失维度（对照 auth/crud/payment 等模式）③ 字段冲突（如 priority 不一致）→ 经 LLM 过滤（已在 SRR 中描述的问题跳过）→ 生成 input_type 为 text/select/multi_select 的问题 → 用户回答 → POST /requirements/{id}/clarify → 重新生成 SRR',
+        step: '澄清问题生成',
+        detail: '动态分析当前 SRR：① 知识库检索到的缺失字段 ② requirement_patterns（需求模式库，如 auth 认证 / crud 增删改查 / payment 支付）检测的缺失维度 ③ 字段冲突（如 priority 优先级不一致）→ 经 LLM 过滤（已在 SRR 描述的问题跳过）→ 生成 input_type 为 text（文本）/ select（单选）/ multi_select（多选）的问题 → 用户回答 → 调用 POST /requirements/{id}/clarify（澄清接口）重新生成 SRR。',
       },
       {
         step: '重新生成',
-        detail: 'POST /requirements/{id}/regenerate — 即使 status=active 也可调用，传入 extra_notes 补充信息 → ReqAgent 重新解析 → 操作记录存入 srr_json._clarify_history 数组（{timestamp, action:"regenerate", ...}），跨 re-parse/finalize/regenerate 保留',
+        detail: '调用 POST /requirements/{id}/regenerate（重新生成接口）——传入 extra_notes（补充备注）重新解析 → 操作记录存入 srr_json._clarify_history（SRR JSON 内的澄清历史数组，形如 {timestamp, action:"regenerate", ...}），跨重新解析 / 归档 / 重新生成永久保留。',
       },
       {
-        step: '归档入库（Celery 异步双写）',
-        detail: 'POST /requirements/{id}/archive — 接收 ArchiveRequest（含 go_live_date YYYY-MM-DDTHH:MM）→ 设置 status=archived → 查询项目 version → 派发 Celery 异步任务计算 Embedding 并写入 Milvus 元数据：{product_id, modules, priority, status, go_live_date, project_version} → API 即时返回（kb_task_queued=true），Celery Worker 异步完成向量写入',
+        step: '归档入库（异步双写）',
+        detail: '调用 POST /requirements/{id}/archive（归档接口）——接收 ArchiveRequest（归档请求，含 go_live_date 上线时间 YYYY-MM-DDTHH:MM）→ 设置 status=archived（已归档）→ 派发 Celery（异步任务队列）计算 Embedding（向量化）并写入 Milvus 元数据：{product_id（产品ID）, modules（模块）, priority（优先级）, status（状态）, go_live_date（上线时间）, project_version（项目版本）} → 接口即时返回（kb_task_queued=true），Celery Worker 异步完成向量写入。',
       },
     ],
     config: [
-      { key: 'LLM 供应商', value: '系统设置 → LLM 配置', note: '支持 DeepSeek/OpenAI/通义千问等多供应商主备' },
-      { key: '解析 Prompt', value: '提示词管理 → req_agent', note: '可自定义解析规则和输出格式' },
-      { key: 'KB 相似度阈值', value: '问答 0.40 / 基线 0.85', note: '问答为问句→文档典型范围；基线补全是字段→已归档 SRR 精确匹配' },
-      { key: '澄清历史', value: 'srr_json._clarify_history', note: '永久保留，跨操作不丢失' },
+      { key: 'LLM 供应商', value: '系统设置 → LLM 配置', note: '支持 DeepSeek / OpenAI / 通义千问等多供应商主备' },
+      { key: '解析提示词', value: '提示词管理 → req_agent', note: '可自定义解析规则和输出格式' },
+      { key: 'KB 相似度阈值', value: '问答 0.40 / 基线 0.85', note: '问答为问句→文档；基线补全是字段→已归档 SRR 精确匹配' },
+      { key: '澄清历史', value: 'srr_json._clarify_history', note: 'SRR JSON 内字段，永久保留跨操作不丢失' },
+      { key: '状态定义', value: 'draft / active / archived', note: '草稿 / 已澄清可生成 / 已归档入知识库' },
     ],
+    diagram: <RequirementAnalysisDiagram />,
   },
   {
     id: 'incremental',
@@ -685,6 +735,24 @@ export default function UserManual() {
               ))}
             </div>
           </section>
+
+          {/* 术语对照（英文标识 → 中文解释） */}
+          {active.terms && active.terms.length > 0 && (
+            <section>
+              <div className="flex items-center gap-2 mb-4">
+                <BookOpen className="w-4 h-4 text-primary-500" />
+                <h2 className="text-base font-semibold text-slate-700">术语对照（英文标识 → 中文解释）</h2>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {active.terms.map((t, i) => (
+                  <div key={i} className="p-3 rounded-lg bg-slate-50 border border-slate-100">
+                    <div className="text-sm font-semibold text-primary-600 font-mono">{t.term}</div>
+                    <div className="text-xs text-slate-500 leading-relaxed mt-1">{t.desc}</div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           {/* 操作步骤（截图 + 文字） */}
           {active.steps && active.steps.length > 0 && (

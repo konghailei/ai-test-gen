@@ -10,8 +10,8 @@ function navItems(permissions: string[]) {
   const has = (p: string) => permissions.length === 0 || permissions.includes(p)
   const items = [
     { key: 'dashboard', path: '/dashboard', label: '仪表盘', icon: LayoutDashboard },
-    { key: 'requirements', path: '/requirements', label: '需求管理', icon: FileText },
     { key: 'projects_modules', path: '/projects-modules', label: '项目与模块', icon: FolderTree },
+    { key: 'requirements', path: '/requirements', label: '需求管理', icon: FileText },
     { key: 'testcases', path: '/testcases', label: '测试用例', icon: TestTube },
     { key: 'dependency_graph', path: '/dependency-graph', label: '依赖图谱', icon: Share2 },
     { key: 'knowledge', path: '/knowledge', label: '知识库', icon: Database },

@@ -73,47 +73,21 @@ class GenAgent:
             list[dict]: UTCF 用例列表，每个用例为字典格式
 
         Note:
-            生成流程（docs/03 §2）：
-                1. 检索 KB 相似用例（Few-shot 注入）
-                2. 检索匹配的测试模式
-                3. 构建 Prompt（分类/批量 + FP 定向）
-                4. 调用 LLM 生成
-                5. 解析用例 JSON + 生成 ID
-                6. gen_confidence 放入 gen_metadata
+            生成流程（docs/03 §2，v3.1 起跳过 KB 检索）：
+                1. 构建 Prompt（分类/批量 + FP 定向，直接基于 SRR）
+                2. 调用 LLM 生成
+                3. 解析用例 JSON + 生成 ID
+                4. gen_confidence 放入 gen_metadata
         """
         req_id = srr.get("requirement", {}).get("id", "")
         logger.info("[GenAgent] ▶ 开始生成: req_id={}, multi_type={}, has_impact_guidance={}, fp_count={}",
                     req_id, enable_multi_type, bool(impact_guidance), len(functional_points or []))
 
-        # 0. 清理该 req_id 的旧用例向量（优化 2：避免重新生成时产生重复用例）
-        if req_id:
-            try:
-                await asyncio.to_thread(vector_store.delete_cases_by_req_id, req_id)
-                logger.info("[GenAgent] 已清理旧用例向量: req_id={}", req_id)
-            except Exception as e:
-                logger.debug("[GenAgent] 清理旧用例失败（不阻断）: {}", str(e)[:120])
-
-        # 1. 检索 KB 相似用例（Few-shot）
-        few_shot_cases = await asyncio.to_thread(self._search_similar_cases, srr)
-
-        # 2. 检索匹配的测试模式（v1.6：若 SRR 含功能点，额外用 FP 类型/名称检索）
-        matched_patterns = await asyncio.to_thread(self._search_patterns, srr)
+        # v3.1: 跳过 KB 检索，直接基于 SRR 生成（SRR 已足够详细，需求上下文在澄清阶段已由知识库补全）
+        few_shot_cases: list = []
+        matched_patterns: list = []
         functional_points = functional_points or []
-        if functional_points:
-            fp_types = list({fp.get("fp_type", "") for fp in functional_points if fp.get("fp_type")})
-            fp_names = [fp.get("name", "") for fp in functional_points[:3] if fp.get("name")]
-            fp_query = " ".join(fp_types + fp_names)
-            if fp_query:
-                fp_patterns = await asyncio.to_thread(
-                    self._search_patterns_by_query, fp_query
-                )
-                # 合并去重（按 id 去重，保持顺序）
-                seen_ids = set(p.get("id", "") for p in matched_patterns)
-                for p in fp_patterns:
-                    if p.get("id", "") not in seen_ids:
-                        matched_patterns.append(p)
-                        seen_ids.add(p.get("id", ""))
-        logger.info("[GenAgent] KB 检索: few_shot_cases={}, matched_patterns={}",
+        logger.info("[GenAgent] KB 检索已跳过（直接基于 SRR 生成）: few_shot_cases={}, matched_patterns={}",
                     len(few_shot_cases), len(matched_patterns))
 
         # 3. 构建 Prompt（含 FP 定向上下文）
@@ -127,18 +101,17 @@ class GenAgent:
         )
         logger.debug("[GenAgent] Prompt 构建完成: len={}", len(user_prompt))
 
-        # 4. 调用 LLM 生成用例（v1.6：移除 max_tokens 限制，利用 1M 上下文窗口，
-        # 确保 LLM 能生成足够多的用例，不再因 token 限制被截断）
+        # 4. 调用 LLM 生成用例（max_tokens=32768，确保能生成足够的用例）
         try:
             logger.info("[GenAgent] 调用 LLM: temperature=0.4, multi_type={}, fp_count={}, "
-                        "max_tokens=unlimited (1M 上下文)",
+                        "max_tokens=32768",
                         enable_multi_type, len(functional_points or []))
             raw_cases = await self._llm.call_json(
                 prompt=user_prompt,
                 system_prompt=prompt_manager.get("gen_agent", "SYSTEM_PROMPT"),
-                schema_hint={"test_suite": list} if False else None,
-                temperature=0.4,  # 用例生成需要一定创造性
-                max_tokens=None,  # 不限制，利用 1M 上下文窗口
+                temperature=0.4,
+                max_tokens=32768,
+                allow_array=True,  # 允许 LLM 输出 JSON 数组，不锁死 json_object
             )
         except Exception as e:
             logger.error("[GenAgent] LLM 调用失败: {}", str(e)[:200])
@@ -201,46 +174,6 @@ class GenAgent:
                     "cases={}, types={}, batch_id={}",
                     len(cases), type_dist, batch_id)
         return cases
-
-    # ========================================================================
-    # KB 检索
-    # ========================================================================
-
-    def _search_similar_cases(self, srr: dict) -> list[dict]:
-        """检索 KB 相似用例（供 Few-shot 注入）。
-
-        v2.2: 按 product_id 过滤，防止跨产品数据泄漏。
-        """
-        summary = srr.get("requirement", {}).get("summary", "")
-        product_id = srr.get("requirement", {}).get("product_id", "")
-        try:
-            results = vector_store.search_similar_cases(
-                query=summary, top_k=3, product_id=product_id or None,
-            )
-            # 仅保留高相似度的用例作为 Few-shot
-            return [r for r in results if r.get("similarity", 0) > settings.FEW_SHOT_SIMILARITY_THRESHOLD]
-        except Exception as e:
-            logger.debug("[GenAgent] KB 检索相似用例失败（不阻断）: {}", str(e)[:120])
-            return []
-
-    def _search_patterns(self, srr: dict) -> list[dict]:
-        """检索匹配的测试模式。"""
-        summary = srr.get("requirement", {}).get("summary", "")
-        try:
-            return vector_store.search_patterns(query=summary, top_k=3)
-        except Exception as e:
-            logger.debug("[GenAgent] KB 检索测试模式失败（不阻断）: {}", str(e)[:120])
-            return []
-
-    def _search_patterns_by_query(self, query: str) -> list[dict]:
-        """按自定义查询检索测试模式（v1.6：FP 类型/名称检索）。"""
-        if not query:
-            return []
-        try:
-            return vector_store.search_patterns(query=query, top_k=3)
-        except Exception as e:
-            logger.debug("[GenAgent] KB 检索测试模式(FP)失败（不阻断）: {}", str(e)[:120])
-            return []
 
     # ========================================================================
     # 用例解析与后处理

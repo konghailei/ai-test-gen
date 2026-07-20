@@ -9,7 +9,7 @@ POST /api/generate —— 调用 LangGraph 编排器，流式返回测试用例�
 - D4 决策：后端用 sse-starlette 的 EventSourceResponse，前端用 fetch + ReadableStream
 
 SSE 事件格式（由 orchestrator.make_sse_event 产生）：
-    {"stage": "parse|select_channel|clarify|gate|impact|retrieve|generate|review|done|error",
+    {"stage": "parse|select_channel|clarify|gate|impact|generate|review|done|error",
      "message": "人类可读进度消息",
      "progress": 0-100,
      ...附加字段}

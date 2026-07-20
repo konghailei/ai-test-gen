@@ -152,7 +152,6 @@ export interface SSEEvent {
   impact_result?: Record<string, unknown>
   gate_result?: Record<string, unknown>
   clarify_result?: Record<string, unknown>
-  few_shot_context?: Record<string, unknown>
   kb_flowback?: Record<string, unknown>
   duration_ms?: number
   [key: string]: unknown

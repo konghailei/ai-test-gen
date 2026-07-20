@@ -297,6 +297,10 @@ class Project(Base):
     __tablename__ = "projects"
     __table_args__ = (
         UniqueConstraint("product_id", "name", name="uq_project_product_name"),
+        # 同一产品下版本号不可重复。应用层在 create/update 时查重并返回 409；
+        # 存量数据存在重复（PROD-57100-974 下有 3 个 v1.0），故未强制 ALTER 加索引，
+        # 以免破坏现有数据。新部署（干净库）将由 create_all 自动建立此约束。
+        UniqueConstraint("product_id", "version", name="uq_project_product_version"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
