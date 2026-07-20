@@ -297,6 +297,7 @@ async def upload_requirement_file(
     product_name: str = Form(default="", description="产品名称"),
     title: str = Form(default="", description="需求标题（可选，留空则从内容提取）"),
     priority: str = Form(default="P2", description="优先级 P0-P3"),
+    project_id: str = Form(default="", description="项目/版本 ID（可选）"),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """上传需求文件（.md 或 .docx），自动解析文本后调用 ReqAgent 生成 SRR。
@@ -431,6 +432,7 @@ async def upload_requirement_file(
     record = Requirement(
         id=req_id,
         product_id=req_data.get("product_id", product_id),
+        project_id=project_id or None,
         title=req_data.get("title", ""),
         priority=req_data.get("priority", "P2"),
         module=req_data.get("modules", [""])[0] if req_data.get("modules") else "",
@@ -995,7 +997,11 @@ async def list_requirements(
     if product_id:
         conditions.append(Requirement.product_id == product_id)
     if project_id:
-        conditions.append(Requirement.project_id == project_id)
+        if project_id == "unassigned":
+            # 筛选未绑定项目的需求（project_id IS NULL）
+            conditions.append(Requirement.project_id.is_(None))
+        else:
+            conditions.append(Requirement.project_id == project_id)
     if priority:
         conditions.append(Requirement.priority == priority)
     if status:

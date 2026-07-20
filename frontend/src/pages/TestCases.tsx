@@ -395,7 +395,7 @@ export default function TestCases() {
             <div className="flex items-center border border-slate-200 rounded-lg bg-white min-w-[180px]">
               <input value={projectSearch} onChange={e => { setProjectSearch(e.target.value); setShowProjectDropdown(true) }}
                 onFocus={() => setShowProjectDropdown(true)}
-                placeholder={selectedProject?.name || "搜索项目..."}
+                placeholder={filterProject === 'unassigned' ? '(未绑定项目)' : (selectedProject?.name || "搜索项目...")}
                 className="w-full px-3 py-2 text-sm outline-none rounded-lg bg-transparent" />
               {filterProject && (
                 <button onClick={() => { setFilterProject(''); setProjectSearch(''); setPage(1) }}
@@ -405,6 +405,13 @@ export default function TestCases() {
             </div>
             {showProjectDropdown && (
               <div className="absolute top-full left-0 mt-1 w-full bg-white rounded-lg shadow-lg border border-slate-200 py-1 z-50 max-h-48 overflow-y-auto">
+                {/* 未绑定项目选项 */}
+                <button
+                  onClick={() => { setFilterProject('unassigned'); setProjectSearch(''); setShowProjectDropdown(false); setFilterReq(''); setPage(1) }}
+                  className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-50 ${filterProject === 'unassigned' ? 'bg-primary-50 text-primary-600 font-medium' : 'text-slate-500 italic'}`}
+                >
+                  (未绑定项目)
+                </button>
                 {filteredProjects.length === 0 ? (
                   <p className="text-xs text-slate-400 px-3 py-2">无匹配项目</p>
                 ) : (
@@ -425,7 +432,7 @@ export default function TestCases() {
             <select value={filterReq} onChange={e => { setFilterReq(e.target.value); setPage(1) }}
               className="select-field text-sm min-w-[200px]">
               <option value="">全部需求</option>
-              {reqs.map(r => <option key={r.id} value={r.id}>{r.id} {r.title}</option>)}
+              {reqs.map(r => <option key={r.id} value={r.id}>{r.title}</option>)}
             </select>
           </div>
 

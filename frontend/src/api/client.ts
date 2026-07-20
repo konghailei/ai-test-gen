@@ -118,8 +118,11 @@ export const requirements = {
       method: 'POST',
       body: JSON.stringify({ raw_text: raw, ...meta }),
     }),
-    uploadFile: (file: File, productId = 'PROD-DEFAULT', title = '') =>
-        uploadFile('/requirements/upload/file', file, { product_id: productId, title }),
+    uploadFile: (file: File, productId = 'PROD-DEFAULT', title = '', projectId = '') => {
+        const extra: Record<string, string> = { product_id: productId, title }
+        if (projectId) extra.project_id = projectId
+        return uploadFile('/requirements/upload/file', file, extra)
+    },
     uploadMultiFiles: (files: File[], productId = 'PROD-DEFAULT', title = '', projectId = '', modules = '') => {
         const form = new FormData()
         files.forEach(f => form.append('files', f))

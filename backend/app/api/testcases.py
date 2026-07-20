@@ -77,11 +77,19 @@ async def list_testcases(
     if project_id:
         # 按项目筛选：先找出该项目下所有需求，再按需求ID查用例
         from app.db.models import Requirement
-        conditions.append(
-            TestCase.req_id.in_(
-                select(Requirement.id).where(Requirement.project_id == project_id)
+        if project_id == "unassigned":
+            # 筛选未绑定项目的需求对应的用例
+            conditions.append(
+                TestCase.req_id.in_(
+                    select(Requirement.id).where(Requirement.project_id.is_(None))
+                )
             )
-        )
+        else:
+            conditions.append(
+                TestCase.req_id.in_(
+                    select(Requirement.id).where(Requirement.project_id == project_id)
+                )
+            )
     if case_type:
         conditions.append(TestCase.type == case_type)
     if priority:

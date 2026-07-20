@@ -206,7 +206,7 @@ export default function ProjectManagementPage() {
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-slate-400 truncate">{proj.description || proj.id}</p>
+                      <p className="text-xs text-slate-400 truncate">{proj.description || '无描述'}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">

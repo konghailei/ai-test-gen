@@ -458,6 +458,7 @@ export default function Requirements() {
           <select value={filterProject} onChange={e => { setFilterProject(e.target.value); setPage(1) }}
             className="select-field text-sm max-w-[160px]" disabled={!selectedProductId}>
             <option value="">全部项目</option>
+            <option value="unassigned">(未绑定项目)</option>
             {(projects[selectedProductId] || []).map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
