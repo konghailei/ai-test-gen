@@ -415,6 +415,20 @@ export interface PromptItem {
   default_value: string
   description: string
   updated_at: string
+  updated_by?: string  // v2.3: 最后修改人
+}
+
+/** v2.3: 提示词修改历史记录 */
+export interface PromptHistoryItem {
+  id: number
+  prompt_id: string
+  module: string
+  name: string
+  old_value: string
+  new_value: string
+  changed_by: string
+  changed_at: string
+  change_summary: string
 }
 
 // ============================================================================
@@ -438,6 +452,7 @@ export interface FPItem {
   test_hints: string[]
   vectorization_status: string | null
   status: string  // pending_review / approved / archived
+  needs_module?: boolean  // v2.3: 是否未分配模块（用于前端提示）
   created_at: string
 }
 
@@ -449,6 +464,45 @@ export interface FPDependencyItem {
   target_name: string
   relation_type: string
   description: string
+  review_status?: string  // v2.3: pending / approved / rejected
+  reviewed_by?: string
+  reviewed_at?: string
+  created_by?: string
+  created_at?: string
+}
+
+/** v2.3: FP 依赖关系变动历史记录 */
+export interface FPDependencyHistoryItem {
+  id: number
+  dependency_id: number | null
+  source_fp_id: string
+  source_name: string
+  target_fp_id: string
+  target_name: string
+  relation_type: string
+  description: string
+  action: string  // created / approved / rejected / modified / deleted
+  old_review_status: string
+  new_review_status: string
+  changed_by: string
+  change_reason: string
+  related_req_id: string | null
+  created_at: string
+}
+
+/** v2.3: 可复用的已归档功能点 */
+export interface FPReusableItem {
+  id: string
+  name: string
+  fp_type: string
+  priority: string
+  module_id: string | null
+  modules: string[]
+  module_names: string[]
+  source_req_id: string
+  source_req_title: string
+  test_hints: string[]
+  archived_at: string
 }
 
 export interface FPNameSuggestion {

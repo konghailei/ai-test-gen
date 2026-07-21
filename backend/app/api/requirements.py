@@ -43,6 +43,7 @@ from app.agents.req_agent import req_agent
 from app.db.database import get_session, async_session
 from app.db.models import Requirement, Project, AnalysisTask, FunctionalPoint, FPDependency
 from app.db.models import TestCase, GenerationBatch, ReqDependency, Traceability
+from app.db.models import FPDependencyHistory  # v2.3: 依赖审核历史
 from app.models.api_schemas import (
     ApiResponse,
     ClarifyAnswerRequest,
@@ -2515,7 +2516,9 @@ async def archive_requirement(
     logger.info("[API/requirements] 归档成功: req_id={}, old_status={}, kb_task_queued={}", req_id, old_status, kb_task_queued)
 
     # v1.5.3: 归档时将 FP 及其依赖关系写入向量知识库
+    # v2.3: 同步更新 FunctionalPoint.status = "archived"，使归档 FP 可被复用
     fp_kb_count = 0
+    fp_archived_count = 0
     try:
         async with AsyncSession() as fp_session:
             fp_result = await fp_session.execute(
@@ -2523,6 +2526,10 @@ async def archive_requirement(
             )
             all_fps = fp_result.scalars().all()
             for f in all_fps:
+                # v2.3: 更新 FP 状态为 archived，标记 FP 进入可复用阶段
+                if f.status != "archived":
+                    f.status = "archived"
+                    fp_archived_count += 1
                 fp_meta = {
                     "type": "functional_point",
                     "requirement_id": req_id,
@@ -2552,6 +2559,9 @@ async def archive_requirement(
                     fp_kb_count += 1
                 except Exception as e:
                     logger.warning("[Archive] FP 写入 Milvus 失败 fp_id={}: {}", f.id, str(e)[:150])
+            if fp_archived_count > 0:
+                await fp_session.commit()
+                logger.info("[Archive] {} 个 FP 状态已更新为 archived (req={})", fp_archived_count, req_id)
     except Exception as e:
         logger.warning("[Archive] FP KB 写入失败（不阻断）: {}", str(e)[:200])
 
@@ -2566,6 +2576,7 @@ async def archive_requirement(
             "kb_error": kb_error if not kb_task_queued else "",
             "go_live_date": parsed_go_live.isoformat() if parsed_go_live else "",
             "project_version": project_version,
+            "fp_archived_count": fp_archived_count,
         },
     )
 
@@ -3209,10 +3220,12 @@ async def fp_list(req_id: str, session: AsyncSession = Depends(get_session)) -> 
         "items": [
             {
                 "id": fp.id, "name": fp.name, "fp_type": fp.fp_type,
-                "module_id": fp.module_id, "priority": fp.priority, "status": fp.status,
+                "module_id": fp.module_id, "modules": fp.modules or [],
+                "priority": fp.priority, "status": fp.status,
                 "srr_json": fp.srr_json, "atomicity_check": fp.atomicity_check,
                 "test_hints": fp.test_hints,
                 "vectorization_status": fp.vectorization_status,
+                "needs_module": not fp.module_id and not (fp.modules or []),
                 "created_at": fp.created_at.isoformat() if fp.created_at else "",
             }
             for fp in fps
@@ -3224,14 +3237,20 @@ async def fp_list(req_id: str, session: AsyncSession = Depends(get_session)) -> 
 
 @router.get("/{req_id}/fp/dependencies", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def fp_dependencies(req_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
-    """获取功能点依赖关系。"""
+    """获取功能点依赖关系。
+
+    v2.3: 返回 review_status 字段，前端按审核状态区分颜色。
+    """
     fp_ids_result = await session.execute(
         select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
     )
     fp_ids = {r[0] for r in fp_ids_result.fetchall()}
 
+    # v2.3: 查询以当前需求 FP 为 source 或 target 的所有依赖（支持跨需求依赖查看）
     dep_result = await session.execute(
-        select(FPDependency).where(FPDependency.source_fp_id.in_(fp_ids))
+        select(FPDependency).where(
+            (FPDependency.source_fp_id.in_(fp_ids)) | (FPDependency.target_fp_id.in_(fp_ids))
+        ).order_by(FPDependency.created_at.desc())
     )
     deps = dep_result.scalars().all()
 
@@ -3253,9 +3272,191 @@ async def fp_dependencies(req_id: str, session: AsyncSession = Depends(get_sessi
                 "target_name": name_map.get(d.target_fp_id, ""),
                 "relation_type": d.relation_type,
                 "description": d.description,
+                "review_status": d.review_status,
+                "reviewed_by": d.reviewed_by,
+                "reviewed_at": d.reviewed_at.isoformat() if d.reviewed_at else "",
+                "created_by": d.created_by,
+                "created_at": d.created_at.isoformat() if d.created_at else "",
             }
             for d in deps
         ]
+    })
+
+
+# ============================================================================
+# v2.3: FP 依赖审核流程
+# 新建依赖默认 pending 状态，需审核通过后才生效（参与影响分析）
+# 支持审核通过/驳回，并记录每次变动历史
+# ============================================================================
+
+class FPDependencyReviewRequest(BaseModel):
+    """FP 依赖审核请求。"""
+    action: str  # approve / reject
+    reason: str = ""  # 审核说明（可选）
+
+
+@router.patch("/{req_id}/fp/dependencies/{dep_id}/review", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_review_dependency(
+    req_id: str,
+    dep_id: int,
+    body: FPDependencyReviewRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> ApiResponse:
+    """审核功能点依赖关系。
+
+    v2.3 新增。将依赖从 pending 状态审核为 approved 或 rejected。
+    - approved: 依赖关系生效，参与影响分析
+    - rejected: 依赖关系不生效，但保留记录
+
+    Args:
+        req_id: 需求 ID
+        dep_id: 依赖 ID
+        body: 审核请求，含 action (approve/reject) 和 reason
+        session: 数据库会话
+        current_user: 当前用户
+
+    Returns:
+        ApiResponse: 含更新后的 review_status
+    """
+    await _load_active_requirement(req_id, session)
+    dep = await session.get(FPDependency, dep_id)
+    if not dep:
+        raise HTTPException(status_code=404, detail="依赖关系不存在")
+
+    # 校验 source_fp 属于该 req_id
+    source_fp = await session.get(FunctionalPoint, dep.source_fp_id)
+    if not source_fp or source_fp.requirement_id != req_id:
+        raise HTTPException(status_code=404, detail="依赖关系不属于该需求")
+
+    if body.action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="action 必须为 approve 或 reject")
+
+    if dep.review_status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"依赖关系当前状态为 {dep.review_status}，仅 pending 状态可审核",
+        )
+
+    old_status = dep.review_status
+    new_status = "approved" if body.action == "approve" else "rejected"
+    dep.review_status = new_status
+    dep.reviewed_by = current_user.username
+    dep.reviewed_at = datetime.now(timezone.utc)
+
+    # 写入历史记录
+    session.add(FPDependencyHistory(
+        dependency_id=dep.id,
+        source_fp_id=dep.source_fp_id,
+        target_fp_id=dep.target_fp_id,
+        relation_type=dep.relation_type,
+        description=dep.description,
+        action=new_status,
+        old_review_status=old_status,
+        new_review_status=new_status,
+        changed_by=current_user.username,
+        change_reason=body.reason or f"用户{('审核通过' if new_status == 'approved' else '驳回')}依赖关系",
+        related_req_id=req_id,
+    ))
+
+    await session.commit()
+    logger.info(
+        "[FP] 依赖审核: dep_id={}, {} → {}, by={}",
+        dep_id, old_status, new_status, current_user.username,
+    )
+
+    return ApiResponse(
+        success=True,
+        message=f"依赖关系已{('审核通过' if new_status == 'approved' else '驳回')}",
+        data={
+            "id": dep.id,
+            "review_status": dep.review_status,
+            "reviewed_by": dep.reviewed_by,
+            "reviewed_at": dep.reviewed_at.isoformat() if dep.reviewed_at else "",
+        },
+    )
+
+
+@router.get("/{req_id}/fp/dependencies/history", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def fp_dependency_history(
+    req_id: str,
+    dep_id: int | None = Query(default=None, description="可选，按依赖ID筛选"),
+    action: str | None = Query(default=None, description="可选，按操作类型筛选 (created/approved/rejected/deleted)"),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """获取功能点依赖关系变动历史。
+
+    v2.3 新增。记录每次依赖关系的创建、审核、修改、删除操作。
+    支持按依赖ID、操作类型筛选，关联显示对应需求变更导致的依赖关系变化。
+
+    Args:
+        req_id: 需求 ID
+        dep_id: 可选，按依赖ID筛选
+        action: 可选，按操作类型筛选
+        limit: 返回条数上限
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: data.items 含历史记录列表
+    """
+    # 查询当前需求下所有 FP ID
+    fp_ids_result = await session.execute(
+        select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
+    )
+    fp_ids = {r[0] for r in fp_ids_result.fetchall()}
+    if not fp_ids:
+        return ApiResponse(success=True, message="ok", data={"items": [], "total": 0})
+
+    # 查询历史记录（source 或 target 属于当前需求 FP）
+    stmt = select(FPDependencyHistory).where(
+        (FPDependencyHistory.source_fp_id.in_(fp_ids))
+        | (FPDependencyHistory.target_fp_id.in_(fp_ids))
+        | (FPDependencyHistory.related_req_id == req_id)
+    )
+    if dep_id is not None:
+        stmt = stmt.where(FPDependencyHistory.dependency_id == dep_id)
+    if action:
+        stmt = stmt.where(FPDependencyHistory.action == action)
+
+    stmt = stmt.order_by(FPDependencyHistory.created_at.desc()).limit(limit)
+    result = await session.execute(stmt)
+    history_rows = result.scalars().all()
+
+    # 查询 FP 名称映射
+    all_fp_ids = set()
+    for h in history_rows:
+        all_fp_ids.add(h.source_fp_id)
+        all_fp_ids.add(h.target_fp_id)
+    name_map = {}
+    if all_fp_ids:
+        names_result = await session.execute(
+            select(FunctionalPoint.id, FunctionalPoint.name).where(FunctionalPoint.id.in_(all_fp_ids))
+        )
+        name_map = {row[0]: row[1] for row in names_result.fetchall()}
+
+    return ApiResponse(success=True, message="ok", data={
+        "items": [
+            {
+                "id": h.id,
+                "dependency_id": h.dependency_id,
+                "source_fp_id": h.source_fp_id,
+                "source_name": name_map.get(h.source_fp_id, ""),
+                "target_fp_id": h.target_fp_id,
+                "target_name": name_map.get(h.target_fp_id, ""),
+                "relation_type": h.relation_type,
+                "description": h.description,
+                "action": h.action,
+                "old_review_status": h.old_review_status,
+                "new_review_status": h.new_review_status,
+                "changed_by": h.changed_by,
+                "change_reason": h.change_reason,
+                "related_req_id": h.related_req_id,
+                "created_at": h.created_at.isoformat() if h.created_at else "",
+            }
+            for h in history_rows
+        ],
+        "total": len(history_rows),
     })
 
 
@@ -3268,8 +3469,11 @@ async def fp_add_dependency(
     req_id: str,
     body: FPDependencyCreateRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """创建功能点依赖关系。
+
+    v2.3: 新建依赖默认 review_status='pending'，需审核通过后才生效（参与影响分析）。
 
     Note:
         - source_fp 必须属于该 req_id，且 req 未归档
@@ -3321,18 +3525,42 @@ async def fp_add_dependency(
         target_fp_id=body.target_fp_id,
         relation_type=body.relation_type,
         description=body.description,
+        review_status="pending",  # 默认待审核
+        created_by=current_user.username,
     )
     session.add(dep)
+    await session.flush()  # 获取 dep.id
+
+    # v2.3: 写入依赖历史记录
+    session.add(FPDependencyHistory(
+        dependency_id=dep.id,
+        source_fp_id=dep.source_fp_id,
+        target_fp_id=dep.target_fp_id,
+        relation_type=dep.relation_type,
+        description=dep.description,
+        action="created",
+        old_review_status="",
+        new_review_status="pending",
+        changed_by=current_user.username,
+        change_reason="新建依赖关系",
+        related_req_id=req_id,
+    ))
+
     await session.commit()
     await session.refresh(dep)
 
-    logger.info("[FP] 依赖创建: {} -{}-> {} (req={})",
+    logger.info("[FP] 依赖创建(待审核): {} -{}-> {} (req={})",
                 body.source_fp_id, body.relation_type, body.target_fp_id, req_id)
 
-    return ApiResponse(success=True, message="依赖关系已创建", data={
-        "id": dep.id, "source_fp_id": dep.source_fp_id,
-        "target_fp_id": dep.target_fp_id, "relation_type": dep.relation_type,
-    })
+    return ApiResponse(
+        success=True,
+        message="依赖关系已创建（待审核，审核通过后生效）",
+        data={
+            "id": dep.id, "source_fp_id": dep.source_fp_id,
+            "target_fp_id": dep.target_fp_id, "relation_type": dep.relation_type,
+            "review_status": dep.review_status,
+        },
+    )
 
 
 @router.delete("/{req_id}/fp/dependencies/{dep_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
@@ -3340,8 +3568,12 @@ async def fp_remove_dependency(
     req_id: str,
     dep_id: int,
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
-    """删除功能点依赖关系。归档后不可用。"""
+    """删除功能点依赖关系。归档后不可用。
+
+    v2.3: 删除前写入历史记录。
+    """
     await _load_active_requirement(req_id, session)
     dep = await session.get(FPDependency, dep_id)
     if not dep:
@@ -3351,6 +3583,21 @@ async def fp_remove_dependency(
     source_fp = await session.get(FunctionalPoint, dep.source_fp_id)
     if not source_fp or source_fp.requirement_id != req_id:
         raise HTTPException(status_code=404, detail="依赖关系不属于该需求")
+
+    # v2.3: 写入删除历史记录
+    session.add(FPDependencyHistory(
+        dependency_id=None,  # 删除后置空
+        source_fp_id=dep.source_fp_id,
+        target_fp_id=dep.target_fp_id,
+        relation_type=dep.relation_type,
+        description=dep.description,
+        action="deleted",
+        old_review_status=dep.review_status,
+        new_review_status="",
+        changed_by=current_user.username,
+        change_reason="用户主动删除依赖关系",
+        related_req_id=req_id,
+    ))
 
     await session.delete(dep)
     await session.commit()
@@ -3740,6 +3987,205 @@ async def fp_search_names(
     })
 
 
+# ============================================================================
+# v2.3: 功能点复用机制
+# 需求归档后 FP 进入 archived 状态，可被新需求复用，避免重复生成
+# 复用时继承原始模块信息，无需用户手动选择
+# ============================================================================
+
+@router.get("/{req_id}/fp/reusable", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def fp_list_reusable(
+    req_id: str,
+    module_id: str | None = Query(default=None, description="按模块筛选已归档的可复用 FP"),
+    q: str | None = Query(default=None, description="按名称模糊搜索"),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """列出可复用的已归档功能点。
+
+    v2.3 新增。需求归档后，所属 FP 进入 archived 状态，可被新需求复用。
+    返回同产品下所有 status='archived' 的 FP，支持按模块、名称筛选。
+
+    Args:
+        req_id: 当前需求 ID（用于确定产品范围）
+        module_id: 可选，按模块筛选
+        q: 可选，按名称模糊搜索
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: data.items 含可复用 FP 列表，含源需求信息
+    """
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="需求不存在")
+
+    # 查询同产品下所有已归档 FP（排除当前需求自身的 FP）
+    stmt = (
+        select(FunctionalPoint, Requirement.title)
+        .join(Requirement, FunctionalPoint.requirement_id == Requirement.id)
+        .where(
+            FunctionalPoint.status == "archived",
+            Requirement.product_id == req.product_id,
+            FunctionalPoint.requirement_id != req_id,
+        )
+        .order_by(FunctionalPoint.updated_at.desc())
+    )
+
+    if module_id:
+        stmt = stmt.where(
+            (FunctionalPoint.module_id == module_id)
+            | FunctionalPoint.modules.contains([module_id])
+        )
+
+    if q:
+        stmt = stmt.where(FunctionalPoint.name.ilike(f"%{q}%"))
+
+    stmt = stmt.limit(100)
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    # 查询模块名称映射
+    all_module_ids: set[str] = set()
+    for fp, _ in rows:
+        if fp.module_id:
+            all_module_ids.add(fp.module_id)
+        for m in (fp.modules or []):
+            all_module_ids.add(m)
+
+    module_names: dict[str, str] = {}
+    if all_module_ids:
+        from app.db.models import Module as ModuleModel
+        mod_result = await session.execute(
+            select(ModuleModel.id, ModuleModel.name).where(ModuleModel.id.in_(all_module_ids))
+        )
+        module_names = {row[0]: row[1] for row in mod_result.fetchall()}
+
+    items = []
+    for fp, src_req_title in rows:
+        items.append({
+            "id": fp.id,
+            "name": fp.name,
+            "fp_type": fp.fp_type,
+            "priority": fp.priority,
+            "module_id": fp.module_id,
+            "modules": fp.modules or [],
+            "module_names": [module_names.get(m, m) for m in (fp.modules or ([fp.module_id] if fp.module_id else []))],
+            "source_req_id": fp.requirement_id,
+            "source_req_title": src_req_title,
+            "test_hints": fp.test_hints or [],
+            "archived_at": fp.updated_at.isoformat() if fp.updated_at else "",
+        })
+
+    return ApiResponse(
+        success=True,
+        message=f"找到 {len(items)} 个可复用功能点",
+        data={"items": items, "total": len(items)},
+    )
+
+
+class FPReuseRequest(BaseModel):
+    """功能点复用请求。"""
+    source_fp_id: str  # 源 FP ID（已归档）
+    name: str | None = None  # 复用后的新名称（可选，默认继承源 FP 名称）
+
+
+@router.post("/{req_id}/fp/reuse", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_reuse(
+    req_id: str,
+    body: FPReuseRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """复用已归档的功能点。
+
+    v2.3 新增。从同产品下已归档的需求中复用功能点：
+    - 复制源 FP 的 name / fp_type / srr_json / atomicity_check / test_hints
+    - 继承源 FP 的 module_id 和 modules（无需用户手动选择）
+    - 新 FP 状态设为 pending_review（在新需求上下文下需重新审核）
+    - 关联到当前需求（requirement_id = req_id）
+
+    Args:
+        req_id: 目标需求 ID
+        body: 复用请求，含源 FP ID
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: data 含新 FP 信息
+    """
+    await _load_active_requirement(req_id, session)
+
+    # 查询源 FP
+    source_fp = await session.get(FunctionalPoint, body.source_fp_id)
+    if not source_fp:
+        raise HTTPException(status_code=404, detail="源功能点不存在")
+    if source_fp.status != "archived":
+        raise HTTPException(
+            status_code=409,
+            detail=f"源功能点「{source_fp.name}」未归档（当前状态: {source_fp.status}），不可复用",
+        )
+
+    # 同产品校验
+    source_req = await session.get(Requirement, source_fp.requirement_id)
+    target_req = await session.get(Requirement, req_id)
+    if not source_req or not target_req:
+        raise HTTPException(status_code=404, detail="源需求或目标需求不存在")
+    if source_req.product_id != target_req.product_id:
+        raise HTTPException(status_code=400, detail="源功能点与目标需求必须属于同一产品")
+
+    # 查重 — 同需求下不能复用同名 FP
+    new_name = (body.name or source_fp.name).strip()[:255]
+    if not new_name:
+        raise HTTPException(status_code=400, detail="功能点名称不能为空")
+
+    dup = await session.execute(
+        select(FunctionalPoint.id).where(
+            FunctionalPoint.requirement_id == req_id,
+            FunctionalPoint.name == new_name,
+        )
+    )
+    if dup.scalar_one_or_none():
+        raise HTTPException(
+            status_code=409,
+            detail=f"当前需求已存在同名功能点「{new_name}」，请修改名称后重试",
+        )
+
+    # 创建新 FP — 继承源 FP 的模块信息
+    new_fp = FunctionalPoint(
+        id=gen_requirement_id(),
+        requirement_id=req_id,
+        module_id=source_fp.module_id,  # 继承源 FP 模块
+        modules=list(source_fp.modules or []),  # 继承源 FP 多模块关联
+        name=new_name,
+        fp_type=source_fp.fp_type,
+        priority=source_fp.priority,
+        srr_json=dict(source_fp.srr_json) if isinstance(source_fp.srr_json, dict) else {},
+        atomicity_check=dict(source_fp.atomicity_check) if isinstance(source_fp.atomicity_check, dict) else {},
+        test_hints=list(source_fp.test_hints or []),
+        status="pending_review",  # 复用后需在新需求上下文下重新审核
+    )
+    session.add(new_fp)
+    await session.commit()
+    await session.refresh(new_fp)
+
+    logger.info(
+        "[FP] 复用成功: source_fp_id={} → new_fp_id={}, name={}, req_id={}, module_id={}",
+        source_fp.id, new_fp.id, new_fp.name, req_id, new_fp.module_id,
+    )
+
+    return ApiResponse(
+        success=True,
+        message=f"功能点「{new_fp.name}」已复用，模块已继承",
+        data={
+            "id": new_fp.id,
+            "name": new_fp.name,
+            "fp_type": new_fp.fp_type,
+            "module_id": new_fp.module_id,
+            "modules": new_fp.modules or [],
+            "status": new_fp.status,
+            "source_fp_id": source_fp.id,
+            "source_req_id": source_fp.requirement_id,
+        },
+    )
+
+
 @router.delete("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def fp_delete(req_id: str, fp_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
     """删除功能点。归档后不可用。"""
@@ -3774,13 +4220,22 @@ async def fp_approve(
     req_id: str, fp_id: str,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """审核通过单个功能点。归档后不可用。"""
+    """审核通过单个功能点。归档后不可用。
+
+    v2.3: 强制要求功能点必须分配模块才能审核通过。
+    """
     await _load_active_requirement(req_id, session)
     fp = await session.get(FunctionalPoint, fp_id)
     if not fp or fp.requirement_id != req_id:
         raise HTTPException(status_code=404, detail="功能点不存在")
     if fp.status == "approved":
         return ApiResponse(success=True, message="该功能点已审核通过")
+    # v2.3: 模块校验 — 未分配模块的功能点不允许审核通过
+    if not fp.module_id and not (fp.modules or []):
+        raise HTTPException(
+            status_code=409,
+            detail=f"功能点「{fp.name}」未分配模块，请先编辑该功能点并选择对应模块后再审核通过",
+        )
     fp.status = "approved"
     await session.commit()
     logger.info("[FP] 审核通过: fp_id={}, name={}", fp_id, fp.name)

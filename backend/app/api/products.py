@@ -619,12 +619,18 @@ async def remove_dependency_edge(
 @router.get("/{product_id}/fp/dependency-graph", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def get_fp_dependency_graph(
     product_id: str,
+    module_id: str | None = Query(default=None, description="v2.3: 按模块筛选，仅返回该模块内 FP 及其依赖"),
+    review_status: str | None = Query(default=None, description="v2.3: 按审核状态筛选 (pending/approved/rejected)"),
     session: AsyncSession = Depends(get_session),
 ):
     """获取产品下所有功能点及其依赖关系（跨需求）。
 
     返回 nodes（功能点）和 edges（FP 依赖关系，含跨需求边）。
     只返回该产品下所有需求的功能点；边的两端必须都在该产品功能点集合内。
+
+    v2.3 新增筛选参数：
+    - module_id: 按模块筛选，仅返回该模块内 FP 及其内部依赖关系
+    - review_status: 按审核状态筛选依赖边 (pending/approved/rejected)
     """
     # 1. 查询该产品下所有需求的 ID + title + status
     req_stmt = select(Requirement.id, Requirement.title, Requirement.status).where(
@@ -637,23 +643,42 @@ async def get_fp_dependency_graph(
     req_status_map = {row[0]: row[2] or "active" for row in req_rows}
 
     if not req_id_set:
-        return ApiResponse(success=True, message="ok", data={"nodes": [], "edges": []})
+        return ApiResponse(success=True, message="ok", data={"nodes": [], "edges": [], "modules": []})
 
     # 2. 查询这些需求下的所有 FunctionalPoint
+    # v2.3: 增加 module_id 字段查询，用于按模块筛选和返回模块信息
     fp_stmt = select(
         FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.fp_type,
         FunctionalPoint.requirement_id, FunctionalPoint.priority,
+        FunctionalPoint.module_id, FunctionalPoint.modules,
     ).where(FunctionalPoint.requirement_id.in_(req_id_set))
+
+    # v2.3: 按模块筛选
+    if module_id:
+        fp_stmt = fp_stmt.where(
+            (FunctionalPoint.module_id == module_id)
+            | FunctionalPoint.modules.contains([module_id])
+        )
+
     fp_result = await session.execute(fp_stmt)
     fp_rows = fp_result.all()
 
     if not fp_rows:
-        return ApiResponse(success=True, message="ok", data={"nodes": [], "edges": []})
+        return ApiResponse(success=True, message="ok", data={"nodes": [], "edges": [], "modules": []})
 
     fp_id_set = {row[0] for row in fp_rows}
 
-    nodes = [
-        {
+    # v2.3: 收集所有模块 ID（用于返回 modules 列表给前端筛选器）
+    all_module_ids: set[str] = set()
+    nodes = []
+    for row in fp_rows:
+        mod_id = row[5]
+        mods = row[6] or []
+        if mod_id:
+            all_module_ids.add(mod_id)
+        for m in mods:
+            all_module_ids.add(m)
+        nodes.append({
             "id": row[0],
             "name": row[1],
             "fp_type": row[2],
@@ -661,15 +686,29 @@ async def get_fp_dependency_graph(
             "req_title": req_title_map.get(row[3], ""),
             "req_status": req_status_map.get(row[3], "active"),
             "priority": row[4] or "P2",
-        }
-        for row in fp_rows
-    ]
+            "module_id": mod_id,
+            "modules": mods,
+        })
+
+    # 查询模块名称映射
+    module_options: list[dict] = []
+    if all_module_ids:
+        from app.db.models import Module as ModuleModel
+        mod_result = await session.execute(
+            select(ModuleModel.id, ModuleModel.name).where(ModuleModel.id.in_(all_module_ids))
+        )
+        module_options = [{"id": row[0], "name": row[1]} for row in mod_result.fetchall()]
 
     # 3. 查询所有 FPDependency（source 或 target 在该产品 FP 集合内）
+    # v2.3: 返回 review_status 字段，前端按审核状态区分颜色
+    # v2.3: 支持 review_status 筛选
     dep_stmt = select(FPDependency).where(
         FPDependency.source_fp_id.in_(fp_id_set),
         FPDependency.target_fp_id.in_(fp_id_set),
     )
+    if review_status:
+        dep_stmt = dep_stmt.where(FPDependency.review_status == review_status)
+
     dep_result = await session.execute(dep_stmt)
     deps = dep_result.scalars().all()
 
@@ -680,11 +719,20 @@ async def get_fp_dependency_graph(
             "target": d.target_fp_id,
             "relation_type": d.relation_type,
             "description": d.description or "",
+            "review_status": d.review_status,
+            "reviewed_by": d.reviewed_by or "",
+            "reviewed_at": d.reviewed_at.isoformat() if d.reviewed_at else "",
+            "created_by": d.created_by or "",
+            "created_at": d.created_at.isoformat() if d.created_at else "",
         }
         for d in deps
     ]
 
-    return ApiResponse(success=True, message="ok", data={"nodes": nodes, "edges": edges})
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data={"nodes": nodes, "edges": edges, "modules": module_options},
+    )
 
 
 # ============================================================================
@@ -726,6 +774,7 @@ async def get_fp_impact(
 
     dep_result = await session.execute(
         select(FPDependency).where(
+            FPDependency.review_status == "approved",  # v2.3: 仅 approved 依赖参与影响分析
             FPDependency.source_fp_id.in_(fp_id_set) | FPDependency.target_fp_id.in_(fp_id_set)
         )
     )

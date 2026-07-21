@@ -346,6 +346,37 @@ export const requirements = {
       `/requirements/${reqId}/fp/merge`,
       { method: 'POST', body: JSON.stringify({ fp_ids: fpIds, merged_name: mergedName || '' }) },
     ),
+  /** v2.3: 列出可复用的已归档功能点 */
+  fpListReusable: (reqId: string, moduleId?: string, q?: string) => {
+    const params = new URLSearchParams()
+    if (moduleId) params.append('module_id', moduleId)
+    if (q) params.append('q', q)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    return request<{ items: import('../types').FPReusableItem[]; total: number }>(
+      `/requirements/${reqId}/fp/reusable${qs}`
+    )
+  },
+  /** v2.3: 复用已归档功能点 */
+  fpReuse: (reqId: string, sourceFpId: string, name?: string) =>
+    request<{ id: string; name: string; fp_type: string; module_id: string | null; modules: string[]; status: string; source_fp_id: string; source_req_id: string }>(
+      `/requirements/${reqId}/fp/reuse`,
+      { method: 'POST', body: JSON.stringify({ source_fp_id: sourceFpId, name }) }
+    ),
+  /** v2.3: 审核功能点依赖关系 */
+  fpReviewDependency: (reqId: string, depId: number, action: 'approve' | 'reject', reason = '') =>
+    request<{ id: number; review_status: string; reviewed_by: string; reviewed_at: string }>(
+      `/requirements/${reqId}/fp/dependencies/${depId}/review`,
+      { method: 'PATCH', body: JSON.stringify({ action, reason }) }
+    ),
+  /** v2.3: 获取功能点依赖关系变动历史 */
+  fpDependencyHistory: (reqId: string, depId?: number, action?: string, limit = 100) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (depId) params.append('dep_id', String(depId))
+    if (action) params.append('action', action)
+    return request<{ items: import('../types').FPDependencyHistoryItem[]; total: number }>(
+      `/requirements/${reqId}/fp/dependencies/history?${params}`
+    )
+  },
 }
 
 // ============================================================
@@ -688,6 +719,17 @@ export const promptApi = {
     }),
   reset: (module: string, name: string) =>
     request(`/admin/prompts/${module}/${name}/reset`, { method: 'POST' }),
+  /** v2.3: 获取提示词修改历史 */
+  history: (module: string, name: string, limit = 50) =>
+    request<{ items: import('../types').PromptHistoryItem[]; total: number }>(
+      `/admin/prompts/${module}/${name}/history?limit=${limit}`
+    ),
+  /** v2.3: 从历史版本恢复提示词 */
+  restore: (module: string, name: string, historyId: number) =>
+    request<{ prompt_id: string; module: string; name: string; value: string; restored_from_history_id: number; changed_by: string }>(
+      `/admin/prompts/${module}/${name}/restore/${historyId}`,
+      { method: 'POST' }
+    ),
 }
 
 // ============================================================
@@ -715,9 +757,16 @@ export const dependencyGraph = {
   // 项目影响分析
   analyzeProject: (projectId: string) =>
     request<import('../types').ProjectImpact>(`/products/projects/${projectId}/impact`),
-  // 功能点依赖图谱（跨需求）
-  fpGraph: (productId: string) =>
-    request<{ nodes: any[]; edges: any[] }>(`/products/${productId}/fp/dependency-graph`),
+  // 功能点依赖图谱（跨需求）v2.3: 支持 module_id 和 review_status 筛选
+  fpGraph: (productId: string, moduleId?: string, reviewStatus?: string) => {
+    const params = new URLSearchParams()
+    if (moduleId) params.append('module_id', moduleId)
+    if (reviewStatus) params.append('review_status', reviewStatus)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    return request<{ nodes: any[]; edges: any[]; modules: { id: string; name: string }[] }>(
+      `/products/${productId}/fp/dependency-graph${qs}`
+    )
+  },
   fpImpact: (productId: string, fpId: string) =>
     request<{
       source_fp_name: string; affected: any[]; affected_modules: any[];

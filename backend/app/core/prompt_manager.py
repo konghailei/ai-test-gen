@@ -179,14 +179,38 @@ def list_prompts() -> list[dict]:
     return prompt_store.get_all_prompts()
 
 
-def update(module: str, name: str, value: str) -> None:
-    """更新提示词（保存用户自定义）。"""
-    prompt_store.update_prompt(module, name, value)
+def update(module: str, name: str, value: str, changed_by: str = "api") -> None:
+    """更新提示词（保存用户自定义）。
+
+    v2.3: 自动写入 prompt_history 表记录修改历史。
+    """
+    prompt_store.update_prompt(module, name, value, changed_by=changed_by)
 
 
-def reset(module: str, name: str) -> None:
-    """恢复为默认值。"""
-    prompt_store.reset_prompt(module, name)
+def reset(module: str, name: str, changed_by: str = "api") -> None:
+    """恢复为默认值。
+
+    v2.3: 自动写入 prompt_history 表记录恢复操作。
+    """
+    prompt_store.reset_prompt(module, name, changed_by=changed_by)
+
+
+def list_history(module: str, name: str, limit: int = 50) -> list[dict]:
+    """获取提示词修改历史列表（v2.3 新增）。"""
+    return prompt_store.list_prompt_history(module, name, limit=limit)
+
+
+def restore_from_history(history_id: int, changed_by: str = "api") -> dict:
+    """从历史版本恢复提示词（v2.3 新增）。
+
+    Args:
+        history_id: 历史记录 ID
+        changed_by: 操作人
+
+    Returns:
+        dict: 含恢复后的提示词信息
+    """
+    return prompt_store.restore_prompt_from_history(history_id, changed_by=changed_by)
 
 
 # 首次导入时自动初始化

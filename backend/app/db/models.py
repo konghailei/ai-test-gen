@@ -536,6 +536,10 @@ class PromptOverride(Base):
     每个模块的每个提示词标识为一个 key（如 "req_agent.SYSTEM_PROMPT"），
     value 为用户自定义的提示词文本，default_value 保存初始默认值。
     支持一键恢复默认值。
+
+    v2.3 新增版本管理：
+    - updated_by: 记录最后修改人
+    - 所有修改历史写入 PromptHistory 表，支持恢复到任意历史版本
     """
     __tablename__ = "prompt_overrides"
 
@@ -545,9 +549,41 @@ class PromptOverride(Base):
     value: Mapped[str] = mapped_column(Text, comment="当前提示词值（用户自定义或默认）")
     default_value: Mapped[str] = mapped_column(Text, comment="代码中的默认值")
     description: Mapped[str] = mapped_column(Text, default="", comment="提示词描述")
+    updated_by: Mapped[str] = mapped_column(String(64), default="", comment="v2.3 最后修改人")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+class PromptHistory(Base):
+    """提示词修改历史表（v2.3 新增）。
+
+    记录每次提示词修改的完整历史，包含修改时间、修改人、修改前后的值。
+    支持从历史版本恢复提示词，确保可追溯性和操作安全性。
+    """
+    __tablename__ = "prompt_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    prompt_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("prompt_overrides.id", ondelete="CASCADE"),
+        index=True, comment="关联的提示词ID（module.name 格式）"
+    )
+    module: Mapped[str] = mapped_column(String(64), index=True, comment="模块名")
+    name: Mapped[str] = mapped_column(String(64), comment="提示词名")
+    old_value: Mapped[str] = mapped_column(Text, comment="修改前的值")
+    new_value: Mapped[str] = mapped_column(Text, comment="修改后的值")
+    changed_by: Mapped[str] = mapped_column(String(64), default="api", comment="修改人")
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+    change_summary: Mapped[str] = mapped_column(
+        Text, default="",
+        comment="修改摘要（自动生成：字符数变化、是否大幅修改等）"
+    )
+
+    __table_args__ = (
+        Index("idx_prompthist_prompt", "prompt_id", "changed_at"),
     )
 
 
@@ -645,6 +681,11 @@ class FPDependency(Base):
     - invariants: A 和 B 共享同一全局约束
     - lifecycle_scenarios: A 和 B 属于同一端到端流程
     - conflicts_with: A 和 B 互斥（不应同时生效）
+
+    v2.3 新增审核流程：
+    - review_status: pending（待审核）/ approved（已审核）/ rejected（已驳回）
+    - 仅 approved 状态的依赖参与影响分析
+    - 审核状态变更自动写入 FPDependencyHistory 表
     """
     __tablename__ = "fp_dependencies"
 
@@ -660,11 +701,62 @@ class FPDependency(Base):
         comment="depends_on / data_flows / invariants / lifecycle_scenarios / conflicts_with"
     )
     description: Mapped[str] = mapped_column(Text, default="", comment="关系说明")
+    review_status: Mapped[str] = mapped_column(
+        String(16), default="pending", index=True,
+        comment="v2.3 审核状态：pending（待审核）/ approved（已审核）/ rejected（已驳回）"
+    )
+    reviewed_by: Mapped[str] = mapped_column(String(64), default="", comment="审核人")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(64), default="api", comment="创建人")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
     )
 
     __table_args__ = (
         Index("idx_fp_dep_src_tgt", "source_fp_id", "target_fp_id"),
+        Index("idx_fp_dep_review", "review_status"),
         UniqueConstraint("source_fp_id", "target_fp_id", "relation_type", name="uq_fp_dep_edge"),
+    )
+
+
+class FPDependencyHistory(Base):
+    """功能点依赖关系变动历史表（v2.3 新增）。
+
+    记录每次依赖关系的创建、审核、修改、删除操作，
+    关联显示对应需求变更导致的依赖关系变化，支持历史版本回溯查看。
+    """
+    __tablename__ = "fp_dependency_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dependency_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("fp_dependencies.id", ondelete="SET NULL"),
+        nullable=True, index=True, comment="关联的依赖ID（删除后置空）"
+    )
+    source_fp_id: Mapped[str] = mapped_column(String(64), index=True, comment="源功能点ID")
+    target_fp_id: Mapped[str] = mapped_column(String(64), index=True, comment="目标功能点ID")
+    relation_type: Mapped[str] = mapped_column(String(32), comment="关系类型")
+    description: Mapped[str] = mapped_column(Text, default="", comment="关系说明")
+    action: Mapped[str] = mapped_column(
+        String(16),
+        comment="操作类型：created / approved / rejected / modified / deleted"
+    )
+    old_review_status: Mapped[str] = mapped_column(String(16), default="", comment="变更前审核状态")
+    new_review_status: Mapped[str] = mapped_column(String(16), default="", comment="变更后审核状态")
+    changed_by: Mapped[str] = mapped_column(String(64), default="api", comment="操作人")
+    change_reason: Mapped[str] = mapped_column(Text, default="", comment="变更原因（关联需求变更说明）")
+    related_req_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True,
+        comment="关联需求ID（如因需求变更触发的依赖调整）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        Index("idx_fp_dephist_fp", "source_fp_id", "target_fp_id"),
+        Index("idx_fp_dephist_action", "action"),
     )

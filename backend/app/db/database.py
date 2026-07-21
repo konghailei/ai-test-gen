@@ -57,7 +57,7 @@ async def init_db() -> None:
         Requirement, TestCase, TestPattern, ErrorCase, GenerationBatch,
         ReqDependency, Traceability, LLMConfig, Product, Project, Module,
         ModuleDependency, KnowledgeQA, User, PromptOverride, ReqPattern,
-        KBSetting, AnalysisTask,
+        KBSetting, AnalysisTask, FPDependencyHistory, PromptHistory,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 
@@ -105,8 +105,21 @@ async def init_db() -> None:
             "functional_points": [
                 # v1.5.1: FP 独立生命周期（为 FP 级归档预留）
                 ("status", "VARCHAR(16) NOT NULL DEFAULT 'active'", "status"),
+                # v2.2: 多模块关联字段（替代单一 module_id，支持 FP 关联多个模块）
+                ("modules", "JSON NOT NULL DEFAULT '[]'::json", "modules"),
             ],
-            "fp_dependencies": [],
+            # v2.3: FP 依赖审核流程字段
+            "fp_dependencies": [
+                ("review_status", "VARCHAR(16) NOT NULL DEFAULT 'pending'", "review_status"),
+                ("reviewed_by", "VARCHAR(64) NOT NULL DEFAULT ''", "reviewed_by"),
+                ("reviewed_at", "TIMESTAMP WITH TIME ZONE", "reviewed_at"),
+                ("created_by", "VARCHAR(64) NOT NULL DEFAULT 'api'", "created_by"),
+                ("updated_at", "TIMESTAMP WITH TIME ZONE", "updated_at"),
+            ],
+            # v2.3: 提示词版本管理字段
+            "prompt_overrides": [
+                ("updated_by", "VARCHAR(64) NOT NULL DEFAULT ''", "updated_by"),
+            ],
         }
 
         def _migrate(conn_sync):
@@ -156,6 +169,8 @@ async def init_db() -> None:
                 ("projects", "uq_project_product_name", "product_id, name"),
                 ("modules", "uq_module_product_name", "product_id, name"),
                 ("module_dependencies", "uq_mod_dep_edge", "source_module_id, target_module_id, relation_type"),
+                # v2.3: FP 依赖边去重
+                ("fp_dependencies", "uq_fp_dep_edge", "source_fp_id, target_fp_id, relation_type"),
             ]
             for tbl, idx_name, cols in UNIQUE_INDEXES:
                 if not inspector.has_table(tbl):

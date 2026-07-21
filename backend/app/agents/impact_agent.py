@@ -427,13 +427,15 @@ class ImpactAnalysisAgent:
         - 从 fp_id 出发，沿反向边遍历（target=fp_id → source 依赖它）
         - depends_on / data_flows / invariants / lifecycle_scenarios / conflicts_with 均遍历
         - 最大深度 3 跳
+        - v2.3: 仅遍历 review_status='approved' 的依赖边（未审核依赖不参与影响分析）
 
         Returns:
             list[dict]: 每项含 {fp_id, fp_name, relation_type, req_id, req_title, depth}
         """
-        # 查询所有以 fp_id 为 target 的依赖边
+        # 查询所有以 fp_id 为 target 或 source 的依赖边（仅 approved 状态）
         result = await session.execute(
             select(FPDependency).where(
+                FPDependency.review_status == "approved",
                 or_(
                     FPDependency.target_fp_id == fp_id,
                     FPDependency.source_fp_id == fp_id,
