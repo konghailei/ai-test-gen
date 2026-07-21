@@ -1131,6 +1131,12 @@ export default function RequirementDetail() {
                   <RefreshCw className="w-4 h-4" /> 补充重新生成
                 </button>
               )}
+              {/* draft / pending_review → 也可重新生成（用户反馈：确认完成前应可点击） */}
+              {(detail.status === 'draft' || detail.status === 'pending_review') && (
+                <button onClick={() => navigate(`/requirements/${id}/clarify`)} className="btn-secondary">
+                  <RefreshCw className="w-4 h-4" /> 补充重新生成
+                </button>
+              )}
               {detail.status !== 'archived' && (
                 <button onClick={startEditing} className="btn-secondary">
                   <Edit3 className="w-4 h-4" /> 编辑 SRR
@@ -1506,6 +1512,11 @@ function ClarifyHistoryTab({
             <RefreshCw className="w-4 h-4" /> 补充重新生成
           </button>
         )}
+        {(status === 'draft' || status === 'pending_review') && (
+          <button onClick={onNavigateToClarify} className="mt-4 btn-secondary text-sm">
+            <RefreshCw className="w-4 h-4" /> 补充重新生成
+          </button>
+        )}
       </div>
     )
   }
@@ -1515,7 +1526,7 @@ function ClarifyHistoryTab({
       {/* 顶部操作栏 */}
       <div className="flex items-center justify-between">
         <p className="text-sm text-slate-500">共 {history.length} 条记录</p>
-        {status === 'active' && (
+        {status !== 'archived' && (
           <button onClick={onNavigateToClarify} className="btn-secondary text-sm">
             <RefreshCw className="w-4 h-4" /> 补充重新生成
           </button>

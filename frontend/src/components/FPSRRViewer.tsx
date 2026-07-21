@@ -36,6 +36,8 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const [editModule, setEditModule] = useState('')
+  const [editModules, setEditModules] = useState<string[]>([])
+  const [showFpModulePicker, setShowFpModulePicker] = useState(false)
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null)
   const [showRegenModal, setShowRegenModal] = useState<string | null>(null)
   const [regenHint, setRegenHint] = useState('')
@@ -165,9 +167,9 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
   }
 
   const updateFP = async (fpId: string) => {
-    await reqApi.fpUpdate(reqId, fpId, { name: editName || undefined, module_id: editModule || undefined })
-    setFps(prev => prev.map(f => f.id === fpId ? { ...f, name: editName || f.name, module_id: editModule || f.module_id } : f))
-    setEditingId(null)
+    await reqApi.fpUpdate(reqId, fpId, { name: editName || undefined, modules: editModules.length > 0 ? editModules : undefined })
+    setFps(prev => prev.map(f => f.id === fpId ? { ...f, name: editName || f.name, modules: editModules.length > 0 ? editModules : f.modules, module_id: editModules.length > 0 ? editModules[0] : f.module_id } : f))
+    setEditingId(null); setEditModules([]); setShowFpModulePicker(false)
   }
 
   // 影响分析
@@ -288,6 +290,15 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                                 待审核
                               </span>
                             )}
+                            {/* v2.2: 多模块标签 */}
+                            {(() => {
+                              const fpMods = (fp.modules as string[]) || (fp.module_id ? [fp.module_id] : [])
+                              return fpMods.map((mid: string) => (
+                                <span key={mid} className="text-[10px] px-1.5 py-0.5 rounded bg-primary-50 text-primary-600">
+                                  {modules.find((m: any) => m.id === mid)?.name || mid}
+                                </span>
+                              ))
+                            })()}
                           </div>
                           {fp.test_hints?.length > 0 && (
                             <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-1">
@@ -329,7 +340,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                               </>
                             ) : (
                               <button
-                                onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModule(fp.module_id || '') }}
+                                onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModules((fp.modules || (fp.module_id ? [fp.module_id] : [])) as string[]) }}
                                 className="p-1.5 text-slate-400 hover:text-primary-500 rounded-lg"
                               >
                                 <Edit3 className="w-3.5 h-3.5" />
@@ -354,13 +365,29 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                       <div className="px-4 pb-3 flex items-center gap-2" onClick={e => e.stopPropagation()}>
                         <input value={editName} onChange={e => setEditName(e.target.value)}
                           className="input-field text-sm flex-1" placeholder="功能点名称" autoFocus />
-                        <select value={editModule} onChange={e => setEditModule(e.target.value)}
-                          className="select-field text-sm max-w-[160px]">
-                          <option value="">选择模块</option>
-                          {modules.map((m: any) => (
-                            <option key={m.id} value={m.id}>{m.name}</option>
-                          ))}
-                        </select>
+                        <div className="relative">
+                          <button type="button" onClick={() => setShowFpModulePicker(!showFpModulePicker)}
+                            className="select-field text-sm flex items-center gap-1 max-w-[200px]">
+                            {editModules.length > 0
+                              ? editModules.map(id => modules.find((m: any) => m.id === id)?.name || id).join(', ')
+                              : '选择模块'}
+                            <span className="text-slate-400 ml-auto">▾</span>
+                          </button>
+                          {showFpModulePicker && (
+                            <div className="absolute top-full left-0 bg-white border border-slate-200 rounded-lg shadow-lg z-20 max-h-48 overflow-y-auto min-w-[180px] p-2">
+                              {modules.map((m: any) => (
+                                <label key={m.id} className="flex items-center gap-2 px-2 py-1 hover:bg-slate-50 rounded cursor-pointer text-xs">
+                                  <input type="checkbox"
+                                    checked={editModules.includes(m.id)}
+                                    onChange={e => setEditModules(e.target.checked ? [...editModules, m.id] : editModules.filter(id => id !== m.id))}
+                                    className="w-3.5 h-3.5 text-primary-600 rounded" />
+                                  {m.name}
+                                </label>
+                              ))}
+                              {modules.length === 0 && <p className="text-xs text-slate-400 px-2 py-1">暂无模块</p>}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     )}
 

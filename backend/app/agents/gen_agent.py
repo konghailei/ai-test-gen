@@ -80,14 +80,50 @@ class GenAgent:
                 4. gen_confidence 放入 gen_metadata
         """
         req_id = srr.get("requirement", {}).get("id", "")
+        product_id = srr.get("requirement", {}).get("product_id", "")
+        modules = srr.get("requirement", {}).get("modules", []) or []
         logger.info("[GenAgent] ▶ 开始生成: req_id={}, multi_type={}, has_impact_guidance={}, fp_count={}",
                     req_id, enable_multi_type, bool(impact_guidance), len(functional_points or []))
 
-        # v3.1: 跳过 KB 检索，直接基于 SRR 生成（SRR 已足够详细，需求上下文在澄清阶段已由知识库补全）
+        # v3.2: 轻量 KB 检索——查同模块下已 approved 的高质量用例 Top-3 作为 Few-shot 参考
         few_shot_cases: list = []
         matched_patterns: list = []
         functional_points = functional_points or []
-        logger.info("[GenAgent] KB 检索已跳过（直接基于 SRR 生成）: few_shot_cases={}, matched_patterns={}",
+        if modules:
+            try:
+                from app.db.database import async_session
+                from app.db.models import TestCase
+                from sqlalchemy import select as _select
+                async with async_session() as _s:
+                    cases_in_module = await _s.execute(
+                        _select(TestCase.case_json, TestCase.id)
+                        .where(TestCase.product_id == product_id, TestCase.status == "approved")
+                        .order_by(TestCase.updated_at.desc())
+                        .limit(10)
+                    )
+                    for cj, cid in cases_in_module.all():
+                        if not isinstance(cj, dict):
+                            continue
+                        few_shot_cases.append({
+                            "id": cid,
+                            "title": cj.get("title", ""),
+                            "type": cj.get("type", ""),
+                            "priority": cj.get("priority", ""),
+                            "steps": cj.get("steps", [])[:3],
+                            "assertions": cj.get("assertions", [])[:2],
+                        })
+                    # 去重 + Top-3
+                    seen = set()
+                    uniq = []
+                    for c in few_shot_cases:
+                        title = c.get("title", "")
+                        if title and title not in seen:
+                            seen.add(title)
+                            uniq.append(c)
+                    few_shot_cases = uniq[:3]
+            except Exception as e:
+                logger.debug("[GenAgent] 轻量 KB 检索失败（不阻断）: {}", str(e)[:120])
+        logger.info("[GenAgent] 轻量 KB 检索: few_shot_cases={}, matched_patterns={}",
                     len(few_shot_cases), len(matched_patterns))
 
         # 3. 构建 Prompt（含 FP 定向上下文）
@@ -156,6 +192,11 @@ class GenAgent:
             except Exception as e:
                 logger.debug("[GenAgent] 向量库写入失败（不阻断）: case_id={}, err={}",
                              case.get("id", ""), str(e)[:120])
+                try:
+                    from app.core.dlq import dlq
+                    dlq.push("milvus_write", {"case_id": case.get("id", ""), "req_id": req_id}, str(e)[:500])
+                except Exception:
+                    pass
                 return False
 
         import time as _time
@@ -252,6 +293,7 @@ class GenAgent:
             case.setdefault("test_data", {})
             case.setdefault("cleanup", [])
             case.setdefault("execution", {})
+            case.setdefault("related_fp", "")  # v2.0.1: FP 追溯（LLM 可能漏写）
 
             # ⚠️ gen_confidence 必须放在 gen_metadata 内（修复问题5）
             # 如果 LLM 把 gen_confidence 放在了顶层，移入 gen_metadata

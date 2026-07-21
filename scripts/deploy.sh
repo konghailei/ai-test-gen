@@ -317,8 +317,20 @@ if [ -d code ] && [ "$(ls -A code/ 2>/dev/null)" ]; then
   info "重建后端镜像 (基于 ai-test-gen-base:latest 缓存)..."
   $COMPOSE_CMD -f docker-compose.offline.yml build backend
   
-  info "重建前端镜像..."
-  $COMPOSE_CMD -f docker-compose.offline.yml build frontend
+  # 前端镜像处理：
+  #   1) 优先加载预构建的镜像 tar（pack-update.sh 已在外网构建好）
+  #   2) 无 tar 但镜像已存在 → 跳过（无前端变更）
+  #   3) 无 tar 无镜像 → 尝试构建（首次部署兜底）
+  if [ -f "images/10-ai-test-gen-web.tar" ]; then
+    info "检测到前端镜像更新包，加载新镜像..."
+    docker load -i "images/10-ai-test-gen-web.tar"
+    info "前端镜像已更新"
+  elif docker image inspect ai-test-gen-web:latest &>/dev/null; then
+    info "前端镜像已存在，跳过构建"
+  else
+    info "前端镜像不存在，尝试构建..."
+    $COMPOSE_CMD -f docker-compose.offline.yml build frontend || warn "前端构建失败，请确认 npm 源可用"
+  fi
   
   info "应用镜像重建完成"
   echo ""

@@ -56,6 +56,22 @@ echo "  复制根目录配置"
 cp .dockerignore "$OUTPUT_DIR/code/" 2>/dev/null || true
 
 # ==================================================================
+# 2. 构建并导出前端镜像（内网无 npm，必须预构建）
+# ==================================================================
+echo ""
+echo "=== [2/3] 构建前端镜像 ==="
+echo "  构建前端镜像 (ai-test-gen-web:latest)..."
+if docker build -t ai-test-gen-web:latest -f frontend/Dockerfile . 2>/dev/null; then
+  echo "  保存前端镜像 → 10-ai-test-gen-web.tar"
+  mkdir -p "$OUTPUT_DIR/images"
+  docker save ai-test-gen-web:latest -o "$OUTPUT_DIR/images/10-ai-test-gen-web.tar"
+  echo "  镜像大小: $(du -h "$OUTPUT_DIR/images/10-ai-test-gen-web.tar" | cut -f1)"
+else
+  echo "  ⚠️ 前端构建失败（可能是 npm 源不可达），跳过镜像导出"
+  echo "    内网部署时将使用已有的前端镜像"
+fi
+
+# ==================================================================
 # 2. 复制部署文件
 # ==================================================================
 echo ""

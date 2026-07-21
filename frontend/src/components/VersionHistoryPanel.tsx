@@ -1,15 +1,16 @@
 import { useState, useEffect } from 'react'
-import { History, Loader2, ChevronRight, ChevronDown, X, FileText, RefreshCw } from 'lucide-react'
+import { History, Loader2, ChevronRight, ChevronDown, X, FileText, RefreshCw, RotateCcw } from 'lucide-react'
 import { requirements as reqApi } from '../api/client'
 import type { ReqVersionSummary, ReqVersionDetail } from '../types'
 
-/** 需求历史版本面板：展示重新分析前的 SRR 快照 */
+/** 需求历史版本面板：展示重新分析前的 SRR 快照。v2.2 支持版本切换。 */
 export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
   const [versions, setVersions] = useState<ReqVersionSummary[]>([])
   const [loading, setLoading] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [viewing, setViewing] = useState<ReqVersionDetail | null>(null)
   const [viewLoading, setViewLoading] = useState(false)
+  const [restoring, setRestoring] = useState(false)
   const [error, setError] = useState('')
 
   const load = async () => {
@@ -36,6 +37,31 @@ export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
     } catch (e: any) {
       setError(e.message || '加载版本详情失败')
     } finally { setViewLoading(false) }
+  }
+
+  const restoreVersion = async (idx: number) => {
+    if (!confirm(`确认切换到 v${idx}？当前需求分析将被保存为历史版本，然后用 v${idx} 的内容覆盖。`)) return
+    setRestoring(true)
+    setError('')
+    try {
+      await reqApi.restoreVersion(reqId, idx)
+      setViewing(null)
+      setExpanded(false)
+      setVersions([])
+      // 刷新页面（切换版本后整个需求 SRR 已变）
+      window.location.reload()
+    } catch (e: any) {
+      setError(e.message || '版本切换失败')
+      setRestoring(false)
+    }
+  }
+
+  /** 安全渲染值：处理对象/数组，避免显示 [object Object] */
+  const safeStr = (v: unknown): string => {
+    if (v === null || v === undefined) return '—'
+    if (typeof v === 'string') return v
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+    try { return JSON.stringify(v) } catch { return String(v) }
   }
 
   /** 紧凑展示 SRR 关键字段 */
@@ -94,7 +120,7 @@ export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
           <div>
             <p className="font-semibold text-slate-700 mb-1">业务规则 ({businessRules.length})</p>
             <ul className="list-disc list-inside text-slate-600 space-y-0.5">
-              {businessRules.slice(0, 5).map((r, i) => <li key={i}>{String((r as { rule?: string; description?: string }).rule || (r as { description?: string }).description || r)}</li>)}
+              {businessRules.slice(0, 5).map((r, i) => <li key={i}>{safeStr((r as { rule?: string; description?: string }).rule || (r as { description?: string }).description || r)}</li>)}
               {businessRules.length > 5 && <li className="text-slate-400">... 共 {businessRules.length} 条</li>}
             </ul>
           </div>
@@ -104,7 +130,7 @@ export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
           <div>
             <p className="font-semibold text-slate-700 mb-1">边界条件 ({boundary.length})</p>
             <ul className="list-disc list-inside text-slate-600 space-y-0.5">
-              {boundary.slice(0, 5).map((b, i) => <li key={i}>{String((b as { condition?: string; description?: string }).condition || (b as { description?: string }).description || b)}</li>)}
+              {boundary.slice(0, 5).map((b, i) => <li key={i}>{safeStr((b as { condition?: string; description?: string }).condition || (b as { description?: string }).description || b)}</li>)}
               {boundary.length > 5 && <li className="text-slate-400">... 共 {boundary.length} 条</li>}
             </ul>
           </div>
@@ -116,7 +142,7 @@ export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
             <ul className="list-disc list-inside text-slate-600 space-y-0.5">
               {dataConstraints.slice(0, 5).map((d, i) => {
                 const c = d as { field?: string; constraint?: string; description?: string }
-                return <li key={i}>{c.field ? `${c.field}: ` : ''}{c.constraint || c.description || JSON.stringify(d)}</li>
+                return <li key={i}>{c.field ? `${c.field}: ` : ''}{safeStr(c.constraint || c.description || d)}</li>
               })}
               {dataConstraints.length > 5 && <li className="text-slate-400">... 共 {dataConstraints.length} 条</li>}
             </ul>
@@ -127,7 +153,7 @@ export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
           <div>
             <p className="font-semibold text-slate-700 mb-1">验收标准 ({acceptance.length})</p>
             <ul className="list-disc list-inside text-slate-600 space-y-0.5">
-              {acceptance.slice(0, 5).map((a, i) => <li key={i}>{String((a as { criteria?: string; description?: string }).criteria || (a as { description?: string }).description || a)}</li>)}
+              {acceptance.slice(0, 5).map((a, i) => <li key={i}>{safeStr((a as { criteria?: string; description?: string }).criteria || (a as { description?: string }).description || a)}</li>)}
               {acceptance.length > 5 && <li className="text-slate-400">... 共 {acceptance.length} 条</li>}
             </ul>
           </div>
@@ -137,7 +163,7 @@ export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
           <div>
             <p className="font-semibold text-slate-700 mb-1">前置条件 ({preconditions.length})</p>
             <ul className="list-disc list-inside text-slate-600 space-y-0.5">
-              {preconditions.slice(0, 5).map((p, i) => <li key={i}>{String((p as { condition?: string; description?: string }).condition || (p as { description?: string }).description || p)}</li>)}
+              {preconditions.slice(0, 5).map((p, i) => <li key={i}>{safeStr((p as { condition?: string; description?: string }).condition || (p as { description?: string }).description || p)}</li>)}
             </ul>
           </div>
         )}
@@ -201,6 +227,14 @@ export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
                   >
                     <FileText className="w-3.5 h-3.5" />
                   </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); restoreVersion(v.version_index) }}
+                    disabled={restoring}
+                    className="btn-ghost p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50"
+                    title="切换使用此版本"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               ))}
             </div>
@@ -233,7 +267,19 @@ export default function VersionHistoryPanel({ reqId }: { reqId: string }) {
             {viewLoading ? (
               <div className="flex items-center justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
             ) : (
-              renderSRRPreview(viewing.srr)
+              <>
+                {renderSRRPreview(viewing.srr)}
+                <div className="mt-4 pt-3 border-t border-slate-100 flex justify-end">
+                  <button
+                    onClick={() => restoreVersion(viewing.version_index)}
+                    disabled={restoring}
+                    className="btn-primary text-sm flex items-center gap-1.5"
+                  >
+                    {restoring ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                    使用此版本
+                  </button>
+                </div>
+              </>
             )}
           </div>
         </div>

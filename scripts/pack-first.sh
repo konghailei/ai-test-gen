@@ -92,6 +92,9 @@ save_image "minio/minio"         "RELEASE.2023-03-20T20-16-18Z" "06-minio.tar"
 save_image "milvusdb/milvus"     "v2.4.0"       "07-milvus-v2.4.0.tar"
 save_image "node"                "20-alpine"    "08-node-20-alpine.tar"
 save_image "nginx"               "1.27-alpine"  "09-nginx-1.27-alpine.tar"
+save_image "ai-test-gen-web"     "latest"       "10-ai-test-gen-web.tar"
+# 注意：后端镜像 (ai-test-gen-api) 基于 ai-test-gen-base 只加了一层 COPY，
+# 内网直接用 base 镜像 + 源码 rebuild 即可，无需单独保存
 
 # ==================================================================
 # 3. 复制模型文件
@@ -147,6 +150,58 @@ PG_PASSWORD=aitestgen123
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 ENVEOF
+
+# ==================================================================
+# 校验：检查关键文件是否完整
+# ==================================================================
+echo ""
+echo "=== 校验离线包完整性 ==="
+
+CHECK_FAILED=false
+check_file() {
+  if [ -f "$1" ]; then
+    echo "  ✅ $1"
+  else
+    echo "  ❌ $1 缺失！"
+    CHECK_FAILED=true
+  fi
+}
+check_dir() {
+  if [ -d "$1" ]; then
+    echo "  ✅ $1/"
+  else
+    echo "  ❌ $1/ 缺失！"
+    CHECK_FAILED=true
+  fi
+}
+
+check_dir "$OUTPUT_DIR/code/frontend/src"
+check_file "$OUTPUT_DIR/code/frontend/package.json"
+check_file "$OUTPUT_DIR/code/frontend/package-lock.json"
+check_file "$OUTPUT_DIR/code/frontend/index.html"
+check_file "$OUTPUT_DIR/code/frontend/vite.config.ts"
+check_file "$OUTPUT_DIR/code/frontend/tsconfig.json"
+check_file "$OUTPUT_DIR/code/frontend/nginx.conf"
+check_dir "$OUTPUT_DIR/code/backend/app"
+check_file "$OUTPUT_DIR/code/backend/requirements.txt"
+check_file "$OUTPUT_DIR/code/backend/Dockerfile"
+check_file "$OUTPUT_DIR/code/docker/postgres.Dockerfile"
+check_file "$OUTPUT_DIR/code/docker/init-zhparser.sql"
+check_file "$OUTPUT_DIR/docker-compose.offline.yml"
+check_file "$OUTPUT_DIR/deploy.sh"
+check_dir "$OUTPUT_DIR/images"
+check_dir "$OUTPUT_DIR/models/bge-large-zh-v1.5"
+check_file "$OUTPUT_DIR/models/bge-large-zh-v1.5/pytorch_model.bin"
+check_file "$OUTPUT_DIR/install.env"
+
+if [ "$CHECK_FAILED" = true ]; then
+  echo ""
+  echo "⚠️  ⚠️  ⚠️  离线包完整性检查未通过，请修复以上缺失文件！"
+  exit 1
+else
+  echo ""
+  echo "✅ 离线包完整性检查通过"
+fi
 
 # ==================================================================
 # 打包

@@ -645,7 +645,59 @@ class Orchestrator:
             sum(1 for c in cases if c.get("related_fp")),
         )
 
-        return {"test_cases": cases}
+        # ── v3.2: 一致性检查（vs 上次生成）──
+        consistency_check = {}
+        try:
+            from app.db.database import async_session
+            from app.db.models import AnalysisTask
+            from sqlalchemy import select as _sel
+            import json as _json
+            async with async_session() as cs:
+                prev_tasks = await cs.execute(
+                    _sel(AnalysisTask).where(
+                        AnalysisTask.req_id == req_id,
+                        AnalysisTask.task_type == "generate",
+                    ).order_by(AnalysisTask.created_at.desc()).limit(2)
+                )
+                prev_rows = prev_tasks.scalars().all()
+                if len(prev_rows) >= 1:
+                    prev_task = prev_rows[0]
+                    prev_result = prev_task.result_json or {}
+                    prev_count = prev_result.get("case_count", 0)
+                    prev_types = prev_result.get("type_dist", {})
+                    cur_count = len(cases)
+                    cur_types: dict[str, int] = {}
+                    for c in cases:
+                        t = c.get("type", "unknown")
+                        cur_types[t] = cur_types.get(t, 0) + 1
+                    count_diff = abs(cur_count - prev_count) / max(prev_count, 1)
+                    is_inconsistent = count_diff > 0.2
+                    consistency_check = {
+                        "prev_case_count": prev_count,
+                        "curr_case_count": cur_count,
+                        "count_diff_pct": round(count_diff * 100, 1),
+                        "prev_type_dist": prev_types,
+                        "curr_type_dist": cur_types,
+                        "is_inconsistent": is_inconsistent,
+                    }
+                    if is_inconsistent:
+                        logger.warning(
+                            "[Orchestrator/GenAgent] ⚠️ 一致性告警: req_id={}, prev_count={}, curr_count={}, diff={:.0f}%",
+                            req_id, prev_count, cur_count, count_diff * 100,
+                        )
+                    # 保存本次统计供下次对比
+                    try:
+                        prev_task.result_json = {**prev_result, "case_count": cur_count, "type_dist": cur_types}
+                        await cs.commit()
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.debug("[Orchestrator] 一致性检查跳过（非阻塞）: {}", str(e)[:120])
+
+        return {
+            "test_cases": cases,
+            "consistency_check": consistency_check,
+        }
 
     async def _review_node(self, state: PipelineState) -> dict:
         """节点 8：ReviewAgent 用例审核 → 知识库回流闭环。
@@ -980,6 +1032,40 @@ class Orchestrator:
 
                     yield event
 
+            # ── v3.2: FP 覆盖率矩阵 ──
+            fp_coverage = {}
+            try:
+                reviewed_cases = final_state.get("reviewed_cases", []) or []
+                req_id_final = final_state.get("req_id", "")
+                if req_id_final:
+                    from app.db.database import async_session as _cov_sess
+                    from app.db.models import FunctionalPoint
+                    from sqlalchemy import select as _cov_sel
+                    async with _cov_sess() as cov_s:
+                        fp_rows = await cov_s.execute(
+                            _cov_sel(FunctionalPoint.id, FunctionalPoint.name)
+                            .where(FunctionalPoint.requirement_id == req_id_final)
+                        )
+                        fp_map = {r[0]: r[1] for r in fp_rows.all()}
+                    total_fps = len(fp_map)
+                    covered_ids = set()
+                    for c in reviewed_cases:
+                        rf = c.get("related_fp", "")
+                        if rf and rf in fp_map:
+                            covered_ids.add(rf)
+                    uncovered = [
+                        {"id": fid, "name": fp_map[fid]}
+                        for fid in fp_map if fid not in covered_ids
+                    ]
+                    fp_coverage = {
+                        "total_fps": total_fps,
+                        "covered_fps": len(covered_ids),
+                        "coverage_rate": round(len(covered_ids) / max(total_fps, 1), 2),
+                        "uncovered": uncovered,
+                    }
+            except Exception as e:
+                logger.debug("[Orchestrator] FP 覆盖率计算跳过: {}", str(e)[:120])
+
             # 流水线完成
             duration = time.time() - final_state.get("start_time", time.time())
             done_event = make_sse_event(
@@ -994,6 +1080,8 @@ class Orchestrator:
                 gate_result=final_state.get("gate_result", {}),
                 impact_result=final_state.get("impact_result", {}),
                 kb_flowback=final_state.get("kb_flowback", {}),
+                fp_coverage=fp_coverage,
+                consistency_check=final_state.get("consistency_check", {}),
                 duration_ms=int(duration * 1000),
             )
             logger.info(

@@ -38,6 +38,8 @@ services:
       args:
         BASE_IMAGE: ai-test-gen-base:latest
     container_name: ai-test-gen-api
+    extra_hosts:
+      - "${LLM_HOST:-host.docker.internal}:${LLM_IP:-127.0.0.1}"
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -49,6 +51,8 @@ services:
       <<: &backend-env
         APP_PORT: 8000
         DEBUG: ${DEBUG:-false}
+        APP_SECRET_KEY: ${APP_SECRET_KEY:-}
+        MASTER_KEY: ${MASTER_KEY:-}
         DATABASE_URL: postgresql+asyncpg://aitestgen:aitestgen123@postgres:5432/ai_test_gen
         VECTOR_STORE: milvus
         MILVUS_HOST: milvus
@@ -85,6 +89,8 @@ services:
   celery_worker:
     image: ai-test-gen-api:latest
     container_name: ai-test-gen-celery
+    extra_hosts:
+      - "${LLM_HOST:-host.docker.internal}:${LLM_IP:-127.0.0.1}"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

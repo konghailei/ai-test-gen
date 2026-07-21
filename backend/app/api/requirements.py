@@ -1689,6 +1689,68 @@ async def get_requirement_version(
     )
 
 
+@router.post("/{req_id}/versions/{version_index}/restore", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def restore_requirement_version(
+    req_id: str,
+    version_index: int,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """切换使用指定历史版本（用版本快照替换当前 SRR）。
+
+    当前 SRR 会先作为新版本快照保存，然后再被目标版本覆盖。
+    v2.2 新增，大哥要求历史版本可直接切换使用。
+    """
+    stmt = select(Requirement).where(Requirement.id == req_id)
+    result = await session.execute(stmt)
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    old_srr = dict(record.srr_json or {})
+    versions = list(old_srr.get("_version_history", []))
+    target = next((v for v in versions if v.get("version_index") == version_index), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"版本 v{version_index} 不存在（共 {len(versions)} 个历史版本）")
+
+    target_srr = target.get("srr", {})
+    if not isinstance(target_srr, dict) or not target_srr:
+        raise HTTPException(status_code=400, detail="目标版本无有效 SRR 数据")
+
+    # 当前 SRR 先保存为历史版本
+    SNAPSHOT_KEYS = {"_clarify_state", "_kb_query_logs", "_clarify_history", "_version_history"}
+    current_snapshot = {k: v for k, v in old_srr.items() if k not in SNAPSHOT_KEYS}
+    current_title = (old_srr.get("requirement", {}) or {}).get("title", record.title)
+    versions.append({
+        "version_index": len(versions) + 1,
+        "snapshot_at": datetime.now(timezone.utc).isoformat(),
+        "title": current_title,
+        "trigger": "restore",
+        "extra_notes": f"切换至 v{version_index} 前自动快照",
+        "srr": current_snapshot,
+    })
+
+    # 用目标版本 SRR 替换当前
+    restored_srr = dict(target_srr)
+    restored_srr["_version_history"] = versions
+    # 保留 KB 查询日志 + 澄清历史
+    for preserve_key in ("_kb_query_logs", "_clarify_history"):
+        if preserve_key in old_srr:
+            restored_srr[preserve_key] = old_srr[preserve_key]
+    record.srr_json = restored_srr
+    record.status = "pending_review"
+    await session.commit()
+
+    logger.info(
+        "[API/requirements] 版本切换: req_id={}, v{} -> restored, new_history_count={}",
+        req_id, version_index, len(versions),
+    )
+    return ApiResponse(
+        success=True,
+        message=f"已切换至 v{version_index}",
+        data={"req_id": req_id, "version_index": version_index, "status": "pending_review"},
+    )
+
+
 @router.post("/{req_id}/regenerate", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def regenerate_requirement(
     req_id: str,
@@ -1877,6 +1939,49 @@ async def _run_regenerate_reparse(
                 values["title"] = new_title
             await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(**values))
             await s.commit()
+
+        # v2.2: 重新生成 SRR 后自动重新拆分 FP
+        try:
+            from app.agents.req_agent import req_agent as _regen_agent
+            # 使用独立 session，不依赖 HTTP 请求的 session（此函数在后台协程运行）
+            async with async_session() as fp_split_sess:
+                record2 = (await fp_split_sess.execute(
+                    select(Requirement).where(Requirement.id == req_id)
+                )).scalar_one_or_none()
+                if record2:
+                    srr2 = record2.srr_json or {}
+                    product_name2 = srr2.get("requirement", {}).get("product_name", "") or ""
+                    raw_text2 = record2.raw_text or ""
+                    logger.info("[Task/Regenerate] 自动触发 FP 拆分: req_id={}", req_id)
+                    new_fps = await _regen_agent._fp_extract_from_raw(raw_text2, srr2, product_name2)
+                    if new_fps:
+                        from app.db.models import FunctionalPoint as FP, FPDependency
+                        old_fp_rows = (await fp_split_sess.execute(
+                            select(FP.id).where(FP.requirement_id == req_id)
+                        )).scalars().all()
+                        if old_fp_rows:
+                            old_ids_set = set(old_fp_rows)
+                            await fp_split_sess.execute(
+                                delete(FPDependency).where(
+                                    (FPDependency.source_fp_id.in_(old_ids_set)) | 
+                                    (FPDependency.target_fp_id.in_(old_ids_set))
+                                )
+                            )
+                            await fp_split_sess.execute(delete(FP).where(FP.requirement_id == req_id))
+                            await fp_split_sess.flush()
+                        await _save_fps_to_db(fp_split_sess, req_id, new_fps, record2.priority)
+                        await _save_fp_dependencies(fp_split_sess, req_id, _regen_agent.last_fp_dependencies)
+                        # 若 LLM 产出 interaction_srr，更新主需求 SRR
+                        if _regen_agent.interaction_srr and isinstance(_regen_agent.interaction_srr, dict):
+                            merged_srr = dict(final_data)
+                            merged_srr.update(_regen_agent.interaction_srr)
+                            await fp_split_sess.execute(
+                                sa_update(Requirement).where(Requirement.id == req_id).values(srr_json=merged_srr)
+                            )
+                        await fp_split_sess.commit()
+                        logger.info("[Task/Regenerate] FP 拆分完成: req_id={}, new_fps={}", req_id, len(new_fps))
+        except Exception as fp_err:
+            logger.warning("[Task/Regenerate] FP 拆分失败（不阻断）: req_id={}, err={}", req_id, str(fp_err)[:200])
 
         logger.info(
             "[Task/Regenerate] 重新生成完成，需求进入待确认: req_id={}, title={}->{}, history_versions={}",
@@ -2724,13 +2829,6 @@ class FPSplitRequest(BaseModel):
     bp_names: list[str] = []  # 空列表→重新拆分模式
 
 
-class FPUpdateRequest(BaseModel):
-    """FP 编辑请求。"""
-    name: str | None = None
-    module_id: str | None = None
-    fp_type: str | None = None
-    priority: str | None = None
-
 
 class FPDependencyCreateRequest(BaseModel):
     """FP 依赖创建请求。"""
@@ -3268,6 +3366,9 @@ async def fp_remove_dependency(
 class FPUpdateRequest(BaseModel):
     name: str | None = None
     module_id: str | None = None
+    modules: list[str] | None = None  # v2.2: 多模块关联
+    fp_type: str | None = None
+    priority: str | None = None
     srr_json: dict | None = None
 
 
@@ -3278,7 +3379,7 @@ async def fp_update(
     body: FPUpdateRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """更新功能点名称 / 模块 / 子 SRR。"""
+    """更新功能点名称 / 模块 / 子 SRR。v2.2 支持多模块。"""
     await _load_active_requirement(req_id, session)
     fp = await session.get(FunctionalPoint, fp_id)
     if not fp or fp.requirement_id != req_id:
@@ -3286,7 +3387,11 @@ async def fp_update(
 
     if body.name is not None:
         fp.name = body.name
-    if body.module_id is not None:
+    if body.modules is not None:
+        fp.modules = body.modules
+    elif body.module_id is not None:
+        # 旧版单模块兼容
+        fp.modules = [body.module_id]
         fp.module_id = body.module_id
     if body.srr_json is not None:
         fp.srr_json = body.srr_json

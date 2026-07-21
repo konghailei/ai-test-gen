@@ -1,8 +1,15 @@
 # 08 功能点（FunctionalPoint）子系统
 
+> **最后更新**: 2026-07-21 (v2.0 ↔ 交互层 SRR + FP 去重跳过 LLM)
+
 ## 概述
 
-功能点（FP）是 ai-test-gen v1.5.1 的核心子系统。它采用 **「原始文档 → FP 一体式提取 → 子 SRR 生成 → 审核 → 用例生成」** 的流水线，将传统的大规模 SRR 拆分为按业务能力划分的功能点，每个 FP 附带完整的子 SRR。
+功能点（FP）是 ai-test-gen v1.5.1 的核心子系统。它采用 **「原始文档 → FP 一体式提取 → 子 SRR 生成 → 审核 → 用例生成」** 的流水线。
+
+**⭐ v2.0 核心演进**：
+- **双 SRR 分层**：LLM 同时产出 interaction_srr（总 SRR = 跨 FP 交互规则）+ FP sub_srr（FP 专属内部规则），消除重复
+- **FP 去重跳过 LLM**：同模块已有 FP 名称 → 复制到新需求，不再让 LLM 重新生成
+- **FP 跨需求复用**：fpSplit 将同模块已有 FP 复制（新 ID + 原 sub_srr），与新 FP 合并为完整列表
 
 ## 架构层级
 
@@ -105,6 +112,7 @@ Product（产品）
 |------|------|------|
 | id | VARCHAR(64) PK | FP 唯一标识 |
 | requirement_id | FK → requirements.id | 所属需求（CASCADE）|
+
 | module_id | FK → modules.id | 归属模块（SET NULL）|
 | name | VARCHAR(255) | 功能点名称 |
 | fp_type | VARCHAR(32) | workflow/constraint/calculation/api_behavior/data_record/config |
@@ -121,3 +129,56 @@ Product（产品）
 | target_fp_id | FK → functional_points.id | 目标 FP（CASCADE）|
 | relation_type | VARCHAR(32) | depends_on/data_flows/invariants/lifecycle_scenarios/conflicts_with |
 | description | TEXT | 关系描述 |
+
+---
+
+## ⭐ v2.0: 双 SRR 分层（interaction_srr + FP sub_srr）
+
+FP 提取时 LLM 同时输出两份 SRR：
+
+```
+LLM 输出 → {
+    interaction_srr: {                    ← 写入 req.srr_json（总 SRR）
+        cross_fp_flows: [...],             FP 间调用顺序 + 数据契约
+        shared_business_rules: [...],      跨 ≥2 个 FP 的共享规则
+        fp_contracts: [...],               FP 间接口约定
+        global_constraints: [...],         全局性约束
+        acceptance_criteria: [...]         跨 FP 验收标准
+    },
+    functional_points: [{                  ← 写入 functional_points 表
+        name: "用户登录",
+        sub_srr: {                         ← FP 内部规则（不重复 interaction_srr）
+            flows: { happy_path/alternate_flows },
+            business_rules: [...],
+            data_constraints: [...],
+            acceptance_criteria: [...]
+        }
+    }]
+}
+```
+
+**原则**：一条规则只在一处定义。单 FP 专属 → sub_srr；多 FP 共享 → interaction_srr。**严禁重复**。
+
+## ⭐ v2.0: FP 去重跳过 LLM + 跨需求复用
+
+**流程**：
+1. `_fp_extract_from_raw` 查询同模块已有 FP 名
+2. 注入 Prompt 硬约束：「已存在 FP 禁止重新生成，标记 reuse_existing: true」
+3. LLM 仅生成**真正新的 FP**（reuse_existing 条目被过滤丢弃）
+4. `fp_split` 从 DB 复制已有 FP（新 ID + 原 sub_srr/atomicity_check/test_hints）
+5. 最终 FP 列表 = 已有 FP（copy）+ LLM 新 FP
+
+**效果**：
+- 减少 LLM 调用量（已有 FP 不走 LLM）
+- 同模块跨需求 FP 名称统一，数据一致性更好
+- 新需求自动继承历史 FP 的完整子 SRR
+
+## ⭐ v2.0: related_fp 全链路追溯
+
+| 环节 | related_fp 作用 |
+|------|----------------|
+| GenAgent prompt | 要求 LLM 在用例中标注 `related_fp`，指向功能点 ID |
+| GenAgent post_process | `case.setdefault("related_fp", "")` 兜底 |
+| ReviewAgent persist_to_kb | `traceability.requirement_field = "fp:{related_fp}"` |
+| XMind 导出 | 按 `related_fp` 分组用例树节点 |
+| testcases API | 从 `related_fp` 提取 FP 名称展示 |

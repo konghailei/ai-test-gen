@@ -14,7 +14,8 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
   const [resplitting, setResplitting] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
-  const [editModule, setEditModule] = useState('')
+  const [editModules, setEditModules] = useState<string[]>([])
+  const [showModulePicker, setShowModulePicker] = useState(false)
   const [modules, setModules] = useState<any[]>([])
   const [nameSearch, setNameSearch] = useState('')
   const [nameSuggestions, setNameSuggestions] = useState<any[]>([])
@@ -45,9 +46,9 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
   }
 
   const updateFP = async (fpId: string) => {
-    await reqApi.fpUpdate(reqId, fpId, { name: editName || undefined, module_id: editModule || undefined })
-    setFps(prev => prev.map(f => f.id === fpId ? { ...f, name: editName || f.name, module_id: editModule || f.module_id } : f))
-    setEditingId(null)
+    await reqApi.fpUpdate(reqId, fpId, { name: editName || undefined, modules: editModules.length > 0 ? editModules : undefined })
+    setFps(prev => prev.map(f => f.id === fpId ? { ...f, name: editName || f.name, modules: editModules.length > 0 ? editModules : f.modules } : f))
+    setEditingId(null); setEditModules([]); setShowModulePicker(false)
   }
 
   const deleteFP = async (fpId: string) => {
@@ -127,13 +128,34 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
                           </div>
                         )}
                       </div>
-                      <select value={editModule} onChange={e => setEditModule(e.target.value)}
-                        className="select-field text-sm max-w-[140px]">
-                        <option value="">选择模块</option>
-                        {modules.map((m: any) => (
-                          <option key={m.id} value={m.id}>{m.name}</option>
-                        ))}
-                      </select>
+                      {/* 模块多选 */}
+                      <div className="relative">
+                        <button type="button" onClick={() => setShowModulePicker(!showModulePicker)}
+                          className="input-field text-sm flex items-center gap-1 min-w-[120px]">
+                          {editModules.length > 0
+                            ? editModules.map(id => modules.find((m: any) => m.id === id)?.name || id).join(', ')
+                            : '选择模块'}
+                          <span className="text-slate-400 ml-auto">▾</span>
+                        </button>
+                        {showModulePicker && (
+                          <div className="absolute top-full left-0 bg-white border border-slate-200 rounded-lg shadow-lg z-20 max-h-48 overflow-y-auto min-w-[200px] p-2">
+                            {modules.map((m: any) => (
+                              <label key={m.id} className="flex items-center gap-2 px-2 py-1 hover:bg-slate-50 rounded cursor-pointer text-sm">
+                                <input type="checkbox"
+                                  checked={editModules.includes(m.id)}
+                                  onChange={e => {
+                                    setEditModules(e.target.checked
+                                      ? [...editModules, m.id]
+                                      : editModules.filter(id => id !== m.id))
+                                  }}
+                                  className="w-3.5 h-3.5 text-primary-600 rounded" />
+                                {m.name}
+                              </label>
+                            ))}
+                            {modules.length === 0 && <p className="text-xs text-slate-400 px-2 py-1">暂无模块</p>}
+                          </div>
+                        )}
+                      </div>
                       <button onClick={() => updateFP(fp.id)} className="p-1 text-emerald-600 hover:bg-emerald-50 rounded"><Save className="w-4 h-4" /></button>
                       <button onClick={() => setEditingId(null)} className="p-1 text-slate-400 hover:bg-slate-100 rounded"><X className="w-4 h-4" /></button>
                     </div>
@@ -146,11 +168,15 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
                           {FP_TYPE_LABELS[fp.fp_type] || fp.fp_type}
                         </span>
-                        {fp.module_id && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary-50 text-primary-600">
-                            {modules.find((m: any) => m.id === fp.module_id)?.name || fp.module_id}
-                          </span>
-                        )}
+                        {/* v2.2: 多模块显示（兼容旧 module_id） */}
+                        {(() => {
+                          const fpModules = (fp.modules as string[]) || (fp.module_id ? [fp.module_id] : [])
+                          return fpModules.map((mid: string) => (
+                            <span key={mid} className="text-[10px] px-1.5 py-0.5 rounded bg-primary-50 text-primary-600">
+                              {modules.find((m: any) => m.id === mid)?.name || mid}
+                            </span>
+                          ))
+                        })()}
                       </div>
                       {fp.test_hints?.length > 0 && (
                         <p className="text-xs text-slate-400 mt-0.5">
@@ -160,7 +186,7 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
                     </div>
                     {!isArchived && (
                     <div className="flex items-center gap-1 ml-2">
-                      <button onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModule(fp.module_id || '') }}
+                      <button onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModules((fp.modules || (fp.module_id ? [fp.module_id] : [])) as string[]) }}
                         className="p-1 text-slate-400 hover:text-primary-500 rounded" title="编辑">
                         <Edit3 className="w-3.5 h-3.5" />
                       </button>

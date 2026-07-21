@@ -226,6 +226,12 @@ export const requirements = {
   /** v2.0 查看指定历史版本的完整 SRR 快照 */
   getVersion: (id: string, versionIndex: number) =>
     request<ReqVersionDetail>(`/requirements/${id}/versions/${versionIndex}`),
+  /** v2.2 切换使用指定历史版本（用快照替换当前 SRR） */
+  restoreVersion: (id: string, versionIndex: number) =>
+    request<{ req_id: string; version_index: number; status: string }>(
+      `/requirements/${id}/versions/${versionIndex}/restore`,
+      { method: 'POST' },
+    ),
   /** v2.0 需求 SRR → XMind 思维导图导出（直接触发浏览器下载 .xmind 文件） */
   exportXmind: async (id: string): Promise<{ filename: string; size: number }> => {
     const resp = await fetch(`${BASE}/requirements/${id}/export/xmind`, {
@@ -317,7 +323,7 @@ export const requirements = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
-  fpUpdate: (reqId: string, fpId: string, updates: { name?: string; module_id?: string; fp_type?: string; srr_json?: any }) =>
+  fpUpdate: (reqId: string, fpId: string, updates: { name?: string; module_id?: string; modules?: string[]; fp_type?: string; srr_json?: any }) =>
     request<{ id: string; name: string }>(`/requirements/${reqId}/fp/${fpId}`, {
       method: 'PUT', body: JSON.stringify(updates),
     }),

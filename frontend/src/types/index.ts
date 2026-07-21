@@ -431,6 +431,7 @@ export interface FPItem {
   name: string
   fp_type: string
   module_id: string | null
+  modules: string[]  // v2.2: 多模块关联
   priority: string
   srr_json: Record<string, any>
   atomicity_check: Record<string, boolean>

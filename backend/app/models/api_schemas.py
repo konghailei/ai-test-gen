@@ -131,7 +131,7 @@ class TestCaseUpdateRequest(BaseModel):
 
 class ExportRequest(BaseModel):
     """导出请求。"""
-    format: Literal["markdown", "gherkin", "pytest", "json", "xmind"] = Field(
+    format: Literal["markdown", "gherkin", "pytest", "json", "xmind", "xmind8"] = Field(
         default="markdown", description="导出格式"
     )
     case_ids: list[str] | None = Field(

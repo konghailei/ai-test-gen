@@ -60,7 +60,96 @@ SYSTEM_PROMPT = """你是一位资深测试工程师。请根据以下结构化�
 6. 每个用例必须可独立执行，步骤含 action 和 expected
 7. 测试数据应覆盖正常值、边界值、异常值
 8. **不要编造 SRR 中不存在的新功能**,但可以基于现有字段/规则合理推断边界、异常和组合场景
-9. **宁可多生成低置信度用例,也不遗漏潜在风险**"""
+9. **宁可多生成低置信度用例,也不遗漏潜在风险**
+
+## 输出示例（完整 UTCF 用例格式，请严格仿照此格式输出）
+
+以「用户登录」SRR 为例，一个标准的功能测试用例如下：
+
+```json
+[
+  {
+    "id": "TC-AUTH-0001-0001",
+    "title": "正确账号密码登录成功并跳转首页",
+    "type": "functional",
+    "priority": "P0",
+    "description": "验证用户使用已注册的正确账号和密码可以成功登录系统并跳转到首页",
+    "tags": ["登录", "核心流程"],
+    "preconditions": ["账号已注册且未被锁定", "密码已设置"],
+    "steps": [
+      {"step": 1, "action": "打开登录页面", "expected": "显示登录表单（账号输入框、密码输入框、登录按钮）", "data": {}},
+      {"step": 2, "action": "输入已注册账号 user@example.com 和正确密码 pass123456", "expected": "输入框正常显示输入内容", "data": {"account": "user@example.com", "password": "pass123456"}},
+      {"step": 3, "action": "点击「登录」按钮", "expected": "系统校验通过，跳转至首页，页面显示用户昵称", "data": {}}
+    ],
+    "expected": "登录成功，跳转首页并显示用户昵称",
+    "test_data": {
+      "valid_account": {"account": "user@example.com", "password": "pass123456"}
+    },
+    "assertions": [
+      {"type": "status_code", "target": "http.response.code", "expected_value": 200, "message": "登录接口返回200"},
+      {"type": "contains", "target": "page.content", "expected_value": "用户昵称", "message": "首页显示用户昵称"},
+      {"type": "not_null", "target": "session.token", "expected_value": null, "message": "会话令牌不为空"}
+    ],
+    "cleanup": ["退出登录", "清除浏览器缓存"],
+    "related_requirement": "REQ-LOGIN-001",
+    "related_fp": "FP-用户登录验证",
+    "source_pattern": "",
+    "gen_metadata": {
+      "gen_confidence": 0.95,
+      "model": "deepseek-v3",
+      "prompt_version": "v2.0"
+    },
+    "execution": {
+      "timeout_seconds": 15,
+      "retry_count": 0,
+      "depends_on": [],
+      "skip_conditions": []
+    }
+  },
+  {
+    "id": "TC-AUTH-0001-0002",
+    "title": "密码错误提示并累计失败次数不锁定",
+    "type": "exception",
+    "priority": "P1",
+    "description": "验证输入错误密码时系统正确提示且失败计数递增，但未达锁定阈值",
+    "tags": ["登录", "异常流程"],
+    "preconditions": ["账号已注册且未被锁定", "当前失败次数 < 4"],
+    "steps": [
+      {"step": 1, "action": "打开登录页面", "expected": "显示登录表单", "data": {}},
+      {"step": 2, "action": "输入账号 user@example.com 和错误密码 wrong123", "expected": "密码脱敏显示", "data": {"account": "user@example.com", "password": "wrong123"}},
+      {"step": 3, "action": "点击「登录」按钮", "expected": "提示「账号或密码错误」，失败次数+1，不锁定账号", "data": {}}
+    ],
+    "expected": "提示密码错误，失败计数递增，不锁定",
+    "test_data": {"wrong_password": {"account": "user@example.com", "password": "wrong123"}},
+    "assertions": [
+      {"type": "equals", "target": "response.message", "expected_value": "账号或密码错误", "message": "错误提示正确"},
+      {"type": "equals", "target": "account.locked", "expected_value": false, "message": "账号未被锁定"}
+    ],
+    "cleanup": [],
+    "related_requirement": "REQ-LOGIN-001",
+    "related_fp": "FP-用户登录验证",
+    "source_pattern": "",
+    "gen_metadata": {
+      "gen_confidence": 0.90,
+      "model": "deepseek-v3",
+      "prompt_version": "v2.0"
+    },
+    "execution": {
+      "timeout_seconds": 15,
+      "retry_count": 0,
+      "depends_on": [],
+      "skip_conditions": []
+    }
+  }
+]
+```
+
+关键要点：
+- 每个用例必须有完整的 steps（含 action + expected）
+- assertions 明确断言目标和期望值
+- gen_metadata.gen_confidence 诚实反映与 SRR 的匹配度
+- related_fp 标注对应的功能点ID
+- 测试数据覆盖正常值/边界值/异常值"""
 
 
 # ============================================================================

@@ -1,47 +1,205 @@
-"""XMind 思维导图格式导出器（XMAP 2.0 XML）。
+"""XMind 思维导图格式导出器（JSON 格式，兼容 XMind 2020+ / Zen / 2022+）。
 
-输出 .xmind 文件，兼容 XMind 8 / 2020 / 2022+ 全系。
+输出 .xmind 文件（ZIP 压缩包），包含：
+    content.json   - 工作表 JSON 数组（核心内容）
+    manifest.json  - 文件清单
+    metadata.json  - 创建者元信息
 
-树结构（按项目→需求→功能点/类型→用例）：
-    项目名称（根）
-      ├── REQ-001 需求标题
-      │   ├── [功能点] 登录流程
-      │   │   ├── [functional] 正常登录验证
-      │   │   │   ├── 步骤1: 输入账号密码 → 登录成功
-      │   │   │   └── ...
-      │   │   └── ...
-      │   └── [未分类]
-      └── REQ-002 需求标题
+树结构（按需求→功能点→用例→步骤）：
+    项目根
+      └── REQ-001 需求标题
+          └── [功能点] 登录流程
+              └── [functional] 正常登录验证
+                  ├── 步骤1: 输入账号密码 → 登录成功
+                  └── 前置: 已部署测试环境
 """
 
 from __future__ import annotations
 
 import io, json, uuid, zipfile
-from datetime import datetime
-from xml.etree.ElementTree import Element, SubElement, tostring
+from datetime import datetime, timezone
 
 
-def _id(): return uuid.uuid4().hex
+def _id() -> str:
+    """生成 24 字符 hex ID（与 XMind 标准兼容，类 ObjectId 格式）。"""
+    # uuid4 hex 是 32 字符，截取前 24 位即可
+    return uuid.uuid4().hex[:24]
 
 
-def _topic(title: str, tid: str | None = None) -> Element:
-    """创建独立 topic 元素（不附加到任何父节点）。
+def _topic(title: str, tid: str | None = None) -> dict:
+    """创建独立 topic dict（XMind JSON 格式）。"""
+    return {
+        "id": tid or _id(),
+        "title": str(title),
+    }
 
-    用 Element() 而非 SubElement() 创建，避免在调用方未明确 append 的情况下
-    被意外挂到错误父节点上（修复原 _topic(req_node, ...) 误用 SubElement 的问题）。
+
+def _attach_children(parent: dict, kids: list[dict]) -> dict:
+    """把 kids 作为 parent 的子节点（attached 类型）。
+
+    若 parent 已有 children.attached，则追加；否则新建。
     """
-    t = Element("topic", {"id": tid or _id(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
-    te = SubElement(t, "title"); te.text = str(title)
+    children = parent.setdefault("children", {})
+    attached = children.setdefault("attached", [])
+    attached.extend(kids)
+    return parent
+
+
+def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
+    """导出为 XMind 思维导图 JSON 格式。
+
+    分组逻辑：
+    1. 按需求 ID 分组
+    2. 需求下按功能点分组（有 FP 用 FP，无 FP 用类型兜底）
+    3. 功能点下展示用例 + 步骤 + 前置条件
+
+    Args:
+        cases: 用例列表，每项含 req_id/req_title/title/type/functional_point/preconditions/steps
+        project_name: 所属项目名称（作为根节点标题）
+
+    Returns:
+        bytes: .xmind ZIP 二进制
+    """
+    root_title = project_name or "测试用例"
+
+    # 1. 按需求分组
+    req_groups: dict[str, dict] = {}
+    for c in cases:
+        rid = c.get("req_id") or c.get("related_requirement") or "未知"
+        if rid not in req_groups:
+            req_groups[rid] = {
+                "title": c.get("req_title") or f"需求 {rid}",
+                "fp_groups": {},
+            }
+        # 2. 需求下按功能点分组
+        fp = (c.get("functional_point") or c.get("related_fp")
+              or f"[{c.get('type', '用例')}]")
+        if fp not in req_groups[rid]["fp_groups"]:
+            req_groups[rid]["fp_groups"][fp] = []
+        req_groups[rid]["fp_groups"][fp].append(c)
+
+    # 3. 构建 JSON 树
+    root_topic = _topic(root_title)
+
+    req_nodes: list[dict] = []
+    for rid, rg in sorted(req_groups.items()):
+        req_node = _topic(f"{rid} {rg['title']}")
+
+        fp_nodes: list[dict] = []
+        for fp_name, fp_cases in sorted(rg["fp_groups"].items()):
+            fp_node = _topic(fp_name)
+
+            case_nodes: list[dict] = []
+            for c in fp_cases:
+                case_title = f"[{c.get('type', '')}] {c.get('title', '')}"
+                case_node = _topic(case_title)
+
+                # 步骤作为子节点
+                steps = c.get("steps") or (c.get("case_json") or {}).get("steps", [])
+                step_nodes: list[dict] = []
+                for i, s in enumerate(steps):
+                    if not isinstance(s, dict):
+                        continue
+                    action = s.get("action", "")
+                    if not action:
+                        continue
+                    expected = s.get("expected") or s.get("expect", "")
+                    step_title = f"步骤{i + 1}: {action}"
+                    if expected:
+                        step_title += f"  →  {expected}"
+                    step_nodes.append(_topic(step_title))
+                if step_nodes:
+                    _attach_children(case_node, step_nodes)
+
+                # 前置条件（追加到同一 children.attached）
+                precond = (c.get("preconditions")
+                           or (c.get("case_json") or {}).get("preconditions", []))
+                if precond:
+                    precond_nodes = [_topic(f"前置: {p}") for p in precond if p]
+                    if precond_nodes:
+                        _attach_children(case_node, precond_nodes)
+
+                case_nodes.append(case_node)
+
+            if case_nodes:
+                _attach_children(fp_node, case_nodes)
+            fp_nodes.append(fp_node)
+
+        if fp_nodes:
+            _attach_children(req_node, fp_nodes)
+        req_nodes.append(req_node)
+
+    if req_nodes:
+        _attach_children(root_topic, req_nodes)
+
+    # 4. 构建 content.json（数组，含一个 sheet）
+    sheet = {
+        "id": _id(),
+        "class": "sheet",
+        "title": root_title,
+        "rootTopic": root_topic,
+        "fileVersion": "2.0",
+        # XMind 2020+ 期望 creator 在 metadata.json 中，但 content.json 也可以含
+    }
+    content_json = [sheet]
+
+    # 5. manifest.json - 必须列出包内所有文件
+    manifest = {
+        "file-entries": {
+            "content.json": {},
+            "metadata.json": {},
+        }
+    }
+
+    # 6. metadata.json
+    metadata = {
+        "creator": {
+            "name": "AI测试用例生成系统",
+            "version": "1.0",
+        },
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "case_count": len(cases),
+    }
+
+    # 7. ZIP 打包（XMind 期望文件顺序：content.json 在前）
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "content.json",
+            json.dumps(content_json, ensure_ascii=False, separators=(",", ": ")),
+        )
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+        zf.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False))
+    return buf.getvalue()
+
+
+# 兼容别名（验证脚本/旧代码可能用 export_xmind 而非 export_to_xmind）
+export_xmind = export_to_xmind
+
+
+# ============================================================================
+# XMind 8 XML 导出（content.xml + XMAP 2.0 命名空间，兼容 XMind 8）
+# ============================================================================
+
+import uuid as _uuid
+from xml.etree.ElementTree import Element, SubElement, tostring as _tostring
+
+
+def _xid() -> str:
+    """生成 32 字符 hex ID（XMAP topic id 格式）。"""
+    return _uuid.uuid4().hex
+
+
+def _xtopic(title: str, tid: str | None = None) -> Element:
+    """创建 XMAP topic 元素。"""
+    t = Element("topic", {"id": tid or _xid(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
+    te = SubElement(t, "title")
+    te.text = str(title)
     return t
 
 
-def _children(parent: Element, kids: list[Element]) -> None:
-    """把 kids 作为 parent 的子节点。
-
-    若 parent 已有 <children>，则复用其 <topics>；否则创建。
-    修复原实现每次调用都新建 <children> 导致 case_node 同时有 steps 和
-    preconditions 时出现两个 <children> 子元素（违反 XMind 格式规范）。
-    """
+def _xchildren(parent: Element, kids: list[Element]) -> None:
+    """把 kids 附加到 parent 的 <children><topics type=\"attached\">。"""
     ce = parent.find("children")
     if ce is None:
         ce = SubElement(parent, "children")
@@ -49,78 +207,89 @@ def _children(parent: Element, kids: list[Element]) -> None:
     if te is None:
         te = SubElement(ce, "topics", {"type": "attached"})
     for k in kids:
-        # detach-on-append：若 k 已挂到其他父节点，ElementTree 会先移除再追加
         te.append(k)
 
 
-def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
-    """导出为 XMind 思维导图 XML。
+def export_to_xmind_xml(cases: list[dict], project_name: str = "") -> bytes:
+    """导出用例为 XMind 8 兼容的 XMAP 2.0 XML 格式。
 
-    分组逻辑（二级）：
-    1. 按需求 ID 分组
-    2. 需求下按功能点分组（有 FP 用 FP，无 FP 用类型兜底）
-    3. 功能点下展示用例 + 步骤
+    XMind 8 不支持 content.json 格式（仅支持 content.xml + XMAP 命名空间）。
+    本函数构建与 export_to_xmind 相同的树结构，但输出为 XMAP 2.0 XML。
 
-    Args:
-        cases: 用例列表，每项含 req_id/req_title/title/type/functional_point/preconditions/steps
-        project_name: 所属项目名称（作为根节点标题）
-
-    Returns:
-        bytes: .xmind ZIP
+    树结构（需求→功能点→用例→步骤）：
+        <root>
+          └── REQ-001 需求标题
+              └── [功能点] 登录流程
+                  └── [functional] 正常登录验证
+                      ├── 步骤1: 输入账号密码 → 登录成功
+                      └── 前置: 已部署测试环境
     """
     root_title = project_name or "测试用例"
 
-    # 1. 按需求分组
+    # 1. 分组（复用 JSON 版逻辑）
     req_groups: dict[str, dict] = {}
     for c in cases:
-        rid = c.get("req_id", "") or "未知"
+        rid = c.get("req_id") or c.get("related_requirement") or "未知"
         if rid not in req_groups:
-            req_groups[rid] = {
-                "title": c.get("req_title", "") or f"需求 {rid}",
-                "fp_groups": {},
-            }
-        # 2. 需求下按功能点分组
-        fp = c.get("functional_point", "") or c.get("related_fp", "") or f"[{c.get('type', '用例')}]"
+            req_groups[rid] = {"title": c.get("req_title") or f"需求 {rid}", "fp_groups": {}}
+        fp = c.get("functional_point") or c.get("related_fp") or f"[{c.get('type', '用例')}]"
         if fp not in req_groups[rid]["fp_groups"]:
             req_groups[rid]["fp_groups"][fp] = []
         req_groups[rid]["fp_groups"][fp].append(c)
 
-    # 3. 构建 XML 树
-    sheet = Element("sheet", {"id": _id(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
-    SubElement(sheet, "title").text = root_title
-    root_topic = _topic(root_title)
-    sheet.append(root_topic)
+    # 2. 构建 XML 树
+    root_topic = _xtopic(root_title)
 
-    req_nodes = []
+    req_nodes: list[Element] = []
     for rid, rg in sorted(req_groups.items()):
-        req_node = _topic(f"{rid} {rg['title']}")
-
-        fp_nodes = []
+        req_node = _xtopic(f"{rid} {rg['title']}")
+        fp_nodes: list[Element] = []
         for fp_name, fp_cases in sorted(rg["fp_groups"].items()):
-            fp_node = _topic(fp_name)
-            case_nodes = []
+            fp_node = _xtopic(fp_name)
+            case_nodes: list[Element] = []
             for c in fp_cases:
-                case_node = _topic(f"[{c.get('type', '')}] {c.get('title', '')}")
-                # 步骤作为子节点
+                case_title = f"[{c.get('type', '')}] {c.get('title', '')}"
+                case_node = _xtopic(case_title)
+
+                # 步骤
                 steps = c.get("steps") or (c.get("case_json") or {}).get("steps", [])
-                if steps:
-                    step_nodes = [_topic(f"{s.get('step', i+1)}. {s.get('action', '')}  →  {s.get('expected', '')}")
-                                  for i, s in enumerate(steps) if isinstance(s, dict) and s.get('action')]
-                    if step_nodes: _children(case_node, step_nodes)
-                # 前置条件（复用同一 <children>，修复原重复创建问题）
+                step_kids: list[Element] = []
+                for i, s in enumerate(steps):
+                    if not isinstance(s, dict):
+                        continue
+                    action = s.get("action", "")
+                    if not action:
+                        continue
+                    expected = s.get("expected") or s.get("expect", "")
+                    text = f"步骤{i + 1}: {action}"
+                    if expected:
+                        text += f"  ->  {expected}"
+                    step_kids.append(_xtopic(text))
+                if step_kids:
+                    _xchildren(case_node, step_kids)
+
+                # 前置条件
                 precond = c.get("preconditions") or (c.get("case_json") or {}).get("preconditions", [])
                 if precond:
-                    _children(case_node, [_topic(f"前置: {p}") for p in precond if p])
+                    pre_kids = [_xtopic(f"前置: {p}") for p in precond if p]
+                    if pre_kids:
+                        _xchildren(case_node, pre_kids)
+
                 case_nodes.append(case_node)
-            if case_nodes: _children(fp_node, case_nodes)
+            if case_nodes:
+                _xchildren(fp_node, case_nodes)
             fp_nodes.append(fp_node)
-
-        if fp_nodes: _children(req_node, fp_nodes)
+        if fp_nodes:
+            _xchildren(req_node, fp_nodes)
         req_nodes.append(req_node)
+    if req_nodes:
+        _xchildren(root_topic, req_nodes)
 
-    if req_nodes: _children(root_topic, req_nodes)
+    # 3. 构建 XMAP 2.0 XML
+    sheet = Element("sheet", {"id": _xid(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
+    SubElement(sheet, "title").text = root_title
+    sheet.append(root_topic)
 
-    # 4. 构建 content.xml
     xmap = Element("xmap-content", {
         "xmlns": "urn:xmind:xmap:xmlns:content:2.0",
         "xmlns:fo": "http://www.w3.org/1999/XSL/Format",
@@ -131,17 +300,19 @@ def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
     })
     xmap.append(sheet)
 
-    xml_bytes = b'<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
-    xml_bytes += tostring(xmap, encoding="unicode").encode("utf-8")
+    xml_bytes = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n"
+    xml_bytes += _tostring(xmap, encoding="unicode").encode("utf-8")
 
-    # 5. ZIP 打包
+    # 4. ZIP 打包
+    import json as _json
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("content.xml", xml_bytes)
-        zf.writestr("manifest.json", json.dumps({"file-entries": {"content.xml": {}, "metadata.json": {}}}).encode("utf-8"))
-        zf.writestr("metadata.json", json.dumps({"creator": {"name": "AI测试用例生成系统", "version": "1.0"}}).encode("utf-8"))
+        zf.writestr("manifest.json", _json.dumps({"file-entries": {"content.xml": {}, "metadata.json": {}}}))
+        zf.writestr("metadata.json", _json.dumps({"creator": {"name": "AI测试用例生成系统", "version": "1.0"}}))
     return buf.getvalue()
 
 
 def _case_type_label(t: str) -> str:
-    return {"functional": "功能", "boundary": "边界", "exception": "异常", "security": "安全", "performance": "性能"}.get(t, t)
+    return {"functional": "功能", "boundary": "边界", "exception": "异常",
+            "security": "安全", "performance": "性能"}.get(t, t)

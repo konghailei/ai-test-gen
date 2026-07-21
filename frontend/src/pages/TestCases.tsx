@@ -48,6 +48,7 @@ export default function TestCases() {
 
   // 导出
   const [exporting, setExporting] = useState(false)
+  const [xmindFormat, setXmindFormat] = useState<'xmind' | 'xmind8'>('xmind')
 
   // 生成
   const [showGenerate, setShowGenerate] = useState(false)
@@ -263,9 +264,10 @@ export default function TestCases() {
     if (cases.length === 0) { alert('当前筛选条件下没有可导出的用例'); return }
     setExporting(true)
     try {
-      const blob = await exportCases.download('xmind', cases.map(c => c.id), selectedProject?.name || filterProject)
+      const blob = await exportCases.download(xmindFormat, cases.map(c => c.id), selectedProject?.name || filterProject)
       const url = URL.createObjectURL(blob)
-      const a = document.createElement('a'); a.href = url; a.download = `testcases-${selectedProject?.name || filterProject}.xmind`; a.click()
+      const suffix = xmindFormat === 'xmind8' ? '-xmind8' : ''
+      const a = document.createElement('a'); a.href = url; a.download = `testcases-${selectedProject?.name || filterProject}${suffix}.xmind`; a.click()
       URL.revokeObjectURL(url)
     } catch (e: any) { alert('导出失败: ' + e.message) }
     finally { setExporting(false) }
@@ -330,11 +332,29 @@ export default function TestCases() {
               批量删除
             </button>
           )}
-          <button onClick={handleExportXMind} disabled={exporting || !filterProject || cases.length === 0}
-            className="btn-secondary flex items-center gap-2 disabled:opacity-50">
-            {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            导出 XMind
-          </button>
+          <div className="flex items-center">
+            <button onClick={handleExportXMind} disabled={exporting || !filterProject || cases.length === 0}
+              className="btn-secondary flex items-center gap-2 disabled:opacity-50 rounded-r-none border-r-0">
+              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              {xmindFormat === 'xmind8' ? '导出 XMind 8' : '导出 XMind'}
+            </button>
+            <div className="relative group">
+              <button disabled={exporting || !filterProject || cases.length === 0}
+                className="btn-secondary rounded-l-none px-2 disabled:opacity-50">
+                <ChevronDown className="w-3 h-3" />
+              </button>
+              <div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-20 hidden group-hover:block min-w-[160px]">
+                <button onClick={() => setXmindFormat('xmind')}
+                  className={`w-full text-left px-3 py-2 text-xs hover:bg-slate-50 ${xmindFormat === 'xmind' ? 'bg-primary-50 text-primary-600 font-medium' : 'text-slate-600'}`}>
+                  XMind 2020+ / Zen（JSON）
+                </button>
+                <button onClick={() => setXmindFormat('xmind8')}
+                  className={`w-full text-left px-3 py-2 text-xs hover:bg-slate-50 ${xmindFormat === 'xmind8' ? 'bg-primary-50 text-primary-600 font-medium' : 'text-slate-600'}`}>
+                  XMind 8（XML）
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 

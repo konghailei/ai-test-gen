@@ -7,7 +7,7 @@ import type { SSEEvent, Requirement, TestCase } from '../types'
 import SSEProgress from '../components/SSEProgress'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
 
-const SSE_STAGES = ['parse', 'select_channel', 'clarify', 'gate', 'impact', 'retrieve', 'generate', 'review']
+const SSE_STAGES = ['parse', 'select_channel', 'clarify', 'gate', 'impact', 'generate', 'review']
 
 export default function Generate() {
   const { id: paramId } = useParams<{ id: string }>()

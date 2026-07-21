@@ -233,6 +233,37 @@ else
   echo "  [SKIP] docker.service 已存在或 dockerd 未安装"
 fi
 
+# ---- 4.5 创建默认 daemon.json（如果不存在） ----
+echo ""
+echo "--- 配置 Docker daemon.json ---"
+if [ ! -f /etc/docker/daemon.json ]; then
+  mkdir -p /etc/docker
+  cat > /etc/docker/daemon.json << 'DAEMONEOF'
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m",
+    "max-file": "3"
+  },
+  "storage-driver": "overlay2",
+  "storage-opts": [
+    "overlay2.override_kernel_check=true"
+  ],
+  "iptables": true,
+  "ip-forward": true,
+  "live-restore": true
+}
+DAEMONEOF
+  echo "  /etc/docker/daemon.json 已创建（默认配置，可按需修改）"
+  echo "  提示：内网环境如需私有 Registry 或镜像加速，请编辑此文件添加:"
+  echo '    "insecure-registries": ["192.168.1.100:5000"]'
+  echo '    "registry-mirrors": ["https://your-mirror:5000"]'
+  echo "  提示：旧内核（< 4.0）不支持 overlay2，请将 storage-driver 改为 overlay"
+else
+  echo "  [SKIP] /etc/docker/daemon.json 已存在，保留现有配置"
+fi
+
 # ---- 5. 验证 ----
 echo ""
 echo "============================================"

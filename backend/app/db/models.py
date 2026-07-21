@@ -604,6 +604,9 @@ class FunctionalPoint(Base):
     module_id: Mapped[str | None] = mapped_column(
         String(64), ForeignKey("modules.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    modules: Mapped[list] = mapped_column(
+        JSON, default=list, comment="v2.2: 多模块关联（module_id 字段列表），替代单 module_id"
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     fp_type: Mapped[str] = mapped_column(
         String(32), default="workflow",

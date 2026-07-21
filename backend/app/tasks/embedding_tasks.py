@@ -64,10 +64,14 @@ if celery_app is not None:
                 "[Celery] 嵌入+Milvus写入失败: req_id={}, error={}",
                 req_id, str(exc)[:200],
             )
-            # 非最后一次重试 → 状态依然是 processing，等下次重试
             if self.request.retries < self.max_retries:
                 raise self.retry(exc=exc)
-            # 全部重试耗尽 → 标记失败
+            # 全部重试耗尽 → 写入死信队列 + 标记失败
+            try:
+                from app.core.dlq import dlq
+                dlq.push("embedding", {"req_id": req_id, "srr_json_keys": list(srr_json.keys())[:10]}, str(exc)[:500])
+            except Exception:
+                pass
             _update_vs_sync(req_id, "failed", str(exc)[:500])
 
     @celery_app.task(
