@@ -418,6 +418,9 @@ class ImpactAnalysisAgent:
             "test_focus": test_focus,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "is_auto_generated": True,
+            # 默认未确认；confirm_impact_analysis 端点确认后会覆盖为 True
+            # 避免 confirm_requirement 校验 `not item.get("is_affected")` 误判缺失字段
+            "is_affected": False,
         }
 
     async def _bfs_fp_reverse(self, fp_id: str, session) -> list[dict]:

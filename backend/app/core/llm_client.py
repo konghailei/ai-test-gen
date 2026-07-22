@@ -343,6 +343,135 @@ class LLMClient:
         )
         return self._parse_json(text, schema_hint)
 
+    async def call_vision(
+        self,
+        image_base64: str,
+        prompt: str,
+        system_prompt: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+        provider: str | None = None,
+        mime_type: str = "image/png",
+    ) -> str:
+        """调用多模态 LLM 识别图片内容（流程图/架构图/表格图等）。
+
+        v2.18: 新增多模态能力。图片以 base64 编码传入，LLM 返回结构化文本描述。
+        支持的供应商需提供视觉模型（如 qwen-vl-max、gpt-4o、claude-3-5-sonnet）。
+        若未配置视觉供应商，回退到主 LLM（需主模型支持视觉，否则会报错）。
+
+        Args:
+            image_base64: 图片的 base64 编码字符串（不含 data: 前缀）
+            prompt: 图片识别提示词（如"请描述这张流程图的内容..."）
+            system_prompt: 系统指令（可选）
+            temperature: 采样温度，默认 0.2（偏稳定）
+            max_tokens: 最大生成 token 数
+            provider: 指定供应商名称。None 时使用视觉专用供应商（若配置）或主供应商
+            mime_type: 图片 MIME 类型，默认 image/png
+
+        Returns:
+            str: LLM 生成的图片内容描述
+
+        Raises:
+            LLMNoProviderAvailable: 无可用视觉供应商
+            RuntimeError: 调用失败
+        """
+        if not self._breaker.allow_request():
+            raise LLMBreakerOpenError("LLM 断路器开启，服务暂不可用（错误率超阈值）")
+
+        # 构造多模态消息（OpenAI Vision API 格式）
+        data_url = f"data:{mime_type};base64,{image_base64}"
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ]
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content})
+
+        # 构建候选提供商列表
+        providers = self._candidate_providers(None, provider=provider)
+        if not providers:
+            raise LLMNoProviderAvailable("无可用多模态 LLM 提供商（未配置 API Key）")
+
+        last_error: Exception | None = None
+        for prov in providers:
+            try:
+                result = await self._call_vision_with_retry(
+                    prov, messages, temperature, max_tokens
+                )
+                self._breaker.record_success()
+                self._provider_failures.pop(prov["key"], None)
+                return result
+            except _RetryableError as e:
+                last_error = e
+                self._record_provider_failure(prov)
+                logger.warning(
+                    "视觉提供商 {} 重试耗尽，尝试故障转移: {}",
+                    prov["key"],
+                    str(e)[:200],
+                )
+            except _NonRetryableError as e:
+                last_error = e
+                self._record_provider_failure(prov)
+                logger.warning("视觉提供商 {} 不可重试错误，故障转移: {}", prov["key"], str(e)[:200])
+
+        self._breaker.record_failure()
+        raise LLMNoProviderAvailable(f"所有多模态 LLM 提供商均不可用: {last_error}")
+
+    async def _call_vision_with_retry(
+        self,
+        provider: dict,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int | None,
+    ) -> str:
+        """对单个视觉提供商执行全抖动重试调用（多模态格式）。"""
+        last_error: Exception | None = None
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            try:
+                kwargs: dict[str, Any] = {
+                    "model": provider["model"],
+                    "messages": messages,
+                    "api_key": provider["api_key"],
+                    "api_base": provider["base_url"],
+                    "custom_llm_provider": "openai",
+                    "temperature": temperature,
+                    "timeout": settings.LLM_TIMEOUT,
+                }
+                # 视觉调用不强制 json 格式，让模型自由描述图片内容
+                if max_tokens:
+                    kwargs["max_tokens"] = max_tokens
+                else:
+                    kwargs["max_tokens"] = 4096
+
+                response = await litellm.acompletion(**kwargs)
+                content = response.choices[0].message.content
+                if not content:
+                    raise _RetryableError("多模态 LLM 返回空内容")
+                logger.debug("多模态 LLM 调用成功 [provider={}, attempt={}]", provider["key"], attempt)
+                return content
+
+            except _NonRetryableError:
+                raise
+            except Exception as e:
+                last_error = e
+                err_str = str(e).lower()
+                if self._is_non_retryable(e, err_str):
+                    raise _NonRetryableError(str(e)) from e
+                if attempt < self.MAX_ATTEMPTS:
+                    delay = self._jitter_delay(attempt)
+                    logger.debug(
+                        "多模态 LLM 调用失败 [attempt={}/{}], {} 后重试: {}",
+                        attempt,
+                        self.MAX_ATTEMPTS,
+                        f"{delay:.2f}s",
+                        str(e)[:120],
+                    )
+                    await asyncio.sleep(delay)
+
+        raise _RetryableError(f"重试 {self.MAX_ATTEMPTS} 次后仍失败: {last_error}")
+
     # ========================================================================
     # 内部实现
     # ========================================================================

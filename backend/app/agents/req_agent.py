@@ -264,7 +264,13 @@ class ReqAgent:
             logger.warning("[ReqAgent] SRR.flows 非 dict: type={}, 重置", type(flows).__name__)
             flows = {}
             srr["flows"] = flows
-        flows.setdefault("happy_path", {"steps": []})
+        # v2.18: 兼容 LLM 返回 happy_path 为数组的情况（应为 {"steps": [...]}）
+        hp = flows.get("happy_path")
+        if isinstance(hp, list):
+            logger.warning("[ReqAgent] SRR.flows.happy_path 为数组（应为对象），自动包装为 {steps: [...]}")
+            flows["happy_path"] = {"steps": hp}
+        else:
+            flows.setdefault("happy_path", {"steps": []})
         flows.setdefault("alternate_flows", [])
 
         # 其他字段补默认值

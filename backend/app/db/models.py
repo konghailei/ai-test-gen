@@ -42,6 +42,10 @@ class Requirement(Base):
     status: Mapped[str] = mapped_column(String(16), default="analyzing")  # analyzing/draft/pending_review/confirmed/active/superseded/deprecated/archived
     srr_json: Mapped[dict] = mapped_column(JSON, default=dict)
     raw_text: Mapped[str] = mapped_column(Text, default="")
+    # v2.17: 补充文件内容（重新分析时上传的补充需求文件，不替代原始 raw_text）
+    supplementary_text: Mapped[str] = mapped_column(Text, default="")
+    # v2.18: docx 中的原始图片（base64 data_url），供前端展示，与 raw_text 中的文字描述对应
+    raw_images: Mapped[list] = mapped_column(JSON, default=list)
     source_type: Mapped[str] = mapped_column(String(32), default="markdown")
     source_url: Mapped[str] = mapped_column(String(512), default="")
     created_by: Mapped[str] = mapped_column(String(64), default="system")

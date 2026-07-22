@@ -9,6 +9,7 @@
 - impact_agent: ImpactAnalysisAgent 影响分析提示词（优化需求 → 变更影响 + 生成指导）
 - gen_agent: GenAgent 用例生成提示词（SRR → UTCF 用例集）
 - review_agent: ReviewAgent 用例审核提示词（UTCF → 审核报告 + 置信度）
+- vision: 多模态图片识别提示词（图片/流程图 → 结构化中文描述，v2.18 新增）
 
 设计依据：
 - docs/01-requirement-parsing.md §3.1（ReqAgent 核心 Prompt）
@@ -24,6 +25,7 @@ from app.prompts import (
     impact_agent,
     req_agent,
     review_agent,
+    vision,
 )
 
 __all__ = [
@@ -32,4 +34,5 @@ __all__ = [
     "impact_agent",
     "gen_agent",
     "review_agent",
+    "vision",
 ]

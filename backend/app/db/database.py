@@ -88,6 +88,10 @@ async def init_db() -> None:
                 # 向量化状态追踪
                 ("vectorization_status", "VARCHAR(20)", "vectorization_status"),
                 ("vectorization_error", "TEXT", "vectorization_error"),
+                # v2.17: 补充文件内容（重新分析时上传的补充需求文件，不替代原始 raw_text）
+                ("supplementary_text", "TEXT NOT NULL DEFAULT ''", "supplementary_text"),
+                # v2.18: docx 原始图片（base64 data_url），供前端展示对比
+                ("raw_images", "JSON NOT NULL DEFAULT '[]'::json", "raw_images"),
             ],
             "test_cases": [
                 # 用例归档时间真实字段

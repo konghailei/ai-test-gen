@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database } from 'lucide-react'
+import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database, Image } from 'lucide-react'
 import { settings as settingsApi, health, auth, knowledge } from '../api/client'
 import type { LLMConfig, LLMProviderItem, HealthStatus } from '../types'
 
@@ -42,10 +42,22 @@ export default function Settings() {
   const [kbLlmProviders, setKbLlmProviders] = useState<Array<{ provider: string; provider_label: string; model: string }>>([])
   const [kbLlmLoading, setKbLlmLoading] = useState(false)
 
+  // 多模态 LLM 选择器（v2.18: 图片/流程图识别专用）
+  const [visionLlmProvider, setVisionLlmProvider] = useState('')
+  const [visionLlmProviders, setVisionLlmProviders] = useState<Array<{ provider: string; provider_label: string; model: string }>>([])
+  const [visionLlmLoading, setVisionLlmLoading] = useState(false)
+
   const loadKbLlm = () => {
     knowledge.getKbLlm().then(r => {
       setKbLlmProvider(r.provider || '')
       setKbLlmProviders(r.providers || [])
+    }).catch(() => {})
+  }
+
+  const loadVisionLlm = () => {
+    knowledge.getVisionLlm().then(r => {
+      setVisionLlmProvider(r.provider || '')
+      setVisionLlmProviders(r.providers || [])
     }).catch(() => {})
   }
 
@@ -62,6 +74,7 @@ export default function Settings() {
       }
     }).catch(() => {}).finally(() => setLoading(false))
     loadKbLlm()
+    loadVisionLlm()
   }
 
   useEffect(() => { loadSettings() }, [])
@@ -510,6 +523,43 @@ export default function Settings() {
               ))}
             </select>
             {kbLlmLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
+          </div>
+        )}
+      </div>
+
+      {/* 多模态 LLM 配置（v2.18: 图片/流程图识别专用） */}
+      <div className="card">
+        <h2 className="section-title flex items-center gap-2 mb-4">
+          <Image className="w-4 h-4 text-purple-500" /> 多模态 LLM
+        </h2>
+        <p className="text-xs text-slate-400 mb-4">
+          需求文档中的图片、流程图、架构图等多模态内容识别专用 LLM。文字解析仍使用主 LLM，图片内容交给多模态模型。多模态模型也可作为主模型使用。
+        </p>
+        {visionLlmProviders.length === 0 ? (
+          <p className="text-xs text-slate-400">暂无可用 LLM 供应商，请先在「LLM 供应商」中配置 API Key。</p>
+        ) : (
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-slate-600">当前：</span>
+            <select
+              value={visionLlmProvider}
+              onChange={e => {
+                const v = e.target.value
+                setVisionLlmLoading(true)
+                knowledge.setVisionLlm(v).then(() => {
+                  setVisionLlmProvider(v)
+                }).catch(() => {}).finally(() => setVisionLlmLoading(false))
+              }}
+              disabled={visionLlmLoading}
+              className="select-field text-sm max-w-[240px]"
+            >
+              <option value="">跟随全局（默认主供应商）</option>
+              {visionLlmProviders.map(p => (
+                <option key={p.provider} value={p.provider}>
+                  {p.provider_label} ({p.model})
+                </option>
+              ))}
+            </select>
+            {visionLlmLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
           </div>
         )}
       </div>

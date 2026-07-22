@@ -656,7 +656,7 @@ class Orchestrator:
                 prev_tasks = await cs.execute(
                     _sel(AnalysisTask).where(
                         AnalysisTask.req_id == req_id,
-                        AnalysisTask.task_type == "generate",
+                        AnalysisTask.task_type == "generate_cases",
                     ).order_by(AnalysisTask.created_at.desc()).limit(2)
                 )
                 prev_rows = prev_tasks.scalars().all()

@@ -47,7 +47,6 @@ from app.db.models import FPDependencyHistory  # v2.3: 依赖审核历史
 from app.models.api_schemas import (
     ApiResponse,
     ClarifyAnswerRequest,
-    RegenerateRequest,
     RequirementSummary,
     RequirementUpdateRequest,
     RequirementUploadRequest,
@@ -58,6 +57,56 @@ from app.utils.logger import logger
 # ============================================================================
 # v1.5.1: FP 自动入库辅助函数
 # ============================================================================
+
+# v2.18: interaction_srr 独有的顶层键（跨 FP 内容），合并时只追加这些字段
+# 符合 SSOT 原则：总 SRR 的 requirement/flows 等字段不被 interaction_srr 覆盖
+_INTERACTION_ONLY_KEYS: set[str] = {
+    "cross_fp_flows",
+    "shared_business_rules",
+    "fp_contracts",
+    "global_constraints",
+}
+
+
+def _merge_interaction_srr(base_srr: dict, interaction_srr: dict) -> dict:
+    """将 interaction_srr 选择性合并到 base_srr（符合 SSOT 原则）。
+
+    合并规则（v2.18 统一所有流程的 interaction_srr 处理）：
+        1. interaction_srr 的独有键（cross_fp_flows / shared_business_rules /
+           fp_contracts / global_constraints）→ 直接写入 base_srr
+        2. acceptance_criteria → 追加跨 FP 的 AC，不覆盖原有 AC（去重）
+        3. requirement / flows / business_rules / data_constraints 等 → 不覆盖
+           （这些字段已在总 SRR 中定义，避免数据丢失）
+
+    Args:
+        base_srr: 总 SRR（含 requirement/flows/business_rules 等完整字段）
+        interaction_srr: 交互层 SRR（含 cross_fp_flows 等跨 FP 内容）
+
+    Returns:
+        dict: 合并后的 SRR（base_srr 的副本 + interaction_srr 的独有字段）
+    """
+    merged = dict(base_srr)
+
+    for key, value in interaction_srr.items():
+        if key in _INTERACTION_ONLY_KEYS:
+            # 独有键：直接写入
+            merged[key] = value
+        elif key == "acceptance_criteria" and isinstance(value, list):
+            # AC：追加跨 FP 的 AC，不覆盖原有 AC（按文本去重）
+            existing_ac = merged.get("acceptance_criteria", [])
+            if not isinstance(existing_ac, list):
+                existing_ac = []
+            existing_set = {str(ac).strip() for ac in existing_ac}
+            for ac in value:
+                ac_str = str(ac).strip()
+                if ac_str and ac_str not in existing_set:
+                    existing_ac.append(ac)
+                    existing_set.add(ac_str)
+            merged["acceptance_criteria"] = existing_ac
+        # 其他键（requirement/flows/business_rules/data_constraints 等）：不覆盖
+
+    return merged
+
 
 async def _save_fps_to_db(
     session: AsyncSession, req_id: str, fps: list[dict], priority: str = "P2",
@@ -102,6 +151,44 @@ async def _save_fps_to_db(
     await session.flush()  # P0-1: 确保 FP 写入 DB，_save_fp_dependencies 可查询到
     logger.info("[FP-AutoSave] 需求 {} 自动存入 {} 个功能点", req_id, saved)
     return saved
+
+
+async def _update_fp_index_in_srr(session: AsyncSession, req_id: str) -> None:
+    """更新总 SRR 中的 fp_index 字段（FP 引用列表，符合 SSOT 追溯原则）。
+
+    从 functional_points 表查询当前需求的所有 FP，构建 fp_index 写入 srr_json。
+    fp_index 只包含 FP 的引用信息（id/name/fp_type/status），不包含 FP 内部 SRR 内容。
+
+    Args:
+        session: 数据库会话
+        req_id: 需求 ID
+    """
+    from sqlalchemy import select as sa_select, update as sa_update
+
+    result = await session.execute(
+        sa_select(FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.fp_type, FunctionalPoint.status)
+        .where(FunctionalPoint.requirement_id == req_id)
+        .order_by(FunctionalPoint.created_at)
+    )
+    fp_rows = result.all()
+
+    fp_index = [
+        {"fp_id": row[0], "name": row[1], "fp_type": row[2], "status": row[3]}
+        for row in fp_rows
+    ]
+
+    # 读取当前 srr_json，更新 fp_index 字段
+    req_result = await session.execute(
+        sa_select(Requirement.srr_json).where(Requirement.id == req_id)
+    )
+    req_row = req_result.first()
+    if req_row and req_row[0]:
+        srr_json = dict(req_row[0]) if isinstance(req_row[0], dict) else {}
+        srr_json["fp_index"] = fp_index
+        await session.execute(
+            sa_update(Requirement).where(Requirement.id == req_id).values(srr_json=srr_json)
+        )
+        logger.info("[FP-Index] 已更新需求 {} 的 fp_index: {} 个 FP", req_id, len(fp_index))
 
 
 async def _save_fp_dependencies(
@@ -184,6 +271,297 @@ def _validate_file_magic(ext: str, raw_bytes: bytes) -> None:
                 detail="文件格式不匹配：扩展名为 .docx 但文件头不是 Office Open XML 格式",
             )
     # .md / .markdown：魔数校验意义不大，靠 UTF-8/GBK 解码校验
+
+
+def _table_to_markdown(table) -> str:
+    """将 docx 表格转为 Markdown 表格语法（含表头分隔行）。
+
+    Args:
+        table: python-docx 的 Table 对象
+
+    Returns:
+        str: Markdown 表格文本（空表格返回空串）
+    """
+    rows_data: list[list[str]] = []
+    for row in table.rows:
+        cells = [cell.text.strip().replace("\n", " ").replace("|", "\\|") for cell in row.cells]
+        rows_data.append(cells)
+    if not rows_data:
+        return ""
+    # 去除完全空行
+    rows_data = [r for r in rows_data if any(c.strip() for c in r)]
+    if not rows_data:
+        return ""
+    col_count = max(len(r) for r in rows_data)
+    # 补齐每行列数
+    rows_data = [r + [""] * (col_count - len(r)) for r in rows_data]
+    lines = []
+    for i, row_cells in enumerate(rows_data):
+        lines.append("| " + " | ".join(row_cells) + " |")
+        if i == 0:
+            lines.append("|" + "|".join(["---"] * col_count) + "|")
+    return "\n".join(lines)
+
+
+async def _extract_docx_text(
+    raw_bytes: bytes, filename: str = "", session=None
+) -> tuple[str, list[dict]]:
+    """从 docx 提取文本，保持段落与表格的原始顺序，识别图片/流程图占位。
+
+    v2.18: 修复 3 个 Bug + 新增多模态识别 + 原始图片保存：
+    1. 表格在段落不为空时被丢弃 → 改为按文档顺序始终提取表格
+    2. 多文件上传端点完全不读表格 → 统一调用本函数
+    3. 图片/流程图完全不可见 → 检测图片并插入占位提示
+    4. 多模态识别：若配置了视觉 LLM，图片自动交给多模态模型生成内容描述
+    5. 原始图片保存：提取的图片 base64 数据同时返回，供前端展示对比
+
+    Args:
+        raw_bytes: docx 文件字节
+        filename: 文件名（仅用于日志）
+        session: PG 异步会话（用于读取视觉 LLM 供应商配置）。None 时跳过多模态识别
+
+    Returns:
+        tuple[str, list[dict]]: (提取的纯文本, 原始图片信息列表)
+        图片信息: {"index": int, "data_url": str, "content_type": str}
+
+    Raises:
+        ImportError: python-docx 未安装
+        Exception: 解析失败
+    """
+    from io import BytesIO
+    import base64
+    from docx import Document
+    from docx.oxml.ns import qn
+
+    doc = Document(BytesIO(raw_bytes))
+    body = doc.element.body
+
+    # 构建 XML 元素 → python-docx 对象映射（用于按文档顺序遍历时反查对象）
+    para_map = {p._element: p for p in doc.paragraphs}
+    table_map = {t._element: t for t in doc.tables}
+
+    # 读取多模态 LLM 供应商配置（若 session 可用）
+    vision_provider: str | None = None
+    if session is not None:
+        try:
+            from app.api.knowledge import get_vision_llm_provider
+            vision_provider = await get_vision_llm_provider(session)
+        except Exception as e:
+            logger.warning("[API/requirements] 读取视觉 LLM 供应商失败，图片将使用占位提示: {}", str(e)[:120])
+
+    parts: list[str] = []
+    raw_images: list[dict] = []
+    table_count = 0
+    image_count = 0
+    vision_success = 0
+    vision_fail = 0
+
+    for child in body.iterchildren():
+        tag = child.tag
+        if tag == qn("w:p"):
+            # 段落
+            para = para_map.get(child)
+            if para and para.text.strip():
+                parts.append(para.text)
+            # 检测段落中的图片/绘图（DrawingML 或 VML 格式）
+            drawings = child.findall(".//" + qn("w:drawing"))
+            picts = child.findall(".//" + qn("w:pict"))
+            img_elements = drawings + picts
+            if img_elements:
+                for img_elem in img_elements:
+                    image_count += 1
+                    description, image_info = await _describe_docx_image(
+                        doc, img_elem, image_count, vision_provider
+                    )
+                    if description.startswith("【图片"):
+                        vision_fail += 1
+                    else:
+                        vision_success += 1
+                    parts.append(description)
+                    # 保存原始图片数据供前端展示
+                    if image_info:
+                        raw_images.append(image_info)
+        elif tag == qn("w:tbl"):
+            # 表格
+            table = table_map.get(child)
+            if table:
+                table_count += 1
+                md = _table_to_markdown(table)
+                if md:
+                    parts.append(md)
+
+    text = "\n".join(parts)
+    logger.info(
+        "[API/requirements] docx 解析: filename={}, text_len={}, tables={}, images={}, "
+        "vision_ok={}, vision_fail={}, raw_images_saved={}",
+        filename, len(text), table_count, image_count, vision_success, vision_fail,
+        len(raw_images),
+    )
+    return text, raw_images
+
+
+async def _describe_docx_image(
+    doc, img_elem, img_index: int, vision_provider: str | None
+) -> tuple[str, dict | None]:
+    """提取 docx 中图片字节并调用多模态 LLM 生成描述。
+
+    Args:
+        doc: python-docx Document 对象
+        img_elem: 图片 XML 元素（w:drawing 或 w:pict）
+        img_index: 图片序号（用于占位提示）
+        vision_provider: 视觉 LLM 供应商名称。None 时直接返回占位提示
+
+    Returns:
+        tuple[str, dict | None]: (图片描述文本, 原始图片信息)
+        原始图片信息: {"index": int, "data_url": str, "content_type": str} 或 None
+    """
+    # 从 XML 提取图片字节：查找 a:blip 的 r:embed 属性 → 通过关系 ID 获取图片 part
+    try:
+        from docx.oxml.ns import qn as _qn
+        blips = img_elem.findall(".//" + _qn("a:blip"))
+        if not blips:
+            return f"【图片{img_index}：检测到图片但无法定位图片数据】", None
+
+        descriptions: list[str] = []
+        image_info: dict | None = None
+        for blip in blips:
+            embed_attr = blip.get(_qn("r:embed"))
+            if not embed_attr:
+                continue
+            # 通过关系 ID 获取图片 part
+            image_part = doc.part.related_parts.get(embed_attr)
+            if not image_part or not hasattr(image_part, "blob"):
+                continue
+            image_bytes = image_part.blob
+            if not image_bytes:
+                continue
+
+            # 转为 base64
+            import base64
+            img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+            # 推断 MIME 类型
+            content_type = getattr(image_part, "content_type", "image/png")
+            mime_type = content_type if content_type else "image/png"
+
+            # v2.18: 保存原始图片数据（无论多模态是否配置，都保存原始图片供前端展示）
+            image_info = {
+                "index": img_index,
+                "data_url": f"data:{mime_type};base64,{img_b64}",
+                "content_type": mime_type,
+            }
+
+            if vision_provider is None:
+                descriptions.append(
+                    f"【图片{img_index}：此处包含图片/流程图/示意图，"
+                    f"未配置多模态 LLM，请人工补充内容描述】"
+                )
+            else:
+                # 调用多模态 LLM 识别图片内容
+                # v2.18: 提示词从 prompt_manager 获取，支持 DB 覆盖和手动优化
+                from app.core import prompt_manager
+                vision_system_prompt = prompt_manager.get("vision", "SYSTEM_PROMPT")
+                vision_user_prompt = prompt_manager.get("vision", "USER_PROMPT_TEMPLATE")
+                from app.core.llm_client import llm_client
+                description = await llm_client.call_vision(
+                    image_base64=img_b64,
+                    prompt=vision_user_prompt,
+                    system_prompt=vision_system_prompt,
+                    temperature=0.2,
+                    provider=vision_provider,
+                    mime_type=mime_type,
+                )
+                descriptions.append(f"【图片{img_index}内容描述（多模态识别）】\n{description}")
+
+        if descriptions:
+            return "\n".join(descriptions), image_info
+        return f"【图片{img_index}：检测到图片但无法提取图片数据】", None
+    except Exception as e:
+        logger.warning(
+            "[API/requirements] 多模态图片识别失败 [index={}]: {}",
+            img_index, str(e)[:200],
+        )
+        return (
+            f"【图片{img_index}：多模态识别失败（{str(e)[:80]}），"
+            f"请人工补充该图片的内容描述】"
+        ), None
+
+
+async def _parse_uploaded_files(files: list[UploadFile], session=None) -> tuple[str, list[dict]]:
+    """解析上传的需求文件列表，合并为纯文本。
+
+    复用 upload_requirement_file 的解析逻辑（扩展名校验 / 魔数校验 / md/txt/docx 解析），
+    供 regenerate 等需要文件上传的端点复用。
+
+    Args:
+        files: UploadFile 列表（支持 .md / .markdown / .txt / .docx）
+        session: PG 异步会话（用于 docx 多模态图片识别）
+
+    Returns:
+        tuple[str, list[dict]]: (合并后的纯文本, 所有 docx 文件提取的原始图片列表)
+        多文件以分隔线连接
+
+    Raises:
+        HTTPException 400: 文件格式不支持 / 内容为空 / 解析失败
+    """
+    MAX_FILE_SIZE = 10 * 1024 * 1024
+    parts: list[str] = []
+    all_images: list[dict] = []
+
+    for file in files:
+        filename = file.filename or ""
+        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
+        if ext not in ("md", "markdown", "docx", "txt"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的文件格式: .{ext}，仅支持 .md / .docx / .txt",
+            )
+
+        raw_bytes = await file.read()
+        if len(raw_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"文件 {filename} 大小超过 10MB 上限，请压缩后重试",
+            )
+
+        _validate_file_magic(ext, raw_bytes)
+
+        file_text = ""
+        if ext in ("md", "markdown", "txt"):
+            try:
+                file_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                try:
+                    file_text = raw_bytes.decode("gbk")
+                except UnicodeDecodeError:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"文件 {filename} 编码不支持，请使用 UTF-8 或 GBK 编码",
+                    )
+        elif ext == "docx":
+            try:
+                file_text, doc_images = await _extract_docx_text(raw_bytes, filename, session=session)
+                all_images.extend(doc_images)
+            except ImportError:
+                raise HTTPException(
+                    status_code=500,
+                    detail="python-docx 未安装，无法解析 .docx 文件",
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"文件 {filename} 解析失败: {str(e)[:150]}",
+                )
+
+        if not file_text or not file_text.strip():
+            raise HTTPException(status_code=400, detail=f"文件 {filename} 内容为空")
+
+        logger.info("[API/requirements] 文件解析完成: filename={}, text_len={}", filename, len(file_text))
+        parts.append(file_text)
+
+    # 多文件以分隔线连接，保持各文件内容边界清晰
+    return "\n\n---\n\n".join(parts), all_images
 
 
 router = APIRouter()
@@ -349,6 +727,7 @@ async def upload_requirement_file(
 
     # 3. 读取并解析文件内容
     raw_text = ""
+    raw_images: list[dict] = []
 
     if ext in ("md", "markdown", "txt"):
         # 直接读取为 UTF-8 文本
@@ -364,22 +743,9 @@ async def upload_requirement_file(
                     detail="文件编码不支持，请使用 UTF-8 或 GBK 编码的 .md 文件",
                 )
     elif ext == "docx":
-        # 使用 python-docx 解析
+        # 使用 python-docx 解析（v2.18: 统一调用 _extract_docx_text，保留表格和图片占位）
         try:
-            from io import BytesIO
-            from docx import Document
-
-            doc = Document(BytesIO(raw_bytes))
-            paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-            raw_text = "\n".join(paragraphs)
-
-            if not raw_text.strip():
-                # docx 中段落为空，尝试读取表格
-                for table in doc.tables:
-                    for row in table.rows:
-                        cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                        if cells:
-                            raw_text += " | ".join(cells) + "\n"
+            raw_text, raw_images = await _extract_docx_text(raw_bytes, filename=file.filename, session=session)
         except ImportError:
             raise HTTPException(
                 status_code=500,
@@ -430,6 +796,11 @@ async def upload_requirement_file(
         req_data["priority"] = priority
 
     # P0 修复：先创建并 flush Requirement 记录，避免 _save_fps_to_db 时外键违反
+    # v2.18: 合并 interaction_srr 到总 SRR（统一所有流程的 interaction_srr 处理）
+    final_srr = srr
+    if req_agent.interaction_srr and isinstance(req_agent.interaction_srr, dict):
+        final_srr = _merge_interaction_srr(srr, req_agent.interaction_srr)
+
     record = Requirement(
         id=req_id,
         product_id=req_data.get("product_id", product_id),
@@ -441,8 +812,9 @@ async def upload_requirement_file(
         tags=[],
         version=1,
         status="active",
-        srr_json=srr,
+        srr_json=final_srr,
         raw_text=raw_text,
+        raw_images=raw_images,
         source_type=ext,
         created_by="api",
     )
@@ -451,6 +823,7 @@ async def upload_requirement_file(
 
     await _save_fps_to_db(session, req_id, req_agent.last_fps, priority)
     await _save_fp_dependencies(session, req_id, req_agent.last_fp_dependencies)
+    await _update_fp_index_in_srr(session, req_id)  # v2.18: 更新总 SRR 的 fp_index
     await session.commit()
 
     logger.info(
@@ -537,6 +910,8 @@ async def _run_requirement_analysis(
         # P0-2: 立即捕获 FP，避免二次 parse 覆盖
         captured_fps = list(req_agent.last_fps)
         captured_fp_deps = list(req_agent.last_fp_dependencies)
+        # v2.18: 捕获 interaction_srr，用于后续合并到总 SRR
+        captured_interaction_srr = dict(req_agent.interaction_srr) if req_agent.interaction_srr else None
 
         if await _is_cancelled():
             logger.info("[Task] 任务已取消，提前退出: task_id={}", task_id)
@@ -563,12 +938,47 @@ async def _run_requirement_analysis(
 
         clarify_result = None
         questions = []
+        clarify_error: str | None = None
         async with async_session() as s:
             try:
                 clarify_result = await clarify_agent.clarify(srr, session=s)
                 questions = clarify_result.get("questions", [])
             except Exception as e:
-                logger.warning("[Task] ClarifyAgent 检测失败（不阻断）: {}", str(e)[:200])
+                # v2.18: 关键错误不再静默——中断流水线，保存已解析结果，标记任务失败
+                clarify_error = str(e)[:500]
+                logger.error("[Task] ClarifyAgent 检测失败（关键错误，中断流水线）: {}", clarify_error)
+
+        # v2.18: ClarifyAgent 失败时中断流水线，但保存已解析的基础 SRR+FP 供用户查看
+        if clarify_error:
+            base_srr = dict(srr)
+            if captured_interaction_srr:
+                base_srr = _merge_interaction_srr(base_srr, captured_interaction_srr)
+            base_srr["_clarify_error"] = clarify_error
+            async with async_session() as save_s:
+                await save_s.execute(sa_update(ReqModel).where(ReqModel.id == req_id).values(
+                    title=req_data.get("title", ""),
+                    priority=req_data.get("priority", "P2"),
+                    module=module_list[0] if module_list else "",
+                    modules=module_list,
+                    status="draft",
+                    srr_json=base_srr,
+                    raw_text=combined_raw,
+                ))
+                try:
+                    await _save_fps_to_db(save_s, req_id, captured_fps, req_data.get("priority", "P2"))
+                    await _save_fp_dependencies(save_s, req_id, captured_fp_deps)
+                    await _update_fp_index_in_srr(save_s, req_id)
+                except Exception as fp_e:
+                    logger.error("[Task] ClarifyAgent 失败后基础 FP 保存也失败: {}", str(fp_e)[:200])
+                await save_s.commit()
+
+            err_msg = f"知识库检索/需求澄清失败: {clarify_error}"
+            await _update_task(
+                task_id, status="failed", phase="kb_search", error=err_msg,
+                message="分析失败: " + err_msg[:200], completed_at=datetime.now(timezone.utc),
+            )
+            logger.error("[Task] 需求分析因 ClarifyAgent 失败而中断: task_id={}, req_id={}", task_id, req_id)
+            return
 
         await _update_task(task_id, phase="clarify", progress=70,
                            message=f"知识库检索完成，检测到 {len(questions)} 个待补充问题" if questions else "知识库检索完成，正在生成最终分析...")
@@ -592,18 +1002,17 @@ async def _run_requirement_analysis(
         # v1.6：分析完成后进入 pending_review（待确认），等待用户确认 SRR/FP/影响分析
         final_status = "draft" if needs_clarify else "pending_review"
 
-        # ===== phase 3: regenerate（无澄清问题时生成最终 SRR）=====
-        if not needs_clarify:
+        # ===== phase 3: regenerate（仅有 KB 补全信息时才重新解析）=====
+        # v2.18: 修复 Bug — ClarifyAgent 失败或无 KB 补全时不应重新解析，
+        # 避免覆盖第一次解析结果（第一次解析的 FP/interaction_srr 已捕获，二次解析会导致 SRR 与 FP 不一致）
+        kb_augments = clarify_result.get("auto_augmentations", []) if clarify_result else []
+        if not needs_clarify and kb_augments:
             await _update_task(task_id, phase="regenerate", progress=85,
-                               message="正在生成最终需求分析结果...")
-            kb_augments = clarify_result.get("auto_augmentations", []) if clarify_result else []
-            if kb_augments:
-                parts = [combined_raw, "\n\n## KB 自动补全信息\n"]
-                for aug in kb_augments:
-                    parts.append(f"- {aug.get('field', '')}: {str(aug.get('value', ''))[:300]}")
-                enhanced_raw = "\n".join(parts)
-            else:
-                enhanced_raw = combined_raw
+                               message="正在融合 KB 补全信息，生成最终需求分析结果...")
+            parts = [combined_raw, "\n\n## KB 自动补全信息\n"]
+            for aug in kb_augments:
+                parts.append(f"- {aug.get('field', '')}: {str(aug.get('value', ''))[:300]}")
+            enhanced_raw = "\n".join(parts)
             try:
                 final_srr = await req_agent.parse(
                     raw_requirement=enhanced_raw,
@@ -619,12 +1028,23 @@ async def _run_requirement_analysis(
                 final_srr_data.pop("_field_sources", None)
                 srr_json_data = final_srr_data
             except Exception as e:
-                logger.error("[Task] 最终SRR生成失败→降级: {}", str(e)[:200])
+                # v2.18: 降级时保留第一次解析结果，但记录降级原因供前端展示警告
+                degrade_err = str(e)[:300]
+                logger.error("[Task] 最终SRR生成失败→降级（保留首次解析结果）: {}", degrade_err)
                 final_srr_data = dict(srr)
                 final_srr_data["_finalize_degraded"] = True
+                final_srr_data["_finalize_error"] = degrade_err
                 srr_json_data = final_srr_data
+        elif not needs_clarify:
+            # ClarifyAgent 失败或无 KB 补全：保留第一次解析结果，仅清理临时字段
+            srr_json_data.pop("_clarify_state", None)
+            srr_json_data.pop("_field_sources", None)
 
         # ===== 持久化 Requirement（更新已创建的 analyzing 记录）=====
+        # v2.18: 合并 interaction_srr 到总 SRR（统一所有流程的 interaction_srr 处理）
+        if captured_interaction_srr:
+            srr_json_data = _merge_interaction_srr(srr_json_data, captured_interaction_srr)
+
         async with async_session() as s:
             stmt = sa_update(ReqModel).where(ReqModel.id == req_id).values(
                 title=req_data.get("title", ""),
@@ -639,13 +1059,22 @@ async def _run_requirement_analysis(
             await s.commit()
 
         # v1.5.1: 自动保存 ReqAgent 一体式提取的功能点 + 依赖关系
+        # v2.18: FP 保存失败不再静默——中断流水线，标记任务失败（FP 是核心产物，0 FP 会导致后续流程全部失效）
         try:
             async with async_session() as s:
                 await _save_fps_to_db(s, req_id, captured_fps, req_data.get("priority", "P2"))
                 await _save_fp_dependencies(s, req_id, captured_fp_deps)
+                await _update_fp_index_in_srr(s, req_id)  # v2.18: 更新总 SRR 的 fp_index
                 await s.commit()
         except Exception as e:
-            logger.warning("[Task] FP 自动保存失败（不阻断）: {}", str(e)[:200])
+            fp_err_msg = str(e)[:500]
+            logger.error("[Task] FP 自动保存失败（关键错误，中断流水线）: {}", fp_err_msg)
+            err_msg = f"功能点(FP)保存失败: {fp_err_msg}"
+            await _update_task(
+                task_id, status="failed", phase="done", error=err_msg,
+                message="分析失败: " + err_msg[:200], completed_at=datetime.now(timezone.utc),
+            )
+            return
 
         # ===== 完成 =====
         result = {
@@ -656,8 +1085,13 @@ async def _run_requirement_analysis(
             "has_unanswered_questions": needs_clarify,
             "source_files": source_files,
             "kb_status": clarify_result.get("kb_status", {}) if clarify_result else {},
-            "kb_empty": clarify_result.get("kb_status", {}).get("kb_empty", True) if clarify_result else True,
+            # v2.18: ClarifyAgent 失败时 kb_empty 设为 None（未知），不再误报为 True
+            "kb_empty": clarify_result.get("kb_status", {}).get("kb_empty") if clarify_result else None,
         }
+        # v2.18: 降级警告传递给前端
+        if srr_json_data.get("_finalize_degraded"):
+            result["degraded"] = True
+            result["degraded_reason"] = srr_json_data.get("_finalize_error", "最终 SRR 生成失败，已降级使用首次解析结果")
         await _update_task(
             task_id, status="completed", phase="done", progress=100,
             message="分析完成" + ("，有待补充问题" if needs_clarify else ""),
@@ -720,6 +1154,7 @@ async def upload_requirement_multi(
     MAX_TOTAL_SIZE = 50 * 1024 * 1024
     total_size = 0
     doc_contents: list[dict] = []
+    all_raw_images: list[dict] = []
 
     for file in files:
         filename = file.filename or ""
@@ -737,11 +1172,10 @@ async def upload_requirement_multi(
         if ext in ("md", "markdown", "txt"):
             text = raw_bytes.decode("utf-8", errors="replace")
         else:
+            # v2.18: 统一使用 _extract_docx_text，修复表格和图片丢失 Bug
             try:
-                from io import BytesIO
-                from docx import Document
-                doc = Document(BytesIO(raw_bytes))
-                text = "\n".join(p.text for p in doc.paragraphs)
+                text, doc_images = await _extract_docx_text(raw_bytes, filename=filename, session=session)
+                all_raw_images.extend(doc_images)
             except ImportError:
                 raise HTTPException(status_code=500, detail="python-docx 未安装，无法解析 .docx 文件")
             except Exception as e:
@@ -776,6 +1210,7 @@ async def upload_requirement_multi(
         status="analyzing",
         srr_json={},
         raw_text=combined_raw,
+        raw_images=all_raw_images,
         source_type="multi",
         created_by="api",
     )
@@ -1093,6 +1528,8 @@ async def get_requirement(
             "version": record.version,
             "srr_json": record.srr_json,  # 注意字段名 srr_json（前端和类型定义使用此名）
             "raw_text": record.raw_text,
+            "raw_images": record.raw_images or [],  # v2.18: docx 原始图片（base64 data_url），供前端展示对比
+            "supplementary_text": record.supplementary_text or "",  # v2.17: 补充文件内容
             "source_type": record.source_type,
             "kb_query_logs": (record.srr_json or {}).get("_kb_query_logs", []),
             "questions_count": len(((record.srr_json or {}).get("_clarify_state", {}) or {}).get("questions", [])),
@@ -1377,14 +1814,18 @@ async def _run_clarify_reparse(
                     srr=final_srr,
                 )
                 captured_fp_deps = list(req_agent.last_fp_dependencies)
+                # v2.18: 捕获 interaction_srr，用于后续合并到总 SRR
+                captured_interaction_srr = dict(req_agent.interaction_srr) if req_agent.interaction_srr else None
                 logger.info("[Task/Clarify] FP 重提取完成（基于原始文本）: {} 个", len(captured_fps))
             except Exception as fp_e:
                 logger.warning("[Task/Clarify] FP 重提取失败（降级使用 enhanced_raw 结果）: {}", str(fp_e)[:200])
                 captured_fps = list(req_agent.last_fps)
                 captured_fp_deps = list(req_agent.last_fp_dependencies)
+                captured_interaction_srr = dict(req_agent.interaction_srr) if req_agent.interaction_srr else None
         else:
             captured_fps = list(req_agent.last_fps)
             captured_fp_deps = list(req_agent.last_fp_dependencies)
+            captured_interaction_srr = dict(req_agent.interaction_srr) if req_agent.interaction_srr else None
 
         await _update_task(task_id, phase="parse", progress=60,
                            message="SRR 生成完成，正在保存功能点...")
@@ -1409,6 +1850,10 @@ async def _run_clarify_reparse(
                     final_data["additional_details"] = str(old_val) + "\n" + str(existing)
                 else:
                     final_data[field] = old_val
+
+        # v2.18: 合并 interaction_srr 到总 SRR（统一所有流程的 interaction_srr 处理）
+        if captured_interaction_srr:
+            final_data = _merge_interaction_srr(final_data, captured_interaction_srr)
 
         async with async_session() as s:
             await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(
@@ -1455,6 +1900,7 @@ async def _run_clarify_reparse(
 
                 await _save_fps_to_db(s, req_id, captured_fps, priority)
                 await _save_fp_dependencies(s, req_id, captured_fp_deps)
+                await _update_fp_index_in_srr(s, req_id)  # v2.18: 更新总 SRR 的 fp_index
                 await s.commit()
                 logger.info("[Task/Clarify] 澄清后重新提取 FP: {} 个", len(captured_fps))
 
@@ -1755,7 +2201,8 @@ async def restore_requirement_version(
 @router.post("/{req_id}/regenerate", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def regenerate_requirement(
     req_id: str,
-    req: RegenerateRequest,
+    extra_notes: str = Form(default="", description="用户补充说明（可选，与文件至少一项）"),
+    files: list[UploadFile] = File(default=[], description="重新上传的需求文件（.md / .docx / .txt，可选）"),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """补充信息后异步重新生成需求分析（SRR）。
@@ -1766,21 +2213,31 @@ async def regenerate_requirement(
         3. 启动后台协程 _run_regenerate_reparse
         4. 立即返回 task_id，前端轮询进度
 
-    允许在 status=active（已澄清/已确认）后调用，用户通过 extra_notes 提供补充说明，
-    系统将原始文本 + 已有 KB 补全 + 补充说明拼接后重新调用 ReqAgent 解析，生成新的 SRR。
+    v2.17 支持补充文件上传：
+        - 用户可上传补充需求文件（.md / .docx / .txt），补充文件不替代原始文件
+        - 补充文件可纠正原始文件中的错误，AI 分析时以原始 + 补充合并内容为准
+        - 原始文件内容保留在 raw_text 字段，补充文件内容存入 supplementary_text 字段
+        - 也可仅通过 extra_notes 提供补充说明（保持原有行为）
+        - 文件和补充说明至少提供一项
+
+    允许在 status=active（已澄清/已确认）后调用。
     操作记录追加到 _clarify_history。
 
     Args:
         req_id: 需求 ID
-        req: 含 extra_notes（用户补充说明）
+        extra_notes: 用户补充说明（可选）
+        files: 补充需求文件列表（可选，不替代原始文件）
         session: 数据库会话
 
     Returns:
         ApiResponse: data 含 task_id / req_id / status=analyzing / previous_title
     """
-    extra_notes = req.extra_notes.strip()
-    if not extra_notes:
-        raise HTTPException(status_code=400, detail="补充说明不能为空")
+    extra_notes = extra_notes.strip()
+    has_files = bool(files) and any(f.filename for f in files)
+
+    # 文件和补充说明至少提供一项
+    if not extra_notes and not has_files:
+        raise HTTPException(status_code=400, detail="请至少提供补充说明或上传补充文件中的一项")
 
     stmt = select(Requirement).where(Requirement.id == req_id)
     result = await session.execute(stmt)
@@ -1788,12 +2245,25 @@ async def regenerate_requirement(
     if record is None:
         raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
 
-    raw_text = record.raw_text or ""
+    # 解析补充文件（如有），存入 supplementary_text，不替换原始 raw_text
+    supplementary_text: str | None = None
+    if has_files:
+        valid_files = [f for f in files if f.filename]
+        supplementary_text, _supp_images = await _parse_uploaded_files(valid_files, session=session)
+        logger.info(
+            "[API/requirements] 重新生成时上传了 {} 个补充文件，supplementary_text 长度={}",
+            len(valid_files), len(supplementary_text),
+        )
+
     old_srr = dict(record.srr_json or {})
     previous_title = (old_srr.get("requirement", {}) or {}).get("title", record.title)
 
-    # 构建增强文本：原始文本 + 已有 KB 补全 + 用户补充说明
-    enhanced_parts = [raw_text]
+    # 构建增强文本：原始文本 + 补充文件内容 + 已有 KB 补全 + 用户补充说明
+    # 补充文件不替代原始文件，而是追加（补充文件可纠正原始文件中的错误）
+    enhanced_parts = [record.raw_text or ""]
+
+    if supplementary_text:
+        enhanced_parts.append(f"\n\n## 补充需求文件内容（重新生成）\n{supplementary_text}")
 
     kb_augments = (old_srr.get("_clarify_state", {}) or {}).get("auto_augmentations", [])
     if kb_augments:
@@ -1801,12 +2271,13 @@ async def regenerate_requirement(
         for aug in kb_augments:
             enhanced_parts.append(f"- {aug.get('field', '')}: {str(aug.get('value', ''))[:300]}")
 
-    enhanced_parts.append(f"\n\n## 补充说明（重新生成）\n{extra_notes}")
+    if extra_notes:
+        enhanced_parts.append(f"\n\n## 补充说明（重新生成）\n{extra_notes}")
     enhanced_raw = "\n".join(enhanced_parts)
 
     logger.info(
-        "[API/requirements] 启动异步重新生成 SRR: req_id={}, extra_notes_len={}, enhanced_len={}",
-        req_id, len(extra_notes), len(enhanced_raw),
+        "[API/requirements] 启动异步重新生成 SRR: req_id={}, has_files={}, extra_notes_len={}, enhanced_len={}",
+        req_id, has_files, len(extra_notes), len(enhanced_raw),
     )
 
     # v2.16: 冲突检测
@@ -1826,7 +2297,7 @@ async def regenerate_requirement(
         status="pending",
         phase="parse",
         progress=0,
-        message="已接收补充说明，准备重新生成...",
+        message="已接收补充信息，准备重新生成..." if not has_files else "已接收补充文件，准备重新生成...",
         created_by="api",
     )
     session.add(task)
@@ -1840,11 +2311,12 @@ async def regenerate_requirement(
         previous_title=previous_title,
         old_srr=old_srr,
         extra_notes=extra_notes,
+        supplementary_text=supplementary_text,
     ))
 
     return ApiResponse(
         success=True,
-        message="已接收补充说明，正在后台重新生成",
+        message="已接收补充信息，正在后台重新生成",
         data={
             "task_id": task_id,
             "req_id": req_id,
@@ -1862,18 +2334,23 @@ async def _run_regenerate_reparse(
     previous_title: str,
     old_srr: dict,
     extra_notes: str,
+    supplementary_text: str | None = None,
 ) -> None:
     """后台执行重新生成 SRR（异步协程，独立 session）。
 
     流程：
         1. phase=parse: req_agent.parse() 重新生成 SRR
         2. 保留 KB 日志 + 澄清历史 + KB 基线补全
-        3. 持久化 + 更新标题
+        3. 持久化 + 更新标题（若有补充文件则同步更新 supplementary_text）
         4. status=completed
 
     v2.0 历史版本管理：
         重新生成前把原 srr_json 完整快照保存到 _version_history 数组，
         保留历次重新分析前的需求分析结果，供用户回溯。
+
+    v2.17 支持补充文件上传：
+        若 supplementary_text 非空，持久化时更新 supplementary_text 字段。
+        原始 raw_text 保持不变，补充文件内容独立存储，前端可分别查看。
     """
     from sqlalchemy import update as sa_update
     try:
@@ -1938,6 +2415,9 @@ async def _run_regenerate_reparse(
             values: dict = {"srr_json": final_data, "status": "pending_review"}
             if new_title:
                 values["title"] = new_title
+            # v2.17: 若用户上传了补充文件，更新 supplementary_text（原始 raw_text 保持不变）
+            if supplementary_text:
+                values["supplementary_text"] = supplementary_text
             await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(**values))
             await s.commit()
 
@@ -1972,17 +2452,25 @@ async def _run_regenerate_reparse(
                             await fp_split_sess.flush()
                         await _save_fps_to_db(fp_split_sess, req_id, new_fps, record2.priority)
                         await _save_fp_dependencies(fp_split_sess, req_id, _regen_agent.last_fp_dependencies)
-                        # 若 LLM 产出 interaction_srr，更新主需求 SRR
+                        # v2.18: 若 LLM 产出 interaction_srr，使用选择性合并（不覆盖 requirement/flows 等字段）
                         if _regen_agent.interaction_srr and isinstance(_regen_agent.interaction_srr, dict):
-                            merged_srr = dict(final_data)
-                            merged_srr.update(_regen_agent.interaction_srr)
+                            merged_srr = _merge_interaction_srr(final_data, _regen_agent.interaction_srr)
                             await fp_split_sess.execute(
                                 sa_update(Requirement).where(Requirement.id == req_id).values(srr_json=merged_srr)
                             )
+                        await _update_fp_index_in_srr(fp_split_sess, req_id)  # v2.18: 更新总 SRR 的 fp_index
                         await fp_split_sess.commit()
                         logger.info("[Task/Regenerate] FP 拆分完成: req_id={}, new_fps={}", req_id, len(new_fps))
         except Exception as fp_err:
-            logger.warning("[Task/Regenerate] FP 拆分失败（不阻断）: req_id={}, err={}", req_id, str(fp_err)[:200])
+            # v2.18: FP 拆分失败不再静默——中断流水线，标记任务失败
+            fp_err_msg = str(fp_err)[:500]
+            logger.error("[Task/Regenerate] FP 拆分失败（关键错误，中断流水线）: req_id={}, err={}", req_id, fp_err_msg)
+            err_msg = f"功能点(FP)重新拆分失败: {fp_err_msg}"
+            await _update_task(
+                task_id, status="failed", phase="done", error=err_msg,
+                message="重新生成失败: " + err_msg[:200], completed_at=datetime.now(timezone.utc),
+            )
+            return
 
         logger.info(
             "[Task/Regenerate] 重新生成完成，需求进入待确认: req_id={}, title={}->{}, history_versions={}",
@@ -2102,6 +2590,34 @@ async def _run_fp_merge_task(
                 fp = await s.get(FunctionalPoint, fid)
                 if fp:
                     await s.delete(fp)
+            await s.flush()
+
+            # v2.18 P3: 代码层去重检测——合并后 FP 的 business_rules 不应与总 SRR 的 shared_business_rules 重复
+            try:
+                req_result = await s.execute(
+                    select(Requirement.srr_json).where(Requirement.id == req_id)
+                )
+                req_row = req_result.first()
+                if req_row and req_row[0]:
+                    total_srr = req_row[0] if isinstance(req_row[0], dict) else {}
+                    shared_rules = total_srr.get("shared_business_rules", [])
+                    merged_rules = (merged_fp.srr_json or {}).get("business_rules", [])
+                    if shared_rules and merged_rules:
+                        shared_texts = {str(r.get("rule", r) if isinstance(r, dict) else r).strip() for r in shared_rules}
+                        duplicates = [
+                            r for r in merged_rules
+                            if str(r.get("rule", r) if isinstance(r, dict) else r).strip() in shared_texts
+                        ]
+                        if duplicates:
+                            logger.warning(
+                                "[FP-Merge] 检测到 {} 条重复规则（合并后 FP 与总 SRR shared_business_rules 重复）: req_id={}, fp_id={}",
+                                len(duplicates), req_id, merged_fp.id,
+                            )
+            except Exception as dedup_e:
+                logger.warning("[FP-Merge] 去重检测失败（不阻断）: {}", str(dedup_e)[:150])
+
+            # v2.18: 更新总 SRR 的 fp_index（FP 列表已变化）
+            await _update_fp_index_in_srr(s, req_id)
             await s.commit()
 
         logger.info("[Task/FP-Merge] 合并完成: {} → {}, req={}", fp_ids, merged_fp.name, req_id)
@@ -2520,7 +3036,7 @@ async def archive_requirement(
     fp_kb_count = 0
     fp_archived_count = 0
     try:
-        async with AsyncSession() as fp_session:
+        async with async_session() as fp_session:
             fp_result = await fp_session.execute(
                 select(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
             )
@@ -3094,11 +3610,12 @@ async def fp_split(
         saved = await _save_fps_to_db(session, req_id, new_fps, req.priority)
         await _save_fp_dependencies(session, req_id, _agent.last_fp_dependencies)
 
-        # ── v1.6: 使用交互层 SRR 作为主需求的 srr_json ──
+        # v2.18: 使用选择性合并 interaction_srr 到总 SRR（不替换，符合 SSOT 原则）
         if _agent.interaction_srr and isinstance(_agent.interaction_srr, dict):
-            req.srr_json = _agent.interaction_srr
-            logger.info("[FP] 已用交互层 SRR 更新主需求 srr_json")
+            req.srr_json = _merge_interaction_srr(dict(req.srr_json or {}), _agent.interaction_srr)
+            logger.info("[FP] 已将交互层 SRR 选择性合并到主需求 srr_json")
 
+        await _update_fp_index_in_srr(session, req_id)  # v2.18: 更新总 SRR 的 fp_index
         await session.commit()
         total_fps = copied_count + saved
         return ApiResponse(

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import time
 from typing import Any
 
 from app.config import settings
@@ -253,7 +254,7 @@ class ClarifyAgent:
                 "answered": qa.get("answered", False),
                 "auto_filled": qa.get("auto_filled", False),
                 "result_count": len(qa.get("sources", [])),
-                "duration_ms": _d4,
+                "duration_ms": qa.get("duration_ms", _d4),  # v2.18: 使用单条查询耗时
             })
 
         # ⑦ 补全后重新检测
@@ -591,7 +592,7 @@ class ClarifyAgent:
     ) -> list[dict]:
         """用 LLM 动态生成上下文感知的 KB 搜索查询。
 
-        LLM 失败时直接抛异常上报，不使用固定模板降级。
+        v2.18: LLM 失败时降级为使用缺口 field 名生成简单查询，避免整个 KB 查询流程失效。
         """
         gaps_count = (
             len(completeness.get("critical_missing", []))
@@ -620,7 +621,7 @@ class ClarifyAgent:
             queries = result.get("queries", [])
             if queries:
                 logger.info(
-                    "[ClarifyAgent] LLM 生成 KB 查询: %d 条（上下文感知）",
+                    "[ClarifyAgent] LLM 生成 KB 查询: {} 条（上下文感知）",
                     len(queries),
                 )
                 # 构建合法 field 集合（防止 LLM 编造列表中不存在的缺口）
@@ -644,7 +645,7 @@ class ClarifyAgent:
                     field = q.get("field", "")
                     if field and field not in valid_fields:
                         logger.info(
-                            "[ClarifyAgent] 丢弃编造查询: field=%s (不在缺口列表中)",
+                            "[ClarifyAgent] 丢弃编造查询: field={} (不在缺口列表中)",
                             field,
                         )
                         continue
@@ -665,11 +666,43 @@ class ClarifyAgent:
             return []
 
         except Exception as e:
-            logger.error(
-                "[ClarifyAgent] LLM KB 查询生成失败: %s",
+            # v2.18: LLM 失败时降级为使用缺口 field 名生成简单查询
+            # 避免 _generate_kb_queries 失败导致整个 KB 查询流程失效
+            logger.warning(
+                "[ClarifyAgent] LLM KB 查询生成失败，降级为模板查询: {}",
                 str(e)[:300],
             )
-            raise
+            fallback_queries: list[dict] = []
+            for m in completeness.get("critical_missing", []) + completeness.get("important_missing", []):
+                field = m.get("field", "")
+                desc = m.get("description", field)
+                if field:
+                    fallback_queries.append({
+                        "field": field,
+                        "question": f"{desc}的相关规则和约束是什么？",
+                        "priority": m.get("priority", "important"),
+                        "_is_baseline": False,
+                        "_gap_keys": None,
+                    })
+            # 增量文档的 baseline 缺口也降级处理
+            if is_incremental:
+                baseline = srr.get("_baseline_gaps")
+                if isinstance(baseline, list):
+                    req_title = srr.get("requirement", {}).get("title", "当前需求")
+                    for gap in baseline:
+                        gap_str = str(gap)[:60]
+                        fallback_queries.append({
+                            "field": "_baseline_context",
+                            "question": f"{req_title}的{gap_str}历史版本内容是什么？",
+                            "priority": "critical",
+                            "_is_baseline": True,
+                            "_gap_keys": ["happy_path", "alternate_flows", "data_constraints", "business_rules", "preconditions"],
+                        })
+            logger.info(
+                "[ClarifyAgent] 降级生成 KB 查询: {} 条（模板模式）",
+                len(fallback_queries),
+            )
+            return fallback_queries
 
     # ========================================================================
     @staticmethod
@@ -819,6 +852,9 @@ class ClarifyAgent:
         answers = []
 
         for q in questions:
+            # v2.18: 记录单条查询耗时（用于 KB 访问日志的 duration_ms）
+            _t_q = time.time()
+
             # 歧义问题跳过 KB 查询，直接标记为未回答
             if q.get("_skip_kb"):
                 answers.append({
@@ -835,12 +871,15 @@ class ClarifyAgent:
                     "input_type": "text",
                     "options": [],
                     "default_answer": q.get("missing_desc", ""),
+                    "duration_ms": int((time.time() - _t_q) * 1000),
                 })
                 continue
 
             # 搜索相关需求 — 使用 hybrid_searcher 混合检索（向量 + BM25 + RRF + 重排）
+            # v2.19: 按 module 过滤，防止不同模块的相同功能点产生错误的知识库匹配
             try:
                 from app.db.hybrid_search import hybrid_searcher
+                current_modules = srr.get("requirement", {}).get("modules", []) or []
                 # 若无 PG session，临时创建一个供 BM25 使用
                 if session is None:
                     from app.db.database import async_session
@@ -848,12 +887,14 @@ class ClarifyAgent:
                         matched = await hybrid_searcher.search_requirements(
                             query=q["question"], top_k=5,
                             product_id=srr.get("requirement", {}).get("product_id", ""),
+                            modules=current_modules,
                             status="archived", session=tmp_session,
                         )
                 else:
                     matched = await hybrid_searcher.search_requirements(
                         query=q["question"], top_k=5,
                         product_id=srr.get("requirement", {}).get("product_id", ""),
+                        modules=current_modules,
                         status="archived", session=session,
                     )
             except Exception as e:
@@ -989,6 +1030,7 @@ class ClarifyAgent:
                 "input_type": "text",
                 "options": [],
                 "default_answer": q.get("missing_desc", ""),
+                "duration_ms": int((time.time() - _t_q) * 1000),  # v2.18: 单条查询耗时
             })
 
         # v2.11：LLM 校验检索结果质量（判断相关性、拒绝不相关答案、提取具体信息）
@@ -1074,7 +1116,7 @@ class ClarifyAgent:
                 else:
                     # LLM 判定不相关：拒收
                     logger.info(
-                        "[ClarifyAgent] KB 答案校验拒绝: query=%s reason=%s",
+                        "[ClarifyAgent] KB 答案校验拒绝: query={} reason={}",
                         answers[idx].get("question", "")[:80],
                         v.get("reason", "")[:100],
                     )
@@ -1087,7 +1129,7 @@ class ClarifyAgent:
 
         except Exception as e:
             logger.error(
-                "[ClarifyAgent] KB 答案校验 LLM 调用失败，保留原始答案: %s",
+                "[ClarifyAgent] KB 答案校验 LLM 调用失败，保留原始答案: {}",
                 str(e)[:200],
             )
             # LLM 失败时不改变答案（降级为原有机械答案，避免全丢弃）
@@ -1155,10 +1197,10 @@ class ClarifyAgent:
                     q["question"] = r["question"]
                 if r.get("default_answer"):
                     q["default_answer"] = r["default_answer"]
-            logger.info("[ClarifyAgent] 未答问题选项精炼完成: %d 题", len(questions))
+            logger.info("[ClarifyAgent] 未答问题选项精炼完成: {} 题", len(questions))
         except Exception as e:
             logger.warning(
-                "[ClarifyAgent] 未答问题选项精炼失败，保留原 text 问题: %s",
+                "[ClarifyAgent] 未答问题选项精炼失败，保留原 text 问题: {}",
                 str(e)[:200],
             )
 
@@ -1280,7 +1322,11 @@ class ClarifyAgent:
 
             # 字段冲突优先级处理（docs/01 §4.4.1）
             existing_value = self._get_nested_value(srr, field)
-            existing_source = field_sources.get(field, "USER_INPUT" if existing_value else "")
+            # v2.18: 区分"有值但无来源标记"和"用户明确输入"
+            # 无来源标记 → 视为 LLM_INFERRED（可被 KB 覆盖），避免 KB 补全失效
+            existing_source = field_sources.get(field)
+            if existing_source is None:
+                existing_source = "LLM_INFERRED" if existing_value else ""
             final_value, final_source, conflict = self._resolve_field_conflict(
                 existing_value, existing_source, value, best.get("similarity", 0),
                 field, best.get("id", ""),
@@ -1591,7 +1637,7 @@ class ClarifyAgent:
             return result
         except Exception as e:
             logger.error(
-                "[ClarifyAgent] LLM 问题生成失败: %s",
+                "[ClarifyAgent] LLM 问题生成失败: {}",
                 str(e)[:300],
             )
             raise

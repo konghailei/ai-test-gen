@@ -4,7 +4,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Send, Loader2, MessageCircle, AlertCircle, CheckCircle2, FileText,
   ChevronDown, ChevronRight, BookOpen, Snowflake, SkipForward, Wand2, Save,
-  RefreshCw, History,
+  RefreshCw, History, FileUp, XCircle,
 } from 'lucide-react'
 import { requirements as reqApi } from '../api/client'
 import type { ClarifyQuestion, KbAugmentation, FieldConflict, ClarifyHistoryEntry, AnalysisTaskInfo } from '../types'
@@ -139,6 +139,7 @@ export default function RequirementClarify() {
   // 重新生成模式（status=active 时启用）
   const [regenMode, setRegenMode] = useState(false)
   const [regenNotes, setRegenNotes] = useState('')
+  const [regenFiles, setRegenFiles] = useState<File[]>([])
   const [regenerating, setRegenerating] = useState(false)
   const [regenDone, setRegenDone] = useState(false)
   const [history, setHistory] = useState<ClarifyHistoryEntry[]>([])
@@ -197,13 +198,17 @@ export default function RequirementClarify() {
   }, [id])
 
   // ===== 重新生成（P1 异步任务模式：立即返回 task_id → 轮询 → 完成跳转） =====
+  // v2.17: 支持上传新需求文件，以新文件内容为准重新分析
   const handleRegenerate = async () => {
-    if (!id || !regenNotes.trim()) return
+    if (!id) return
+    const hasNotes = regenNotes.trim().length > 0
+    const hasFiles = regenFiles.length > 0
+    if (!hasNotes && !hasFiles) return
     setRegenerating(true)
     setError('')
     setTaskMessage('正在提交重新生成请求...')
     try {
-      const res = await reqApi.regenerate(id, regenNotes.trim())
+      const res = await reqApi.regenerate(id, regenNotes.trim(), regenFiles.length > 0 ? regenFiles : undefined)
       const taskId = res?.task_id
       if (!taskId) throw new Error('未返回任务 ID')
       setTaskMessage('正在重新生成 SRR...')
@@ -499,17 +504,71 @@ export default function RequirementClarify() {
               <h3 className="text-base font-semibold text-slate-800">重新生成需求分析</h3>
             </div>
             <p className="text-sm text-slate-500">
-              输入补充信息后，系统将原始需求文本与补充说明拼接后重新调用 AI 解析，生成新的 SRR。
+              可上传补充需求文件或输入补充说明，系统将原始需求与补充内容合并后重新调用 AI 解析。
+              <strong className="text-amber-600">补充文件不替代原始文件</strong>，两者内容在详情页均可查看。
               此操作会记录到澄清历史中。
             </p>
-            <textarea
-              value={regenNotes}
-              onChange={e => setRegenNotes(e.target.value)}
-              rows={6}
-              className="input-field resize-none"
-              placeholder="请输入补充说明，例如：&#10;- 需要增加 OAuth 第三方登录支持&#10;- 密码长度限制改为 8-64&#10;- 增加 2FA 双因素认证..."
-              disabled={regenerating}
-            />
+
+            {/* 文件上传区 */}
+            <div className="p-4 border-2 border-dashed border-amber-200 rounded-xl hover:border-amber-300 transition-colors bg-amber-50/30">
+              <label className="label flex items-center gap-1.5">
+                <FileUp className="w-4 h-4 text-amber-500" />
+                上传补充需求文件（可选，支持多选 .md / .docx / .txt）
+              </label>
+              <input
+                type="file"
+                accept=".md,.docx,.txt,.markdown"
+                multiple
+                onChange={e => {
+                  const selected = Array.from(e.target.files || [])
+                  if (selected.length > 0) {
+                    setRegenFiles(prev => [...prev, ...selected])
+                  }
+                  e.target.value = ''
+                }}
+                disabled={regenerating}
+                className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-medium file:bg-amber-50 file:text-amber-700 hover:file:bg-amber-100 disabled:opacity-50"
+              />
+              <p className="text-xs text-amber-600 mt-1">
+                补充文件可纠正原始文件中的错误，但不会替代原始文件内容
+              </p>
+            </div>
+
+            {/* 已选文件列表 */}
+            {regenFiles.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-slate-400">已选择 {regenFiles.length} 个文件：</p>
+                {regenFiles.map((f, i) => (
+                  <div key={i} className="flex items-center justify-between bg-slate-50 p-2.5 rounded-lg">
+                    <span className="text-xs text-slate-600 flex items-center gap-1.5">
+                      <FileUp className="w-3.5 h-3.5 text-slate-400" />
+                      {f.name}
+                      <span className="text-slate-400">({(f.size / 1024).toFixed(1)} KB)</span>
+                    </span>
+                    <button
+                      onClick={() => setRegenFiles(prev => prev.filter((_, idx) => idx !== i))}
+                      className="text-slate-400 hover:text-red-500 p-1"
+                      title="移除"
+                      disabled={regenerating}
+                    >
+                      <XCircle className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="border-t border-slate-100 pt-3">
+              <label className="label">补充说明（可选，与文件至少填写一项）</label>
+              <textarea
+                value={regenNotes}
+                onChange={e => setRegenNotes(e.target.value)}
+                rows={4}
+                className="input-field resize-none"
+                placeholder="请输入补充说明，例如：&#10;- 需要增加 OAuth 第三方登录支持&#10;- 密码长度限制改为 8-64&#10;- 增加 2FA 双因素认证..."
+                disabled={regenerating}
+              />
+            </div>
             {error && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /> {error}
@@ -521,7 +580,7 @@ export default function RequirementClarify() {
               </button>
               <button
                 onClick={handleRegenerate}
-                disabled={regenerating || !regenNotes.trim()}
+                disabled={regenerating || (!regenNotes.trim() && regenFiles.length === 0)}
                 className="btn-primary"
               >
                 {regenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}

@@ -524,6 +524,99 @@ async def set_kb_llm(
 
 
 # ============================================================================
+# 4d. 多模态 LLM 配置（v2.18: 图片/流程图识别专用）
+# ============================================================================
+
+VISION_LLM_SETTING_KEY = "vision_llm_provider"
+
+
+async def get_vision_llm_provider(session: AsyncSession) -> str | None:
+    """读取多模态 LLM 供应商（供 docx 图片识别使用）。
+
+    返回 None 表示未设置，调用方应使用全局主 LLM（需主模型支持视觉）。
+    """
+    try:
+        result = await session.execute(
+            select(KBSetting).where(KBSetting.key == VISION_LLM_SETTING_KEY)
+        )
+        row = result.scalar_one_or_none()
+        return row.value if row and row.value else None
+    except Exception:
+        return None
+
+
+@router.get("/vision-llm", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_vision_llm(
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """获取多模态 LLM 配置。
+
+    返回当前视觉 LLM 供应商 + 所有可用供应商列表（从 LLMConfig 表）。
+    多模态模型也可作为主模型，因此候选列表与 KB LLM 一致。
+    """
+    current_provider = await get_vision_llm_provider(session)
+
+    result = await session.execute(
+        select(LLMConfig).order_by(LLMConfig.is_primary.desc(), LLMConfig.id.desc())
+    )
+    rows = result.scalars().all()
+    providers = [{
+        "provider": r.provider,
+        "provider_label": r.provider_label or r.provider,
+        "model": r.model,
+        "is_primary": r.is_primary,
+    } for r in rows if r.api_key]
+
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data={
+            "provider": current_provider or (providers[0]["provider"] if providers else ""),
+            "providers": providers,
+        },
+    )
+
+
+@router.put("/vision-llm", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def set_vision_llm(
+    body: dict,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """设置多模态 LLM 供应商。
+
+    body: {"provider": "qwen"} — 多模态模型也可作为主模型使用
+    """
+    provider = body.get("provider", "").strip()
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider 不能为空")
+
+    result = await session.execute(
+        select(LLMConfig).where(LLMConfig.provider == provider)
+    )
+    llm_row = result.scalar_one_or_none()
+    if not llm_row:
+        raise HTTPException(status_code=404, detail=f"供应商 {provider} 不存在")
+
+    existing = await session.execute(
+        select(KBSetting).where(KBSetting.key == VISION_LLM_SETTING_KEY)
+    )
+    row = existing.scalar_one_or_none()
+    if row:
+        row.value = provider
+    else:
+        session.add(KBSetting(key=VISION_LLM_SETTING_KEY, value=provider))
+    await session.commit()
+
+    logger.info("[API/knowledge] 多模态 LLM 已设置: provider={}", provider)
+
+    return ApiResponse(
+        success=True,
+        message=f"多模态 LLM 已设置为 {llm_row.provider_label or provider}",
+        data={"provider": provider},
+    )
+
+
+# ============================================================================
 # 5. 知识库诊断（管理员）
 # ============================================================================
 

@@ -2118,3 +2118,95 @@ def load_config() -> AppConfig:
         log_file=os.getenv("LOG_FILE"),
     )
 ```
+
+---
+
+## 10. v2.18 实现更新（需求分析流水线）
+
+> 本节记录 v2.18 版本中需求分析流水线的实际实现变更，作为对前文设计文档的补充与对齐。
+
+### 10.1 文档解析增强（docx 表格 + 图片 + 多模态）
+
+**问题背景**：原 `_extract_docx_text` 仅提取段落文本，丢失表格和图片，导致大文档（如 30 万字 PRD）解析后内容不完整。
+
+**实现**（`backend/app/api/requirements.py`）：
+
+| 变更 | 说明 |
+|------|------|
+| `_table_to_markdown()` | 新增：将 docx 表格转为 Markdown 表格语法 |
+| `_extract_docx_text()` | 重写：按 `body.iterchildren()` 遍历 `<w:p>`/`<w:tbl>` 保持原始顺序；返回 `tuple[str, list[dict]]`（文本 + 原始图片） |
+| `_describe_docx_image()` | 新增：提取 `<a:blip r:embed>` → base64 → 调用多模态 LLM 生成描述；同时保存原始图片数据 |
+| `raw_images` 字段 | `Requirement` 模型新增 `raw_images: JSON` 字段，存储 base64 data_url 供前端展示对比 |
+
+**多模态集成**：
+- `llm_client.call_vision()`：通过 `litellm.acompletion` 调用视觉 LLM（OpenAI Vision API 格式）
+- `KBSetting` 表存储 `vision_llm_provider` 配置
+- `GET/PUT /api/knowledge/vision-llm` 端点管理多模态模型配置
+- 图片识别提示词纳入 `prompt_manager` 管理（`vision` 模块）
+
+### 10.2 ClarifyAgent 关键 Bug 修复
+
+| Bug | 根因 | 修复 |
+|-----|------|------|
+| KB 查询完全失效 | `clarify_agent.py` 缺少 `import time`，`NameError` 导致整个 `clarify()` 崩溃 | 添加 `import time` |
+| 日志格式错误 | loguru 使用 `{}` 占位符，代码中用了 `%d`/`%s` | 6 处全部替换为 `{}` |
+| ClarifyAgent 失败覆盖首次解析 | 失败后 `needs_clarify=False` 触发 regenerate，二次解析的 SRR 与已保存 FP 不一致 | 改为仅有 KB 补全信息时才重新解析 |
+| `kb_empty` 误报 | 失败时默认 `True`，误导用户认为知识库为空 | 改为 `None`（未知） |
+| `existing_source` 默认值 | 阻止 KB 覆盖 LLM 推断字段 | 未标记的值视为 `LLM_INFERRED` |
+| `duration_ms` 不准 | 使用总耗时而非单条查询耗时 | 添加 per-query 计时 |
+| LLM 查询生成失败致 KB 全失效 | `_generate_kb_queries` 异常导致无查询 | 实现模板降级 fallback |
+
+### 10.3 错误可见性原则（流水线中断机制）
+
+**设计原则**：流水线中任何关键步骤失败必须中断流水线、标记任务 `failed`、携带 `error` 字段，禁止静默吞错后标记 `completed`。
+
+**实现**（`_run_requirement_analysis`）：
+
+| 关键步骤 | 失败处理 |
+|----------|----------|
+| ClarifyAgent 失败 | 保存基础 SRR+FP → `task.status=failed` → `return` 中断 |
+| FP 保存失败 | `task.status=failed` → `return` 中断 |
+| 最终 SRR 生成失败 | 降级使用首次解析结果 + `result.degraded=true` + `degraded_reason` 告知前端 |
+| regenerate FP 拆分失败 | `task.status=failed` → `return` 中断 |
+
+**前端配合**：
+- `Requirements.tsx` 轮询 `task.status`，`failed` 时展示红色错误框（含错误详情 + 重试按钮）
+- `completed` 时检查 `result.degraded`，展示 3 秒橙色降级警告
+- 错误标题动态化（红色"分析失败" / 橙色"分析完成（降级警告）"）
+
+### 10.4 双 SRR 分层架构（SSOT 约束）
+
+**设计**：总 SRR 只描述总体功能 + 跨功能点交互规则；FP sub_srr 描述单功能点内部细节，避免重复。
+
+**实现**：
+- `req_agent.py` Prompt 新增 SSOT 约束：总 SRR 不包含功能点级别细节
+- 总 SRR 新增 `fp_index` 字段引用功能点（`_update_fp_index_in_srr()` 在所有变更点调用）
+- `interaction_srr` 合并改为选择性合并：仅合并 `cross_fp_flows`/`shared_business_rules`/`fp_contracts`/`global_constraints`，不覆盖 `requirement`/`acceptance_criteria`
+- FP 合并后代码级检测业务规则重复（FP sub_srr vs 总 SRR shared_business_rules）
+
+### 10.5 异步任务进度反馈
+
+**流程**（`upload_requirement_multi` → `_run_requirement_analysis`）：
+
+```
+POST /api/requirements/upload-multi
+  → 立即创建 Requirement(analyzing) + AnalysisTask(pending)
+  → 返回 {task_id, req_id}
+  → 后台协程执行：
+      phase=parse (10-30%)
+      phase=kb_search (40%)
+      phase=clarify (70%)
+      phase=regenerate (85%) [仅有 KB 补全时]
+      phase=done (100%)
+  → 前端每 1.5s 轮询 GET /api/requirements/tasks/{task_id}
+```
+
+**任务状态机**：`pending → running → completed/failed/interrupted`
+
+**进度阶段映射**（前端 `PHASE_MAP`）：
+- `parse` → 阶段 0（解析需求文档）
+- `kb_search` → 阶段 1（检索知识库）
+- `clarify` → 阶段 2（需求澄清）
+- `regenerate` → 阶段 3（生成最终分析）
+- `done` → 阶段 4（完成）
+

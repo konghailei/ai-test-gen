@@ -15,6 +15,7 @@ from app.prompts import (
     impact_agent,
     knowledge_qa,
     fp_agent,
+    vision,
 )
 
 # ============================================================================
@@ -125,6 +126,19 @@ _PROMPT_REGISTRY: list[dict] = [
         "name": "FP_INTEGRATED_USER_PROMPT",
         "default": fp_agent.FP_INTEGRATED_USER_PROMPT,
         "description": "FP-Agent 一体式拆分用户提示词模板",
+    },
+    # Vision（多模态图片识别，v2.18 新增）
+    {
+        "module": "vision",
+        "name": "SYSTEM_PROMPT",
+        "default": vision.SYSTEM_PROMPT,
+        "description": "多模态图片识别系统指令 — 流程图/架构图/状态图等图片的结构化描述",
+    },
+    {
+        "module": "vision",
+        "name": "USER_PROMPT_TEMPLATE",
+        "default": vision.USER_PROMPT_TEMPLATE,
+        "description": "多模态图片识别用户提示词模板 — 图片识别请求模板",
     },
 ]
 

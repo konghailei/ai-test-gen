@@ -208,6 +208,17 @@ export default function Requirements() {
           const result = task.result_json || {}
           const questions: ClarifyQuestion[] = (result.questions as ClarifyQuestion[]) || []
 
+          // v2.18: 降级警告——SRR 生成了但质量有折扣，提示用户
+          if (result.degraded) {
+            setProgress({
+              phase: phaseIdx,
+              message: '分析完成（降级）',
+              error: `⚠️ ${result.degraded_reason || '最终 SRR 生成失败，已降级使用首次解析结果'}`,
+              progress: 100,
+            })
+            await sleep(3000) // 让用户看到警告 3 秒
+          }
+
           if (questions.length > 0) {
             // 有未回答问题：显示澄清面板
             setProgress({ phase: 2, message: '检测到需要补充的内容，请确认以下问题', error: null, progress: 100 })
@@ -559,14 +570,27 @@ export default function Requirements() {
                   </div>
                 </div>
 
-                {/* 错误信息 */}
+                {/* 错误信息 / 降级警告 */}
                 {progress.error && (
-                  <div className="p-4 bg-red-50 border border-red-200 rounded-xl">
+                  <div className={`p-4 border rounded-xl ${
+                    progress.message?.includes('降级')
+                      ? 'bg-amber-50 border-amber-200'
+                      : 'bg-red-50 border-red-200'
+                  }`}>
                     <div className="flex items-start gap-3">
-                      <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                      {progress.message?.includes('降级')
+                        ? <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                        : <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                      }
                       <div className="min-w-0">
-                        <p className="text-sm font-semibold text-red-700 mb-1">上传失败</p>
-                        <pre className="text-xs text-red-600 whitespace-pre-wrap leading-relaxed font-sans">
+                        <p className={`text-sm font-semibold mb-1 ${
+                          progress.message?.includes('降级') ? 'text-amber-700' : 'text-red-700'
+                        }`}>
+                          {progress.message?.includes('降级') ? '分析完成（降级警告）' : (progress.message || '分析失败')}
+                        </p>
+                        <pre className={`text-xs whitespace-pre-wrap leading-relaxed font-sans ${
+                          progress.message?.includes('降级') ? 'text-amber-600' : 'text-red-600'
+                        }`}>
                           {progress.error}
                         </pre>
                       </div>

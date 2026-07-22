@@ -13,12 +13,20 @@ export interface Requirement {
   go_live_date?: string
 }
 
+export interface RawImage {
+  index: number
+  data_url: string
+  content_type: string
+}
+
 export interface RequirementDetail extends Requirement {
   module: string
   modules: string[]
   version: number
   srr_json: Record<string, unknown>
   raw_text: string
+  raw_images?: RawImage[]  // v2.18: docx 原始图片（base64 data_url），供前端展示对比
+  supplementary_text?: string  // v2.17: 补充文件内容（重新分析时上传的补充需求文件）
   source_type: string
   questions_count?: number
   kb_query_logs?: KbQueryLog[]

@@ -1,0 +1,1657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI-Test-Gen 系统架构详解</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --primary: #4f46e5;
+    --primary-light: #818cf8;
+    --primary-dark: #3730a3;
+    --accent: #06b6d4;
+    --success: #10b981;
+    --warning: #f59e0b;
+    --danger: #ef4444;
+    --bg: #0f172a;
+    --bg-card: #1e293b;
+    --bg-card-hover: #334155;
+    --text: #f1f5f9;
+    --text-muted: #94a3b8;
+    --border: #334155;
+  }
+  body {
+    font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+    height: 100vh;
+  }
+
+  /* ====== 幻灯片容器 ====== */
+  .slides-container {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+    overflow: hidden;
+  }
+  .slide {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+    padding: 60px 80px;
+    display: none;
+    flex-direction: column;
+    overflow-y: auto;
+    animation: fadeIn 0.5s ease;
+  }
+  .slide.active { display: flex; }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateX(30px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  /* ====== 导航 ====== */
+  .nav-bar {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--bg-card);
+    padding: 10px 24px;
+    border-radius: 50px;
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    z-index: 100;
+  }
+  .nav-btn {
+    background: var(--primary);
+    color: white;
+    border: none;
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 18px;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s;
+  }
+  .nav-btn:hover { background: var(--primary-dark); transform: scale(1.1); }
+  .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .page-info { color: var(--text-muted); font-size: 14px; min-width: 60px; text-align: center; }
+
+  /* ====== 通用样式 ====== */
+  h1 { font-size: 2.8em; margin-bottom: 20px; }
+  h2 { font-size: 2.2em; margin-bottom: 16px; color: var(--primary-light); }
+  h3 { font-size: 1.5em; margin: 20px 0 12px; color: var(--accent); }
+  p { line-height: 1.8; margin-bottom: 12px; font-size: 1.05em; color: var(--text); }
+  ul, ol { margin-left: 24px; margin-bottom: 16px; }
+  li { line-height: 1.8; margin-bottom: 6px; }
+  code {
+    background: var(--bg-card);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.9em;
+    color: var(--accent);
+  }
+  pre {
+    background: var(--bg-card);
+    padding: 20px;
+    border-radius: 12px;
+    overflow-x: auto;
+    margin: 16px 0;
+    border: 1px solid var(--border);
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    color: var(--text);
+    font-size: 0.9em;
+    line-height: 1.6;
+  }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin: 12px 0;
+    transition: all 0.3s;
+  }
+  .card:hover { background: var(--bg-card-hover); border-color: var(--primary); }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+  .badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.85em;
+    font-weight: 600;
+  }
+  .badge-blue { background: rgba(79,70,229,0.2); color: var(--primary-light); }
+  .badge-green { background: rgba(16,185,129,0.2); color: var(--success); }
+  .badge-yellow { background: rgba(245,158,11,0.2); color: var(--warning); }
+  .badge-red { background: rgba(239,68,68,0.2); color: var(--danger); }
+  .highlight { color: var(--warning); font-weight: 600; }
+  .text-center { text-align: center; }
+
+  /* ====== 封面 ====== */
+  .cover {
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    background: linear-gradient(135deg, var(--bg) 0%, var(--primary-dark) 100%);
+  }
+  .cover h1 {
+    font-size: 4em;
+    background: linear-gradient(135deg, var(--primary-light), var(--accent));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 30px;
+  }
+  .cover .subtitle { font-size: 1.5em; color: var(--text-muted); margin-bottom: 40px; }
+  .cover .tech-badges { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+
+  /* ====== 架构图 ====== */
+  .arch-layer {
+    background: var(--bg-card);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 24px;
+    margin: 8px 0;
+    text-align: center;
+    position: relative;
+    transition: all 0.3s;
+  }
+  .arch-layer:hover { border-color: var(--primary); transform: translateX(8px); }
+  .arch-layer .layer-name { font-size: 1.2em; font-weight: 700; color: var(--primary-light); }
+  .arch-layer .layer-desc { font-size: 0.9em; color: var(--text-muted); margin-top: 4px; }
+  .arch-arrow { text-align: center; color: var(--primary); font-size: 24px; margin: 2px 0; }
+
+  /* ====== 流程图 ====== */
+  .flow-step {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--primary);
+    border-radius: 8px;
+    padding: 12px 20px;
+    margin: 8px 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .flow-step .step-num {
+    background: var(--primary);
+    color: white;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .flow-step .step-content { flex: 1; }
+  .flow-step .step-title { font-weight: 600; color: var(--text); }
+  .flow-step .step-desc { font-size: 0.9em; color: var(--text-muted); margin-top: 2px; }
+
+  /* ====== 表格 ====== */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+  th, td { padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--primary-light); font-weight: 600; }
+  tr:hover { background: var(--bg-card); }
+
+  /* ====== 提示框 ====== */
+  .tip-box {
+    background: rgba(79,70,229,0.1);
+    border-left: 4px solid var(--primary);
+    padding: 16px 20px;
+    border-radius: 0 8px 8px 0;
+    margin: 16px 0;
+  }
+  .tip-box.warning {
+    background: rgba(245,158,11,0.1);
+    border-left-color: var(--warning);
+  }
+  .tip-box.success {
+    background: rgba(16,185,129,0.1);
+    border-left-color: var(--success);
+  }
+  .tip-box .tip-title { font-weight: 700; margin-bottom: 8px; }
+
+  /* ====== Agent 卡片 ====== */
+  .agent-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    transition: all 0.3s;
+  }
+  .agent-card:hover { border-color: var(--accent); transform: translateY(-4px); }
+  .agent-card .agent-icon { font-size: 2em; margin-bottom: 8px; }
+  .agent-card .agent-name { font-size: 1.2em; font-weight: 700; color: var(--accent); margin-bottom: 8px; }
+  .agent-card .agent-desc { font-size: 0.9em; color: var(--text-muted); line-height: 1.6; }
+
+  /* ====== 技术栈卡片 ====== */
+  .tech-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+    transition: all 0.3s;
+  }
+  .tech-card:hover { border-color: var(--success); transform: scale(1.05); }
+  .tech-card .tech-name { font-size: 1.1em; font-weight: 700; color: var(--success); margin-bottom: 6px; }
+  .tech-card .tech-role { font-size: 0.85em; color: var(--text-muted); }
+
+  /* ====== 示例代码框 ====== */
+  .example-box {
+    background: rgba(6,182,212,0.05);
+    border: 1px solid rgba(6,182,212,0.3);
+    border-radius: 12px;
+    padding: 16px;
+    margin: 16px 0;
+  }
+  .example-box .example-label {
+    font-size: 0.8em;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+  }
+
+  /* ====== 目录 ====== */
+  .toc-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 8px 0;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .toc-item:hover { border-color: var(--primary); background: var(--bg-card-hover); }
+  .toc-item .toc-num {
+    background: var(--primary);
+    color: white;
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  /* ====== 滚动条 ====== */
+  .slide::-webkit-scrollbar { width: 6px; }
+  .slide::-webkit-scrollbar-track { background: var(--bg); }
+  .slide::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .slide::-webkit-scrollbar-thumb:hover { background: var(--primary); }
+
+  /* ====== 对比框 ====== */
+  .compare-box {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 16px 0;
+  }
+  .compare-bad {
+    background: rgba(239,68,68,0.08);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .compare-good {
+    background: rgba(16,185,129,0.08);
+    border: 1px solid rgba(16,185,129,0.3);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .compare-label { font-weight: 700; margin-bottom: 8px; font-size: 0.9em; }
+  .compare-bad .compare-label { color: var(--danger); }
+  .compare-good .compare-label { color: var(--success); }
+
+  /* ====== 数据模型 ====== */
+  .model-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    border-left: 4px solid var(--accent);
+  }
+  .model-card .model-name { font-weight: 700; color: var(--accent); }
+  .model-card .model-fields { font-size: 0.85em; color: var(--text-muted); margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="slides-container">
+
+<!-- ========== Slide 1: 封面 ========== -->
+<div class="slide cover active" data-slide="0">
+  <h1>AI-Test-Gen</h1>
+  <div class="subtitle">AI 驱动的智能测试用例生成系统</div>
+  <div class="subtitle" style="font-size:1.1em;">架构设计 · 技术栈 · 实现详解</div>
+  <div class="tech-badges">
+    <span class="badge badge-blue">FastAPI</span>
+    <span class="badge badge-blue">LangGraph</span>
+    <span class="badge badge-green">Milvus</span>
+    <span class="badge badge-green">PostgreSQL</span>
+    <span class="badge badge-yellow">DeepSeek LLM</span>
+    <span class="badge badge-blue">React 18</span>
+  </div>
+  <p style="margin-top:50px; color:var(--text-muted); font-size:0.9em;">使用 ← → 方向键或下方按钮翻页</p>
+</div>
+
+<!-- ========== Slide 2: 目录 ========== -->
+<div class="slide" data-slide="1">
+  <h2>目录</h2>
+  <div class="toc-item" onclick="goToSlide(2)"><div class="toc-num">1</div><div>系统定位与核心理念 — 为什么需要这个系统？</div></div>
+  <div class="toc-item" onclick="goToSlide(3)"><div class="toc-num">2</div><div>五层架构全景 — 系统是怎么搭建的？</div></div>
+  <div class="toc-item" onclick="goToSlide(5)"><div class="toc-num">3</div><div>技术栈详解 — 用了什么技术？为什么选它们？</div></div>
+  <div class="toc-item" onclick="goToSlide(8)"><div class="toc-num">4</div><div>Agent 协作流水线 — 6 个 AI Agent 如何配合？</div></div>
+  <div class="toc-item" onclick="goToSlide(12)"><div class="toc-num">5</div><div>需求分析全流程 — 从文档上传到结构化 SRR</div></div>
+  <div class="toc-item" onclick="goToSlide(16)"><div class="toc-num">6</div><div>知识库设计 — 双引擎存储与混合检索</div></div>
+  <div class="toc-item" onclick="goToSlide(20)"><div class="toc-num">7</div><div>数据模型与存储层 — 22+ 张表如何组织？</div></div>
+  <div class="toc-item" onclick="goToSlide(22)"><div class="toc-num">8</div><div>错误处理与稳定性保障 — 出错了怎么办？</div></div>
+  <div class="toc-item" onclick="goToSlide(24)"><div class="toc-num">9</div><div>部署架构 — Docker 容器化部署</div></div>
+</div>
+
+<!-- ========== Slide 3: 系统定位 ========== -->
+<div class="slide" data-slide="2">
+  <h2>1. 系统定位与核心理念</h2>
+  <div class="grid-2">
+    <div>
+      <h3>我们要解决什么问题？</h3>
+      <p>传统测试用例编写面临三大痛点：</p>
+      <div class="card">
+        <p><span class="highlight">📊 工作量大</span>：一个中等规模需求（10+ 功能点）需要编写 50-100 条测试用例，手工编写耗时 2-3 天</p>
+      </div>
+      <div class="card">
+        <p><span class="highlight">🐛 覆盖不全</span>：人工容易遗漏边界条件、异常路径、安全场景</p>
+      </div>
+      <div class="card">
+        <p><span class="highlight">🔄 重复劳动</span>：相似需求的用例模式重复编写，缺乏积累复用</p>
+      </div>
+    </div>
+    <div>
+      <h3>我们的解决方案</h3>
+      <div class="tip-box success">
+        <div class="tip-title">核心理念：闭环积累</div>
+        <p>系统不是一次性的生成工具，而是越用越聪明的知识系统：</p>
+        <ol>
+          <li>上传需求文档 → AI 解析为结构化格式</li>
+          <li>检索知识库历史 → 补全缺失信息</li>
+          <li>AI 生成测试用例 → 人工审核</li>
+          <li>审核通过用例入库 → 成为下次生成的参考</li>
+        </ol>
+      </div>
+      <div class="example-box">
+        <div class="example-label">简单示例</div>
+        <p>第一次上传"用户登录"需求 → 生成 20 条用例 → 审核通过入库</p>
+        <p>第二次上传"用户注册"需求 → KB 自动检索到"登录"的历史用例 → 参考其模式生成"注册"用例（复用了密码校验、错误提示等模式）</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 4: 五层架构 ========== -->
+<div class="slide" data-slide="3">
+  <h2>2. 五层架构全景</h2>
+  <p>系统采用经典的分层架构，每一层职责清晰，层与层之间通过明确接口通信。</p>
+  <div style="max-width:800px; margin:20px auto;">
+    <div class="arch-layer">
+      <div class="layer-name">🌐 接入层（Access Layer）</div>
+      <div class="layer-desc">Web UI（React）· REST API（FastAPI）· 用户交互入口</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-layer" style="border-color: var(--accent);">
+      <div class="layer-name">⚙️ 编排层（Orchestration Layer）</div>
+      <div class="layer-desc">LangGraph DAG 编排器 · 任务调度 · 流水线控制 · 进度反馈</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-layer" style="border-color: var(--success);">
+      <div class="layer-name">🤖 引擎层（Engine Layer）</div>
+      <div class="layer-desc">ReqAgent · ClarifyAgent · QualityGate · ImpactAgent · GenAgent · ReviewAgent</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-layer" style="border-color: var(--warning);">
+      <div class="layer-name">💾 数据层（Data Layer）</div>
+      <div class="layer-desc">Milvus（向量）· PostgreSQL（结构化）· Redis（缓存）· MinIO（文件）</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-layer" style="border-color: var(--danger);">
+      <div class="layer-name">🛡️ 横切层（Cross-cutting Layer）</div>
+      <div class="layer-desc">断路器 · 重试机制 · 死信队列 · LLM-as-Judge · 限流器</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 5: 架构详解 ========== -->
+<div class="slide" data-slide="4">
+  <h2>2.1 各层职责详解</h2>
+  <div class="grid-2">
+    <div class="card">
+      <h3>🌐 接入层</h3>
+      <p><strong>前端</strong>：React 18 + TypeScript + Vite</p>
+      <ul>
+        <li>需求上传与管理</li>
+        <li>需求澄清交互面板</li>
+        <li>SRR/FP 审核界面</li>
+        <li>测试用例展示与编辑</li>
+        <li>知识库可视化</li>
+      </ul>
+      <p><strong>后端 API</strong>：FastAPI + Pydantic</p>
+      <ul>
+        <li>13 个 API 模块（auth/requirements/knowledge 等）</li>
+        <li>SSE 实时进度推送</li>
+        <li>JWT 认证 + RBAC 权限</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>⚙️ 编排层</h3>
+      <p><strong>Orchestrator</strong>：基于 LangGraph 的 DAG 编排器</p>
+      <div class="example-box">
+        <div class="example-label">为什么用 LangGraph？</div>
+        <p>LangGraph 提供了有状态的多步 Agent 编排能力：</p>
+        <ul>
+          <li><strong>状态管理</strong>：PipelineState 在节点间传递</li>
+          <li><strong>条件路由</strong>：质量门禁通过→生成，不通过→回到澄清</li>
+          <li><strong>循环控制</strong>：最多 3 轮澄清迭代</li>
+          <li><strong>可视化</strong>：DAG 图可导出调试</li>
+        </ul>
+      </div>
+    </div>
+    <div class="card">
+      <h3>🤖 引擎层</h3>
+      <p>6 个 AI Agent + 1 个质量门禁 + 1 个格式引擎：</p>
+      <ul>
+        <li><code>ReqAgent</code> — 需求解析（文档→SRR JSON）</li>
+        <li><code>ClarifyAgent</code> — 需求澄清（KB 补全 + 人工提问）</li>
+        <li><code>QualityGate</code> — 质量门禁（动态阈值评分）</li>
+        <li><code>ImpactAnalysisAgent</code> — 影响分析（依赖图 BFS）</li>
+        <li><code>GenAgent</code> — 用例生成（多维度 + Few-shot）</li>
+        <li><code>ReviewAgent</code> — 用例审核（6 维度评估）</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>💾 数据层 + 🛡️ 横切层</h3>
+      <p><strong>四存储引擎</strong>：</p>
+      <ul>
+        <li>Milvus — 语义向量检索（HNSW 索引）</li>
+        <li>PostgreSQL — 结构化数据 + pgvector 降级</li>
+        <li>Redis — L1 缓存 + Celery broker</li>
+        <li>MinIO — 文档/产物对象存储</li>
+      </ul>
+      <p><strong>稳定性保障</strong>：</p>
+      <ul>
+        <li>断路器（向量 DB 故障率 >20% 降级）</li>
+        <li>LLM 多提供商故障转移</li>
+        <li>死信队列 + 重试机制</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 6: 技术栈 - 后端 ========== -->
+<div class="slide" data-slide="5">
+  <h2>3. 技术栈详解 — 后端</h2>
+  <div class="grid-3">
+    <div class="tech-card">
+      <div class="tech-name">FastAPI</div>
+      <div class="tech-role">Web 框架<br>异步 API · 自动文档</div>
+    </div>
+    <div class="tech-card">
+      <div class="tech-name">LangGraph</div>
+      <div class="tech-role">Agent 编排<br>DAG 流程 · 状态管理</div>
+    </div>
+    <div class="tech-card">
+      <div class="tech-name">SQLAlchemy 2.0</div>
+      <div class="tech-role">ORM<br>异步 Session · 类型安全</div>
+    </div>
+    <div class="tech-card">
+      <div class="tech-name">Pydantic v2</div>
+      <div class="tech-role">数据校验<br>Schema 定义 · 序列化</div>
+    </div>
+    <div class="tech-card">
+      <div class="tech-name">Celery</div>
+      <div class="tech-role">异步任务<br>向量双写 · 嵌入计算</div>
+    </div>
+    <div class="tech-card">
+      <div class="tech-name">litellm</div>
+      <div class="tech-role">LLM 统一接口<br>多供应商 · 故障转移</div>
+    </div>
+  </div>
+  <div class="tip-box">
+    <div class="tip-title">为什么选 FastAPI 而不是 Django/Flask？</div>
+    <div class="grid-2">
+      <div>
+        <p><strong>FastAPI 优势</strong>：</p>
+        <ul>
+          <li>原生 async/await，适合 LLM 高延迟场景</li>
+          <li>自动生成 OpenAPI 文档</li>
+          <li>Pydantic 类型校验，减少手动校验代码</li>
+          <li>性能优于 Flask（基于 Starlette）</li>
+        </ul>
+      </div>
+      <div class="example-box">
+        <div class="example-label">示例：异步 LLM 调用</div>
+<pre><code>@router.post("/requirements/upload")
+async def upload(file: UploadFile):
+    # 非阻塞调用 LLM
+    srr = await req_agent.parse(raw_text)
+    return {"srr": srr}</code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 7: 技术栈 - 数据库 ========== -->
+<div class="slide" data-slide="6">
+  <h2>3.1 技术栈详解 — 数据库与存储</h2>
+  <div class="grid-2">
+    <div>
+      <h3>Milvus（向量数据库）</h3>
+      <div class="card">
+        <p><strong>用途</strong>：语义相似度检索</p>
+        <p><strong>核心场景</strong>：</p>
+        <ul>
+          <li>ClarifyAgent 检索相似历史需求</li>
+          <li>GenAgent 检索 Top-3 相似用例作 Few-shot</li>
+          <li>ReviewAgent 检测重复用例</li>
+        </ul>
+        <p><strong>索引</strong>：HNSW（Hierarchical Navigable Small World）</p>
+        <p><strong>维度</strong>：1024（bge-large-zh 模型）</p>
+      </div>
+      <div class="example-box">
+        <div class="example-label">为什么不用 PostgreSQL 的 pgvector？</div>
+        <p>Milvus 专为向量优化，10 万条以上检索性能远超 pgvector。但系统保留了 pgvector 作为降级方案——当 Milvus 故障时自动切换。</p>
+      </div>
+    </div>
+    <div>
+      <h3>PostgreSQL（关系数据库）</h3>
+      <div class="card">
+        <p><strong>用途</strong>：结构化数据存储 + 全文检索</p>
+        <p><strong>核心特性</strong>：</p>
+        <ul>
+          <li>JSONB 字段存储 SRR/用例 JSON</li>
+          <li>pgvector 扩展（向量降级备份）</li>
+          <li>zhparser 扩展（中文全文检索）</li>
+          <li>22+ 张表，覆盖需求/用例/依赖/追溯</li>
+        </ul>
+      </div>
+      <h3>Redis + MinIO</h3>
+      <div class="card">
+        <p><strong>Redis</strong>：L1 多级缓存 + Celery 消息队列 broker</p>
+        <p><strong>MinIO</strong>：S3 兼容对象存储，存放上传的文档和导出产物</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 8: 技术栈 - LLM ========== -->
+<div class="slide" data-slide="7">
+  <h2>3.2 技术栈详解 — LLM 大模型</h2>
+  <div class="grid-2">
+    <div>
+      <h3>LLM 供应商策略</h3>
+      <div class="card">
+        <p><strong>主模型</strong>：DeepSeek（默认）</p>
+        <ul>
+          <li>成本低（约为 GPT-4 的 1/10）</li>
+          <li>中文理解能力强</li>
+          <li>支持 128K 上下文（长需求文档）</li>
+        </ul>
+        <p><strong>备用模型</strong>：GPT-4o / Qwen</p>
+        <p><strong>多模态模型</strong>：独立配置，用于图片识别</p>
+      </div>
+      <div class="tip-box">
+        <div class="tip-title">litellm 统一抽象层</div>
+        <p>通过 <code>litellm.acompletion</code> 统一调用所有供应商，切换模型只需改配置，不改代码：</p>
+<pre><code># 切换供应商只需改环境变量
+LLM_PROVIDER=deepseek  # 或 openai/qwen
+# 代码完全不变
+result = await llm_client.call_json(...)  </code></pre>
+      </div>
+    </div>
+    <div>
+      <h3>LLM 调用场景</h3>
+      <table>
+        <tr><th>Agent</th><th>用途</th><th>temperature</th></tr>
+        <tr><td>ReqAgent</td><td>需求解析</td><td>0.5</td></tr>
+        <tr><td>ClarifyAgent</td><td>KB 查询生成</td><td>0.3</td></tr>
+        <tr><td>GenAgent</td><td>用例生成</td><td>0.4</td></tr>
+        <tr><td>ReviewAgent</td><td>用例审核</td><td>0.2</td></tr>
+        <tr><td>多模态</td><td>图片识别</td><td>0.2</td></tr>
+      </table>
+      <div class="example-box">
+        <div class="example-label">为什么不同 Agent 用不同 temperature？</div>
+        <p><strong>解析/生成（0.4-0.5）</strong>：需要一定创造力，发现多种测试场景</p>
+        <p><strong>审核/校验（0.2-0.3）</strong>：需要严格判断，不能"发挥"</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 9: Agent 协作 ========== -->
+<div class="slide" data-slide="8">
+  <h2>4. Agent 协作流水线</h2>
+  <p>系统的核心是 6 个 AI Agent 通过 LangGraph DAG 编排，形成完整的"需求→用例"生成流水线。</p>
+  <div class="grid-3" style="margin:20px 0;">
+    <div class="agent-card">
+      <div class="agent-icon">📄</div>
+      <div class="agent-name">ReqAgent</div>
+      <div class="agent-desc">需求解析：将 docx/md 文档解析为结构化 SRR JSON。支持表格提取、多模态图片识别、FP 一体式提取。</div>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon">🔍</div>
+      <div class="agent-name">ClarifyAgent</div>
+      <div class="agent-desc">需求澄清：三级检测（完整性/歧义性/遗漏），KB 自动补全，未答问题转人工澄清。</div>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon">🚦</div>
+      <div class="agent-name">QualityGate</div>
+      <div class="agent-desc">质量门禁：动态阈值评分（默认 0.75 / 冷启动 0.60）。不通过则回到 ClarifyAgent 迭代。</div>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon">🕸️</div>
+      <div class="agent-name">ImpactAgent</div>
+      <div class="agent-desc">影响分析：模块依赖图 BFS（最大 3 跳），识别受影响的历史需求和用例，规划回归范围。</div>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon">✍️</div>
+      <div class="agent-name">GenAgent</div>
+      <div class="agent-desc">用例生成：多维度生成（功能/边界/异常/安全），KB Top-3 用例作 Few-shot 参考。</div>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon">✅</div>
+      <div class="agent-name">ReviewAgent</div>
+      <div class="agent-desc">用例审核：6 维度评估（完整性/去重/可执行/一致性/追溯/覆盖），多因子置信度计算。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 10: Agent 流水线流程图 ========== -->
+<div class="slide" data-slide="9">
+  <h2>4.1 Agent 流水线 — 完整流程</h2>
+  <div style="max-width:900px; margin:0 auto;">
+    <div class="flow-step">
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <div class="step-title">ReqAgent.parse() — 需求解析</div>
+        <div class="step-desc">上传 docx/md → 提取文本+表格+图片 → LLM 解析为 SRR JSON → 一体式提取 FP + 依赖关系</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <div class="step-title">ClarifyAgent.clarify() — 需求澄清</div>
+        <div class="step-desc">规则检测 → KB 检索补全 → 字段冲突处理 → 未答问题转人工</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <div class="step-title">QualityGate.check() — 质量门禁</div>
+        <div class="step-desc">Schema 校验 + 质量评分 → 通过？进入下一步 / 不通过？回到步骤 2（最多 3 轮）</div>
+      </div>
+    </div>
+    <div class="flow-step" style="border-left-color: var(--warning);">
+      <div class="step-num" style="background:var(--warning);">↻</div>
+      <div class="step-content">
+        <div class="step-title">循环控制（最多 3 轮）</div>
+        <div class="step-desc">MAX_CLARIFY_ITERATIONS=3，第 3 轮仍不通过则 force_pass 强制放行</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">4</div>
+      <div class="step-content">
+        <div class="step-title">ImpactAnalysisAgent.analyze() — 影响分析</div>
+        <div class="step-desc">模块依赖图 BFS → 追溯矩阵定位 → 用例操作规划（update/add/delete/keep）</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">5</div>
+      <div class="step-content">
+        <div class="step-title">GenAgent.generate() — 用例生成</div>
+        <div class="step-desc">KB Top-3 用例 Few-shot → 多维度生成 → 置信度自评估</div>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="step-num">6</div>
+      <div class="step-content">
+        <div class="step-title">ReviewAgent.review() — 用例审核</div>
+        <div class="step-desc">规则预检 + LLM 6 维度审核 → 多因子置信度加权 → 需要补充？回到步骤 5</div>
+      </div>
+    </div>
+    <div class="flow-step" style="border-left-color: var(--success);">
+      <div class="step-num" style="background:var(--success);">✓</div>
+      <div class="step-content">
+        <div class="step-title">FormatEngine + 回流存储</div>
+        <div class="step-desc">UTCF → Gherkin/pytest/Markdown 输出 → 向量 DB + PG 双写 → 进入知识库供下次使用</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 11: 编排器详解 ========== -->
+<div class="slide" data-slide="10">
+  <h2>4.2 LangGraph DAG 编排器详解</h2>
+  <div class="grid-2">
+    <div>
+      <h3>DAG 节点与路由</h3>
+      <pre><code># orchestrator.py 核心结构
+
+PipelineState = TypedDict:
+    srr: dict          # 需求 SRR
+    questions: list    # 澄清问题
+    gate_passed: bool  # 门禁是否通过
+    iteration: int     # 澄清轮次
+    test_cases: list   # 生成的用例
+
+# DAG 构建
+graph = StateGraph(PipelineState)
+graph.add_node("parse", _parse_node)
+graph.add_node("clarify", _clarify_node)
+graph.add_node("gate", _gate_node)
+graph.add_node("impact", _impact_node)
+graph.add_node("gen", _gen_node)
+graph.add_node("review", _review_node)
+
+# 条件路由
+graph.add_conditional_edges("gate", 
+    _route_after_gate)  # 通过→impact / 不通过→clarify
+graph.add_conditional_edges("review",
+    _route_after_review)  # 需补充→gen / 完成→END</code></pre>
+    </div>
+    <div>
+      <h3>循环控制逻辑</h3>
+      <div class="card">
+        <p><code>should_retry(iteration, gate_passed)</code></p>
+        <p>门禁未通过 且 迭代次数 < 3 → 回到澄清</p>
+      </div>
+      <div class="card">
+        <p><code>should_force_pass(iteration, gate_passed)</code></p>
+        <p>迭代次数 >= 3 → 强制放行（避免死循环）</p>
+      </div>
+      <div class="tip-box warning">
+        <div class="tip-title">为什么最多 3 轮？</div>
+        <p>经验表明，3 轮澄清足以覆盖 95% 的需求缺口。更多轮次会导致用户疲劳，边际收益递减。第 3 轮未解决的问题标记为"optional"，不阻断流程。</p>
+      </div>
+      <div class="example-box">
+        <div class="example-label">SSE 进度推送</div>
+        <p>每个节点完成后通过 SSE 推送进度事件：</p>
+<pre><code>make_sse_event("parse", "解析完成", progress=30)
+make_sse_event("clarify", "发现3个问题", progress=70)</code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 12: 需求分析 - 上传 ========== -->
+<div class="slide" data-slide="11">
+  <h2>5. 需求分析全流程 — 文档上传与解析</h2>
+  <div class="grid-2">
+    <div>
+      <h3>文档上传流程</h3>
+      <div class="flow-step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <div class="step-title">上传文件（docx/md/txt）</div>
+          <div class="step-desc">支持多文件上传，立即返回 task_id，异步执行分析</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <div class="step-title">_extract_docx_text()</div>
+          <div class="step-desc">按 XML 顺序遍历 body → 段落(w:p) + 表格(w:tbl) + 图片(w:drawing)</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <div class="step-title">_describe_docx_image()</div>
+          <div class="step-desc">提取图片 base64 → 多模态 LLM 识别 → 保存原始图片到 raw_images</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">4</div>
+        <div class="step-content">
+          <div class="step-title">ReqAgent.parse()</div>
+          <div class="step-desc">LLM 解析为 SRR JSON + 一体式提取 FP</div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3>三级递进模型</h3>
+      <div class="card">
+        <p><strong>L0</strong>：原始需求文本（docx/md 原文）</p>
+        <p><strong>L1</strong>：标准化 Markdown（结构化模板）</p>
+        <p><strong>L2</strong>：SRR JSON（结构化需求表示）</p>
+        <p><strong>L3</strong>：细化后 SRR v2（经澄清+KB补全）</p>
+      </div>
+      <div class="example-box">
+        <div class="example-label">SRR JSON 结构示例</div>
+<pre><code>{
+  "requirement": {
+    "id": "REQ-xxx",
+    "title": "用户登录",
+    "priority": "P0",
+    "modules": ["auth"]
+  },
+  "flows": {
+    "happy_path": {
+      "steps": [
+        {"order":1, "action":"输入账号密码", "expect":"登录成功"}
+      ]
+    }
+  },
+  "business_rules": ["密码长度>=8"],
+  "boundary_conditions": [...],
+  "fp_index": ["FP-001", "FP-002"]
+}</code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 13: 需求分析 - 澄清 ========== -->
+<div class="slide" data-slide="12">
+  <h2>5.1 需求分析 — ClarifyAgent 澄清闭环</h2>
+  <div class="grid-2">
+    <div>
+      <h3>三级检测机制</h3>
+      <div class="card">
+        <p><span class="badge badge-red">① 完整性检测</span></p>
+        <p>检查 critical/important 字段是否缺失</p>
+        <p>如：无 happy_path、无业务规则、无边界条件</p>
+      </div>
+      <div class="card">
+        <p><span class="badge badge-yellow">② 歧义性检测</span></p>
+        <p>检测模糊表述、未量化指标、矛盾描述</p>
+        <p>如："快速响应"（多快？）、"安全校验"（什么校验？）</p>
+      </div>
+      <div class="card">
+        <p><span class="badge badge-blue">③ 遗漏检测</span></p>
+        <p>需求模式库匹配，发现同类需求常有的维度</p>
+        <p>如：CRUD 模式应有"删除确认"但当前缺失</p>
+      </div>
+    </div>
+    <div>
+      <h3>KB 自动补全流程</h3>
+      <div class="flow-step" style="padding:8px 16px;">
+        <div class="step-num" style="width:28px;height:28px;font-size:0.8em;">①</div>
+        <div class="step-content">
+          <div class="step-title">检测缺失字段</div>
+        </div>
+      </div>
+      <div class="flow-step" style="padding:8px 16px;">
+        <div class="step-num" style="width:28px;height:28px;font-size:0.8em;">②</div>
+        <div class="step-content">
+          <div class="step-title">LLM 生成 KB 查询（动态）</div>
+        </div>
+      </div>
+      <div class="flow-step" style="padding:8px 16px;">
+        <div class="step-num" style="width:28px;height:28px;font-size:0.8em;">③</div>
+        <div class="step-content">
+          <div class="step-title">向量检索 + PG 查询</div>
+        </div>
+      </div>
+      <div class="flow-step" style="padding:8px 16px;">
+        <div class="step-num" style="width:28px;height:28px;font-size:0.8em;">④</div>
+        <div class="step-content">
+          <div class="step-title">LLM 校验答案可信度</div>
+        </div>
+      </div>
+      <div class="flow-step" style="padding:8px 16px;">
+        <div class="step-num" style="width:28px;height:28px;font-size:0.8em;">⑤</div>
+        <div class="step-content">
+          <div class="step-title">字段冲突处理 + 自动补全</div>
+        </div>
+      </div>
+      <div class="flow-step" style="padding:8px 16px;">
+        <div class="step-num" style="width:28px;height:28px;font-size:0.8em;">⑥</div>
+        <div class="step-content">
+          <div class="step-title">未答问题 → 人工澄清</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 14: 字段冲突优先级 ========== -->
+<div class="slide" data-slide="13">
+  <h2>5.2 字段冲突优先级 — 谁说了算？</h2>
+  <p>当多个来源提供了同一字段的值时，系统按严格的优先级处理：</p>
+  <div style="max-width:700px; margin:20px auto;">
+    <div class="arch-layer" style="border-color: var(--danger);">
+      <div class="layer-name">① USER_INPUT（优先级 0）</div>
+      <div class="layer-desc">用户原文中明确写出的值 — <span class="highlight">最高权威，不可覆盖</span></div>
+    </div>
+    <div class="arch-arrow">↓ 优先级递减</div>
+    <div class="arch-layer" style="border-color: var(--warning);">
+      <div class="layer-name">② HUMAN_ANSWERED（优先级 1）</div>
+      <div class="layer-desc">用户通过澄清面板回答的值</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-layer" style="border-color: var(--accent);">
+      <div class="layer-name">③ KB_INFERRED（优先级 2）</div>
+      <div class="layer-desc">从知识库检索并校验后补全的值</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-layer" style="border-color: var(--primary);">
+      <div class="layer-name">④ PATTERN_DEFAULT（优先级 3）</div>
+      <div class="layer-desc">需求模式库的默认值</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-layer" style="border-color: var(--text-muted);">
+      <div class="layer-name">⑤ LLM_INFERRED（优先级 4）</div>
+      <div class="layer-desc">LLM 推断的值 — <span class="highlight">最低优先级，可被任何来源覆盖</span></div>
+    </div>
+  </div>
+  <div class="example-box">
+    <div class="example-label">场景示例</div>
+    <p>字段"密码长度限制"：LLM 推断为 6 位（优先级 4）→ KB 检索到历史需求规定 8 位（优先级 2）→ KB 覆盖 LLM → 最终值 8 位。但用户原文写了"至少 10 位"（优先级 0）→ 不可被覆盖 → 最终值 10 位。</p>
+  </div>
+</div>
+
+<!-- ========== Slide 15: 双 SRR 分层 ========== -->
+<div class="slide" data-slide="14">
+  <h2>5.3 双 SRR 分层架构（SSOT 原则）</h2>
+  <div class="grid-2">
+    <div>
+      <h3>什么是 SSOT？</h3>
+      <p>SSOT = Single Source of Truth（单一数据源）</p>
+      <div class="tip-box">
+        <p>每个信息只在一个地方定义，避免多处重复导致不一致。</p>
+      </div>
+      <h3>系统中的双 SRR</h3>
+      <div class="card">
+        <p><span class="badge badge-blue">总 SRR</span></p>
+        <p><strong>只描述</strong>：总体功能概述 + 跨功能点交互规则</p>
+        <ul>
+          <li><code>requirement</code> — 需求元信息</li>
+          <li><code>cross_fp_flows</code> — 跨功能点流程</li>
+          <li><code>shared_business_rules</code> — 共享业务规则</li>
+          <li><code>fp_contracts</code> — 功能点间契约</li>
+          <li><code>fp_index</code> — 功能点索引</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p><span class="badge badge-green">FP sub_srr</span></p>
+        <p><strong>只描述</strong>：单个功能点内部细节</p>
+        <ul>
+          <li>该 FP 的 happy_path / 异常路径</li>
+          <li>该 FP 专属的业务规则</li>
+          <li>该 FP 的边界条件</li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <h3>为什么需要分层？</h3>
+      <div class="compare-box">
+        <div class="compare-bad">
+          <div class="compare-label">❌ 不分层的问题</div>
+          <p>总 SRR 包含每个 FP 的详细步骤 → 修改一个 FP 要同时改两处 → 容易遗漏 → 数据不一致</p>
+        </div>
+        <div class="compare-good">
+          <div class="compare-label">✅ 分层后</div>
+          <p>总 SRR 只引用 fp_index → FP 修改只需改 sub_srr → 总 SRR 不变 → 天然一致</p>
+        </div>
+      </div>
+      <div class="example-box">
+        <div class="example-label">Epic/Feature 层级类比</div>
+        <p>类似 Jira 的 Epic → Story 层级：</p>
+        <ul>
+          <li><strong>Epic（总 SRR）</strong>：用户中心 v2.0 — 描述整体目标</li>
+          <li><strong>Story（FP sub_srr）</strong>：登录功能 / 注册功能 / 密码重置 — 各自独立详述</li>
+        </ul>
+      </div>
+      <div class="tip-box success">
+        <div class="tip-title">追溯矩阵</div>
+        <p>需求 → 功能点（FP）→ 测试用例 三级追溯，每条用例都能追溯到具体需求字段。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 16: 知识库 - 双引擎 ========== -->
+<div class="slide" data-slide="15">
+  <h2>6. 知识库设计 — 双引擎存储</h2>
+  <div class="grid-2">
+    <div>
+      <h3>为什么需要双引擎？</h3>
+      <div class="compare-box">
+        <div class="compare-bad">
+          <div class="compare-label">只用向量库</div>
+          <p>✅ 语义检索强</p>
+          <p>❌ 无法精确查询（按 ID/状态/产品过滤）</p>
+          <p>❌ 事务一致性弱</p>
+        </div>
+        <div class="compare-good">
+          <div class="compare-label">双引擎互补</div>
+          <p>✅ 向量库：语义相似度检索</p>
+          <p>✅ PG：精确查询 + 事务 + JSONB</p>
+          <p>✅ 故障降级（向量库挂了用 pgvector）</p>
+        </div>
+      </div>
+      <h3>异步双写</h3>
+      <div class="card">
+        <p>通过 Celery worker 保证最终一致性：</p>
+        <pre><code># 主流程写入 PG（同步）
+await session.commit()
+
+# 异步写入 Milvus（Celery）
+@celery.task
+def write_to_milvus(data):
+    vector_store.upsert(data)
+
+# 每小时对账修复不一致
+schedule_reconcile_task()</code></pre>
+      </div>
+    </div>
+    <div>
+      <h3>Milvus Collections</h3>
+      <table>
+        <tr><th>Collection</th><th>存储内容</th></tr>
+        <tr><td>reqs</td><td>需求语义嵌入</td></tr>
+        <tr><td>cases</td><td>用例语义嵌入</td></tr>
+        <tr><td>patterns</td><td>测试模式嵌入</td></tr>
+        <tr><td>req_pats</td><td>需求模式嵌入</td></tr>
+        <tr><td>errors</td><td>错误案例嵌入</td></tr>
+      </table>
+      <h3>PostgreSQL 表（22+）</h3>
+      <div class="grid-2" style="gap:8px;">
+        <div class="model-card">
+          <div class="model-name">requirements</div>
+          <div class="model-fields">id, srr_json, raw_text, raw_images</div>
+        </div>
+        <div class="model-card">
+          <div class="model-name">test_cases</div>
+          <div class="model-fields">id, case_json, confidence</div>
+        </div>
+        <div class="model-card">
+          <div class="model-name">functional_points</div>
+          <div class="model-fields">id, sub_srr, status</div>
+        </div>
+        <div class="model-card">
+          <div class="model-name">traceability</div>
+          <div class="model-fields">case_id, req_id, field</div>
+        </div>
+        <div class="model-card">
+          <div class="model-name">req_dependencies</div>
+          <div class="model-fields">source, target, relation</div>
+        </div>
+        <div class="model-card">
+          <div class="model-name">fp_dependencies</div>
+          <div class="model-fields">source_fp, target_fp</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 17: 知识库 - 混合检索 ========== -->
+<div class="slide" data-slide="16">
+  <h2>6.1 知识库 — 混合检索策略</h2>
+  <div class="grid-2">
+    <div>
+      <h3>三路检索 + RRF 融合</h3>
+      <div class="flow-step">
+        <div class="step-num">V</div>
+        <div class="step-content">
+          <div class="step-title">向量检索（Milvus）</div>
+          <div class="step-desc">语义相似度 — "登录" 能匹配到 "身份认证"</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">K</div>
+        <div class="step-content">
+          <div class="step-title">BM25 关键词检索（PG）</div>
+          <div class="step-desc">精确关键词匹配 — "RBAC" 必须包含 "RBAC"</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">P</div>
+        <div class="step-content">
+          <div class="step-title">模式匹配（需求模式库）</div>
+          <div class="step-desc">抽象维度匹配 — CRUD 模式匹配 CRUD 模式</div>
+        </div>
+      </div>
+      <div class="flow-step" style="border-left-color: var(--success);">
+        <div class="step-num" style="background:var(--success);">R</div>
+        <div class="step-content">
+          <div class="step-title">RRF 融合 + Cross-Encoder 重排</div>
+          <div class="step-desc">Reciprocal Rank Fusion 融合三路结果 → Cross-Encoder 精排</div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3>为什么需要混合检索？</h3>
+      <div class="example-box">
+        <div class="example-label">场景对比</div>
+        <div class="compare-box">
+          <div class="compare-bad">
+            <div class="compare-label">只用向量检索</div>
+            <p>查询"RBAC 权限" → 可能返回"角色管理"（语义相似但不是 RBAC）</p>
+          </div>
+          <div class="compare-good">
+            <div class="compare-label">混合检索</div>
+            <p>向量检索找到"角色管理" + BM25 找到含"RBAC"的文档 → 融合后"RBAC"文档排名更高</p>
+          </div>
+        </div>
+      </div>
+      <h3>断路器降级</h3>
+      <div class="tip-box warning">
+        <div class="tip-title">L2 断路器</div>
+        <p>当 Milvus 故障率 > 20% 时，自动降级为纯 BM25 关键词检索，保证系统可用性。</p>
+      </div>
+      <h3>按模块过滤（v2.19）</h3>
+      <div class="tip-box success">
+        <div class="tip-title">防止跨模块相同功能点误匹配</div>
+        <p>不同模块可能存在相同功能点（如 "auth" 和 "order" 都有"查询"），KB 检索时按 <code>modules</code> 过滤，只匹配同模块历史需求。</p>
+      </div>
+      <div class="example-box">
+        <div class="example-label">三层过滤传递</div>
+        <p><strong>① ClarifyAgent</strong>：从 SRR 读取 <code>modules</code> → 透传 hybrid_searcher</p>
+        <p><strong>② BM25 检索</strong>：SQL 用 <code>json_array_elements_text</code> + <code>ANY(string_to_array)</code> 实现数组交集过滤</p>
+        <p><strong>③ 缓存键</strong>：<code>(query, product_id, modules, coll_type)</code> 四元组 — 避免跨模块缓存污染</p>
+      </div>
+      <h3>检索参数</h3>
+      <table>
+        <tr><th>参数</th><th>值</th><th>说明</th></tr>
+        <tr><td>MATCH_TOP_K</td><td>20</td><td>初始检索数量</td></tr>
+        <tr><td>FEW_SHOT_SIMILARITY</td><td>0.70</td><td>Few-shot 阈值</td></tr>
+        <tr><td>KB_SIMILARITY</td><td>0.85</td><td>KB 补全阈值</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 18: 知识库 - 冷启动 ========== -->
+<div class="slide" data-slide="17">
+  <h2>6.2 知识库 — 冷启动与版本管理</h2>
+  <div class="grid-2">
+    <div>
+      <h3>冷启动模式</h3>
+      <p>系统首次使用时，知识库为空，如何工作？</p>
+      <div class="card">
+        <p><span class="badge badge-yellow">触发条件</span></p>
+        <ul>
+          <li><code>kb_empty = True</code>（知识库完全为空）</li>
+          <li><code>product_first = True</code>（当前产品的第一个需求）</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p><span class="badge badge-blue">行为变化</span></p>
+        <ul>
+          <li>QualityGate 阈值从 0.75 降至 <span class="highlight">0.60</span></li>
+          <li>ClarifyAgent 切换深度人工澄清模式</li>
+          <li>不依赖 KB 补全，全部走人工澄清</li>
+        </ul>
+      </div>
+      <div class="tip-box">
+        <div class="tip-title">为什么不直接放行？</div>
+        <p>冷启动时阈值降为 0.60 而非 0，仍然把关核心字段（如 happy_path、业务规则）。完全放行会导致生成的用例质量差，失去用户信任。</p>
+      </div>
+    </div>
+    <div>
+      <h3>需求版本链</h3>
+      <p>通过 <code>supersedes</code> / <code>superseded_by</code> 维护版本演进：</p>
+      <div class="card">
+        <pre><code>REQ-001 v1.0 (原始需求)
+    ↓ supersedes
+REQ-001 v2.0 (优化需求)
+    ↓ supersedes
+REQ-001 v3.0 (最新版本)
+
+# KB 检索时优先返回最新版本
+# 但保留历史版本供影响分析</code></pre>
+      </div>
+      <h3>需求依赖图谱</h3>
+      <div class="card">
+        <p>通过 <code>req_dependencies</code> 表维护依赖关系：</p>
+        <ul>
+          <li><code>depends_on</code> — A 依赖 B</li>
+          <li><code>related_to</code> — A 与 B 相关</li>
+          <li><code>conflicts</code> — A 与 B 冲突</li>
+          <li><code>replaces</code> — A 替代 B</li>
+        </ul>
+        <p>ImpactAnalysisAgent 通过 BFS 遍历此图，找到所有受影响的需求。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 19: 用例生成 ========== -->
+<div class="slide" data-slide="18">
+  <h2>6.3 GenAgent — 测试用例生成</h2>
+  <div class="grid-2">
+    <div>
+      <h3>生成流程</h3>
+      <div class="flow-step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <div class="step-title">KB Few-shot 检索</div>
+          <div class="step-desc">检索 Top-3 相似 approved 用例（阈值 0.70）作为示例</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <div class="step-title">多维度 Prompt 构建</div>
+          <div class="step-desc">功能用例 + 边界用例 + 异常用例 + 安全用例</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <div class="step-title">LLM 生成（temperature=0.4）</div>
+          <div class="step-desc">max_tokens=32768，支持大批量生成</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">4</div>
+        <div class="step-content">
+          <div class="step-title">后处理 + 向量写入</div>
+          <div class="step-desc">去重、格式校验、并发写入 Milvus</div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3>为什么用 Few-shot？</h3>
+      <div class="example-box">
+        <div class="example-label">Few-shot vs Zero-shot</div>
+        <div class="compare-box">
+          <div class="compare-bad">
+            <div class="compare-label">Zero-shot</div>
+            <p>LLM 自由发挥 → 用例格式不统一、断言方式各异、质量不稳定</p>
+          </div>
+          <div class="compare-good">
+            <div class="compare-label">Few-shot（Top-3）</div>
+            <p>提供 3 条已审核用例作参考 → 格式统一、断言规范、符合团队习惯</p>
+          </div>
+        </div>
+      </div>
+      <h3>UTCF 格式</h3>
+      <div class="card">
+        <p>统一测试用例格式（Universal Test Case Format）：</p>
+        <pre><code>{
+  "id": "TC-AUTH-0001-0001",
+  "title": "正确账号密码登录成功",
+  "type": "functional",
+  "priority": "P0",
+  "preconditions": ["用户已注册"],
+  "steps": [
+    {"action":"输入正确账号","data":"admin@test.com"},
+    {"action":"输入正确密码","data":"Admin@123"},
+    {"action":"点击登录","data":""}
+  ],
+  "expected_result": "跳转到首页，显示用户名",
+  "confidence": 0.92,
+  "related_requirement": "REQ-001"
+}</code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 20: 数据模型 ========== -->
+<div class="slide" data-slide="19">
+  <h2>7. 数据模型与存储层</h2>
+  <p>系统包含 22+ 张数据表，分为 6 大类：</p>
+  <div class="grid-3">
+    <div class="card">
+      <h3>需求相关（5 张）</h3>
+      <ul>
+        <li><code>requirements</code> — 需求主表</li>
+        <li><code>functional_points</code> — 功能点</li>
+        <li><code>req_dependencies</code> — 需求依赖</li>
+        <li><code>fp_dependencies</code> — FP 依赖</li>
+        <li><code>fp_dependency_history</code> — 依赖变更</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>用例相关（4 张）</h3>
+      <ul>
+        <li><code>test_cases</code> — 测试用例</li>
+        <li><code>test_patterns</code> — 测试模式库</li>
+        <li><code>error_cases</code> — 错误案例</li>
+        <li><code>traceability</code> — 追溯矩阵</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>组织架构（3 张）</h3>
+      <ul>
+        <li><code>products</code> — 产品</li>
+        <li><code>projects</code> — 项目</li>
+        <li><code>modules</code> + <code>module_dependencies</code></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>系统配置（4 张）</h3>
+      <ul>
+        <li><code>llm_config</code> — LLM 供应商</li>
+        <li><code>kb_settings</code> — KB 设置</li>
+        <li><code>prompt_overrides</code> — 提示词覆盖</li>
+        <li><code>prompt_history</code> — 修改历史</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>任务与用户（4 张）</h3>
+      <ul>
+        <li><code>analysis_tasks</code> — 异步任务</li>
+        <li><code>users</code> + <code>roles</code></li>
+        <li><code>knowledge_qa</code> — KB 问答</li>
+        <li><code>generation_batches</code> — 生成批次</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>需求模式（1 张）</h3>
+      <ul>
+        <li><code>req_patterns</code> — 需求模式库</li>
+      </ul>
+      <p>存储同类需求的抽象维度集合，供 ClarifyAgent 遗漏检测使用。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 21: 错误处理 ========== -->
+<div class="slide" data-slide="20">
+  <h2>8. 错误处理与稳定性保障</h2>
+  <div class="grid-2">
+    <div>
+      <h3>错误可见性原则</h3>
+      <div class="tip-box warning">
+        <div class="tip-title">核心原则</div>
+        <p>流水线中任何关键步骤失败必须<strong>中断流水线</strong>、<strong>标记任务 failed</strong>、<strong>携带 error 字段</strong>，禁止静默吞错后标记 completed。</p>
+      </div>
+      <div class="card">
+        <p><span class="badge badge-red">中断型错误</span></p>
+        <ul>
+          <li>ClarifyAgent 崩溃 → 保存基础 SRR → failed</li>
+          <li>FP 保存失败 → failed</li>
+          <li>FP 拆分失败 → failed</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p><span class="badge badge-yellow">降级型错误</span></p>
+        <ul>
+          <li>最终 SRR 生成失败 → 降级用首次结果</li>
+          <li>标记 <code>degraded=true</code> + <code>degraded_reason</code></li>
+          <li>前端展示橙色警告</li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <h3>稳定性保障机制</h3>
+      <div class="card">
+        <p><strong>🛡️ L2 断路器</strong></p>
+        <p>向量 DB 故障率 > 20% → 降级关键词匹配</p>
+      </div>
+      <div class="card">
+        <p><strong>🔄 LLM 故障转移</strong></p>
+        <p>主供应商失败 → 自动切换备用供应商 → 全抖动重试</p>
+      </div>
+      <div class="card">
+        <p><strong>📮 死信队列（DLQ）</strong></p>
+        <p>写入失败的任务入队，定期重试，不丢数据</p>
+      </div>
+      <div class="card">
+        <p><strong>⚖️ LLM-as-Judge</strong></p>
+        <p>5% 采样审核 LLM 输出，Schema 校验</p>
+      </div>
+      <div class="card">
+        <p><strong>⚡ 限流器</strong></p>
+        <p>防止 LLM API 超频，平滑请求速率</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 22: 前端交互 ========== -->
+<div class="slide" data-slide="21">
+  <h2>8.1 前端交互 — 异步任务进度反馈</h2>
+  <div class="grid-2">
+    <div>
+      <h3>异步任务模式</h3>
+      <p>长耗时操作（需求分析/用例生成）采用异步模式：</p>
+      <div class="flow-step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <div class="step-title">POST 请求 → 立即返回 task_id</div>
+          <div class="step-desc">后台协程执行，不阻塞 HTTP 连接</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <div class="step-title">前端轮询 GET /tasks/{task_id}</div>
+          <div class="step-desc">每 1.5 秒轮询一次，获取真实进度</div>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <div class="step-title">状态变化 → UI 响应</div>
+          <div class="step-desc">running→进度条 / completed→跳转 / failed→红色错误框</div>
+        </div>
+      </div>
+      <div class="example-box">
+        <div class="example-label">进度阶段映射</div>
+        <pre><code>PHASE_MAP = {
+  parse: 0,      // 解析需求
+  kb_search: 1,  // 检索知识库
+  clarify: 2,    // 需求澄清
+  regenerate: 3, // 生成最终分析
+  done: 4        // 完成
+}</code></pre>
+      </div>
+    </div>
+    <div>
+      <h3>错误展示</h3>
+      <div class="card" style="border-color: var(--danger);">
+        <p><span class="badge badge-red">❌ 分析失败（红色）</span></p>
+        <p>task.status === 'failed'</p>
+        <ul>
+          <li>红色错误框 + 错误详情</li>
+          <li>"返回修改" + "重试" 按钮</li>
+          <li>标题动态化（非固定"上传失败"）</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color: var(--warning);">
+        <p><span class="badge badge-yellow">⚠️ 降级警告（橙色）</span></p>
+        <p>result.degraded === true</p>
+        <ul>
+          <li>橙色警告框 + 降级原因</li>
+          <li>展示 3 秒后继续流程</li>
+          <li>用户可知数据质量有折扣</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color: var(--success);">
+        <p><span class="badge badge-green">✅ 分析完成（绿色）</span></p>
+        <p>task.status === 'completed'</p>
+        <ul>
+          <li>无问题 → 进入影响分析</li>
+          <li>有问题 → 显示澄清面板</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px;">
+    <h3>原始文本展示（v2.19 优化）</h3>
+    <div class="grid-2" style="margin-top:12px;">
+      <div class="card">
+        <p><span class="badge badge-blue">表格 HTML 渲染</span></p>
+        <p>后端 <code>_table_to_markdown</code> 将 docx 表格转为 Markdown 语法 → 前端 ReactMarkdown 渲染为带边框、斑马纹的 HTML table，替代竖线纯文本。</p>
+      </div>
+      <div class="card">
+        <p><span class="badge badge-blue">图片描述折叠</span></p>
+        <p>多模态识别内容用 <code>&lt;details&gt;/&lt;summary&gt;</code> 默认折叠，点击展开。原始图片始终展示，避免描述占用过多空间。</p>
+      </div>
+    </div>
+    <div class="tip-box" style="margin-top:12px;">
+      <div class="tip-title">统一两栏布局</div>
+      <p>文本块、表格块、图片块统一遵循「行号列 + 内容列」两栏布局，<code>splitTextIntoBlocks</code> 按顺序分块渲染，保证页面整齐对齐。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 23: 部署架构 ========== -->
+<div class="slide" data-slide="22">
+  <h2>9. 部署架构 — Docker 容器化</h2>
+  <div class="grid-2">
+    <div>
+      <h3>8 个 Docker 服务</h3>
+      <table>
+        <tr><th>服务</th><th>职责</th></tr>
+        <tr><td>frontend</td><td>Nginx + React 静态资源</td></tr>
+        <tr><td>backend</td><td>FastAPI 主 API 服务</td></tr>
+        <tr><td>celery_worker</td><td>异步嵌入计算、向量双写</td></tr>
+        <tr><td>postgres</td><td>PG 16 + pgvector + zhparser</td></tr>
+        <tr><td>redis</td><td>缓存 + Celery broker</td></tr>
+        <tr><td>milvus</td><td>向量检索（standalone）</td></tr>
+        <tr><td>etcd</td><td>Milvus 元数据协调</td></tr>
+        <tr><td>minio</td><td>S3 兼容对象存储</td></tr>
+      </table>
+      <div class="tip-box">
+        <div class="tip-title">为什么用 Docker Compose？</div>
+        <p>8 个服务有依赖关系（Milvus 依赖 etcd + minio），Compose 可以声明依赖顺序，一键启动完整环境。</p>
+      </div>
+    </div>
+    <div>
+      <h3>网络拓扑</h3>
+      <pre><code>ai-test-gen-net (bridge 网络)
+│
+├── frontend (80) ──→ backend (8000)
+│
+├── backend ──→ postgres (5432)
+│           ──→ redis (6379)
+│           ──→ milvus (19530)
+│           ──→ minio (9000)
+│
+├── celery_worker ──→ postgres
+│                 ──→ redis (broker)
+│                 ──→ milvus
+│
+├── milvus ──→ etcd (2379)
+│          ──→ minio (S3)
+│
+└── 前端浏览器 ──→ frontend (80)
+              ──→ backend (8000) [API]</code></pre>
+      <div class="example-box">
+        <div class="example-label">健康检查</div>
+        <p>每个服务配置 healthcheck，backend 启动前等待 PG + Redis + Milvus 全部 healthy。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 24: 总结 ========== -->
+<div class="slide cover" data-slide="23">
+  <h1 style="font-size: 3em;">架构总结</h1>
+  <div class="grid-3" style="max-width:900px; margin:30px auto;">
+    <div class="card">
+      <h3>🎯 核心价值</h3>
+      <ul>
+        <li>越用越聪明的闭环系统</li>
+        <li>AI 生成 + 人工审核</li>
+        <li>知识积累与复用</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🏗️ 架构亮点</h3>
+      <ul>
+        <li>LangGraph DAG 编排</li>
+        <li>双引擎存储（Milvus + PG）</li>
+        <li>双 SRR 分层（SSOT）</li>
+        <li>错误可见性原则</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>🔧 技术栈</h3>
+      <ul>
+        <li>FastAPI + React</li>
+        <li>Milvus + PostgreSQL</li>
+        <li>DeepSeek LLM + litellm</li>
+        <li>Docker Compose</li>
+      </ul>
+    </div>
+  </div>
+  <div class="tip-box success" style="max-width:700px; margin:20px auto;">
+    <div class="tip-title">给新手的建议</div>
+    <ol>
+      <li>先理解 <strong>五层架构</strong>，建立全局视图</li>
+      <li>再跟一遍 <strong>Agent 流水线</strong>，理解数据流向</li>
+      <li>重点看 <strong>ClarifyAgent</strong>，它是系统智能的核心</li>
+      <li>最后看 <strong>知识库设计</strong>，理解"闭环积累"的实现</li>
+    </ol>
+  </div>
+  <p style="margin-top:30px; color:var(--text-muted);">— AI-Test-Gen 系统架构详解 —</p>
+</div>
+
+</div>
+
+<!-- ========== 导航栏 ========== -->
+<div class="nav-bar">
+  <button class="nav-btn" id="prevBtn" onclick="changeSlide(-1)">←</button>
+  <span class="page-info"><span id="curPage">1</span> / <span id="totalPage">24</span></span>
+  <button class="nav-btn" id="nextBtn" onclick="changeSlide(1)">→</button>
+</div>
+
+<script>
+  let currentSlide = 0;
+  const slides = document.querySelectorAll('.slide');
+  const totalSlides = slides.length;
+
+  document.getElementById('totalPage').textContent = totalSlides;
+
+  function showSlide(index) {
+    slides.forEach(s => s.classList.remove('active'));
+    slides[index].classList.add('active');
+    currentSlide = index;
+    document.getElementById('curPage').textContent = index + 1;
+    document.getElementById('prevBtn').disabled = index === 0;
+    document.getElementById('nextBtn').disabled = index === totalSlides - 1;
+  }
+
+  function changeSlide(dir) {
+    const next = currentSlide + dir;
+    if (next >= 0 && next < totalSlides) {
+      showSlide(next);
+    }
+  }
+
+  function goToSlide(index) {
+    if (index >= 0 && index < totalSlides) {
+      showSlide(index);
+    }
+  }
+
+  // 键盘导航
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      changeSlide(-1);
+    } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') {
+      e.preventDefault();
+      changeSlide(1);
+    } else if (e.key === 'Home') {
+      showSlide(0);
+    } else if (e.key === 'End') {
+      showSlide(totalSlides - 1);
+    }
+  });
+
+  // 初始化
+  showSlide(0);
+</script>
+
+</body>
+</html>

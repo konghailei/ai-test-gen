@@ -55,9 +55,10 @@ class HybridSearcher:
         Returns:
             list[dict]: 融合后的检索结果
         """
-        # 0. 缓存查询
+        # 0. 缓存查询（modules 参与缓存键，避免跨模块缓存污染）
         from app.db.kb_cache import kb_cache
-        cached = await kb_cache.get(query, product_id or "", "requirements")
+        modules_key = ",".join(sorted(modules)) if modules else ""
+        cached = await kb_cache.get(query, product_id or "", "requirements", modules_key)
         if cached is not None:
             logger.debug("[HybridSearch] 缓存命中: query={!r}", query[:60])
             return cached[:top_k]
@@ -78,7 +79,7 @@ class HybridSearcher:
         if session:
             try:
                 bm25_results = await self._bm25_search(
-                    session, query, product_id, top_k * 2, status
+                    session, query, product_id, top_k * 2, status, modules
                 )
             except Exception as e:
                 logger.warning("[HybridSearch] BM25 检索失败，仅用向量: {}", str(e)[:200])
@@ -102,7 +103,7 @@ class HybridSearcher:
                 logger.warning("[HybridSearch] 重排失败，使用 RRF 排序: {}", str(e)[:200])
 
         # 6. 写入缓存
-        await kb_cache.set(query, product_id or "", "requirements", fused)
+        await kb_cache.set(query, product_id or "", "requirements", fused, modules_key)
 
         return fused[:top_k]
 
@@ -113,20 +114,24 @@ class HybridSearcher:
         product_id: str | None,
         top_k: int,
         status: str | None,
+        modules: list[str] | None = None,
     ) -> list[dict]:
         """PostgreSQL BM25 全文检索（优先 zhparser 中文分词，回退 simple）。
 
         Args:
-            session: PG 异步会话
+            session: PG 会话
             query: 查询文本
             product_id: 按产品过滤
             top_k: 返回数量
             status: 按状态过滤
+            modules: 按模块过滤（只匹配 modules 数组有交集的记录）
 
         Returns:
             list[dict]: BM25 检索结果，格式与向量检索一致
         """
         ts_config = await self._get_ts_config(session)
+        # modules 过滤：传入逗号分隔字符串，SQL 中用 string_to_array + && (数组交集) 过滤
+        module_filter = ",".join(modules) if modules else None
         # 使用 CAST 显式指定参数类型，避免 asyncpg AmbiguousParameterError
         sql = text(f"""
             SELECT id,
@@ -139,6 +144,7 @@ class HybridSearcher:
             WHERE search_vec @@ plainto_tsquery('{ts_config}', :q)
               AND (CAST(:product_id AS VARCHAR) IS NULL OR product_id = :product_id)
               AND (CAST(:status AS VARCHAR) IS NULL OR status = :status)
+              AND (CAST(:module_filter AS VARCHAR) IS NULL OR EXISTS (SELECT 1 FROM json_array_elements_text(modules) AS m WHERE m = ANY(string_to_array(:module_filter, ','))))
             ORDER BY rank DESC
             LIMIT :top_k
         """)
@@ -148,6 +154,7 @@ class HybridSearcher:
                 "q": query,
                 "product_id": product_id,
                 "status": status,
+                "module_filter": module_filter,
                 "top_k": top_k,
             })
             rows = result.all()

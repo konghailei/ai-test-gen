@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, memo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers, Clock, Download } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers, Clock, Download, FilePlus, Image as ImageIcon } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
@@ -79,6 +79,79 @@ function Table({ children, ...props }: any) {
       </table>
     </div>
   )
+}
+
+/**
+ * 将原始文本拆分为「普通文本段」+「表格段」+「图片描述段」。
+ *
+ * 1. 表格段：后端 _table_to_markdown 把 docx 表格转成标准 Markdown 表格语法
+ *    （| col1 | col2 | + |---|---| 分隔行），需渲染为 HTML 表格保证可读性。
+ * 2. 图片描述段：以「【图片N」开头的行及其后续多模态识别内容，需折叠展示避免占用过多空间。
+ *
+ * 所有段在渲染时统一纳入「行号列 + 内容列」两栏布局，保持页面整齐。
+ */
+function splitTextIntoBlocks(text: string): Array<
+  | { type: 'text'; lines: string[]; startLine: number }
+  | { type: 'table'; content: string; startLine: number; lineCount: number }
+  | { type: 'image_desc'; lines: string[]; startLine: number; imageIndex: number | null }
+> {
+  const lines = text.split('\n')
+  const blocks: Array<
+    | { type: 'text'; lines: string[]; startLine: number }
+    | { type: 'table'; content: string; startLine: number; lineCount: number }
+    | { type: 'image_desc'; lines: string[]; startLine: number; imageIndex: number | null }
+  > = []
+  let i = 0
+  let textStart = 0
+  const flushText = (endIdx: number) => {
+    if (endIdx > textStart) {
+      blocks.push({ type: 'text', lines: lines.slice(textStart, endIdx), startLine: textStart })
+    }
+  }
+  const isTableLine = (s: string) => /^\s*\|.*\|\s*$/.test(s)
+  const isSeparator = (s: string) => /^[|\s:-]+$/.test(s) && s.includes('-')
+  const isImageStart = (s: string) => /^【图片/.test(s)
+  // 图片描述的后续行：空行 / 【xxx】格式 / 列表项 / 缩进行
+  const isImageContentLine = (s: string) => {
+    if (s.trim() === '') return true
+    if (/^【/.test(s.trim())) return true
+    if (/^[-*]/.test(s.trim())) return true
+    if (/^\s/.test(s)) return true
+    return false
+  }
+
+  while (i < lines.length) {
+    if (isTableLine(lines[i])) {
+      // 表格块：连续的表格行
+      let j = i
+      while (j < lines.length && isTableLine(lines[j])) j++
+      const tableLines = lines.slice(i, j)
+      if (tableLines.length >= 2 && isSeparator(tableLines[1])) {
+        flushText(i)
+        blocks.push({ type: 'table', content: tableLines.join('\n'), startLine: i, lineCount: tableLines.length })
+        i = j
+        textStart = j
+      } else {
+        i++
+      }
+    } else if (isImageStart(lines[i])) {
+      // 图片描述块：【图片N 开头 + 后续内容行
+      const match = lines[i].match(/^【图片(\d+)/)
+      const imgIdx = match ? parseInt(match[1], 10) : null
+      let j = i + 1
+      while (j < lines.length && !isTableLine(lines[j]) && !isImageStart(lines[j]) && isImageContentLine(lines[j])) {
+        j++
+      }
+      flushText(i)
+      blocks.push({ type: 'image_desc', lines: lines.slice(i, j), startLine: i, imageIndex: imgIdx })
+      i = j
+      textStart = j
+    } else {
+      i++
+    }
+  }
+  flushText(lines.length)
+  return blocks
 }
 
 // ============================================================================
@@ -390,32 +463,63 @@ export default function RequirementDetail() {
   const reqData = srr?.requirement || {}
   const flows = srr?.flows || {}
 
-  /** 解析原始文本为文件条目列表（支持多文件合并格式 */
-  function parseFileEntries(): { filename: string; source_type: string; text: string }[] {
-    if (!detail.raw_text) return []
-    const isMulti = normalizeSourceType(detail.source_type) === 'multi'
-    if (!isMulti) {
-      const st = normalizeSourceType(detail.source_type)
-      return [{
-        filename: `source.${st}`,
-        source_type: st,
-        text: detail.raw_text,
-      }]
-    }
-    const entries: { filename: string; source_type: string; text: string }[] = []
-    const parts = detail.raw_text.split(/(?=【文档：)/)
-    for (const part of parts) {
-      const headerMatch = part.match(/^【文档：(.*?)】\n?/)
-      if (!headerMatch) {
-        if (entries.length > 0) entries[entries.length - 1].text += '\n' + part
-        continue
+  /** 解析原始文本为文件条目列表（支持多文件合并格式 + 补充文件） */
+  function parseFileEntries(): { filename: string; source_type: string; text: string; is_supplementary?: boolean }[] {
+    const entries: { filename: string; source_type: string; text: string; is_supplementary?: boolean }[] = []
+
+    // 1. 解析原始文件内容
+    if (detail.raw_text) {
+      const isMulti = normalizeSourceType(detail.source_type) === 'multi'
+      if (!isMulti) {
+        const st = normalizeSourceType(detail.source_type)
+        entries.push({
+          filename: `source.${st}`,
+          source_type: st,
+          text: detail.raw_text,
+        })
+      } else {
+        const parts = detail.raw_text.split(/(?=【文档：)/)
+        for (const part of parts) {
+          const headerMatch = part.match(/^【文档：(.*?)】\n?/)
+          if (!headerMatch) {
+            if (entries.length > 0) entries[entries.length - 1].text += '\n' + part
+            continue
+          }
+          const filename = headerMatch[1]
+          const ext = filename.toLowerCase().split('.').pop() || 'txt'
+          const sourceType = normalizeSourceType(ext)
+          const text = part.slice(headerMatch[0].length).replace(/^\n---\n\n?/, '').trim()
+          entries.push({ filename, source_type: sourceType, text })
+        }
       }
-      const filename = headerMatch[1]
-      const ext = filename.toLowerCase().split('.').pop() || 'txt'
-      const sourceType = normalizeSourceType(ext)
-      const text = part.slice(headerMatch[0].length).replace(/^\n---\n\n?/, '').trim()
-      entries.push({ filename, source_type: sourceType, text })
     }
+
+    // 2. 追加补充文件内容（v2.17: 补充文件不替代原始文件，两者都可见）
+    if (detail.supplementary_text && detail.supplementary_text.trim()) {
+      const suppText = detail.supplementary_text
+      // 补充文件可能是多文件合并格式（--- 分隔），拆分展示
+      const suppParts = suppText.split(/\n\n---\n\n/)
+      if (suppParts.length > 1) {
+        suppParts.forEach((part, idx) => {
+          if (part.trim()) {
+            entries.push({
+              filename: `补充文件${idx + 1}.md`,
+              source_type: 'markdown',
+              text: part.trim(),
+              is_supplementary: true,
+            })
+          }
+        })
+      } else {
+        entries.push({
+          filename: '补充文件.md',
+          source_type: 'markdown',
+          text: suppText.trim(),
+          is_supplementary: true,
+        })
+      }
+    }
+
     return entries
   }
 
@@ -673,7 +777,7 @@ export default function RequirementDetail() {
   // 渲染：原始文本（Markdown / Word / 纯文本，支持多文件切换）
   // ==========================================================================
   function renderRawText() {
-    if (!detail.raw_text) {
+    if (!detail.raw_text && !detail.supplementary_text) {
       return (
         <div className="text-center py-12">
           <FileText className="w-12 h-12 mx-auto mb-3 text-slate-300" />
@@ -694,6 +798,7 @@ export default function RequirementDetail() {
 
     const isMarkdown = entry.source_type === 'markdown'
     const isDocx = entry.source_type === 'docx'
+    const isSupplementary = entry.is_supplementary
 
     return (
       <div>
@@ -706,14 +811,18 @@ export default function RequirementDetail() {
                 onClick={() => { setSelectedFileIdx(i) }}
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all duration-150 ${
                   i === selectedFileIdx
-                    ? 'bg-primary-50 border-primary-300 text-primary-700 shadow-sm'
+                    ? f.is_supplementary
+                      ? 'bg-amber-50 border-amber-300 text-amber-700 shadow-sm'
+                      : 'bg-primary-50 border-primary-300 text-primary-700 shadow-sm'
                     : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-700'
                 }`}
               >
-                {f.source_type === 'markdown' ? <FileCode className="w-3.5 h-3.5" /> :
+                {f.is_supplementary ? <FilePlus className="w-3.5 h-3.5" /> :
+                 f.source_type === 'markdown' ? <FileCode className="w-3.5 h-3.5" /> :
                  f.source_type === 'docx' ? <FileType className="w-3.5 h-3.5" /> :
                  <FileText className="w-3.5 h-3.5" />}
                 {f.filename}
+                {f.is_supplementary && <span className="text-amber-500 text-[10px]">补充</span>}
               </button>
             ))}
           </div>
@@ -721,7 +830,11 @@ export default function RequirementDetail() {
 
         {/* 当前文件来源标识 */}
         <div className="flex items-center gap-2 mb-4 px-1">
-          {isMarkdown ? (
+          {isSupplementary ? (
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 text-amber-700 rounded-full text-xs font-medium">
+              <FilePlus className="w-3.5 h-3.5" /> 补充文件
+            </span>
+          ) : isMarkdown ? (
             <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-50 text-blue-700 rounded-full text-xs font-medium">
               <FileCode className="w-3.5 h-3.5" /> Markdown
             </span>
@@ -787,20 +900,118 @@ export default function RequirementDetail() {
             </ReactMarkdown>
           </div>
         ) : (
-          /* Word / 纯文本 — 带行号格式展示 */
+          /* Word / 纯文本 — 统一两栏布局（行号列 + 内容列），表格渲染为 HTML table，图片描述折叠 */
           <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
-            <div className="flex text-sm leading-relaxed">
-              {/* 行号侧栏 */}
-              <div className="select-none py-4 pl-3 pr-2 text-right text-xs text-slate-300 bg-slate-50 border-r border-slate-200 min-w-[3rem] font-mono">
-                {entry.text.split('\n').map((_, i) => (
-                  <div key={i}>{i + 1}</div>
-                ))}
-              </div>
-              {/* 文本内容 */}
-              <div className="flex-1 py-4 px-4 whitespace-pre-wrap text-sm text-slate-700 leading-relaxed font-sans">
-                {entry.text}
-              </div>
-            </div>
+            {(() => {
+              const imageMap = new Map<number, string>()
+              ;(detail.raw_images || []).forEach(img => imageMap.set(img.index, img.data_url))
+              const blocks = splitTextIntoBlocks(entry.text)
+
+              // 公共行号列组件
+              const LineNumberCol = ({ start, end }: { start: number; end?: number }) => (
+                <div className="select-none py-3 pl-3 pr-2 text-right text-xs text-slate-300 bg-slate-50 border-r border-slate-200 min-w-[3rem] font-mono flex flex-col justify-start">
+                  <div>{start + 1}</div>
+                  {end != null && end > start + 1 && (
+                    <>
+                      <div className="text-slate-200 leading-tight">{'\u22EE'}</div>
+                      <div>{end}</div>
+                    </>
+                  )}
+                </div>
+              )
+
+              return (
+                <div className="text-sm leading-relaxed">
+                  {blocks.map((block, bi) => {
+                    if (block.type === 'table') {
+                      // 表格块：两栏布局，行号列显示行号范围，内容列渲染 HTML 表格
+                      return (
+                        <div key={bi} className="flex text-sm leading-relaxed border-t border-slate-100 first:border-t-0">
+                          <LineNumberCol start={block.startLine} end={block.startLine + block.lineCount} />
+                          <div className="flex-1 py-2 px-4 overflow-x-auto">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              rehypePlugins={[rehypeRaw]}
+                              components={{
+                                table: ({ children }) => (
+                                  <div className="overflow-x-auto rounded-lg border border-slate-200 my-1">
+                                    <table className="w-full text-sm divide-y divide-slate-200">{children}</table>
+                                  </div>
+                                ),
+                                th: ({ children, ...props }: any) => (
+                                  <th {...props} className="px-3 py-2 text-left text-xs text-slate-500 font-semibold border-b border-slate-200 bg-slate-50">
+                                    {children}
+                                  </th>
+                                ),
+                                td: ({ children, ...props }: any) => (
+                                  <td {...props} className="px-3 py-2 border-b border-slate-100 text-slate-700">
+                                    {children}
+                                  </td>
+                                ),
+                                tr: ({ children, ...props }: any) => (
+                                  <tr {...props} className="even:bg-slate-50/50">{children}</tr>
+                                ),
+                              }}
+                            >
+                              {block.content}
+                            </ReactMarkdown>
+                          </div>
+                        </div>
+                      )
+                    }
+
+                    if (block.type === 'image_desc') {
+                      // 图片描述块：两栏布局，行号列显示行号，内容列显示原始图片 + 折叠的多模态描述
+                      const imgIdx = block.imageIndex
+                      const imgUrl = imgIdx != null ? imageMap.get(imgIdx) : undefined
+                      const descLines = block.lines
+                      return (
+                        <div key={bi} className="flex text-sm leading-relaxed border-t border-slate-100">
+                          <LineNumberCol start={block.startLine} end={block.startLine + descLines.length} />
+                          <div className="flex-1 py-2 px-4 space-y-2">
+                            {/* 原始图片（始终展示） */}
+                            {imgUrl && (
+                              <div className="block p-2 bg-slate-50 border border-slate-200 rounded-lg">
+                                <div className="text-xs text-slate-400 mb-1 flex items-center gap-1">
+                                  <ImageIcon className="w-3.5 h-3.5" /> 原始图片（图片{imgIdx}）
+                                </div>
+                                <img
+                                  src={imgUrl}
+                                  alt={`原始图片${imgIdx}`}
+                                  className="max-w-full rounded border border-slate-200"
+                                  style={{ maxHeight: '400px' }}
+                                />
+                              </div>
+                            )}
+                            {/* 多模态识别内容（折叠展示） */}
+                            <details className="group bg-blue-50/40 border border-blue-200 rounded-lg overflow-hidden">
+                              <summary className="cursor-pointer list-none flex items-center gap-2 px-3 py-2 text-xs font-medium text-blue-700 select-none hover:bg-blue-50/70">
+                                <span className="inline-block transition-transform group-open:rotate-90 text-blue-400">{'\u25B6'}</span>
+                                <span>{descLines[0]?.replace(/^【|\】$/g, '') || `图片${imgIdx ?? ''}描述`}</span>
+                                <span className="text-blue-400 font-normal">（{descLines.length} 行，点击{'\u5C55'}开）</span>
+                              </summary>
+                              <pre className="px-3 pb-3 pt-1 text-xs text-slate-600 whitespace-pre-wrap font-sans leading-relaxed border-t border-blue-100 bg-white/60">
+                                {descLines.join('\n')}
+                              </pre>
+                            </details>
+                          </div>
+                        </div>
+                      )
+                    }
+
+                    // 文本块：行号列 + 纯文本
+                    return (
+                      <div key={bi} className="flex text-sm leading-relaxed border-t border-slate-100 first:border-t-0">
+                        <LineNumberCol start={block.startLine} />
+                        <div className="flex-1 py-3 px-4 whitespace-pre-wrap text-sm text-slate-700 leading-relaxed font-sans">
+                          {block.lines.join('\n')}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            })()}
           </div>
         )}
       </div>

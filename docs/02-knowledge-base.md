@@ -1894,3 +1894,126 @@ AUTO_ADD_FIRST_REQ = True  # 第一个需求完成后自动入库（默认 True�
 6. **大规模检索优化分阶段实施**：MVP 即用 Milvus 单机 → 10 万条启用分区/分片 → 1000 万条启用 Milvus 集群（详见 §9）
 7. **入库 Pipeline 支持断点续传**：大批量入库时可能中断，需支持从断点恢复（详见 §10.3）
 8. **异步双写 + 定期对账**：生产环境用异步双写降低延迟，每小时对账修复不一致（详见 §9.7）
+
+---
+
+## 12. v2.18 实现更新（知识库与需求分析联动）
+
+> 本节记录 v2.18 版本中知识库相关的实际实现变更，重点补充 ClarifyAgent 与 KB 的交互细节。
+
+### 12.1 KB 查询全链路修复
+
+**问题**：v2.18 之前 ClarifyAgent 因 `import time` 缺失导致 `NameError`，整个 `clarify()` 在第一步就崩溃，KB 查询完全跳过，但任务仍标记为 `completed`，用户无感知。
+
+**修复链路**：
+
+| 环节 | 问题 | 修复 |
+|------|------|------|
+| `import time` | 13 处使用 `time.time()` 但未导入 | 添加导入 |
+| 日志格式 | loguru 不支持 `%d`/`%s` | 6 处改为 `{}` |
+| `_generate_kb_queries` | LLM 失败导致无查询 | 模板降级 fallback |
+| `_verify_kb_answers` | 答案校验异常吞错 | 保留原始答案 |
+| `duration_ms` | 使用总耗时 | per-query 计时 |
+| `existing_source` | 默认值阻止 KB 覆盖 | 未标记视为 `LLM_INFERRED` |
+
+### 12.2 KB 查询流程（ClarifyAgent 内部）
+
+```
+ClarifyAgent.clarify(srr, session)
+  │
+  ├─① KB 状态检查
+  │   ├─ _safe_is_empty() → kb_empty
+  │   ├─ _safe_is_product_first() → product_first
+  │   └─ cold_start = kb_empty OR product_first
+  │
+  ├─② 规则检测
+  │   ├─ _check_completeness(srr) → critical_missing / important_missing
+  │   └─ _detect_ambiguity(srr) → ambiguities
+  │
+  ├─②b 需求模式库匹配
+  │   └─ pattern_matcher.match_pattern() → missing_dims
+  │
+  ├─③a 全局相似需求检索
+  │   └─ _search_similar_requirements(srr) → global_similar
+  │
+  ├─③b PG 关系增强
+  │   └─ _enrich_with_pg(session, srr, global_similar) → pg_context
+  │
+  ├─③c KB 查询生成（LLM 动态）
+  │   └─ _generate_kb_queries(srr, completeness) → kb_questions
+  │       └─ 失败时降级为模板查询
+  │
+  ├─④ KB 问答
+  │   └─ _query_kb_for_answers(session, kb_questions) → kb_answers
+  │       ├─ 向量检索（Milvus）
+  │       ├─ PG 结构化查询
+  │       └─ _verify_kb_answers() LLM 校验
+  │
+  ├─⑤ 应用 KB 答案
+  │   └─ _apply_kb_answers(augmented_srr, kb_answers)
+  │       └─ 字段冲突处理：USER_INPUT > HUMAN_ANSWERED > KB_INFERRED > PATTERN_DEFAULT > LLM_INFERRED
+  │
+  ├─⑥ KB 访问日志
+  │   └─ kb_access_log[]（供前端展示）
+  │
+  ├─⑦ 未答问题转人工
+  │   └─ _refine_unresolved_to_questions() → questions[]
+  │
+  └─⑧ 返回
+      {status, questions, auto_augmentations, quality_report, kb_status, kb_access_log}
+```
+
+### 12.3 KB 字段冲突优先级（实际实现）
+
+```
+USER_INPUT(0) > HUMAN_ANSWERED(1) > KB_INFERRED(2) > PATTERN_DEFAULT(3) > LLM_INFERRED(4)
+```
+
+- **USER_INPUT**：用户原文中明确写出的字段值（最高优先级）
+- **HUMAN_ANSWERED**：用户通过澄清面板回答的字段值
+- **KB_INFERRED**：从知识库检索并校验后补全的字段值
+- **PATTERN_DEFAULT**：需求模式库的默认值
+- **LLM_INFERRED**：LLM 推断的字段值（最低优先级，可被 KB 覆盖）
+
+**实现**：`FIELD_PRIORITY` 字典 + `_apply_kb_answers()` 中的冲突检测逻辑。KB 答案仅在字段来源优先级低于 `KB_INFERRED` 时才覆盖。
+
+### 12.4 KB 访问日志（前端展示）
+
+每次 KB 查询生成一条日志记录，存储在 `srr_json._kb_query_logs` 中：
+
+```json
+{
+  "action": "kb_query",
+  "type": "kb_query | kb_unresolved",
+  "label": "KB 问答 | KB 未解决",
+  "query": "该功能在历史需求中是否有权限校验规则？",
+  "answer": "REQ-001 中定义了 RBAC 权限校验...",
+  "sources": [{"req_id": "REQ-001", "title": "...", "score": 0.89}],
+  "answered": true,
+  "auto_filled": true,
+  "result_count": 3,
+  "duration_ms": 245
+}
+```
+
+前端 `RequirementDetail.tsx` 的「知识库查询」标签页展示这些日志，用户可查看 KB 查询的全过程。
+
+### 12.5 冷启动模式
+
+| 条件 | 阈值 | 行为 |
+|------|------|------|
+| KB 为空（`kb_empty=True`） | — | ClarifyAgent 切换深度人工澄清 |
+| 产品首个需求（`product_first=True`） | — | 同上 |
+| QualityGate 阈值 | `DEFAULT=0.75` → `COLD_START=0.60` | 动态降低避免死锁 |
+
+**实现**：`QualityGate._resolve_pass_score(srr, clarify_result)` 根据 `kb_status.kb_empty` 和 `kb_status.product_first_requirement` 判断是否冷启动。
+
+### 12.6 KB 专属 LLM 供应商
+
+知识库相关 LLM 调用（KB 查询生成、答案校验等）可使用独立的 LLM 供应商，与主 LLM 解耦：
+
+- `KBSetting` 表存储 `kb_llm_provider` 配置
+- `GET/PUT /api/knowledge/kb-llm` 端点管理
+- `ClarifyAgent.clarify()` 启动时读取 `kb_provider`，KB 相关调用使用该供应商
+- 失败时回退全局主 LLM
+

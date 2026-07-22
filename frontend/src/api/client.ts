@@ -257,12 +257,31 @@ export const requirements = {
     URL.revokeObjectURL(url)
     return { filename, size: blob.size }
   },
-  /** 补充信息后重新生成需求分析（异步任务模式，返回 task_id 供轮询） */
-  regenerate: (id: string, extraNotes: string) =>
-    request<{ task_id: string; req_id: string; status: string; previous_title: string }>(
-      `/requirements/${id}/regenerate`,
-      { method: 'POST', body: JSON.stringify({ extra_notes: extraNotes }) },
-    ),
+  /** 补充信息后重新生成需求分析（异步任务模式，返回 task_id 供轮询）
+   *  v2.17: 支持上传新需求文件（可选），以新文件内容为准重新分析
+   *  后端统一使用 multipart/form-data（Form + File），前端统一用 FormData
+   */
+  regenerate: (id: string, extraNotes: string, files?: File[]) => {
+    const form = new FormData()
+    form.append('extra_notes', extraNotes || '')
+    if (files && files.length > 0) {
+      files.forEach(f => form.append('files', f))
+    }
+    const headers: Record<string, string> = {}
+    const token = getToken()
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    return fetch(`${BASE}/requirements/${id}/regenerate`, {
+      method: 'POST',
+      body: form,
+      headers,
+    }).then(async res => {
+      if (res.status === 401) { forceLogout(); throw new Error('登录已过期，请重新登录') }
+      const json = await res.json()
+      if (!res.ok && json.detail) throw new Error(json.detail)
+      if (json.success === false) throw new Error(json.message || '请求失败')
+      return json as { task_id: string; req_id: string; status: string; previous_title: string }
+    })
+  },
   /** v1.6: 确认需求完成（pending_review → confirmed），允许生成测试用例 */
   confirm: (id: string) =>
     request<{ req_id: string; status: string }>(`/requirements/${id}/confirm`, { method: 'POST' }),
@@ -503,6 +522,14 @@ export const knowledge = {
   /** 设置知识库专属 LLM 供应商 */
   setKbLlm: (provider: string) =>
     request<{ provider: string }>('/knowledge/kb-llm', {
+      method: 'PUT',
+      body: JSON.stringify({ provider }),
+    }),
+  /** 获取多模态 LLM 配置（图片/流程图识别专用） */
+  getVisionLlm: () => request<{ provider: string; providers: Array<{ provider: string; provider_label: string; model: string; is_primary: boolean }> }>('/knowledge/vision-llm'),
+  /** 设置多模态 LLM 供应商 */
+  setVisionLlm: (provider: string) =>
+    request<{ provider: string }>('/knowledge/vision-llm', {
       method: 'PUT',
       body: JSON.stringify({ provider }),
     }),
