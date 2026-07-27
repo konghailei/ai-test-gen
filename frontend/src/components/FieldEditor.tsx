@@ -34,6 +34,18 @@ const FIELD_TYPE_OPTIONS = [
   { value: 'object', label: '对象' },
 ]
 
+// v2.22: 功能点子 SRR 新增字段的下拉选项
+const TEST_POINT_CATEGORY_OPTIONS = [
+  { value: 'functional', label: '功能' }, { value: 'boundary', label: '边界' },
+  { value: 'exception', label: '异常' }, { value: 'security', label: '安全' },
+  { value: 'performance', label: '性能' },
+]
+const ASSUMPTION_TYPE_OPTIONS = [
+  { value: 'assumption', label: '假设' },
+  { value: 'constraint', label: '约束' },
+  { value: 'out_of_scope', label: '范围外' },
+]
+
 /**
  * 通用 SRR 字段编辑器。
  *
@@ -198,6 +210,34 @@ function getColumns(fieldPath: string): any[] {
       { key: 'description', label: '验收描述', placeholder: '用户可正常登录系统', flex: 2 },
     ]
   }
+  // v2.22: 功能点子 SRR 新增字段
+  if (base === 'test_points_hint') {
+    return [
+      { key: 'category', label: '类别', type: 'select', options: TEST_POINT_CATEGORY_OPTIONS, flex: 0.7 },
+      { key: 'point', label: '测试点', placeholder: '正确账号+正确密码→登录成功', flex: 2.5 },
+    ]
+  }
+  if (base === 'ui_rules') {
+    return [
+      { key: 'element', label: '元素', placeholder: '密码输入框', flex: 0.8 },
+      { key: 'behavior', label: '行为', placeholder: '默认脱敏显示', flex: 1.5 },
+      { key: 'condition', label: '条件', placeholder: '始终', flex: 1 },
+    ]
+  }
+  if (base === 'data_model') {
+    return [
+      { key: 'entity_name', label: '实体名', placeholder: 'User', flex: 0.8 },
+      { key: 'description', label: '描述', placeholder: '用户实体', flex: 1.2 },
+      { key: 'fields', label: '字段', placeholder: 'id, name, email', flex: 1.5 },
+      { key: 'relationships', label: '关系', placeholder: 'has_many: Order', flex: 1.2 },
+    ]
+  }
+  if (base === 'assumptions') {
+    return [
+      { key: 'content', label: '内容', placeholder: '假设用户账号体系已存在', flex: 2.5 },
+      { key: 'type', label: '类型', type: 'select', options: ASSUMPTION_TYPE_OPTIONS, flex: 0.8 },
+    ]
+  }
   return []  // fallback
 }
 
@@ -214,6 +254,10 @@ function getPlaceholder(fieldPath: string, valueType: string): string {
     case 'business_rules': return 'ID|类型|规则\nBR-001|校验|密码长度≥8位'
     case 'data_constraints': return '字段|类型|必填|约束\nusername|string|必填|2-20字符'
     case 'acceptance_criteria': return 'ID|类型|描述\nAC-001|功能|用户可正常登录'
+    case 'test_points_hint': return '类别|测试点\nfunctional|正确账号+正确密码→登录成功\nboundary|密码长度边界（6位/5位）'
+    case 'ui_rules': return '元素|行为|条件\n密码输入框|默认脱敏显示|始终'
+    case 'data_model': return '实体名|描述|字段|关系\nUser|用户实体|id,name,email|has_many: Order'
+    case 'assumptions': return '内容|类型\n假设用户账号体系已存在|assumption'
     default: return '每行一条记录，用 | 和 → 分隔字段'
   }
 }
@@ -300,6 +344,30 @@ function serializeObjectArray(fieldPath: string, items: any[]): string {
         : `${a.id || ''}|${a.type || ''}|${a.description || ''}`
     ).join('\n')
   }
+  // v2.22: test_points_hint: category|point
+  if (base === 'test_points_hint') {
+    return items.map((t: any) =>
+      `${t.category || ''}|${t.point || ''}`
+    ).join('\n')
+  }
+  // v2.22: ui_rules: element|behavior|condition
+  if (base === 'ui_rules') {
+    return items.map((u: any) =>
+      `${u.element || ''}|${u.behavior || ''}|${u.condition || ''}`
+    ).join('\n')
+  }
+  // v2.22: data_model: entity_name|description|fields|relationships
+  if (base === 'data_model') {
+    return items.map((d: any) =>
+      `${d.entity_name || ''}|${d.description || ''}|${d.fields || (Array.isArray(d.fields) ? d.fields.join(',') : '')}|${d.relationships || (Array.isArray(d.relationships) ? d.relationships.join(',') : '')}`
+    ).join('\n')
+  }
+  // v2.22: assumptions: content|type
+  if (base === 'assumptions') {
+    return items.map((a: any) =>
+      `${a.content || ''}|${a.type || ''}`
+    ).join('\n')
+  }
   // fallback: JSON for unknown object arrays
   return JSON.stringify(items, null, 2)
 }
@@ -356,6 +424,39 @@ function parseObjectArray(fieldPath: string, text: string): any[] {
     return lines.map((line) => {
       const parts = line.split('|').map(s => s.trim())
       return { id: parts[0] || '', type: parts[1] || '', description: parts[2] || parts[0] }
+    })
+  }
+  // v2.22: test_points_hint: category|point
+  if (base === 'test_points_hint') {
+    return lines.map((line) => {
+      const parts = line.split('|').map(s => s.trim())
+      return { category: parts[0] || '', point: parts[1] || '' }
+    })
+  }
+  // v2.22: ui_rules: element|behavior|condition
+  if (base === 'ui_rules') {
+    return lines.map((line) => {
+      const parts = line.split('|').map(s => s.trim())
+      return { element: parts[0] || '', behavior: parts[1] || '', condition: parts[2] || '' }
+    })
+  }
+  // v2.22: data_model: entity_name|description|fields|relationships
+  if (base === 'data_model') {
+    return lines.map((line) => {
+      const parts = line.split('|').map(s => s.trim())
+      return {
+        entity_name: parts[0] || '',
+        description: parts[1] || '',
+        fields: parts[2] || '',
+        relationships: parts[3] || '',
+      }
+    })
+  }
+  // v2.22: assumptions: content|type
+  if (base === 'assumptions') {
+    return lines.map((line) => {
+      const parts = line.split('|').map(s => s.trim())
+      return { content: parts[0] || '', type: parts[1] || 'assumption' }
     })
   }
   // fallback: try JSON

@@ -32,10 +32,11 @@ from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_admin, require_write, get_current_user, CurrentUser
+from app.core.operation_logger import log_operation
 from app.agents.clarify_agent import clarify_agent
 from app.agents.impact_agent import ImpactAnalysisAgent
 from app.utils.id_gen import gen_requirement_id, gen_task_id
@@ -58,53 +59,179 @@ from app.utils.logger import logger
 # v1.5.1: FP 自动入库辅助函数
 # ============================================================================
 
-# v2.18: interaction_srr 独有的顶层键（跨 FP 内容），合并时只追加这些字段
+# v2.32: interaction_srr 独有的跨 FP 子字段（合并到 cross_fp_interactions 嵌套结构）
 # 符合 SSOT 原则：总 SRR 的 requirement/flows 等字段不被 interaction_srr 覆盖
-_INTERACTION_ONLY_KEYS: set[str] = {
+_INTERACTION_SUBKEYS: tuple[str, ...] = (
     "cross_fp_flows",
     "shared_business_rules",
     "fp_contracts",
     "global_constraints",
-}
+)
+
+
+def _normalize_cross_fp_flow(item: dict) -> dict:
+    """归一化 cross_fp_flows 条目，兼容 LLM 输出字段名差异。
+
+    LLM 可能输出 from/to/contract 或 source_fp/target_fp/description，统一为后者。
+    """
+    if not isinstance(item, dict):
+        return {}
+    return {
+        "name": item.get("name", "") or "",
+        "source_fp": item.get("source_fp") or item.get("from", "") or "",
+        "target_fp": item.get("target_fp") or item.get("to", "") or "",
+        "interaction_type": item.get("interaction_type", "sequence") or "sequence",
+        "description": item.get("description") or item.get("contract", "") or "",
+    }
+
+
+def _normalize_shared_business_rule(item: dict) -> dict:
+    """归一化 shared_business_rules 条目，兼容 applies_to / applied_fps。"""
+    if not isinstance(item, dict):
+        return {}
+    return {
+        "id": item.get("id", "") or "",
+        "rule": item.get("rule", "") or "",
+        "applied_fps": item.get("applied_fps") or item.get("applies_to", []) or [],
+    }
+
+
+def _normalize_fp_contract(item: dict) -> dict:
+    """归一化 fp_contracts 条目，兼容 fp_a/fp_b/contract 与 provider_fp/consumer_fp/contract_desc。"""
+    if not isinstance(item, dict):
+        return {}
+    return {
+        "provider_fp": item.get("provider_fp") or item.get("fp_a", "") or "",
+        "consumer_fp": item.get("consumer_fp") or item.get("fp_b", "") or "",
+        "data_fields": item.get("data_fields", []) or [],
+        "contract_desc": item.get("contract_desc") or item.get("contract", "") or "",
+    }
+
+
+def _normalize_global_constraint(item: Any) -> str:
+    """归一化 global_constraints 条目为字符串。
+
+    LLM 可能输出字符串或 dict（如 {id, field, constraints}）。
+    """
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        # 拼接 field + constraints，避免信息丢失
+        field = item.get("field", "") or ""
+        constraints = item.get("constraints", "") or item.get("rule", "") or ""
+        desc = item.get("description", "") or ""
+        parts = [p for p in [field, constraints, desc] if p]
+        return "：".join(parts) if parts else ""
+    return str(item).strip()
 
 
 def _merge_interaction_srr(base_srr: dict, interaction_srr: dict) -> dict:
-    """将 interaction_srr 选择性合并到 base_srr（符合 SSOT 原则）。
+    """将 interaction_srr 选择性合并到 base_srr 的 cross_fp_interactions 嵌套结构（符合 SSOT 原则）。
 
-    合并规则（v2.18 统一所有流程的 interaction_srr 处理）：
-        1. interaction_srr 的独有键（cross_fp_flows / shared_business_rules /
-           fp_contracts / global_constraints）→ 直接写入 base_srr
-        2. acceptance_criteria → 追加跨 FP 的 AC，不覆盖原有 AC（去重）
-        3. requirement / flows / business_rules / data_constraints 等 → 不覆盖
-           （这些字段已在总 SRR 中定义，避免数据丢失）
+    v2.32 重构：interaction_srr 的跨 FP 子字段不再写入 base_srr 顶层，
+    而是合并到 base_srr["cross_fp_interactions"][子字段] 中，并做去重。
+    总 SRR 已移除 acceptance_criteria 顶层字段，跨 FP AC 转为 global_constraints 字符串。
+
+    合并规则：
+        1. cross_fp_flows / shared_business_rules / fp_contracts → 追加到
+           cross_fp_interactions 对应子字段（按归一化后的 JSON 字符串去重）
+        2. global_constraints → 追加为字符串列表（按文本去重）
+        3. acceptance_criteria → 转换为字符串后追加到 global_constraints（跨 FP AC 视为全局约束）
+        4. requirement / flows / business_rules 等 → 不覆盖（SSOT 原则）
 
     Args:
         base_srr: 总 SRR（含 requirement/flows/business_rules 等完整字段）
         interaction_srr: 交互层 SRR（含 cross_fp_flows 等跨 FP 内容）
 
     Returns:
-        dict: 合并后的 SRR（base_srr 的副本 + interaction_srr 的独有字段）
+        dict: 合并后的 SRR（base_srr 的副本 + interaction_srr 的跨 FP 内容合并到 cross_fp_interactions）
     """
+    import json as _json
+
     merged = dict(base_srr)
 
+    # 确保 cross_fp_interactions 存在且为 dict
+    cfi = merged.get("cross_fp_interactions")
+    if not isinstance(cfi, dict):
+        cfi = {}
+    cfi.setdefault("cross_fp_flows", [])
+    cfi.setdefault("shared_business_rules", [])
+    cfi.setdefault("fp_contracts", [])
+    cfi.setdefault("global_constraints", [])
+    # 防御：确保子字段是 list
+    for sub in _INTERACTION_SUBKEYS:
+        if not isinstance(cfi.get(sub), list):
+            cfi[sub] = []
+
     for key, value in interaction_srr.items():
-        if key in _INTERACTION_ONLY_KEYS:
-            # 独有键：直接写入
-            merged[key] = value
-        elif key == "acceptance_criteria" and isinstance(value, list):
-            # AC：追加跨 FP 的 AC，不覆盖原有 AC（按文本去重）
-            existing_ac = merged.get("acceptance_criteria", [])
-            if not isinstance(existing_ac, list):
-                existing_ac = []
-            existing_set = {str(ac).strip() for ac in existing_ac}
+        if not isinstance(value, list):
+            continue
+
+        if key == "cross_fp_flows":
+            existing = cfi["cross_fp_flows"]
+            seen = {_json.dumps(_normalize_cross_fp_flow(x), ensure_ascii=False, sort_keys=True)
+                    for x in existing if isinstance(x, dict)}
+            for item in value:
+                norm = _normalize_cross_fp_flow(item)
+                if not norm.get("source_fp") and not norm.get("target_fp"):
+                    continue
+                sig = _json.dumps(norm, ensure_ascii=False, sort_keys=True)
+                if sig not in seen:
+                    existing.append(norm)
+                    seen.add(sig)
+
+        elif key == "shared_business_rules":
+            existing = cfi["shared_business_rules"]
+            seen = {_json.dumps(_normalize_shared_business_rule(x), ensure_ascii=False, sort_keys=True)
+                    for x in existing if isinstance(x, dict)}
+            for item in value:
+                norm = _normalize_shared_business_rule(item)
+                if not norm.get("rule"):
+                    continue
+                sig = _json.dumps(norm, ensure_ascii=False, sort_keys=True)
+                if sig not in seen:
+                    existing.append(norm)
+                    seen.add(sig)
+
+        elif key == "fp_contracts":
+            existing = cfi["fp_contracts"]
+            seen = {_json.dumps(_normalize_fp_contract(x), ensure_ascii=False, sort_keys=True)
+                    for x in existing if isinstance(x, dict)}
+            for item in value:
+                norm = _normalize_fp_contract(item)
+                if not norm.get("provider_fp") and not norm.get("consumer_fp"):
+                    continue
+                sig = _json.dumps(norm, ensure_ascii=False, sort_keys=True)
+                if sig not in seen:
+                    existing.append(norm)
+                    seen.add(sig)
+
+        elif key == "global_constraints":
+            existing = cfi["global_constraints"]
+            seen = {str(x).strip() for x in existing}
+            for item in value:
+                norm = _normalize_global_constraint(item)
+                if norm and norm not in seen:
+                    existing.append(norm)
+                    seen.add(norm)
+
+        elif key == "acceptance_criteria":
+            # v2.32: 总 SRR 已移除 acceptance_criteria 顶层字段
+            # 跨 FP AC 转换为字符串后追加到 global_constraints（视为全局约束）
+            existing = cfi["global_constraints"]
+            seen = {str(x).strip() for x in existing}
             for ac in value:
-                ac_str = str(ac).strip()
-                if ac_str and ac_str not in existing_set:
-                    existing_ac.append(ac)
-                    existing_set.add(ac_str)
-            merged["acceptance_criteria"] = existing_ac
+                if isinstance(ac, dict):
+                    desc = ac.get("description", "") or ac.get("rule", "") or ""
+                else:
+                    desc = str(ac)
+                desc = desc.strip()
+                if desc and desc not in seen:
+                    existing.append(f"[AC] {desc}")
+                    seen.add(f"[AC] {desc}")
         # 其他键（requirement/flows/business_rules/data_constraints 等）：不覆盖
 
+    merged["cross_fp_interactions"] = cfi
     return merged
 
 
@@ -153,11 +280,126 @@ async def _save_fps_to_db(
     return saved
 
 
-async def _update_fp_index_in_srr(session: AsyncSession, req_id: str) -> None:
-    """更新总 SRR 中的 fp_index 字段（FP 引用列表，符合 SSOT 追溯原则）。
+async def _bump_req_revision(session: AsyncSession, req_id: str) -> None:
+    """v2.33: 自增需求的 revision 字段，用于多人协作冲突检测。
 
-    从 functional_points 表查询当前需求的所有 FP，构建 fp_index 写入 srr_json。
-    fp_index 只包含 FP 的引用信息（id/name/fp_type/status），不包含 FP 内部 SRR 内容。
+    在所有修改 srr_json 的地方调用此函数，让前端轮询发现 revision 变化时提示刷新。
+
+    Args:
+        session: 数据库会话
+        req_id: 需求 ID
+    """
+    from sqlalchemy import update as sa_update
+    await session.execute(
+        sa_update(Requirement).where(Requirement.id == req_id).values(
+            revision=Requirement.revision + 1,
+        )
+    )
+
+
+async def _update_cross_fp_interactions_on_merge(
+    session: AsyncSession, req_id: str, old_names: set[str], new_name: str,
+) -> None:
+    """v2.33: 功能点合并后增量更新 cross_fp_interactions 中的旧 FP 名称引用。
+
+    将 cross_fp_interactions 的四个子字段中引用的旧 FP 名称替换为合并后的新名称：
+    - cross_fp_flows: source_fp / target_fp
+    - shared_business_rules: applied_fps[]
+    - fp_contracts: provider_fp / consumer_fp
+    - global_constraints: 不涉及（是文本约束，不引用 FP 名称）
+
+    Args:
+        session: 数据库会话
+        req_id: 需求 ID
+        old_names: 被合并的旧 FP 名称集合
+        new_name: 合并后的新 FP 名称
+    """
+    if not old_names or not new_name:
+        return
+
+    from sqlalchemy import select as sa_select, update as sa_update
+
+    result = await session.execute(
+        sa_select(Requirement.srr_json).where(Requirement.id == req_id)
+    )
+    req_row = result.first()
+    if not req_row or not req_row[0]:
+        return
+
+    srr_json = dict(req_row[0]) if isinstance(req_row[0], dict) else {}
+    cfi = srr_json.get("cross_fp_interactions")
+    if not isinstance(cfi, dict):
+        return
+
+    changed = False
+
+    # 1. cross_fp_flows: 替换 source_fp / target_fp
+    flows = cfi.get("cross_fp_flows")
+    if isinstance(flows, list):
+        for flow in flows:
+            if not isinstance(flow, dict):
+                continue
+            for key in ("source_fp", "target_fp"):
+                val = flow.get(key, "")
+                if val in old_names:
+                    flow[key] = new_name
+                    changed = True
+
+    # 2. shared_business_rules: 替换 applied_fps[]
+    shared_rules = cfi.get("shared_business_rules")
+    if isinstance(shared_rules, list):
+        for rule in shared_rules:
+            if not isinstance(rule, dict):
+                continue
+            applied = rule.get("applied_fps")
+            if isinstance(applied, list):
+                new_applied = []
+                for fp_name in applied:
+                    if fp_name in old_names:
+                        new_applied.append(new_name)
+                        changed = True
+                    else:
+                        new_applied.append(fp_name)
+                # 去重（合并后可能产生重复）
+                seen = set()
+                deduped = []
+                for name in new_applied:
+                    if name not in seen:
+                        seen.add(name)
+                        deduped.append(name)
+                if len(deduped) != len(new_applied):
+                    new_applied = deduped
+                rule["applied_fps"] = new_applied
+
+    # 3. fp_contracts: 替换 provider_fp / consumer_fp
+    contracts = cfi.get("fp_contracts")
+    if isinstance(contracts, list):
+        for contract in contracts:
+            if not isinstance(contract, dict):
+                continue
+            for key in ("provider_fp", "consumer_fp"):
+                val = contract.get(key, "")
+                if val in old_names:
+                    contract[key] = new_name
+                    changed = True
+
+    if changed:
+        srr_json["cross_fp_interactions"] = cfi
+        await session.execute(
+            sa_update(Requirement).where(Requirement.id == req_id).values(srr_json=srr_json)
+        )
+        logger.info(
+            "[FP-Merge] cross_fp_interactions 已增量更新: req_id={}, old_names={}, new_name={}",
+            req_id, old_names, new_name,
+        )
+
+
+async def _update_fp_index_in_srr(session: AsyncSession, req_id: str) -> None:
+    """更新总 SRR 中的 fp_index 和 fp_summary 字段（FP 引用列表 + FP 概要，符合 SSOT 追溯原则）。
+
+    从 functional_points 表查询当前需求的所有 FP，构建 fp_index 和 fp_summary 写入 srr_json。
+    - fp_index 只包含 FP 的引用信息（id/name/fp_type/status），不包含 FP 内部 SRR 内容。
+    - fp_summary 包含 FP 的概要信息（name/fp_type/priority/summary/module），由后端基于实际 FP 生成。
 
     Args:
         session: 数据库会话
@@ -166,7 +408,11 @@ async def _update_fp_index_in_srr(session: AsyncSession, req_id: str) -> None:
     from sqlalchemy import select as sa_select, update as sa_update
 
     result = await session.execute(
-        sa_select(FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.fp_type, FunctionalPoint.status)
+        sa_select(
+            FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.fp_type,
+            FunctionalPoint.status, FunctionalPoint.priority,
+            FunctionalPoint.srr_json, FunctionalPoint.module_id,
+        )
         .where(FunctionalPoint.requirement_id == req_id)
         .order_by(FunctionalPoint.created_at)
     )
@@ -177,7 +423,22 @@ async def _update_fp_index_in_srr(session: AsyncSession, req_id: str) -> None:
         for row in fp_rows
     ]
 
-    # 读取当前 srr_json，更新 fp_index 字段
+    # v2.22: 构建 fp_summary（基于实际入库的 FP，覆盖 LLM 首次输出的 fp_summary）
+    fp_summary = []
+    for row in fp_rows:
+        srr_json = row[5] if isinstance(row[5], dict) else {}
+        # summary 可能在 srr_json.summary 或 srr_json.requirement.summary
+        req_obj = srr_json.get("requirement", {})
+        summary_text = srr_json.get("summary", "") or (req_obj.get("summary", "") if isinstance(req_obj, dict) else "")
+        fp_summary.append({
+            "name": row[1] or "",
+            "fp_type": row[2] or "workflow",
+            "priority": row[4] or "P2",
+            "summary": summary_text or "",
+            "module": row[6] or "",
+        })
+
+    # 读取当前 srr_json，更新 fp_index 和 fp_summary 字段
     req_result = await session.execute(
         sa_select(Requirement.srr_json).where(Requirement.id == req_id)
     )
@@ -185,10 +446,13 @@ async def _update_fp_index_in_srr(session: AsyncSession, req_id: str) -> None:
     if req_row and req_row[0]:
         srr_json = dict(req_row[0]) if isinstance(req_row[0], dict) else {}
         srr_json["fp_index"] = fp_index
+        srr_json["fp_summary"] = fp_summary
         await session.execute(
             sa_update(Requirement).where(Requirement.id == req_id).values(srr_json=srr_json)
         )
-        logger.info("[FP-Index] 已更新需求 {} 的 fp_index: {} 个 FP", req_id, len(fp_index))
+        # v2.33: 自增 revision（FP 列表变化属于内容变更）
+        await _bump_req_revision(session, req_id)
+        logger.info("[FP-Index] 已更新需求 {} 的 fp_index + fp_summary: {} 个 FP", req_id, len(fp_index))
 
 
 async def _save_fp_dependencies(
@@ -575,6 +839,7 @@ router = APIRouter()
 async def upload_requirement(
     req: RequirementUploadRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """上传需求文本（异步任务模式，与文件上传统一）。
 
@@ -653,6 +918,12 @@ async def upload_requirement(
     ))
 
     logger.info("[API] raw_text 上传已派发异步分析: task_id={}, req_id={}", task_id, req_id)
+
+    await log_operation(
+        username=current_user.username, user_id=current_user.user_id,
+        action="upload_requirement", target_type="requirement", target_id=req_id,
+        detail={"title": req.title or "(自动提取)", "product_id": req.product_id or "PROD-DEFAULT"},
+    )
 
     return ApiResponse(
         success=True,
@@ -851,10 +1122,59 @@ async def upload_requirement_file(
 # ============================================================================
 
 async def _update_task(task_id: str, **fields) -> None:
-    """更新 AnalysisTask 记录（独立 session，供后台协程使用）。"""
+    """更新 AnalysisTask 记录（独立 session，供后台协程使用）。
+
+    v2.23: 自动追踪 phase_timings — 当 phase 变化或任务完成/失败/中断时，
+    自动记录阶段的开始/结束/耗时（ms），供前端展示每步操作用时。
+
+    v2.23.1 修复：当同一次调用同时设置新 phase 和终止 status 时，
+    需要关闭新开启的阶段（而非已关闭的旧阶段）。
+    """
     try:
         async with async_session() as s:
             from sqlalchemy import update as sa_update
+
+            # 读取当前任务，判断 phase 是否变化
+            task = await s.get(AnalysisTask, task_id)
+            if task is None:
+                return
+
+            timings = dict(task.phase_timings or {})
+            new_phase = fields.get("phase")
+            new_status = fields.get("status")
+            now = datetime.now(timezone.utc)
+
+            def _close_phase(phase_key: str) -> None:
+                """关闭指定阶段（记录 end + duration_ms），若已关闭或无 start 则跳过。"""
+                if not phase_key or phase_key not in timings:
+                    return
+                phase_data = dict(timings[phase_key])
+                if "end" in phase_data or "start" not in phase_data:
+                    return
+                try:
+                    start_dt = datetime.fromisoformat(phase_data["start"])
+                    phase_data["end"] = now.isoformat()
+                    phase_data["duration_ms"] = int((now - start_dt).total_seconds() * 1000)
+                    timings[phase_key] = phase_data
+                except (ValueError, TypeError):
+                    pass
+
+            # 1. phase 变化时：关闭前一阶段，开启新阶段
+            phase_changed = bool(new_phase) and new_phase != task.phase
+            if phase_changed:
+                _close_phase(task.phase)
+                timings[new_phase] = {"start": now.isoformat()}
+
+            # 2. 任务完成/失败/中断时：关闭当前活跃阶段
+            #    注意：若刚切换了 phase，应关闭新开启的阶段
+            if new_status in ("completed", "failed", "interrupted"):
+                active_phase = new_phase if phase_changed else task.phase
+                _close_phase(active_phase)
+
+            # 只在有 phase_timings 变更时写入字段
+            if phase_changed or new_status in ("completed", "failed", "interrupted"):
+                fields["phase_timings"] = timings
+
             stmt = sa_update(AnalysisTask).where(AnalysisTask.id == task_id).values(**fields)
             await s.execute(stmt)
             await s.commit()
@@ -873,10 +1193,12 @@ async def _run_requirement_analysis(
     project_id: str,
     module_list: list[str],
     source_files: list[str],
+    file_bytes_list: list[tuple[str, bytes]] | None = None,
 ) -> None:
     """后台执行需求解析 + 澄清（异步协程，使用独立 session）。
 
     流程：
+    0. phase=upload: 文件解析（docx/md/txt → combined_raw）
     1. phase=parse: req_agent.parse() 解析需求
     2. phase=kb_search: clarify_agent.clarify() KB 检索 + 问题生成
     3. 若有问题: phase=clarify, status=completed, result_json 含 questions
@@ -895,7 +1217,42 @@ async def _run_requirement_analysis(
             return False
 
     try:
-        # ===== phase 1: parse =====
+        # ===== phase 0: upload（文件解析）=====
+        # v2.24: 文件解析从 API 请求移到协程中，任务记录可提前创建
+        if file_bytes_list:
+            await _update_task(task_id, status="running", phase="upload", progress=3,
+                               message=f"正在解析 {len(file_bytes_list)} 个文件...")
+            all_raw_images: list[dict] = []
+            merged_parts: list[str] = []
+            for filename, raw_bytes in file_bytes_list:
+                ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+                if ext in ("md", "markdown", "txt"):
+                    text = raw_bytes.decode("utf-8", errors="replace")
+                elif ext == "docx":
+                    try:
+                        text, doc_images = await _extract_docx_text(raw_bytes, filename=filename)
+                        all_raw_images.extend(doc_images)
+                    except Exception as e:
+                        raise RuntimeError(f"解析 {filename} 失败: {str(e)[:200]}")
+                else:
+                    text = raw_bytes.decode("utf-8", errors="replace")
+                merged_parts.append(f"【文档：{filename}】\n{text}")
+            combined_raw = "\n\n---\n\n".join(merged_parts)
+
+            # 保存 raw_text 和 raw_images 到 Requirement
+            async with async_session() as s:
+                await s.execute(sa_update(ReqModel).where(ReqModel.id == req_id).values(
+                    raw_text=combined_raw, raw_images=all_raw_images,
+                ))
+                await s.commit()
+
+            if await _is_cancelled():
+                logger.info("[Task] 任务已取消（upload 后），提前退出: task_id={}", task_id)
+                return
+        elif not combined_raw:
+            raise RuntimeError("无文件字节且无 combined_raw，无法执行需求分析")
+
+        # ===== phase 1: parse（LLM 解析）=====
         await _update_task(task_id, status="running", phase="parse", progress=10,
                            message="正在调用 LLM 解析需求文档...")
 
@@ -979,6 +1336,21 @@ async def _run_requirement_analysis(
             )
             logger.error("[Task] 需求分析因 ClarifyAgent 失败而中断: task_id={}, req_id={}", task_id, req_id)
             return
+
+        # v2.24: 将 ClarifyAgent 子阶段耗时分解记录到 phase_timings["kb_search"]
+        if clarify_result and clarify_result.get("phase_breakdown"):
+            try:
+                async with async_session() as s:
+                    task = await s.get(AnalysisTask, task_id)
+                    if task and task.phase_timings:
+                        timings = dict(task.phase_timings)
+                        kb_phase = dict(timings.get("kb_search", {}))
+                        kb_phase["sub_breakdown"] = clarify_result["phase_breakdown"]
+                        timings["kb_search"] = kb_phase
+                        task.phase_timings = timings
+                        await s.commit()
+            except Exception as e:
+                logger.warning("[Task] 写入 phase_breakdown 失败: {}", str(e)[:120])
 
         await _update_task(task_id, phase="clarify", progress=70,
                            message=f"知识库检索完成，检测到 {len(questions)} 个待补充问题" if questions else "知识库检索完成，正在生成最终分析...")
@@ -1153,9 +1525,10 @@ async def upload_requirement_multi(
 
     MAX_TOTAL_SIZE = 50 * 1024 * 1024
     total_size = 0
-    doc_contents: list[dict] = []
-    all_raw_images: list[dict] = []
 
+    # v2.24: 先读取文件字节（快速操作），文件解析移到后台协程中
+    # 这样任务记录可以在文件解析之前就创建，用户立即看到任务
+    file_bytes_list: list[tuple[str, bytes]] = []
     for file in files:
         filename = file.filename or ""
         ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
@@ -1168,35 +1541,12 @@ async def upload_requirement_multi(
         total_size += len(raw_bytes)
         if total_size > MAX_TOTAL_SIZE:
             raise HTTPException(status_code=400, detail="所有文件总大小超过 50MB 上限")
+        file_bytes_list.append((filename, raw_bytes))
 
-        if ext in ("md", "markdown", "txt"):
-            text = raw_bytes.decode("utf-8", errors="replace")
-        else:
-            # v2.18: 统一使用 _extract_docx_text，修复表格和图片丢失 Bug
-            try:
-                text, doc_images = await _extract_docx_text(raw_bytes, filename=filename, session=session)
-                all_raw_images.extend(doc_images)
-            except ImportError:
-                raise HTTPException(status_code=500, detail="python-docx 未安装，无法解析 .docx 文件")
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"解析 {filename} 失败: {str(e)[:200]}")
-
-        doc_contents.append({
-            "filename": filename,
-            "text": text,
-        })
-
-    # 多文档合并（DocMergeAgent 逻辑：LLM 融合分析）
-    merged_text_parts = []
-    for doc in doc_contents:
-        merged_text_parts.append(f"【文档：{doc['filename']}】\n{doc['text']}")
-    combined_raw = "\n\n---\n\n".join(merged_text_parts)
-
-    # v2.14: 异步分析模式——立即创建 Requirement(analyzing) + AnalysisTask，后台协程执行解析
+    # v2.24: 立即创建 Requirement + AnalysisTask（phase=upload），文件解析在协程中完成
     req_id = gen_requirement_id()
     task_id = gen_task_id()
 
-    # 立即创建 Requirement 记录（status=analyzing，分析完成后更新）
     record = Requirement(
         id=req_id,
         product_id=product_id,
@@ -1209,54 +1559,56 @@ async def upload_requirement_multi(
         version=1,
         status="analyzing",
         srr_json={},
-        raw_text=combined_raw,
-        raw_images=all_raw_images,
+        raw_text="",
+        raw_images=[],
         source_type="multi",
         created_by="api",
     )
     session.add(record)
-    await session.flush()  # 确保 Requirement 先落库，避免 AnalysisTask 外键约束 violation
+    await session.flush()
 
-    # 创建任务记录
     task = AnalysisTask(
         id=task_id,
         task_type="upload_requirement",
         req_id=req_id,
         product_id=product_id,
         status="pending",
-        phase="parse",
+        phase="upload",
         progress=0,
-        message="已接收文件，准备开始分析...",
+        message="已接收文件，准备解析...",
         created_by="api",
+        # v2.24: 初始化 upload 阶段的 phase_timings
+        phase_timings={"upload": {"start": datetime.now(timezone.utc).isoformat()}},
     )
     session.add(task)
     await session.commit()
 
-    # 启动后台协程（不 await，立即返回）
+    # 启动后台协程（不 await，立即返回）— 文件字节传递给协程解析
     asyncio.create_task(_run_requirement_analysis(
         task_id=task_id,
         req_id=req_id,
-        combined_raw=combined_raw,
+        combined_raw="",  # v2.24: 文件解析移到协程中，初始为空
         product_id=product_id,
         product_name=product_name,
         title=title,
         priority=priority,
         project_id=project_id,
         module_list=module_list,
-        source_files=[d["filename"] for d in doc_contents],
+        source_files=[f[0] for f in file_bytes_list],
+        file_bytes_list=file_bytes_list,  # v2.24: 传递原始文件字节
     ))
 
     logger.info("[API] 多文档上传已派发异步分析: task_id={}, req_id={}, files={}",
-                task_id, req_id, [d["filename"] for d in doc_contents])
+                task_id, req_id, [f[0] for f in file_bytes_list])
 
     return ApiResponse(
         success=True,
-        message=f"已接收 {len(doc_contents)} 个文件，正在后台分析",
+        message=f"已接收 {len(file_bytes_list)} 个文件，正在后台分析",
         data={
             "task_id": task_id,
             "req_id": req_id,
             "status": "analyzing",
-            "source_files": [d["filename"] for d in doc_contents],
+            "source_files": [f[0] for f in file_bytes_list],
         },
     )
 
@@ -1267,17 +1619,25 @@ async def upload_requirement_multi(
 
 @router.get("/tasks", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def list_tasks(
-    status: str | None = Query(default=None, description="按状态筛选 pending/running/completed/failed/interrupted"),
+    status: str | None = Query(default=None, description="按状态筛选，支持逗号分隔多值（如 running,pending）"),
     task_type: str | None = Query(default=None, description="按任务类型筛选 upload_requirement/submit_clarify/..."),
     product_id: str | None = Query(default=None, description="按产品筛选"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """列出分析任务（支持按状态/类型/产品筛选，分页）。"""
+    """列出分析任务（支持按状态/类型/产品筛选，分页）。
+
+    v2.20: status 参数支持逗号分隔多值（如 ``running,pending``），
+    便于前端查询"所有未结束任务"。
+    """
     conditions = []
     if status:
-        conditions.append(AnalysisTask.status == status)
+        status_list = [s.strip() for s in status.split(",") if s.strip()]
+        if len(status_list) == 1:
+            conditions.append(AnalysisTask.status == status_list[0])
+        elif status_list:
+            conditions.append(AnalysisTask.status.in_(status_list))
     if task_type:
         conditions.append(AnalysisTask.task_type == task_type)
     if product_id:
@@ -1385,6 +1745,20 @@ async def cancel_task(
     task.error = "用户手动取消"
     task.message = "已取消"
     task.completed_at = datetime.now(timezone.utc)
+
+    # v2.23: 记录当前阶段的结束时间到 phase_timings
+    if task.phase and task.phase_timings:
+        timings = dict(task.phase_timings)
+        phase_data = dict(timings.get(task.phase, {}))
+        if "end" not in phase_data and "start" in phase_data:
+            try:
+                start_dt = datetime.fromisoformat(phase_data["start"])
+                phase_data["end"] = task.completed_at.isoformat()
+                phase_data["duration_ms"] = int((task.completed_at - start_dt).total_seconds() * 1000)
+                timings[task.phase] = phase_data
+                task.phase_timings = timings
+            except (ValueError, TypeError):
+                pass
 
     # 若关联需求仍为 analyzing 状态，回退为 draft 避免卡死
     if task.req_id:
@@ -1540,6 +1914,71 @@ async def get_requirement(
             "vectorization_error": record.vectorization_error or "",
             "go_live_date": record.go_live_date.isoformat() if record.go_live_date else "",
             "archived_at": record.archived_at.isoformat() if record.archived_at else "",
+            "revision": record.revision or 1,  # v2.33: 多人协作冲突检测
+        },
+    )
+
+
+@router.get("/{req_id}/revision", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_requirement_revision(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """v2.33: 轻量端点——返回需求的 revision 和任务状态，供前端轮询检测多人协作冲突。
+
+    前端每 5 秒轮询此端点，对比 revision 变化时显示"需求已被他人修改，请刷新"提示条。
+    同时返回是否有运行中的分析任务，用于显示"正在执行分析任务"提示。
+
+    Returns:
+        ApiResponse: data 含 revision / updated_at / task_running / task_message
+    """
+    result = await session.execute(
+        select(Requirement.revision, Requirement.updated_at, Requirement.status).where(Requirement.id == req_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    revision = row[0] or 1
+    updated_at = row[1].isoformat() if row[1] else ""
+    req_status = row[2]
+
+    # 检查是否有运行中的分析任务
+    task_running = False
+    task_message = ""
+    task_type_label = ""
+    if req_status == "analyzing":
+        task_running = True
+        task_message = "正在分析需求..."
+    else:
+        task_result = await session.execute(
+            select(AnalysisTask).where(
+                AnalysisTask.req_id == req_id,
+                AnalysisTask.status.in_(["pending", "running"]),
+            ).order_by(AnalysisTask.created_at.desc()).limit(1)
+        )
+        running_task = task_result.scalar_one_or_none()
+        if running_task:
+            task_running = True
+            labels = {
+                "upload_requirement": "需求解析",
+                "regenerate": "重新生成",
+                "merge_fp": "功能点合并",
+                "submit_clarify": "澄清重解析",
+            }
+            task_type_label = labels.get(running_task.task_type, running_task.task_type)
+            task_message = running_task.message or f"正在执行{task_type_label}任务..."
+
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data={
+            "revision": revision,
+            "updated_at": updated_at,
+            "status": req_status,
+            "task_running": task_running,
+            "task_type": task_type_label,
+            "task_message": task_message,
         },
     )
 
@@ -1633,6 +2072,9 @@ async def submit_clarify_answers(
     if not req.answers:
         raise HTTPException(status_code=400, detail="澄清答案不能为空")
 
+    # v2.33: 互斥锁检查——防止与其他分析任务并发冲突
+    await _check_no_running_task(req_id)
+
     # 从 DB 取需求
     stmt = select(Requirement).where(Requirement.id == req_id)
     result = await session.execute(stmt)
@@ -1655,12 +2097,50 @@ async def submit_clarify_answers(
     clarify_state = srr_json.get("_clarify_state", {}) or {}
     questions = clarify_state.get("questions", []) or []
 
+    # v2.29: 若 _clarify_state 已被清空（重新解析后会 pop），从最近的分析任务
+    # result_json 中找回澄清问题，确保澄清历史能完整记录 Q&A 对。
+    if not questions:
+        try:
+            recent_task_stmt = (
+                select(AnalysisTask.result_json)
+                .where(AnalysisTask.req_id == req_id)
+                .where(AnalysisTask.task_type == "upload_requirement")
+                .order_by(AnalysisTask.created_at.desc())
+                .limit(1)
+            )
+            rt = await session.execute(recent_task_stmt)
+            rt_row = rt.scalar_one_or_none()
+            if rt_row:
+                rt_data = rt_row if isinstance(rt_row, dict) else json.loads(rt_row)
+                task_questions = rt_data.get("questions", []) if isinstance(rt_data, dict) else []
+                if task_questions:
+                    questions = task_questions
+                    logger.info("[API/requirements] 从 task result_json 回找澄清问题: count={}", len(questions))
+        except Exception as e:
+            logger.warning("[API/requirements] 回找澄清问题失败: {}", str(e)[:200])
+
     # ===== ⓪ 保存澄清历史快照（在 re-parse 前留存 Q&A 记录） =====
+    # v2.29: answers 保存为结构化 Q&A 列表（含 question 文本），而非裸 id→answer 映射，
+    # 确保即使后续 _clarify_state 被清空，历史记录仍能独立展示完整 Q&A。
+    qa_records: list[dict] = []
+    for q in questions:
+        qid = q.get("id", "") if isinstance(q, dict) else ""
+        ans_val = req.answers.get(qid, "").strip() if isinstance(req.answers, dict) else ""
+        if qid:
+            qa_records.append({
+                "id": qid,
+                "field": q.get("field", "") if isinstance(q, dict) else "",
+                "question": q.get("question", "") if isinstance(q, dict) else "",
+                "priority": q.get("priority", "") if isinstance(q, dict) else "",
+                "answer": ans_val,
+            })
+
     history_entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "action": "clarify",
         "questions": questions,
         "answers": dict(req.answers),
+        "qa_records": qa_records,
         "extra_notes": req.extra_notes or "",
         "auto_augmentations": clarify_state.get("auto_augmentations", []),
         "field_conflicts": clarify_state.get("field_conflicts", []),
@@ -1855,9 +2335,86 @@ async def _run_clarify_reparse(
         if captured_interaction_srr:
             final_data = _merge_interaction_srr(final_data, captured_interaction_srr)
 
+        # v2.32/v2.34: 从澄清答案中提取历史数据影响信息，写入 SRR.legacy_data_impact
+        # v2.34 扩展：除 user_clarification 文本框外，还提取多选题 kb_optimization_impact
+        # 以及 v2.34 新增的 legacy_data_impact.* 专项字段（migration_strategy/rollback_strategy 等）
+        try:
+            if clarify_history:
+                latest_clarify = clarify_history[-1] if isinstance(clarify_history[-1], dict) else {}
+                latest_answers = latest_clarify.get("answers", {}) or {}
+                ldi = final_data.get("legacy_data_impact")
+                if not isinstance(ldi, dict):
+                    ldi = {}
+                updated_fields: list[str] = []
+
+                # 1. 多选题 kb_optimization_impact：用户选择的影响类型
+                #    映射到 impact_scope 字段（逗号分隔），并据此推断 data_inventory 等
+                impact_types = latest_answers.get("kb_optimization_impact", "")
+                if isinstance(impact_types, list):
+                    impact_types = ",".join(str(x) for x in impact_types if x)
+                impact_types = str(impact_types or "").strip()
+                if impact_types:
+                    # 若 LLM 已生成 impact_scope，追加用户选择；否则用用户选择初始化
+                    existing_scope = str(ldi.get("impact_scope", "") or "").strip()
+                    if existing_scope and impact_types not in existing_scope:
+                        ldi["impact_scope"] = f"{existing_scope}; 用户选择: {impact_types}"
+                    elif not existing_scope:
+                        ldi["impact_scope"] = impact_types
+                    updated_fields.append("impact_scope")
+
+                # 2. 文本框 kb_optimization_impact_scope：用户填写的具体影响范围
+                user_impact_scope = str(latest_answers.get("kb_optimization_impact_scope", "")).strip()
+                if user_impact_scope:
+                    ldi["user_clarification"] = user_impact_scope
+                    updated_fields.append("user_clarification")
+
+                # 3. v2.34 新增：legacy_data_impact.* 专项字段（来自 LLM 生成的问题）
+                #    问题 id 规则：kb_optimization_<subfield> 或 legacy_data_impact.<subfield>
+                LDI_SUBFIELDS = (
+                    "migration_strategy",
+                    "rollback_strategy",
+                    "compatibility_analysis",
+                    "verification_method",
+                    "impact_scope",
+                )
+                for sub in LDI_SUBFIELDS:
+                    # 支持两种 question id 格式
+                    for qid in (f"kb_optimization_{sub}", f"legacy_data_impact.{sub}"):
+                        ans = latest_answers.get(qid)
+                        if ans is None:
+                            continue
+                        # 多选/单选答案可能是 list，文本框是 str
+                        if isinstance(ans, list):
+                            ans = ",".join(str(x) for x in ans if x)
+                        ans = str(ans or "").strip()
+                        if not ans:
+                            continue
+                        # 不覆盖用户已填写的 user_clarification
+                        if sub == "impact_scope" and ans == impact_types:
+                            continue  # 已在步骤 1 处理
+                        existing = str(ldi.get(sub, "") or "").strip()
+                        if existing and ans not in existing:
+                            ldi[sub] = f"{existing}; {ans}"
+                        elif not existing:
+                            ldi[sub] = ans
+                        updated_fields.append(sub)
+
+                if updated_fields:
+                    # 若 LLM 未标记 is_optimization，用户回答了影响问题则标记为 True
+                    ldi.setdefault("is_optimization", True)
+                    final_data["legacy_data_impact"] = ldi
+                    logger.info(
+                        "[Task/Clarify] 写入 legacy_data_impact: req_id={}, fields={}",
+                        req_id, updated_fields,
+                    )
+        except Exception as ldi_e:
+            logger.warning("[Task/Clarify] 写入 legacy_data_impact 失败(不阻断): {}", str(ldi_e)[:200])
+
         async with async_session() as s:
             await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(
                 srr_json=final_data, status="pending_review",
+                # v2.33: 自增 revision（澄清重解析属于内容变更）
+                revision=Requirement.revision + 1,
             ))
             await s.commit()
 
@@ -2204,6 +2761,7 @@ async def regenerate_requirement(
     extra_notes: str = Form(default="", description="用户补充说明（可选，与文件至少一项）"),
     files: list[UploadFile] = File(default=[], description="重新上传的需求文件（.md / .docx / .txt，可选）"),
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """补充信息后异步重新生成需求分析（SRR）。
 
@@ -2314,6 +2872,12 @@ async def regenerate_requirement(
         supplementary_text=supplementary_text,
     ))
 
+    await log_operation(
+        username=current_user.username, user_id=current_user.user_id,
+        action="regenerate_requirement", target_type="requirement", target_id=req_id,
+        detail={"has_files": has_files, "extra_notes_len": len(extra_notes)},
+    )
+
     return ApiResponse(
         success=True,
         message="已接收补充信息，正在后台重新生成",
@@ -2338,11 +2902,14 @@ async def _run_regenerate_reparse(
 ) -> None:
     """后台执行重新生成 SRR（异步协程，独立 session）。
 
+    v2.20 变更：重新生成不再从原始文件解析，而是基于现有 SRR + 补充说明修改。
     流程：
-        1. phase=parse: req_agent.parse() 重新生成 SRR
+        1. phase=parse: req_agent.refine_srr() 基于现有 SRR 修改生成新 SRR
+           （refine_srr 内部已完成 FP 提取，结果存于 req_agent.last_fps）
         2. 保留 KB 日志 + 澄清历史 + KB 基线补全
         3. 持久化 + 更新标题（若有补充文件则同步更新 supplementary_text）
-        4. status=completed
+        4. 用 refine 已提取的 FP 替换旧 FP
+        5. status=completed
 
     v2.0 历史版本管理：
         重新生成前把原 srr_json 完整快照保存到 _version_history 数组，
@@ -2351,19 +2918,125 @@ async def _run_regenerate_reparse(
     v2.17 支持补充文件上传：
         若 supplementary_text 非空，持久化时更新 supplementary_text 字段。
         原始 raw_text 保持不变，补充文件内容独立存储，前端可分别查看。
+        v2.20: 补充文件内容会合并进 refine 的 extra_notes 传给 LLM。
     """
-    from sqlalchemy import update as sa_update
+    from sqlalchemy import update as sa_update, delete as sa_delete
     try:
         await _update_task(task_id, status="running", phase="parse", progress=30,
-                           message="正在调用 LLM 重新生成 SRR...")
+                           message="正在基于现有 SRR 调用 LLM 修改生成...")
 
-        final_srr = await req_agent.parse(
-            raw_requirement=enhanced_raw,
+        # v2.20: 合并 extra_notes 和 supplementary_text 作为 refine 的补充说明
+        refine_notes_parts: list[str] = []
+        if supplementary_text:
+            refine_notes_parts.append(f"【补充需求文件内容】\n{supplementary_text}")
+        if extra_notes:
+            refine_notes_parts.append(f"【补充修改说明】\n{extra_notes}")
+        refine_notes = "\n\n".join(refine_notes_parts) if refine_notes_parts else extra_notes
+
+        # v2.20: 基于现有 SRR 修改，而非从原始文件重新解析
+        final_srr = await req_agent.refine_srr(
+            current_srr=old_srr,
+            extra_notes=refine_notes,
             product_id=product_id,
         )
-        logger.info("[Task/Regenerate] 重新生成 SRR 成功: req_id={}", req_id)
+        logger.info("[Task/Regenerate] 基于 SRR 修改生成成功: req_id={}", req_id)
 
-        await _update_task(task_id, phase="parse", progress=80, message="SRR 生成完成，正在保存...")
+        # v2.32: 捕获 refine_srr 内部 _fp_extract_from_raw 产出的 interaction_srr
+        # 用于后续合并到总 SRR 的 cross_fp_interactions（与需求分析流程一致）
+        captured_interaction_srr = (
+            dict(req_agent.interaction_srr) if req_agent.interaction_srr else None
+        )
+
+        await _update_task(task_id, phase="parse", progress=50, message="SRR 修改完成，正在检索知识库...")
+
+        # ===== v2.32: phase=kb_search + clarify（与需求分析流程一致）=====
+        # 重新生成同样需要走澄清环节：KB 检索 + 问题生成 + 质量评分
+        clarify_result = None
+        questions: list = []
+        clarify_error: str | None = None
+        async with async_session() as s:
+            try:
+                clarify_result = await clarify_agent.clarify(final_srr, session=s)
+                questions = clarify_result.get("questions", [])
+            except Exception as e:
+                # v2.18: 关键错误不再静默——中断流水线，保存已生成结果，标记任务失败
+                clarify_error = str(e)[:500]
+                logger.error("[Task/Regenerate] ClarifyAgent 检测失败（关键错误，中断流水线）: {}", clarify_error)
+
+        # v2.18: ClarifyAgent 失败时中断流水线，但保存已生成的 SRR+FP 供用户查看
+        if clarify_error:
+            base_srr = dict(final_srr)
+            if captured_interaction_srr:
+                base_srr = _merge_interaction_srr(base_srr, captured_interaction_srr)
+            base_srr["_clarify_error"] = clarify_error
+            async with async_session() as save_s:
+                await save_s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(
+                    status="draft",
+                    srr_json=base_srr,
+                ))
+                try:
+                    new_fps = req_agent.last_fps or []
+                    if new_fps:
+                        from app.db.models import FunctionalPoint as FP, FPDependency
+                        old_fp_rows = (await save_s.execute(
+                            select(FP.id).where(FP.requirement_id == req_id)
+                        )).scalars().all()
+                        if old_fp_rows:
+                            old_ids_set = set(old_fp_rows)
+                            await save_s.execute(sa_delete(FPDependency).where(
+                                (FPDependency.source_fp_id.in_(old_ids_set)) |
+                                (FPDependency.target_fp_id.in_(old_ids_set))
+                            ))
+                            await save_s.execute(sa_delete(FP).where(FP.requirement_id == req_id))
+                            await save_s.flush()
+                        await _save_fps_to_db(save_s, req_id, new_fps, "P2")
+                        await _save_fp_dependencies(save_s, req_id, req_agent.last_fp_dependencies or [])
+                        await _update_fp_index_in_srr(save_s, req_id)
+                except Exception as fp_e:
+                    logger.error("[Task/Regenerate] ClarifyAgent 失败后基础 FP 保存也失败: {}", str(fp_e)[:200])
+                await save_s.commit()
+
+            err_msg = f"知识库检索/需求澄清失败: {clarify_error}"
+            await _update_task(
+                task_id, status="failed", phase="kb_search", error=err_msg,
+                message="重新生成失败: " + err_msg[:200], completed_at=datetime.now(timezone.utc),
+            )
+            logger.error("[Task/Regenerate] 重新生成因 ClarifyAgent 失败而中断: task_id={}, req_id={}", task_id, req_id)
+            return
+
+        # v2.24: 记录 ClarifyAgent 子阶段耗时
+        if clarify_result and clarify_result.get("phase_breakdown"):
+            try:
+                async with async_session() as s:
+                    task = await s.get(AnalysisTask, task_id)
+                    if task and task.phase_timings:
+                        timings = dict(task.phase_timings)
+                        kb_phase = dict(timings.get("kb_search", {}))
+                        kb_phase["sub_breakdown"] = clarify_result["phase_breakdown"]
+                        timings["kb_search"] = kb_phase
+                        task.phase_timings = timings
+                        await s.commit()
+            except Exception as e:
+                logger.warning("[Task/Regenerate] 写入 phase_breakdown 失败: {}", str(e)[:120])
+
+        await _update_task(
+            task_id, phase="clarify", progress=75,
+            message=(f"知识库检索完成，检测到 {len(questions)} 个待补充问题" if questions
+                     else "知识库检索完成，正在生成最终分析..."),
+        )
+
+        # 构建澄清后的 SRR：优先使用 KB 增强后的 augmented_srr
+        multi_augmented = clarify_result.get("augmented_srr", final_srr) if clarify_result else final_srr
+        final_srr = dict(multi_augmented)
+
+        needs_clarify = (
+            (clarify_result.get("status") == "needs_clarification") if clarify_result
+            else (len(questions) > 0)
+        )
+        # v2.32: 重新生成完成后进入 draft（需澄清）或 pending_review（待确认）
+        final_status = "draft" if needs_clarify else "pending_review"
+
+        await _update_task(task_id, phase="clarify", progress=85, message="SRR 生成完成，正在保存...")
 
         # 记录历史
         new_title = (final_srr.get("requirement", {}) or {}).get("title", "")
@@ -2378,6 +3051,22 @@ async def _run_regenerate_reparse(
         clarify_history.append(history_entry)
 
         final_data = dict(final_srr)
+
+        # v2.32: 写入澄清状态（与需求分析流程一致）
+        if clarify_result:
+            final_data["_clarify_state"] = {
+                "questions": questions,
+                "auto_augmentations": clarify_result.get("auto_augmentations", []),
+                "kb_status": clarify_result.get("kb_status", {}),
+                "quality_report": clarify_result.get("quality_report", {}),
+                "field_conflicts": clarify_result.get("field_conflicts", []),
+            }
+            kb_logs = clarify_result.get("kb_access_log", [])
+            if kb_logs:
+                final_data["_kb_query_logs"] = kb_logs
+        # 保留历史 KB 查询日志（本次未产出新日志时回退使用历史日志）
+        if "_kb_query_logs" not in final_data and old_srr.get("_kb_query_logs"):
+            final_data["_kb_query_logs"] = old_srr.get("_kb_query_logs")
 
         # ===== v2.0 历史版本管理：把原 srr_json 完整快照保存到 _version_history =====
         # 快照只保留业务字段（剔除内部状态字段，避免重复堆积）
@@ -2395,9 +3084,6 @@ async def _run_regenerate_reparse(
         final_data["_version_history"] = version_history
         # ===== end 历史版本管理 =====
 
-        # 保留 KB 查询日志
-        if original_logs := old_srr.get("_kb_query_logs"):
-            final_data["_kb_query_logs"] = original_logs
         # 保留澄清历史
         final_data["_clarify_history"] = clarify_history
         # 迁移 KB 基线补全内容
@@ -2410,32 +3096,63 @@ async def _run_regenerate_reparse(
                 else:
                     final_data[field] = old_val
 
+        # v2.32: 合并 interaction_srr 到 cross_fp_interactions（与需求分析流程一致）
+        if captured_interaction_srr:
+            final_data = _merge_interaction_srr(final_data, captured_interaction_srr)
+
+        # v2.32: 保留旧 SRR 的 legacy_data_impact（用户在之前澄清环节填写的影响范围）
+        # 重新生成流程本身不处理用户澄清答案（答案在后续 _run_clarify_reparse 中处理），
+        # 但需保留旧的 legacy_data_impact.user_clarification，避免重新生成后数据丢失。
+        # 若 LLM 重新生成了 legacy_data_impact（is_optimization=True），则尊重 LLM 判断，
+        # 仅在新 user_clarification 为空时回填旧值。
+        try:
+            new_ldi = final_data.get("legacy_data_impact")
+            old_ldi = old_srr.get("legacy_data_impact")
+            old_has = isinstance(old_ldi, dict) and old_ldi.get("is_optimization") and old_ldi.get("user_clarification", "").strip()
+            if old_has:
+                if isinstance(new_ldi, dict) and new_ldi.get("is_optimization"):
+                    # LLM 重新生成了优化需求分析，回填旧的用户澄清（若新值为空）
+                    if not str(new_ldi.get("user_clarification", "")).strip():
+                        new_ldi["user_clarification"] = old_ldi.get("user_clarification", "")
+                        logger.info(
+                            "[Task/Regenerate] 回填旧 user_clarification 到新 legacy_data_impact: req_id={}", req_id,
+                        )
+                else:
+                    # LLM 未生成优化需求分析，保留旧的 legacy_data_impact
+                    final_data["legacy_data_impact"] = old_ldi
+                    logger.info(
+                        "[Task/Regenerate] 保留旧 SRR 的 legacy_data_impact: req_id={}", req_id,
+                    )
+        except Exception as ldi_e:
+            logger.warning("[Task/Regenerate] 保留 legacy_data_impact 失败(不阻断): {}", str(ldi_e)[:200])
+
         # 持久化
         async with async_session() as s:
-            values: dict = {"srr_json": final_data, "status": "pending_review"}
+            values: dict = {"srr_json": final_data, "status": final_status}
             if new_title:
                 values["title"] = new_title
             # v2.17: 若用户上传了补充文件，更新 supplementary_text（原始 raw_text 保持不变）
             if supplementary_text:
                 values["supplementary_text"] = supplementary_text
+            # v2.33: 自增 revision（重新生成属于内容变更）
+            values["revision"] = Requirement.revision + 1
             await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(**values))
             await s.commit()
 
-        # v2.2: 重新生成 SRR 后自动重新拆分 FP
+        # v2.20: refine_srr 内部已调用 _fp_extract_from_raw 提取 FP，
+        # 直接使用 req_agent.last_fps / last_fp_dependencies，不再重复从 raw_text 提取
         try:
-            from app.agents.req_agent import req_agent as _regen_agent
-            # 使用独立 session，不依赖 HTTP 请求的 session（此函数在后台协程运行）
-            async with async_session() as fp_split_sess:
-                record2 = (await fp_split_sess.execute(
-                    select(Requirement).where(Requirement.id == req_id)
-                )).scalar_one_or_none()
-                if record2:
-                    srr2 = record2.srr_json or {}
-                    product_name2 = srr2.get("requirement", {}).get("product_name", "") or ""
-                    raw_text2 = record2.raw_text or ""
-                    logger.info("[Task/Regenerate] 自动触发 FP 拆分: req_id={}", req_id)
-                    new_fps = await _regen_agent._fp_extract_from_raw(raw_text2, srr2, product_name2)
-                    if new_fps:
+            new_fps = req_agent.last_fps or []
+            new_fp_deps = req_agent.last_fp_dependencies or []
+            if new_fps:
+                # 使用独立 session，不依赖 HTTP 请求的 session（此函数在后台协程运行）
+                async with async_session() as fp_split_sess:
+                    record2 = (await fp_split_sess.execute(
+                        select(Requirement).where(Requirement.id == req_id)
+                    )).scalar_one_or_none()
+                    if record2:
+                        logger.info("[Task/Regenerate] 应用 refine 已提取的 FP: req_id={}, fp_count={}",
+                                    req_id, len(new_fps))
                         from app.db.models import FunctionalPoint as FP, FPDependency
                         old_fp_rows = (await fp_split_sess.execute(
                             select(FP.id).where(FP.requirement_id == req_id)
@@ -2443,45 +3160,45 @@ async def _run_regenerate_reparse(
                         if old_fp_rows:
                             old_ids_set = set(old_fp_rows)
                             await fp_split_sess.execute(
-                                delete(FPDependency).where(
-                                    (FPDependency.source_fp_id.in_(old_ids_set)) | 
+                                sa_delete(FPDependency).where(
+                                    (FPDependency.source_fp_id.in_(old_ids_set)) |
                                     (FPDependency.target_fp_id.in_(old_ids_set))
                                 )
                             )
-                            await fp_split_sess.execute(delete(FP).where(FP.requirement_id == req_id))
+                            await fp_split_sess.execute(sa_delete(FP).where(FP.requirement_id == req_id))
                             await fp_split_sess.flush()
                         await _save_fps_to_db(fp_split_sess, req_id, new_fps, record2.priority)
-                        await _save_fp_dependencies(fp_split_sess, req_id, _regen_agent.last_fp_dependencies)
-                        # v2.18: 若 LLM 产出 interaction_srr，使用选择性合并（不覆盖 requirement/flows 等字段）
-                        if _regen_agent.interaction_srr and isinstance(_regen_agent.interaction_srr, dict):
-                            merged_srr = _merge_interaction_srr(final_data, _regen_agent.interaction_srr)
-                            await fp_split_sess.execute(
-                                sa_update(Requirement).where(Requirement.id == req_id).values(srr_json=merged_srr)
-                            )
+                        await _save_fp_dependencies(fp_split_sess, req_id, new_fp_deps)
+                        # v2.32: interaction_srr 已在上方合并到 final_data，此处只需更新 fp_index
                         await _update_fp_index_in_srr(fp_split_sess, req_id)  # v2.18: 更新总 SRR 的 fp_index
                         await fp_split_sess.commit()
-                        logger.info("[Task/Regenerate] FP 拆分完成: req_id={}, new_fps={}", req_id, len(new_fps))
+                        logger.info("[Task/Regenerate] FP 应用完成: req_id={}, new_fps={}", req_id, len(new_fps))
+            else:
+                logger.warning("[Task/Regenerate] refine 未产出 FP（last_fps 为空），跳过 FP 更新: req_id={}", req_id)
         except Exception as fp_err:
-            # v2.18: FP 拆分失败不再静默——中断流水线，标记任务失败
+            # v2.18: FP 应用失败不再静默——中断流水线，标记任务失败
             fp_err_msg = str(fp_err)[:500]
-            logger.error("[Task/Regenerate] FP 拆分失败（关键错误，中断流水线）: req_id={}, err={}", req_id, fp_err_msg)
-            err_msg = f"功能点(FP)重新拆分失败: {fp_err_msg}"
+            logger.error("[Task/Regenerate] FP 应用失败（关键错误，中断流水线）: req_id={}, err={}", req_id, fp_err_msg)
+            err_msg = f"功能点(FP)应用失败: {fp_err_msg}"
             await _update_task(
                 task_id, status="failed", phase="done", error=err_msg,
                 message="重新生成失败: " + err_msg[:200], completed_at=datetime.now(timezone.utc),
             )
             return
 
+        status_desc = "待确认" if final_status == "pending_review" else "待澄清"
         logger.info(
-            "[Task/Regenerate] 重新生成完成，需求进入待确认: req_id={}, title={}->{}, history_versions={}",
-            req_id, previous_title, new_title, len(version_history),
+            "[Task/Regenerate] 重新生成完成，需求进入{}: req_id={}, title={}->{}, history_versions={}",
+            status_desc, req_id, previous_title, new_title, len(version_history),
         )
 
         await _update_task(
             task_id, status="completed", phase="done", progress=100,
-            message="需求分析已重新生成，进入待确认",
-            result_json={"req_id": req_id, "new_title": new_title, "status": "pending_review",
-                         "version_count": len(version_history)},
+            message=f"需求分析已重新生成，进入{status_desc}",
+            result_json={"req_id": req_id, "new_title": new_title, "status": final_status,
+                         "version_count": len(version_history),
+                         "needs_clarification": needs_clarify,
+                         "question_count": len(questions)},
             completed_at=datetime.now(timezone.utc),
         )
         logger.info("[Task/Regenerate] 重新生成完成: task_id={}, req_id={}", task_id, req_id)
@@ -2560,6 +3277,7 @@ async def _run_fp_merge_task(
             system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
             schema_hint={"name": str, "fp_type": str, "summary": str, "suggested_module": str, "sub_srr": dict, "test_hints": list},
             temperature=0.2,
+            agent_name="FpAgent",
         )
 
         # 持久化
@@ -2568,10 +3286,36 @@ async def _run_fp_merge_task(
             primary_fp = await s.get(FunctionalPoint, fp_ids[0])
             merged_id = gen_requirement_id()
 
+            # v2.33: 预检查重名——若合并后名称与同需求下其他 FP 重名，自动加后缀
+            # 收集旧 FP 名称映射（用于后续 cross_fp_interactions 增量更新）
+            old_names = {fp.name for fp in fps_to_merge}
+            final_merged_name = merged_name or merged.get("name", "合并功能点")
+            # 查询同需求下不在合并列表中的 FP 名称
+            from sqlalchemy import select as _sa_sel
+            existing_names_result = await s.execute(
+                _sa_sel(FunctionalPoint.name).where(
+                    FunctionalPoint.requirement_id == req_id,
+                    ~FunctionalPoint.id.in_(set(fp_ids)),
+                )
+            )
+            existing_names = {row[0] for row in existing_names_result.all()}
+            if final_merged_name in existing_names:
+                suffix = "（合并）"
+                candidate = f"{final_merged_name}{suffix}"
+                idx = 2
+                while candidate in existing_names:
+                    candidate = f"{final_merged_name}{suffix}{idx}"
+                    idx += 1
+                logger.warning(
+                    "[Task/FP-Merge] 合并后名称「{}」与已有 FP 重名，自动调整为「{}」: req_id={}",
+                    final_merged_name, candidate, req_id,
+                )
+                final_merged_name = candidate
+
             merged_fp = FunctionalPoint(
                 id=merged_id, requirement_id=req_id,
                 module_id=primary_fp.module_id if primary_fp else None,
-                name=merged_name or merged.get("name", "合并功能点"),
+                name=final_merged_name,
                 fp_type=merged.get("fp_type", "workflow"),
                 priority="P1", status="pending_review",
                 srr_json=merged.get("sub_srr", {}),
@@ -2618,6 +3362,8 @@ async def _run_fp_merge_task(
 
             # v2.18: 更新总 SRR 的 fp_index（FP 列表已变化）
             await _update_fp_index_in_srr(s, req_id)
+            # v2.33: 增量更新 cross_fp_interactions 中的旧 FP 名称引用
+            await _update_cross_fp_interactions_on_merge(s, req_id, old_names, merged_fp.name)
             await s.commit()
 
         logger.info("[Task/FP-Merge] 合并完成: {} → {}, req={}", fp_ids, merged_fp.name, req_id)
@@ -2680,10 +3426,12 @@ async def update_requirement(
     record.title = req_data.get("title", record.title)
     record.priority = req_data.get("priority", record.priority)
     record.modules = req_data.get("modules", record.modules)
+    # v2.33: 自增 revision（手动编辑属于内容变更）
+    record.revision = (record.revision or 0) + 1
 
     await session.commit()
 
-    logger.info("[API/requirements] 需求已更新: req_id={}", req_id)
+    logger.info("[API/requirements] 需求已更新: req_id={}, revision={}", req_id, record.revision)
 
     return ApiResponse(
         success=True,
@@ -2755,14 +3503,15 @@ async def delete_preview(
     })
 
 
-@router.delete("/{req_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+@router.delete("/{req_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def delete_requirement(
     req_id: str,
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """删除需求。
 
-    规则（v2.1 设计）：
+    规则（v2.1 设计；v2.20 权限放宽为 require_write）：
     - active / superseded / deprecated 状态 → 允许删除（从 DB 永久移除）
     - archived 状态 → ❌ 拒绝删除（已归档进入知识库，删除会导致 KB 数据不一致）
 
@@ -2856,6 +3605,12 @@ async def delete_requirement(
     except Exception as e:
         logger.warning("[API/requirements] 向量库删除失败(不阻断): req_id={}, error={}", req_id, str(e)[:100])
 
+    await log_operation(
+        username=current_user.username, user_id=current_user.user_id,
+        action="delete_requirement", target_type="requirement", target_id=req_id,
+        detail={"status": record.status},
+    )
+
     return ApiResponse(
         success=True,
         message=f"需求 {req_id} 已删除",
@@ -2876,6 +3631,7 @@ async def archive_requirement(
     req_id: str,
     body: ArchiveRequest | None = None,
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """归档需求。
 
@@ -2958,6 +3714,8 @@ async def archive_requirement(
     kb_task_queued = False
     kb_error = ""
     milvus_meta = {
+        # v2.34: 显式标记 type=requirement，便于检索时与 functional_point 隔离
+        "type": "requirement",
         "product_id": record.product_id,
         "modules": ",".join(record.modules or []),
         "priority": record.priority,
@@ -3049,7 +3807,12 @@ async def archive_requirement(
                 fp_meta = {
                     "type": "functional_point",
                     "requirement_id": req_id,
-                    "module_id": f.module_id or "",
+                    # v2.34: 补全 FP 元数据，支持按模块/功能点过滤检索
+                    "fp_id": f.id or "",
+                    "fp_name": f.name or "",
+                    # v2.2: 多模块关联（替代 legacy 单 module_id）
+                    "modules": ",".join(f.modules or []) if f.modules else (f.module_id or ""),
+                    "module_id": f.module_id or "",  # 保留 legacy 字段向后兼容
                     "fp_type": f.fp_type,
                     "product_id": record.product_id,
                     "status": "archived",
@@ -3058,6 +3821,11 @@ async def archive_requirement(
                 embed_srr = dict(f.srr_json) if isinstance(f.srr_json, dict) else {}
                 embed_srr.setdefault("requirement", {})
                 embed_srr["requirement"]["title"] = f.name
+                # v2.34: 注入 modules 到 srr_json.requirement，便于 KB 检索时反查
+                if f.modules:
+                    embed_srr["requirement"]["modules"] = list(f.modules)
+                elif f.module_id:
+                    embed_srr["requirement"]["modules"] = [f.module_id]
                 if not embed_srr["requirement"].get("summary"):
                     embed_srr["requirement"]["summary"] = (
                         f.srr_json.get("requirement", {}).get("summary", "")
@@ -3082,6 +3850,11 @@ async def archive_requirement(
         logger.warning("[Archive] FP KB 写入失败（不阻断）: {}", str(e)[:200])
 
     message = "需求已归档，知识库写入任务已异步派发" if kb_task_queued else "需求已归档，但知识库写入任务派发失败（请检查 Celery 是否运行 / 嵌入模型是否就绪）"
+    await log_operation(
+        username=current_user.username, user_id=current_user.user_id,
+        action="archive_requirement", target_type="requirement", target_id=req_id,
+        detail={"old_status": old_status, "kb_task_queued": kb_task_queued},
+    )
     return ApiResponse(
         success=True,
         message=message,
@@ -3222,19 +3995,20 @@ async def analyze_requirement_impact(
     req_id: str,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """分析需求变更的影响范围。
+    """分析需求变更的影响范围（v2.35: 基于 FP 依赖图谱分析受影响功能点）。
 
-    基于需求关联的模块 + 模块依赖图谱 BFS 遍历，找到：
-    - 直接涉及的模块
-    - 间接影响的模块（通过依赖关系传播）
-    - 受影响的其他需求
+    v2.35 变更：
+        - 保留模块级影响分析（direct_modules / indirect_modules）作为参考
+        - 移除 affected_requirements（不再分析受影响的需求）
+        - 新增 affected_fps：基于 FP 依赖图谱 BFS 分析受影响的功能点
+        - 已归档 FP 查询知识库展示功能点说明（kb_context）
 
     Args:
         req_id: 需求 ID
         session: 数据库会话
 
     Returns:
-        ApiResponse: data 含 direct_modules / indirect_modules / affected_requirements
+        ApiResponse: data 含 direct_modules / indirect_modules / affected_fps / total_affected
     """
     # 1. 查询需求
     stmt = select(Requirement).where(Requirement.id == req_id)
@@ -3243,82 +4017,50 @@ async def analyze_requirement_impact(
     if record is None:
         raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
 
-    # 2. 获取需求的关联模块
-    req_modules = record.modules or []
-    req_title = record.title
-    req_product = record.product_id
-
-    if not req_modules:
-        return ApiResponse(
-            success=True,
-            message="该需求未关联模块，无法分析影响范围",
-            data={
-                "req_id": req_id,
-                "req_title": req_title,
-                "direct_modules": [],
-                "indirect_modules": [],
-                "affected_requirements": [],
-            },
-        )
-
-    # 3. 调用 ImpactAnalysisAgent 的 BFS 分析
+    # 2. 调用 ImpactAnalysisAgent 的完整影响分析（模块 BFS + FP 依赖图谱 BFS + KB 查询）
     from app.agents.impact_agent import impact_agent
 
-    srr = record.srr_json or {}
-    srr["requirement"] = srr.get("requirement", {}) or {}
-    srr["requirement"]["id"] = req_id
-    srr["requirement"]["product_id"] = req_product
-    srr["requirement"]["modules"] = req_modules
-
     try:
-        impact = await impact_agent._analyze_module_impact(req_modules, session)
+        impact = await impact_agent.analyze_requirement_impact(req_id, session)
     except Exception as e:
-        logger.error("[API/requirements] 影响分析 BFS 失败: {}", str(e)[:200])
+        logger.error("[API/requirements] 影响分析失败: {}", str(e)[:200])
         raise HTTPException(status_code=500, detail=f"影响分析失败: {str(e)[:200]}")
 
-    # 4. 查询受影响模块下的其他需求
-    all_affected = impact.get("all_affected_modules", [])
-    affected_reqs: list[dict] = []
-    if all_affected:
-        # 排除当前需求自身
-        stmt = select(Requirement).where(
-            Requirement.product_id == req_product,
-            Requirement.id != req_id,
-        )
-        result = await session.execute(stmt)
-        all_reqs = result.scalars().all()
+    if "error" in impact:
+        raise HTTPException(status_code=404, detail=impact["error"])
 
-        for r in all_reqs:
-            r_modules = r.modules or []
-            if any(m in all_affected for m in r_modules):
-                affected_reqs.append({
-                    "id": r.id,
-                    "title": r.title,
-                    "priority": r.priority,
-                    "modules": [m for m in r_modules if m in all_affected],
-                })
+    # 3. 查询模块名称，过滤孤儿依赖（模块已删除但依赖记录还在）
+    mod_impact = impact.get("module_impact", {})
+    direct_mod_ids = mod_impact.get("direct", [])
+    indirect_mods = mod_impact.get("indirect", [])
+    all_mod_ids = [m if isinstance(m, str) else m.get("module_id", "") for m in direct_mod_ids]
+    all_mod_ids += [m.get("module_id", "") for m in indirect_mods if m.get("module_id")]
+    all_mod_ids = [m for m in all_mod_ids if m]
 
-    # 5. 查询模块名称，并过滤孤儿依赖（模块已删除但依赖记录还在）
     mod_names: dict[str, str] = {}
     valid_ids: set[str] = set()
-    if all_affected:
+    if all_mod_ids:
         from app.db.models import Module as ModuleModel
-        mod_stmt = select(ModuleModel.id, ModuleModel.name).where(ModuleModel.id.in_(all_affected))
+        mod_stmt = select(ModuleModel.id, ModuleModel.name).where(ModuleModel.id.in_(all_mod_ids))
         mod_result = await session.execute(mod_stmt)
         mod_names = {row[0]: row[1] for row in mod_result.all()}
         valid_ids = set(mod_names.keys())
 
+    # 4. 构建返回数据
+    req_info = impact.get("requirement", {})
+    affected_fps = impact.get("affected_fps", [])
+
     return ApiResponse(
         success=True,
-        message=f"影响分析完成：{len(impact.get('direct_modules', []))} 个直接模块，"
-                f"{len(impact.get('indirect_modules', []))} 个间接模块，"
-                f"{len(affected_reqs)} 个受影响需求",
+        message=f"影响分析完成：{len(direct_mod_ids)} 个直接模块，"
+                f"{len(indirect_mods)} 个间接模块，"
+                f"{len(affected_fps)} 个受影响功能点",
         data={
             "req_id": req_id,
-            "req_title": req_title,
+            "req_title": req_info.get("title", record.title),
             "direct_modules": [
                 {"id": m, "name": mod_names.get(m, f"已删除模块({m})")}
-                for m in impact.get("direct_modules", [])
+                for m in direct_mod_ids
                 if m in valid_ids
             ],
             "indirect_modules": [
@@ -3328,10 +4070,11 @@ async def analyze_requirement_impact(
                     "reason": m.get("reason", ""),
                     "depth": m.get("depth", 1),
                 }
-                for m in impact.get("indirect_modules", [])
+                for m in indirect_mods
                 if m.get("module_id", "") in valid_ids
             ],
-            "affected_requirements": affected_reqs,
+            "affected_fps": affected_fps,
+            "total_affected": impact.get("total_affected", len(affected_fps)),
         },
     )
 
@@ -3343,18 +4086,6 @@ async def analyze_requirement_impact(
 from app.core import prompt_manager as pm
 from app.core.llm_client import llm_client
 from app.utils.id_gen import gen_requirement_id  # 复用 ID 生成
-
-
-class FPExtractBPRequest(BaseModel):
-    """BP 提取请求。"""
-    req_id: str
-
-
-class FPSplitRequest(BaseModel):
-    """FP 拆分请求。bp_names 为空时 = 全量重新拆分（删除旧 FP，从原始文档重新生成）。"""
-    req_id: str
-    bp_names: list[str] = []  # 空列表→重新拆分模式
-
 
 
 class FPDependencyCreateRequest(BaseModel):
@@ -3443,6 +4174,10 @@ async def confirm_requirement(
     await session.commit()
 
     logger.info("[API/requirements] 需求确认完成: req_id={}, title={}", req_id, req.title)
+    await log_operation(
+        username=current_user.username, user_id=current_user.user_id,
+        action="confirm_requirement", target_type="requirement", target_id=req_id,
+    )
     return ApiResponse(
         success=True,
         data={"req_id": req_id, "status": "confirmed"},
@@ -3450,10 +4185,10 @@ async def confirm_requirement(
 
 
 async def _check_no_running_task(req_id: str, exclude_task_id: str | None = None) -> None:
-    """检查需求是否有进行中的任务（分析/重生成/FP合并），如有则拒绝。
+    """检查需求是否有进行中的任务（分析/重生成/FP合并/澄清），如有则拒绝。
 
     互斥规则：同一需求同时只能有一个 running/pending 的分析类任务。
-    - upload_requirement / regenerate / merge_fp 三种操作互斥
+    - upload_requirement / regenerate / merge_fp / submit_clarify 四种操作互斥
     - 已有任务 running/pending 时抛 HTTPException 409
 
     Args:
@@ -3472,6 +4207,7 @@ async def _check_no_running_task(req_id: str, exclude_task_id: str | None = None
                 AnalysisTask.task_type == "upload_requirement",
                 AnalysisTask.task_type == "regenerate",
                 AnalysisTask.task_type == "merge_fp",
+                AnalysisTask.task_type == "submit_clarify",
             ),
         )
         if exclude_task_id:
@@ -3479,245 +4215,17 @@ async def _check_no_running_task(req_id: str, exclude_task_id: str | None = None
         result = await s.execute(stmt)
         conflict = result.scalar_one_or_none()
         if conflict:
-            labels = {"upload_requirement": "需求解析", "regenerate": "重新生成", "merge_fp": "功能点合并"}
+            labels = {
+                "upload_requirement": "需求解析",
+                "regenerate": "重新生成",
+                "merge_fp": "功能点合并",
+                "submit_clarify": "澄清重解析",
+            }
             label = labels.get(conflict.task_type, conflict.task_type)
             raise HTTPException(
                 status_code=409,
                 detail=f"需求正在进行「{label}」任务（{conflict.id}），请等待完成后再操作",
             )
-
-
-@router.post("/{req_id}/fp/extract-bp", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
-async def fp_extract_bp(
-    req_id: str,
-    session: AsyncSession = Depends(get_session),
-) -> ApiResponse:
-    """从需求 SRR 提取候选业务点（BP）。归档后不可用。"""
-    req = await _load_active_requirement(req_id, session)
-    srr = req.srr_json or {}
-    modules = ", ".join(req.modules or [])
-
-    # 精简 SRR 去掉大字段
-    srr_snippet = {
-        k: v for k, v in srr.items()
-        if k not in ("_raw_text", "additional_details", "assumptions", "dependencies", "api_definitions", "data_model", "relationships", "non_functional", "ui_rules", "user_roles")
-    }
-    import json as _json
-    snippet_text = _json.dumps(srr_snippet, ensure_ascii=False)[:8000]
-
-    prompt = pm.get("fp_agent", "FP_EXTRACT_BP_USER_PROMPT").format(
-        req_title=req.title, modules=modules, srr_snippet=snippet_text,
-    )
-
-    try:
-        result = await llm_client.call_json(
-            prompt=prompt,
-            system_prompt=pm.get("fp_agent", "FP_EXTRACT_BP_SYSTEM_PROMPT"),
-            schema_hint={"business_points": list},
-            temperature=0.2,
-        )
-        return ApiResponse(success=True, message="ok", data=result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"BP 提取失败: {str(e)[:200]}")
-
-
-@router.post("/{req_id}/fp/split", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
-async def fp_split(
-    req_id: str,
-    body: FPSplitRequest,
-    session: AsyncSession = Depends(get_session),
-) -> ApiResponse:
-    """在选中的 BP 范围内拆分功能点并持久化。bp_names 为空时全量重新拆分。归档后不可用。"""
-    req = await _load_active_requirement(req_id, session)
-    srr = req.srr_json or {}
-
-    # v1.5.1: "重新拆分"模式 — 删除旧 FP + 从原始文档一体式重新生成
-    if not body.bp_names or len(body.bp_names) == 0:
-        from sqlalchemy import delete as sa_delete
-
-        logger.info("[FP] 全量重新拆分: req_id={}", req_id)
-        # 删除旧 FP + 依赖
-        old_fps = await session.execute(
-            select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
-        )
-        old_ids = {r[0] for r in old_fps.fetchall()}
-        if old_ids:
-            await session.execute(
-                sa_delete(FPDependency).where(
-                    (FPDependency.source_fp_id.in_(old_ids)) | (FPDependency.target_fp_id.in_(old_ids))
-                )
-            )
-            await session.execute(
-                sa_delete(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
-            )
-        await session.flush()
-
-        # P3 修复：删除旧 FP 对应的 Milvus 向量，避免孤儿（仅清理已归档过的 FP 向量）
-        if old_ids:
-            try:
-                from app.db.milvus_store import vector_store
-                for old_fp_id in old_ids:
-                    try:
-                        await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{old_fp_id}")
-                    except Exception as fp_err:
-                        logger.warning("[FP] 旧 FP 向量删除失败(不阻断): fp_id={}, error={}", old_fp_id, str(fp_err)[:100])
-                logger.info("[FP] 已清理 {} 个旧 FP 向量", len(old_ids))
-            except Exception as e:
-                logger.warning("[FP] 旧 FP 向量清理失败(不阻断): {}", str(e)[:200])
-
-        # 调用 ReqAgent 一体式提取（仅新 FP；已有 FP 名称已跳过 LLM）
-        raw_text = req.raw_text or ""
-        from app.agents.req_agent import req_agent as _agent
-        product_name = srr.get("requirement", {}).get("product_name", "") or ""
-        try:
-            new_fps = await _agent._fp_extract_from_raw(raw_text, srr, product_name)
-        except Exception as e:
-            logger.error("[FP] 重新拆分失败: {}", str(e)[:200])
-            raise HTTPException(status_code=500, detail=f"重新拆分失败: {str(e)[:200]}")
-
-        # ── v1.6: 复制已有 FP 到当前需求 ──
-        copied_count = 0
-        modules = req.modules or []
-        if modules:
-            try:
-                existing_fp_rows = await session.execute(
-                    select(FunctionalPoint).where(FunctionalPoint.module_id.in_(modules))
-                )
-                seen_names: set[str] = set()
-                for efp in existing_fp_rows.scalars().all():
-                    if efp.name and efp.name not in seen_names:
-                        seen_names.add(efp.name)
-                        fp_copy = FunctionalPoint(
-                            id=gen_requirement_id(),
-                            requirement_id=req_id,
-                            module_id=efp.module_id,
-                            name=efp.name,
-                            fp_type=efp.fp_type,
-                            priority=efp.priority,
-                            srr_json=dict(efp.srr_json) if isinstance(efp.srr_json, dict) else {},
-                            atomicity_check=dict(efp.atomicity_check) if isinstance(efp.atomicity_check, dict) else {},
-                            test_hints=list(efp.test_hints or []),
-                            status="pending",
-                        )
-                        session.add(fp_copy)
-                        copied_count += 1
-                await session.flush()
-                if copied_count:
-                    logger.info("[FP] 已从已有 FP 复制 {} 个到当前需求", copied_count)
-            except Exception as e:
-                logger.warning("[FP] 复制已有 FP 失败(不阻断): {}", str(e)[:200])
-
-        saved = await _save_fps_to_db(session, req_id, new_fps, req.priority)
-        await _save_fp_dependencies(session, req_id, _agent.last_fp_dependencies)
-
-        # v2.18: 使用选择性合并 interaction_srr 到总 SRR（不替换，符合 SSOT 原则）
-        if _agent.interaction_srr and isinstance(_agent.interaction_srr, dict):
-            req.srr_json = _merge_interaction_srr(dict(req.srr_json or {}), _agent.interaction_srr)
-            logger.info("[FP] 已将交互层 SRR 选择性合并到主需求 srr_json")
-
-        await _update_fp_index_in_srr(session, req_id)  # v2.18: 更新总 SRR 的 fp_index
-        await session.commit()
-        total_fps = copied_count + saved
-        return ApiResponse(
-            success=True,
-            message=f"已拆分 {total_fps} 个功能点（新增 {saved} + 复用已有 {copied_count}）",
-            data={"functional_points": [
-                {"id": "", "name": fp.get("name", ""), "fp_type": fp.get("fp_type", "workflow"), "module_id": None}
-                for fp in new_fps
-            ]},
-        )
-
-    # 精简 SRR
-    srr_snippet = {
-        k: v for k, v in srr.items()
-        if k not in ("_raw_text", "additional_details", "assumptions", "dependencies", "api_definitions", "data_model", "relationships", "non_functional", "ui_rules", "user_roles")
-    }
-    import json as _json
-    snippet_text = _json.dumps(srr_snippet, ensure_ascii=False)[:6000]
-
-    all_fps = []
-    for bp_name in body.bp_names:
-        prompt = pm.get("fp_agent", "FP_SPLIT_USER_PROMPT").format(
-            bp_name=bp_name, bp_summary="", req_title=req.title, srr_snippet=snippet_text,
-        )
-        try:
-            result = await llm_client.call_json(
-                prompt=prompt,
-                system_prompt=pm.get("fp_agent", "FP_SPLIT_SYSTEM_PROMPT"),
-                schema_hint={"functional_points": list},
-                temperature=0.2,
-            )
-            all_fps.extend(result.get("functional_points", []))
-        except Exception:
-            continue
-
-    created = []
-    for fp in all_fps:
-        fp_id = gen_requirement_id()
-        record = FunctionalPoint(
-            id=fp_id,
-            requirement_id=req_id,
-            module_id=fp.get("suggested_module_id"),
-            name=fp.get("name", "未命名功能点"),
-            fp_type=fp.get("fp_type", "workflow"),
-            priority=req.priority,
-            srr_json={
-                "happy_path": fp.get("happy_path", ""),
-                "alternate_flows": fp.get("alternate_flows", ""),
-                "business_rules": fp.get("business_rules", []),
-                "triggers": fp.get("triggers", ""),
-                "expected_results": fp.get("expected_results", ""),
-                "boundary_elements": fp.get("boundary_elements", ""),
-                "summary": fp.get("summary", ""),
-            },
-            atomicity_check=fp.get("atomicity_check", {}),
-            test_hints=fp.get("test_hints", []),
-        )
-        session.add(record)
-        created.append({
-            "id": fp_id,
-            "name": record.name,
-            "fp_type": record.fp_type,
-            "module_id": record.module_id,
-        })
-
-    # 关联分析
-    if len(created) >= 2:
-        fp_list_text = "\n".join(
-            f"- {f['name']}" for f in created
-        )
-        try:
-            assoc_result = await llm_client.call_json(
-                prompt=pm.get("fp_agent", "FP_ASSOCIATE_USER_PROMPT").format(
-                    req_title=req.title, fp_list=fp_list_text,
-                ),
-                system_prompt=pm.get("fp_agent", "FP_ASSOCIATE_SYSTEM_PROMPT"),
-                schema_hint={"dependencies": list},
-                temperature=0.2,
-            )
-            id_map = {f["name"]: f["id"] for f in created}
-            deps_added = 0
-            for dep in assoc_result.get("dependencies", []):
-                src_id = id_map.get(dep.get("source_fp_name", ""))
-                tgt_id = id_map.get(dep.get("target_fp_name", ""))
-                if src_id and tgt_id and src_id != tgt_id:
-                    session.add(FPDependency(
-                        source_fp_id=src_id,
-                        target_fp_id=tgt_id,
-                        relation_type=dep.get("relation_type", "depends_on"),
-                        description=dep.get("description", ""),
-                    ))
-                    deps_added += 1
-            logger.info("[FP] 关联分析完成: {} 条依赖", deps_added)
-        except Exception as e:
-            logger.warning("[FP] 关联分析失败（不阻断拆分）: {}", str(e)[:200])
-
-    await session.commit()
-    return ApiResponse(
-        success=True,
-        message=f"已拆分 {len(created)} 个功能点",
-        data={"functional_points": created, "total": len(created)},
-    )
 
 
 @router.get("/{req_id}/fp", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
@@ -4143,14 +4651,33 @@ async def fp_update(
     body: FPUpdateRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """更新功能点名称 / 模块 / 子 SRR。v2.2 支持多模块。"""
-    await _load_active_requirement(req_id, session)
+    """更新功能点名称 / 模块 / 子 SRR。v2.2 支持多模块。
+
+    v2.35: 允许归档状态下编辑功能点，编辑后同步更新所有引用点：
+        - 总 SRR fp_index / fp_summary（FP 名称/模块变更时）
+        - 向量库 FP 记录（FP 已归档时重新写入 Milvus）
+        - 用例 case_json.related_fp（FP 名称变更时批量更新关联用例）
+        - FP 依赖关系按 ID 存储，展示层自动读取最新名称，无需额外处理
+    """
+    # v2.35: 归档状态也允许编辑 FP（不调用 _load_active_requirement）
+    req = await session.get(Requirement, req_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="需求不存在")
+
     fp = await session.get(FunctionalPoint, fp_id)
     if not fp or fp.requirement_id != req_id:
         raise HTTPException(status_code=404, detail="功能点不存在")
 
-    if body.name is not None:
+    # 记录变更前的名称，用于判断是否需要同步用例
+    old_name = fp.name
+    old_modules = list(fp.modules or [])
+    old_srr_json = dict(fp.srr_json) if isinstance(fp.srr_json, dict) else {}
+    name_changed = False
+    srr_changed = False
+
+    if body.name is not None and body.name != fp.name:
         fp.name = body.name
+        name_changed = True
     if body.modules is not None:
         fp.modules = body.modules
     elif body.module_id is not None:
@@ -4159,11 +4686,97 @@ async def fp_update(
         fp.module_id = body.module_id
     if body.srr_json is not None:
         fp.srr_json = body.srr_json
+        srr_changed = True
+
+    await session.flush()
+
+    # v2.35: 同步更新引用点
+    sync_results: list[str] = []
+
+    # 1. FP 名称变更 → 更新关联用例 case_json.related_fp / functional_point
+    if name_changed:
+        try:
+            case_result = await session.execute(
+                select(TestCase).where(
+                    TestCase.req_id == req_id,
+                )
+            )
+            cases_to_update = case_result.scalars().all()
+            updated_count = 0
+            for case in cases_to_update:
+                case_json = dict(case.case_json) if isinstance(case.case_json, dict) else {}
+                related_fp = case_json.get("related_fp", "")
+                functional_point = case_json.get("functional_point", "")
+                changed = False
+                if related_fp == old_name:
+                    case_json["related_fp"] = fp.name
+                    changed = True
+                if functional_point == old_name:
+                    case_json["functional_point"] = fp.name
+                    changed = True
+                if changed:
+                    case.case_json = case_json
+                    updated_count += 1
+            if updated_count > 0:
+                sync_results.append(f"用例 related_fp 同步 {updated_count} 条")
+                logger.info("[FP] 用例 related_fp 同步: fp_id={}, old_name={}, new_name={}, updated={}",
+                            fp_id, old_name, fp.name, updated_count)
+        except Exception as e:
+            logger.error("[FP] 用例 related_fp 同步失败 fp_id={}: {}", fp_id, str(e)[:200])
+
+    # 2. 更新总 SRR 的 fp_index / fp_summary
+    try:
+        await _update_fp_index_in_srr(session, req_id)
+        sync_results.append("总 SRR fp_index 已更新")
+    except Exception as e:
+        logger.error("[FP] 总 SRR fp_index 更新失败 req_id={}: {}", req_id, str(e)[:200])
 
     await session.commit()
-    logger.info("[FP] 更新: fp_id={}, fields={}", fp_id,
-                [k for k, v in {"name": body.name, "module_id": body.module_id, "srr_json": body.srr_json is not None}.items() if v])
-    return ApiResponse(success=True, message="功能点已更新", data={"id": fp.id, "name": fp.name})
+
+    # 3. FP 已归档 → 重新写入向量库（在 commit 后执行，避免事务未提交时写入不一致数据）
+    if fp.status == "archived" and (name_changed or srr_changed):
+        try:
+            from app.db.milvus_store import vector_store
+
+            fp_meta = {
+                "type": "functional_point",
+                "requirement_id": req_id,
+                "fp_id": fp.id or "",
+                "fp_name": fp.name or "",
+                "modules": ",".join(fp.modules or []) if fp.modules else (fp.module_id or ""),
+                "module_id": fp.module_id or "",
+                "fp_type": fp.fp_type,
+                "product_id": req.product_id,
+                "status": "archived",
+            }
+            embed_srr = dict(fp.srr_json) if isinstance(fp.srr_json, dict) else {}
+            embed_srr.setdefault("requirement", {})
+            embed_srr["requirement"]["title"] = fp.name
+            if fp.modules:
+                embed_srr["requirement"]["modules"] = list(fp.modules)
+            elif fp.module_id:
+                embed_srr["requirement"]["modules"] = [fp.module_id]
+            if not embed_srr["requirement"].get("summary"):
+                embed_srr["requirement"]["summary"] = (
+                    fp.srr_json.get("requirement", {}).get("summary", "")
+                    if isinstance(fp.srr_json, dict) else ""
+                ) or fp.name
+
+            await asyncio.to_thread(
+                vector_store.add_requirement,
+                req_id=f"FP-{fp.id}",
+                srr_json=embed_srr,
+                metadata=fp_meta,
+            )
+            sync_results.append("向量库 FP 记录已更新")
+            logger.info("[FP] 向量库 FP 记录已更新: fp_id={}", fp_id)
+        except Exception as e:
+            logger.warning("[FP] 向量库 FP 记录更新失败 fp_id={}: {}", fp_id, str(e)[:200])
+
+    logger.info("[FP] 更新: fp_id={}, fields={}, sync={}", fp_id,
+                [k for k, v in {"name": body.name, "module_id": body.module_id, "srr_json": body.srr_json is not None}.items() if v],
+                sync_results)
+    return ApiResponse(success=True, message="功能点已更新", data={"id": fp.id, "name": fp.name, "sync": sync_results})
 
 
 # ============================================================================
@@ -4399,6 +5012,7 @@ async def fp_merge(
     req_id: str,
     body: FPMergeRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """将多个功能点合并为一个（异步任务模式）。
 
@@ -4449,6 +5063,12 @@ async def fp_merge(
         )
     )
 
+    await log_operation(
+        username=current_user.username, user_id=current_user.user_id,
+        action="fp_merge", target_type="functional_point", target_id=req_id,
+        detail={"fp_ids": fp_ids, "merged_name": body.merged_name},
+    )
+
     return ApiResponse(
         success=True,
         message="功能点合并已启动",
@@ -4461,7 +5081,11 @@ async def fp_update(
     req_id: str, fp_id: str, body: FPUpdateRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """编辑功能点（名称/模块/类型/优先级）。归档后不可用。"""
+    """编辑功能点（名称/模块/类型/优先级）。
+
+    v2.35: 归档编辑请使用 PUT 接口（含同步更新总 SRR/向量库/用例逻辑）。
+    此 PATCH 接口仅做简单字段更新，不包含同步逻辑，归档状态不建议使用。
+    """
     await _load_active_requirement(req_id, session)
     fp = await session.get(FunctionalPoint, fp_id)
     if not fp or fp.requirement_id != req_id:
@@ -4610,6 +5234,7 @@ async def fp_reuse(
     req_id: str,
     body: FPReuseRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """复用已归档的功能点。
 
@@ -4687,6 +5312,12 @@ async def fp_reuse(
         source_fp.id, new_fp.id, new_fp.name, req_id, new_fp.module_id,
     )
 
+    await log_operation(
+        username=current_user.username, user_id=current_user.user_id,
+        action="fp_reuse", target_type="functional_point", target_id=new_fp.id,
+        detail={"source_fp_id": source_fp.id, "source_req_id": source_fp.requirement_id},
+    )
+
     return ApiResponse(
         success=True,
         message=f"功能点「{new_fp.name}」已复用，模块已继承",
@@ -4703,8 +5334,13 @@ async def fp_reuse(
     )
 
 
-@router.delete("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def fp_delete(req_id: str, fp_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
+@router.delete("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def fp_delete(
+    req_id: str,
+    fp_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> ApiResponse:
     """删除功能点。归档后不可用。"""
     await _load_active_requirement(req_id, session)
     fp = await session.get(FunctionalPoint, fp_id)
@@ -4720,6 +5356,17 @@ async def fp_delete(req_id: str, fp_id: str, session: AsyncSession = Depends(get
         await session.delete(dep)
     await session.delete(fp)
     await session.commit()
+    # v2.22: 删除 FP 后更新总 SRR 的 fp_index 和 fp_summary
+    try:
+        await _update_fp_index_in_srr(session, req_id)
+        await session.commit()
+    except Exception as e:
+        logger.warning("[FP-Delete] 更新 fp_index/fp_summary 失败（不阻断）: {}", str(e)[:200])
+    await log_operation(
+        username=current_user.username, user_id=current_user.user_id,
+        action="fp_delete", target_type="functional_point", target_id=fp_id,
+        detail={"req_id": req_id},
+    )
     return ApiResponse(success=True, message="功能点已删除")
 
 
@@ -4794,6 +5441,7 @@ async def fp_regenerate(
             system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
             schema_hint={"name": str, "fp_type": str, "summary": str, "sub_srr": dict, "atomicity_check": dict, "test_hints": list},
             temperature=0.2,
+            agent_name="FpAgent",
         )
         sub_srr = result.get("sub_srr", {}) if isinstance(result, dict) else {}
         fp.srr_json = {
@@ -4826,26 +5474,40 @@ async def fp_regenerate(
 @router.get("/{req_id}/export/xmind", dependencies=[Depends(get_current_user)])
 async def export_requirement_xmind(
     req_id: str,
+    format: str = "xmind",
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """导出需求 SRR 为 XMind 思维导图（.xmind ZIP 文件）。
 
+    支持两种 XMind 格式（与测试用例导出保持一致）：
+    - ``xmind``（默认）：XMind 2020+ / Zen / 2022+ JSON 格式（content.json）
+    - ``xmind8``：XMind 8 兼容的 XMAP 2.0 XML 格式（content.xml）
+
     树结构：
         需求标题（根）
-          ├── 基本信息（优先级/类型/摘要）
-          ├── 主流程（Happy Path 步骤）
-          ├── 异常分支
-          ├── 业务规则 / 边界条件 / 数据约束 / 验收标准 / 前置条件
-          ├── 功能点（含子 SRR）
-          └── 附加详情
+          ├── 总体SRR（一级）
+          │   ├── 基本信息（优先级/类型/摘要）
+          │   ├── 主流程（Happy Path 步骤）
+          │   ├── 异常分支
+          │   ├── 业务规则 / 边界条件 / 数据约束 / 验收标准 / 前置条件
+          │   └── 附加详情
+          ├── [fp_type] 功能点1（一级）
+          │   ├── 摘要 / 主流程 / 异常分支 / 业务规则 / ...
+          │   └── 测试提示
+          └── [fp_type] 功能点2（一级）
 
     Args:
         req_id: 需求 ID
+        format: 导出格式，``xmind``（JSON）或 ``xmind8``（XML）
         session: 数据库会话
 
     Returns:
         Response: .xmind 文件（application/zip）
     """
+    fmt = (format or "xmind").strip().lower()
+    if fmt not in ("xmind", "xmind8"):
+        raise HTTPException(status_code=400, detail=f"不支持的导出格式: {format}，支持: xmind / xmind8")
+
     stmt = select(Requirement).where(Requirement.id == req_id)
     result = await session.execute(stmt)
     record = result.scalar_one_or_none()
@@ -4857,24 +5519,57 @@ async def export_requirement_xmind(
     if not isinstance(srr, dict):
         srr = {}
 
+    # 查询功能点列表，合并到 srr 中供导出器使用（srr_json 本身不含 FP 详细数据）
+    from sqlalchemy import select as sa_select
+    fp_result = await session.execute(
+        sa_select(
+            FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.fp_type,
+            FunctionalPoint.priority, FunctionalPoint.srr_json, FunctionalPoint.test_hints,
+            FunctionalPoint.status,
+        )
+        .where(FunctionalPoint.requirement_id == req_id)
+        .order_by(FunctionalPoint.created_at)
+    )
+    fp_rows = fp_result.all()
+    if fp_rows:
+        srr = dict(srr)  # 浅拷贝避免修改 ORM 持有对象
+        srr["functional_points"] = [
+            {
+                "fp_id": row[0],
+                "name": row[1],
+                "fp_type": row[2],
+                "priority": row[3],
+                "srr_json": row[4] or {},
+                "test_hints": row[5] or [],
+                "status": row[6],
+            }
+            for row in fp_rows
+        ]
+
     # 安全文件名（去除路径分隔符等特殊字符）
     raw_title = (srr.get("requirement") or {}).get("title") if isinstance(srr.get("requirement"), dict) else record.title
     raw_title = str(raw_title or req_id)
     safe_title = "".join(c for c in raw_title if c not in '\\/:*?"<>|\r\n\t').strip()[:60] or req_id
 
     try:
-        from app.exporters.req_xmind import export_requirement_to_xmind
-        content = export_requirement_to_xmind(srr, req_title=record.title or "", req_id=req_id)
+        if fmt == "xmind8":
+            from app.exporters.req_xmind import export_requirement_to_xmind
+            content = export_requirement_to_xmind(srr, req_title=record.title or "", req_id=req_id)
+        else:
+            from app.exporters.req_xmind import export_requirement_to_xmind_json
+            content = export_requirement_to_xmind_json(srr, req_title=record.title or "", req_id=req_id)
     except Exception as e:
-        logger.exception("[API/requirements] XMind 导出失败: req_id={}", req_id)
+        logger.exception("[API/requirements] XMind 导出失败: req_id={}, format={}", req_id, fmt)
         raise HTTPException(status_code=500, detail=f"XMind 导出失败: {str(e)[:200]}")
 
-    filename = f"{safe_title}_{req_id}.xmind"
+    # 文件名后缀区分格式（与测试用例导出一致）
+    suffix = "-xmind8" if fmt == "xmind8" else ""
+    filename = f"{safe_title}_{req_id}{suffix}.xmind"
     # RFC 5987: 中文文件名需用 filename* 编码（Starlette header 用 latin-1，不支持中文）
     from urllib.parse import quote
-    filename_ascii = f"requirement_{req_id}.xmind"  # ASCII fallback
+    filename_ascii = f"requirement_{req_id}{suffix}.xmind"  # ASCII fallback
     filename_utf8 = quote(filename, safe="")  # URL 编码后的中文文件名
-    logger.info("[API/requirements] XMind 导出: req_id={}, size={} bytes", req_id, len(content))
+    logger.info("[API/requirements] XMind 导出: req_id={}, format={}, size={} bytes", req_id, fmt, len(content))
 
     return Response(
         content=content,

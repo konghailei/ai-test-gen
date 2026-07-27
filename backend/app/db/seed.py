@@ -294,6 +294,14 @@ async def seed_admin_user() -> None:
             session.add(admin_role)
             await session.flush()
             logger.info("默认角色已创建: admin（全菜单权限）")
+        else:
+            # v2.23: 已存在的 admin 角色同步最新菜单权限（如新增 admin_logs）
+            current_menus = set(admin_role.menus or [])
+            needed_menus = set(DEFAULT_MENUS)
+            if not needed_menus.issubset(current_menus):
+                admin_role.menus = list(DEFAULT_MENUS)
+                logger.info("admin 角色菜单权限已同步更新: 新增 {} 项",
+                            len(needed_menus - current_menus))
 
         stmt = select(Role).where(Role.name == "user")
         result = await session.execute(stmt)

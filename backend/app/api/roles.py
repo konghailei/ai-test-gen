@@ -142,7 +142,7 @@ async def list_menus() -> ApiResponse:
         "projects_modules": "项目与模块", "admin": "管理后台",
         "admin_products": "产品管理", "admin_prompts": "提示词管理", "admin_settings": "系统设置",
         "admin_dashboard": "管理首页", "admin_users": "用户管理", "admin_roles": "角色管理",
-        "admin_kb": "知识库配置",
+        "admin_kb": "知识库配置", "admin_logs": "日志查看",
     }
     menus = [{"key": m, "label": menu_labels.get(m, m)} for m in DEFAULT_MENUS]
     return ApiResponse(success=True, message="ok", data=menus)

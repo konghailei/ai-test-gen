@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.core.auth import require_admin, get_current_user, CurrentUser
 from app.core import prompt_manager
+from app.core.operation_logger import log_operation
 from app.models.api_schemas import ApiResponse
 from app.utils.logger import logger
 
@@ -47,8 +48,17 @@ async def update_prompt(
     try:
         prompt_manager.update(module, name, req.value, changed_by=current_user.username)
         logger.info("[API/prompts] 提示词已更新: {}.{} (by={})", module, name, current_user.username)
+        await log_operation(
+            username=current_user.username, user_id=current_user.user_id,
+            action="update_prompt", target_type="prompt", target_id=f"{module}.{name}",
+        )
         return ApiResponse(success=True, message="提示词已保存", data=None)
     except Exception as e:
+        await log_operation(
+            username=current_user.username, user_id=current_user.user_id,
+            action="update_prompt", target_type="prompt", target_id=f"{module}.{name}",
+            success=False, error_message=str(e)[:200],
+        )
         raise HTTPException(status_code=500, detail=f"保存失败: {str(e)[:200]}")
 
 
@@ -65,8 +75,17 @@ async def reset_prompt(
     try:
         prompt_manager.reset(module, name, changed_by=current_user.username)
         logger.info("[API/prompts] 提示词已重置: {}.{} (by={})", module, name, current_user.username)
+        await log_operation(
+            username=current_user.username, user_id=current_user.user_id,
+            action="reset_prompt", target_type="prompt", target_id=f"{module}.{name}",
+        )
         return ApiResponse(success=True, message="已恢复默认值", data=None)
     except Exception as e:
+        await log_operation(
+            username=current_user.username, user_id=current_user.user_id,
+            action="reset_prompt", target_type="prompt", target_id=f"{module}.{name}",
+            success=False, error_message=str(e)[:200],
+        )
         raise HTTPException(status_code=500, detail=f"重置失败: {str(e)[:200]}")
 
 
@@ -123,12 +142,29 @@ async def restore_prompt_from_history(
             "[API/prompts] 提示词已从历史恢复: {}.{} (history_id={}, by={})",
             module, name, history_id, current_user.username,
         )
+        await log_operation(
+            username=current_user.username, user_id=current_user.user_id,
+            action="restore_prompt", target_type="prompt", target_id=f"{module}.{name}",
+            detail={"history_id": history_id},
+        )
         return ApiResponse(
             success=True,
             message=f"已从历史版本 #{history_id} 恢复",
             data=result,
         )
     except ValueError as e:
+        await log_operation(
+            username=current_user.username, user_id=current_user.user_id,
+            action="restore_prompt", target_type="prompt", target_id=f"{module}.{name}",
+            detail={"history_id": history_id},
+            success=False, error_message=str(e)[:200],
+        )
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        await log_operation(
+            username=current_user.username, user_id=current_user.user_id,
+            action="restore_prompt", target_type="prompt", target_id=f"{module}.{name}",
+            detail={"history_id": history_id},
+            success=False, error_message=str(e)[:200],
+        )
         raise HTTPException(status_code=500, detail=f"恢复失败: {str(e)[:200]}")

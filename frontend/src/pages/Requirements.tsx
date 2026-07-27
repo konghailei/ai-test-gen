@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, AlertTriangle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2, Search, X, Download } from 'lucide-react'
+import { FileText, Upload, ArrowRight, Loader2, Filter, CheckCircle2, XCircle, AlertCircle, AlertTriangle, FileUp, Brain, Database, Sparkles, RefreshCw, Trash2, FileCode, File, FileType, MessageCircle, Send, Share2, Search, X, Download, Minimize2, Clock } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
-import type { Requirement, Product, ClarifyQuestion, Module, AnalysisTaskInfo } from '../types'
+import type { Requirement, Product, ClarifyQuestion, Module, AnalysisTaskInfo, PhaseTiming } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, sourceTypeLabel } from '../utils'
 
 /** 上传进度步骤定义（v2.4 影响分析合并） */
@@ -20,6 +20,8 @@ type UploadProgress = {
   message: string       // 当前状态描述
   error: string | null  // 错误信息（不为空时表示出错）
   progress: number      // 真实进度 0-100（v2.14 来自后端任务轮询）
+  taskId?: string       // v2.23: 关联的任务 ID（用于最小化后继续轮询）
+  timings?: Record<string, PhaseTiming>  // v2.23: 阶段耗时数据
 }
 
 export default function Requirements() {
@@ -60,13 +62,25 @@ export default function Requirements() {
   } | null>(null)
   const [submittingClarify, setSubmittingClarify] = useState(false)
 
-  // 上传后的影响分析结果
+  // 上传后的影响分析结果（v2.35: 移除 affected_requirements，新增 affected_fps）
   const [impactResult, setImpactResult] = useState<{
     req_id: string
     req_title: string
     direct_modules: { id: string; name: string }[]
     indirect_modules: { id: string; name: string; reason: string; depth: number }[]
-    affected_requirements: { id: string; title: string; priority: string; modules: string[] }[]
+    affected_fps: {
+      fp_id: string
+      fp_name: string
+      fp_status: string
+      module_id: string
+      module_name: string
+      impact_reason: string
+      depth: number
+      source_fp_name: string
+      kb_context: string
+      existing_cases_count: number
+    }[]
+    total_affected: number
   } | null>(null)
 
   // 上传进度
@@ -183,7 +197,7 @@ export default function Requirements() {
     if (taskPollingRef.current) clearInterval(taskPollingRef.current)
 
     const PHASE_MAP: Record<string, number> = {
-      parse: 0, kb_search: 1, clarify: 2, regenerate: 3, impact: 4, done: 4,
+      upload: 0, parse: 0, kb_search: 1, clarify: 2, regenerate: 3, impact: 4, done: 4,
     }
 
     const poll = async () => {
@@ -192,6 +206,7 @@ export default function Requirements() {
 
         // 映射后端 phase 到前端 UPLOAD_PHASES 索引
         const phaseIdx = PHASE_MAP[task.phase] ?? 0
+        const timings = task.phase_timings || {}
 
         if (task.status === 'running' || task.status === 'pending') {
           setProgress({
@@ -199,6 +214,8 @@ export default function Requirements() {
             message: task.message || '正在分析...',
             error: null,
             progress: task.progress,
+            taskId,
+            timings,
           })
         } else if (task.status === 'completed') {
           // 任务完成
@@ -215,13 +232,15 @@ export default function Requirements() {
               message: '分析完成（降级）',
               error: `⚠️ ${result.degraded_reason || '最终 SRR 生成失败，已降级使用首次解析结果'}`,
               progress: 100,
+              taskId,
+              timings,
             })
             await sleep(3000) // 让用户看到警告 3 秒
           }
 
           if (questions.length > 0) {
             // 有未回答问题：显示澄清面板
-            setProgress({ phase: 2, message: '检测到需要补充的内容，请确认以下问题', error: null, progress: 100 })
+            setProgress({ phase: 2, message: '检测到需要补充的内容，请确认以下问题', error: null, progress: 100, taskId, timings })
             await sleep(800)
             setProgress(null)
             const initAnswers: Record<string, string> = {}
@@ -239,6 +258,8 @@ export default function Requirements() {
             message: '分析失败',
             error: task.error || '分析过程中发生错误',
             progress: task.progress,
+            taskId,
+            timings,
           })
         } else if (task.status === 'interrupted') {
           if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
@@ -248,6 +269,8 @@ export default function Requirements() {
             message: '任务已中断（服务重启）',
             error: task.error || '服务重启导致任务中断，请重新上传',
             progress: task.progress,
+            taskId,
+            timings,
           })
         }
       } catch (e: any) {
@@ -261,19 +284,19 @@ export default function Requirements() {
     taskPollingRef.current = setInterval(poll, 1500)
   }
 
-  /** 运行影响分析（基于模块依赖图谱 BFS 遍历） */
+  /** 运行影响分析（基于模块依赖图谱 + FP 依赖图谱 BFS 遍历） */
   const runImpactAnalysis = async (reqId: string) => {
     try {
-      setProgress({ phase: 4, message: '正在进行影响分析（基于模块依赖图谱 BFS 遍历）...', error: null, progress: 90 })
+      setProgress({ phase: 4, message: '正在进行影响分析（基于模块+FP 依赖图谱 BFS 遍历）...', error: null, progress: 90 })
       startProgressSimulation()
 
-      const impactRes = await reqApi.analyzeImpact(reqId)
+      const impactRes = await reqApi.impactAnalysis(reqId)
 
       stopProgressTimer()
 
-      // 如果有间接影响或受影响需求，展示确认面板
+      // 如果有间接影响或受影响功能点，展示确认面板
       const hasImpacts = (impactRes.indirect_modules?.length || 0) > 0 ||
-                         (impactRes.affected_requirements?.length || 0) > 0
+                         (impactRes.affected_fps?.length || 0) > 0
 
       if (hasImpacts) {
         setProgress({ phase: 4, message: '影响分析完成，请确认以下影响范围', error: null, progress: 95 })
@@ -520,9 +543,29 @@ export default function Requirements() {
           if (!progress) setShowUpload(false)
         }}>
           <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-semibold text-slate-800 mb-4 sticky top-0 bg-white pb-2 z-10">
-              {progress ? '正在上传需求' : uploadResult ? '请补充需求信息' : '上传需求'}
-            </h2>
+            <div className="flex items-center justify-between mb-4 sticky top-0 bg-white pb-2 z-10">
+              <h2 className="text-lg font-semibold text-slate-800">
+                {progress ? '正在上传需求' : uploadResult ? '请补充需求信息' : '上传需求'}
+              </h2>
+              {/* v2.24: 后台运行按钮 — 关闭弹窗并跳转到任务管理页面查看进度 */}
+              {progress && !progress.error && (
+                <button
+                  onClick={() => {
+                    // 停止本地轮询，任务进度由任务管理页面统一展示
+                    if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
+                    setFileUploading(false)
+                    setShowUpload(false)
+                    setProgress(null)
+                    setUploadFiles([])
+                    navigate('/tasks')
+                  }}
+                  className="btn-secondary text-xs py-1.5 flex items-center gap-1.5"
+                  title="关闭弹窗，前往任务管理页面查看进度"
+                >
+                  <Minimize2 className="w-3.5 h-3.5" /> 后台运行
+                </button>
+              )}
+            </div>
 
             {/* ===== 上传中：阶段化进度条 ===== */}
             {progress && (
@@ -567,8 +610,52 @@ export default function Requirements() {
                       阶段 {progress.phase + 1}/{UPLOAD_PHASES.length}
                     </span>
                     <span>{progress.message}</span>
+                    {/* v2.23: 当前阶段已用时间 */}
+                    {progress.timings && progress.taskId && (() => {
+                      const currentPhaseKey = UPLOAD_PHASES[progress.phase]?.key
+                      const t = currentPhaseKey ? progress.timings[currentPhaseKey] : undefined
+                      if (!t?.start) return null
+                      const elapsed = (t.end ? new Date(t.end).getTime() : Date.now()) - new Date(t.start).getTime()
+                      const sec = Math.round(elapsed / 1000)
+                      return (
+                        <span className="inline-flex items-center gap-0.5 text-xs text-slate-400">
+                          <Clock className="w-3 h-3" />
+                          {sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`}
+                        </span>
+                      )
+                    })()}
                   </div>
                 </div>
+
+                {/* v2.23: 已完成阶段的耗时明细 */}
+                {progress.timings && Object.keys(progress.timings).length > 0 && (
+                  <div className="bg-slate-50 rounded-lg p-3 space-y-1.5">
+                    <p className="text-xs font-medium text-slate-500 flex items-center gap-1">
+                      <Clock className="w-3 h-3" /> 阶段耗时明细
+                    </p>
+                    {UPLOAD_PHASES.map(phase => {
+                      const t = progress.timings?.[phase.key]
+                      if (!t?.start) return null
+                      const isDone = !!t.end
+                      const elapsed = t.end
+                        ? t.duration_ms || (new Date(t.end).getTime() - new Date(t.start).getTime())
+                        : Date.now() - new Date(t.start).getTime()
+                      const sec = Math.round(elapsed / 1000)
+                      const timeStr = sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`
+                      return (
+                        <div key={phase.key} className="flex items-center justify-between text-xs">
+                          <span className={`flex items-center gap-1.5 ${isDone ? 'text-slate-500' : 'text-indigo-600 font-medium'}`}>
+                            {isDone ? <CheckCircle2 className="w-3 h-3 text-emerald-500" /> : <Loader2 className="w-3 h-3 animate-spin" />}
+                            {phase.label}
+                          </span>
+                          <span className={`font-mono ${isDone ? 'text-slate-400' : 'text-indigo-600'}`}>
+                            {timeStr}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
 
                 {/* 错误信息 / 降级警告 */}
                 {progress.error && (
@@ -890,19 +977,38 @@ export default function Requirements() {
               </div>
             )}
 
-            {/* 受影响的其他需求 */}
-            {impactResult.affected_requirements.length > 0 && (
+            {/* 受影响的功能点（基于 FP 依赖图谱 BFS 分析） */}
+            {impactResult.affected_fps.length > 0 && (
               <div className="mb-4">
                 <p className="text-xs font-medium text-slate-500 mb-2">
-                  受影响的其他需求 ({impactResult.affected_requirements.length})
+                  受影响的功能点 ({impactResult.affected_fps.length})
+                  <span className="text-slate-400 font-normal ml-1">基于 FP 依赖图谱 BFS 分析</span>
                 </p>
                 <div className="space-y-1.5">
-                  {impactResult.affected_requirements.map(r => (
-                    <div key={r.id} className="px-4 py-3 bg-white rounded-xl border border-slate-200 flex items-center justify-between">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-slate-700 truncate">{r.title}</p>
-                        <span className="text-xs text-slate-400">{r.priority} · {r.id}</span>
+                  {impactResult.affected_fps.map(fp => (
+                    <div key={fp.fp_id} className="px-4 py-3 bg-white rounded-xl border border-slate-200">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <p className="text-sm font-medium text-slate-700 truncate">{fp.fp_name}</p>
+                          {fp.fp_status === 'archived' && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 font-medium flex-shrink-0">已归档</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-slate-400 flex-shrink-0">{fp.depth}跳</span>
                       </div>
+                      <p className="text-xs text-slate-500">{fp.impact_reason}</p>
+                      {fp.module_name && (
+                        <span className="text-[10px] text-slate-400 mt-0.5 inline-block">模块: {fp.module_name}</span>
+                      )}
+                      {fp.kb_context && (
+                        <div className="mt-2 p-2 bg-blue-50/50 rounded border border-blue-100">
+                          <div className="flex items-center gap-1 mb-0.5">
+                            <Database className="w-3 h-3 text-blue-500" />
+                            <span className="text-[10px] font-medium text-blue-700">知识库说明</span>
+                          </div>
+                          <p className="text-[11px] text-slate-600 whitespace-pre-wrap line-clamp-3">{fp.kb_context}</p>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -910,16 +1016,16 @@ export default function Requirements() {
             )}
 
             {/* 无影响 */}
-            {impactResult.indirect_modules.length === 0 && impactResult.affected_requirements.length === 0 && (
+            {impactResult.indirect_modules.length === 0 && impactResult.affected_fps.length === 0 && (
               <div className="text-center py-6">
                 <CheckCircle2 className="w-10 h-10 mx-auto mb-3 text-emerald-400" />
                 <p className="text-sm font-medium text-emerald-600">未发现间接影响</p>
-                <p className="text-xs text-slate-400 mt-1">该需求变更不会影响其他模块或需求</p>
+                <p className="text-xs text-slate-400 mt-1">该需求变更不会影响其他模块或功能点</p>
               </div>
             )}
 
             <p className="text-xs text-slate-400 mt-4 pt-4 border-t border-slate-100">
-              以上为基于模块依赖图谱的自动分析结果，仅供参考
+              以上为基于模块+FP 依赖图谱的自动分析结果，仅供参考
             </p>
             <div className="flex justify-end gap-3 mt-4">
               <button onClick={() => { finishUpload(impactResult.req_id) }}
@@ -1115,6 +1221,8 @@ export default function Requirements() {
           </div>
         </div>
       )}
+
+      {/* v2.24: 移除右下角浮动进度卡片 — 进度统一在任务管理页面展示 */}
     </div>
   )
 }

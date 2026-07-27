@@ -431,24 +431,7 @@ function ImpactDescriptionModal({
                 </div>
               )}
 
-              {/* 受影响需求 */}
-              {data.affected_requirements.length > 0 && (
-                <div>
-                  <h4 className="text-sm font-semibold text-slate-700 mb-2">
-                    受影响的需求（{data.affected_requirements.length}）
-                  </h4>
-                  <div className="space-y-1">
-                    {data.affected_requirements.map((r, i) => (
-                      <div key={i} className="text-xs px-3 py-1.5 bg-amber-50 text-amber-700 rounded">
-                        {r.title}
-                        {r.matched_modules && r.matched_modules.length > 0 && (
-                          <span className="ml-1 text-amber-400">[{r.matched_modules.join(', ')}]</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* v2.35: 移除受影响需求展示（不再分析受影响的需求，改为基于 FP 依赖图谱分析受影响功能点） */}
 
               {/* 可编辑的影响说明 */}
               <div>

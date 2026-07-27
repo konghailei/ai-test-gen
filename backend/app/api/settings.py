@@ -161,6 +161,8 @@ def _build_item(row: LLMConfigModel) -> LLMConfigItem:
         base_url=row.base_url or "",
         model=row.model or "",
         is_primary=row.is_primary or False,
+        enable_thinking=row.enable_thinking or False,
+        thinking_params=row.thinking_params or "",
     )
 
 
@@ -213,6 +215,8 @@ async def load_db_config_to_settings(session: AsyncSession) -> None:
                 "base_url": row.base_url or "",
                 "model": row.model or "",
                 "is_primary": row.is_primary or False,
+                "enable_thinking": row.enable_thinking or False,
+                "thinking_params": row.thinking_params or "",
             }
             all_configs.append(cfg)
 
@@ -256,6 +260,8 @@ def _apply_config_to_settings(cfg: dict) -> None:
         "api_key": cfg.get("api_key", ""),
         "base_url": cfg.get("base_url", ""),
         "model": cfg.get("model", ""),
+        "enable_thinking": cfg.get("enable_thinking", False),
+        "thinking_params": cfg.get("thinking_params", ""),
     }
 
     # 如果当前 provider 是 is_primary，也写入传统字段
@@ -388,6 +394,8 @@ async def update_llm_config(
             base_url=base_url,
             model=model,
             is_primary=(idx == 0),  # 列表第一项为主供应商
+            enable_thinking=item.enable_thinking or False,
+            thinking_params=(item.thinking_params or "").strip(),
         )
         session.add(record)
         new_records.append(record)
@@ -402,6 +410,8 @@ async def update_llm_config(
             "base_url": record.base_url or "",
             "model": record.model or "",
             "is_primary": record.is_primary or False,
+            "enable_thinking": record.enable_thinking or False,
+            "thinking_params": record.thinking_params or "",
         }
         _apply_config_to_settings(cfg)
 

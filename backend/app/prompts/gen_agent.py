@@ -249,6 +249,9 @@ def build_user_prompt(
     fp_section = ""
     fp_requirements = ""
     if functional_points:
+        # v2.34: 注入总 SRR 的跨 FP 共享规则，供 LLM 生成跨 FP 集成用例参考
+        cfi = srr.get("cross_fp_interactions") or {} if isinstance(srr, dict) else {}
+        shared_rules = cfi.get("shared_business_rules", []) or []
         fp_brief = [
             {
                 "id": fp.get("id", ""),
@@ -273,6 +276,14 @@ def build_user_prompt(
 
 ## 功能点拆分（已拆分的原子功能单元，按此定向生成用例）
 {json.dumps(fp_brief, ensure_ascii=False, indent=2)}"""
+        # v2.34: 注入跨 FP 共享规则，供 LLM 生成跨 FP 集成/交互用例参考
+        if shared_rules:
+            fp_section += f"""
+
+## 跨 FP 共享业务规则（总 SRR 的 cross_fp_interactions.shared_business_rules，适用于多个 FP）
+{json.dumps(shared_rules, ensure_ascii=False, indent=2)}
+
+**覆盖要求**：若某条共享规则 applied_fps 涉及 ≥2 个 FP，应生成一个跨 FP 集成用例验证该规则的端到端一致性。"""
         fp_requirements = """
 ### 功能点覆盖要求（优先级最高）
 - 每个功能点（FP）至少生成 1 个测试用例，覆盖其 happy_path_steps 中的每个步骤
@@ -300,10 +311,7 @@ def build_user_prompt(
                     {"module_name": m.get("module_name", ""), "reason": m.get("reason", "")}
                     for m in item.get("affected_modules", [])[:10]
                 ],
-                "affected_requirements": [
-                    {"title": r.get("title", ""), "matched_modules": r.get("matched_modules", [])}
-                    for r in item.get("affected_requirements", [])[:10]
-                ],
+                # v2.35: 移除 affected_requirements（不再分析受影响的需求）
                 "description": item.get("description", ""),
                 "test_focus": item.get("test_focus", ""),
             }

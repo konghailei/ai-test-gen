@@ -211,7 +211,7 @@ FP_IMPACT_DESCRIPTION_SYSTEM_PROMPT = """你是一个专业的变更影响分析
 ## 输出要求
 输出 JSON 必须包含以下字段：
 {
-  "description": "自然语言描述本次功能点变更对其他功能点、模块、需求的影响范围。要求具体、可执行，按受影响对象分条说明。",
+  "description": "自然语言描述本次功能点变更对其他功能点、模块的影响范围。要求具体、可执行，按受影响对象分条说明。",
   "test_focus": "针对上述影响，列出测试用例生成时应重点关注的回归场景和边界条件。"
 }
 
@@ -226,15 +226,15 @@ def build_fp_impact_description_prompt(
     fp: dict,
     affected_fps: list[dict],
     affected_modules: list[dict],
-    affected_requirements: list[dict],
 ) -> str:
     """构建 FP 影响描述合成的用户指令。
+
+    v2.35: 移除 affected_requirements 参数（不再分析受影响的需求）。
 
     Args:
         fp: 当前功能点信息 {fp_id, fp_name, fp_type, module_id}
         affected_fps: 受影响的 FP 列表（反向 BFS 结果）
         affected_modules: 受影响的模块列表（模块 BFS 结果）
-        affected_requirements: 受影响的需求列表
 
     Returns:
         str: 完整的用户指令
@@ -249,8 +249,5 @@ def build_fp_impact_description_prompt(
 
 【受影响的模块（通过 FP 所属模块的依赖关系传播）】
 {json.dumps(affected_modules, ensure_ascii=False, indent=2) if affected_modules else "[]"}
-
-【受影响的需求（受影响模块下的其他需求）】
-{json.dumps(affected_requirements, ensure_ascii=False, indent=2) if affected_requirements else "[]"}
 
 请直接输出 JSON，不要包含其他解释性文字。"""

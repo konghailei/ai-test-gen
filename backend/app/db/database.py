@@ -58,6 +58,7 @@ async def init_db() -> None:
         ReqDependency, Traceability, LLMConfig, Product, Project, Module,
         ModuleDependency, KnowledgeQA, User, PromptOverride, ReqPattern,
         KBSetting, AnalysisTask, FPDependencyHistory, PromptHistory,
+        LLMCallLog, OperationLog,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 
@@ -74,6 +75,10 @@ async def init_db() -> None:
             "llm_config": [
                 ("provider_label", "VARCHAR(128) NOT NULL DEFAULT ''", "provider_label"),
                 ("is_primary", "BOOLEAN NOT NULL DEFAULT FALSE", "is_primary"),
+                # v2.36: 思考模式开关
+                ("enable_thinking", "BOOLEAN NOT NULL DEFAULT FALSE", "enable_thinking"),
+                # v2.37: 自定义思考参数（JSON 字符串）
+                ("thinking_params", "TEXT NOT NULL DEFAULT ''", "thinking_params"),
             ],
             "requirements": [
                 ("project_id", "VARCHAR(64) REFERENCES projects(id)", "project_id"),
@@ -92,6 +97,8 @@ async def init_db() -> None:
                 ("supplementary_text", "TEXT NOT NULL DEFAULT ''", "supplementary_text"),
                 # v2.18: docx 原始图片（base64 data_url），供前端展示对比
                 ("raw_images", "JSON NOT NULL DEFAULT '[]'::json", "raw_images"),
+                # v2.33: 多人协作冲突检测——每次 srr_json 被修改时自增
+                ("revision", "INTEGER NOT NULL DEFAULT 1", "revision"),
             ],
             "test_cases": [
                 # 用例归档时间真实字段
@@ -123,6 +130,10 @@ async def init_db() -> None:
             # v2.3: 提示词版本管理字段
             "prompt_overrides": [
                 ("updated_by", "VARCHAR(64) NOT NULL DEFAULT ''", "updated_by"),
+            ],
+            # v2.23: 任务阶段耗时追踪
+            "analysis_tasks": [
+                ("phase_timings", "JSON NOT NULL DEFAULT '{}'::json", "phase_timings"),
             ],
         }
 

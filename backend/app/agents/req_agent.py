@@ -85,6 +85,142 @@ class ReqAgent:
             logger.error("[ReqAgent] ❌ 解析异常: {}\n{}", str(e)[:500], traceback.format_exc()[-600:])
             raise
 
+    async def refine_srr(
+        self,
+        current_srr: dict,
+        extra_notes: str = "",
+        product_id: str = "",
+        product_name: str = "",
+    ) -> dict:
+        """基于现有 SRR + 补充说明修改生成新 SRR。
+
+        v2.20: 重新生成不再从原始文件解析，而是基于现有 SRR 修改。
+        复用 _parse_impl 的后处理、校验、向量库写入、FP 提取逻辑。
+
+        Args:
+            current_srr: 当前 SRR JSON 字典
+            extra_notes: 用户补充修改说明
+            product_id: 产品 ID（可选）
+            product_name: 产品名称（可选）
+
+        Returns:
+            dict: 修改后的 SRR JSON 字典
+        """
+        logger.info("[ReqAgent] ▶ 开始基于现有 SRR 修改: srr_keys={}, notes_len={}, product_id={}",
+                    list(current_srr.keys()) if isinstance(current_srr, dict) else "N/A",
+                    len(extra_notes), product_id or "(未指定)")
+
+        try:
+            return await self._refine_impl(current_srr, extra_notes, product_id, product_name)
+        except Exception as e:
+            import traceback
+            logger.error("[ReqAgent] ❌ SRR 修改异常: {}\n{}", str(e)[:500], traceback.format_exc()[-600:])
+            raise
+
+    async def _refine_impl(
+        self,
+        current_srr: dict,
+        extra_notes: str,
+        product_id: str,
+        product_name: str,
+    ) -> dict:
+        """基于现有 SRR 修改的实现（内部）。
+
+        复用 _parse_impl 的后处理逻辑，但使用 refine prompt。
+        """
+        # 1. 构建 refine prompt
+        user_prompt = prompts.build_refine_prompt(current_srr, extra_notes, product_id, product_name)
+        system_prompt = prompt_manager.get("req_agent", "SYSTEM_PROMPT") + "\n\n" + prompt_manager.get("req_agent", "FEW_SHOT_EXAMPLE")
+        logger.debug("[ReqAgent] Refine Prompt 构建完成: user_prompt_len={}, system_prompt_len={}",
+                     len(user_prompt), len(system_prompt))
+
+        # 2. 调用 LLM（强制 JSON 输出）
+        schema_hint = {
+            "srr_version": str,
+            "requirement": dict,
+            "flows": dict,
+            "data_constraints": list,
+            "acceptance_criteria": list,
+            "api_definitions": list,
+            "additional_details": str,
+        }
+        logger.info("[ReqAgent] 调用 LLM (refine): temperature=0.5, max_tokens=unlimited")
+        srr = await self._llm.call_json(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+            schema_hint=schema_hint,
+            temperature=0.5,
+            agent_name="ReqAgent",
+        )
+        logger.info("[ReqAgent] LLM 返回修改后 SRR: keys={}, requirement.title={}",
+                    list(srr.keys()) if isinstance(srr, dict) else type(srr).__name__,
+                    srr.get("requirement", {}).get("title", "") if isinstance(srr, dict) else "")
+
+        # 防御：LLM 偶尔返回 list
+        if isinstance(srr, list) and srr and isinstance(srr[0], dict):
+            logger.warning("[ReqAgent] LLM 返回 list（len={}），取首个 dict 元素", len(srr))
+            srr = srr[0]
+
+        # 防御：LLM 偶尔返回非 dict
+        if not isinstance(srr, dict):
+            logger.error("[ReqAgent] LLM 返回非 dict 结构: type={}", type(srr).__name__)
+            raise RuntimeError(
+                f"LLM 返回格式异常（期望 dict，实际 {type(srr).__name__}），"
+                "请检查 LLM 配置或重试"
+            )
+
+        # 3. 后处理：复用 _post_process
+        # raw_requirement 传入 SRR JSON 文本，供追溯
+        srr_text_for_trace = json.dumps(current_srr, ensure_ascii=False)
+        srr = self._post_process(srr, product_id, product_name, srr_text_for_trace)
+
+        req_id = srr["requirement"].get("id", "")
+        flows = srr.get("flows", {})
+        hp = flows.get("happy_path", {}) if isinstance(flows, dict) else {}
+        hp_steps = hp.get("steps", []) if isinstance(hp, dict) else []
+        logger.info("[ReqAgent] 后处理完成(refine): req_id={}, priority={}, flows.steps={}",
+                    req_id, srr["requirement"].get("priority", ""), len(hp_steps))
+
+        # 4. Schema 宽松校验
+        self._validate_lenient(srr)
+
+        # 5. 写入向量库
+        try:
+            await asyncio.to_thread(
+                vector_store.add_requirement,
+                req_id=req_id,
+                srr_json=srr,
+                metadata={
+                    "product_id": srr["requirement"].get("product_id", ""),
+                    "modules": ",".join(srr["requirement"].get("modules", [])),
+                    "priority": srr["requirement"].get("priority", "P2"),
+                    "status": "draft",
+                },
+            )
+            logger.debug("[ReqAgent] 向量库写入成功(refine): req_id={}", req_id)
+        except Exception as e:
+            logger.warning("[ReqAgent] 向量库写入失败(refine，不阻断）: {}", str(e)[:200])
+
+        logger.info("[ReqAgent] ◀ SRR 修改完成 ▶: req_id={}, title={}",
+                    req_id, srr["requirement"].get("title", ""))
+
+        # 6. FP 提取：基于修改后的新 SRR（不从原始文件提取，也不从旧 SRR 提取）
+        self.last_fps = []
+        self.last_fp_dependencies = []
+        try:
+            # 把修改后的新 SRR JSON 作为 raw_text 传入，让 LLM 从中提取 FP
+            new_srr_text = json.dumps(srr, ensure_ascii=False)
+            self.last_fps = await self._fp_extract_from_raw(
+                raw_text=new_srr_text,
+                srr=srr,
+                product_name=product_name,
+            )
+            logger.info("[ReqAgent] FP 提取完成(refine): {} 个功能点", len(self.last_fps))
+        except Exception as e:
+            logger.warning("[ReqAgent] FP 提取失败(refine，不阻断主流程）: {}", str(e)[:200])
+
+        return srr
+
     async def _parse_impl(
         self,
         raw_requirement: str,
@@ -117,6 +253,7 @@ class ReqAgent:
             system_prompt=system_prompt,
             schema_hint=schema_hint,
             temperature=0.5,
+            agent_name="ReqAgent",
             # v2.1: 不再设 max_tokens 上限，由模型自身上下文窗口决定
         )
         logger.info("[ReqAgent] LLM 返回 SRR: keys={}, requirement.title={}",
@@ -148,20 +285,20 @@ class ReqAgent:
         nf = srr.get("non_functional", {})
         logger.debug("[ReqAgent] 后处理完成: req_id={}, priority={}, modules={}, "
                      "preconditions={}, flows.steps={}, alternate_flows={}, "
-                     "boundary_conditions={}, business_rules={}, data_constraints={}, "
+                     "cross_fp_flows={}, shared_rules={}, "
                      "non_functional={}, relationships={}, test_points_hint={}, "
-                     "additional_details_len={}",
+                     "legacy_data_impact={}, additional_details_len={}",
                      req_id, srr["requirement"].get("priority", ""),
                      srr["requirement"].get("modules", []),
                      len(srr.get("preconditions", [])),
                      len(hp_steps),
                      len(alt_flows),
-                     len(srr.get("boundary_conditions", [])),
-                     len(srr.get("business_rules", [])),
-                     len(srr.get("data_constraints", [])),
+                     len(srr.get("cross_fp_interactions", {}).get("cross_fp_flows", [])),
+                     len(srr.get("cross_fp_interactions", {}).get("shared_business_rules", [])),
                      len(nf if isinstance(nf, dict) else {}),
                      len(srr.get("relationships", [])),
                      len(srr.get("test_points_hint", [])),
+                     "yes" if srr.get("legacy_data_impact") else "no",
                      len(srr.get("additional_details", "")))
 
         # 4. Schema 宽松校验（v2.1：容错模式，不因非关键字段阻断）
@@ -275,21 +412,107 @@ class ReqAgent:
 
         # 其他字段补默认值
         srr.setdefault("preconditions", [])
-        srr.setdefault("boundary_conditions", [])
-        srr.setdefault("business_rules", [])
-        srr.setdefault("data_constraints", [])
+        # v2.34: 总 SRR 不再保留 business_rules 顶层字段（与 shared_business_rules 重复）
+        # 若 LLM 仍输出，由下方迁移逻辑合并到 cross_fp_interactions.shared_business_rules
         srr.setdefault("non_functional", {})
         srr.setdefault("relationships", [])
         srr.setdefault("test_points_hint", [])
 
-        # v2.1 新增字段补默认值
-        srr.setdefault("acceptance_criteria", [])
+        # v2.22: 功能点概要（LLM 首次解析时可能输出，后端 FP 拆分后会基于实际 FP 覆盖）
+        srr.setdefault("fp_summary", [])
+
+        # v2.1 字段补默认值
         srr.setdefault("api_definitions", [])
         srr.setdefault("user_roles", [])
         srr.setdefault("dependencies", [])
         srr.setdefault("ui_rules", [])
         srr.setdefault("data_model", [])
         srr.setdefault("assumptions", [])
+
+        # v2.32 新增字段：跨 FP 交互规则（总 SRR 核心职责）
+        if not isinstance(srr.get("cross_fp_interactions"), dict):
+            srr["cross_fp_interactions"] = {
+                "cross_fp_flows": [],
+                "shared_business_rules": [],
+                "fp_contracts": [],
+                "global_constraints": [],
+            }
+        else:
+            cfi = srr["cross_fp_interactions"]
+            cfi.setdefault("cross_fp_flows", [])
+            cfi.setdefault("shared_business_rules", [])
+            cfi.setdefault("fp_contracts", [])
+            cfi.setdefault("global_constraints", [])
+
+        # v2.32 新增字段：历史数据影响分析（仅优化需求时由 LLM 输出，否则为 None）
+        if "legacy_data_impact" not in srr:
+            srr["legacy_data_impact"] = None
+
+        # v2.32/v2.34: 兼容旧 LLM 输出——若 LLM 仍输出了 boundary_conditions /
+        # data_constraints / acceptance_criteria / business_rules，迁移到对应位置
+        # - boundary_conditions / data_constraints / acceptance_criteria → additional_details
+        # - business_rules → cross_fp_interactions.shared_business_rules（去重）
+        _legacy_bc = srr.pop("boundary_conditions", None) or []
+        _legacy_dc = srr.pop("data_constraints", None) or []
+        _legacy_ac = srr.pop("acceptance_criteria", None) or []
+        _legacy_br = srr.pop("business_rules", None) or []
+        if _legacy_bc or _legacy_dc or _legacy_ac or _legacy_br:
+            logger.info(
+                "[ReqAgent] v2.34 兼容处理：LLM 仍输出已移除的顶层字段 "
+                "(boundary_conditions={}, data_constraints={}, acceptance_criteria={}, business_rules={})，"
+                "business_rules 合并到 cross_fp_interactions.shared_business_rules，"
+                "其余合并到 additional_details",
+                len(_legacy_bc) if isinstance(_legacy_bc, list) else 0,
+                len(_legacy_dc) if isinstance(_legacy_dc, list) else 0,
+                len(_legacy_ac) if isinstance(_legacy_ac, list) else 0,
+                len(_legacy_br) if isinstance(_legacy_br, list) else 0,
+            )
+            # 1. business_rules 迁移到 shared_business_rules
+            if isinstance(_legacy_br, list) and _legacy_br:
+                cfi = srr.get("cross_fp_interactions") or {}
+                sbr = cfi.setdefault("shared_business_rules", [])
+                existing_rules = {
+                    r.get("rule", "") if isinstance(r, dict) else str(r)
+                    for r in sbr if r is not None
+                }
+                added = 0
+                for item in _legacy_br:
+                    if isinstance(item, dict):
+                        rule_text = item.get("rule", "")
+                        if rule_text and rule_text not in existing_rules:
+                            # 补 id（若无）
+                            if not item.get("id"):
+                                item["id"] = f"BR-MIG-{added + 1}"
+                            # 补 applied_fps（若 LLM 未指定，留空待人工补全）
+                            if not item.get("applied_fps"):
+                                item["applied_fps"] = []
+                            sbr.append(item)
+                            existing_rules.add(rule_text)
+                            added += 1
+                    elif isinstance(item, str) and item and item not in existing_rules:
+                        sbr.append({
+                            "id": f"BR-MIG-{added + 1}",
+                            "rule": item,
+                            "applied_fps": [],
+                        })
+                        existing_rules.add(item)
+                        added += 1
+                if added > 0:
+                    logger.info(
+                        "[ReqAgent] v2.34 business_rules → shared_business_rules 迁移完成: 新增 {} 条（去重后）",
+                        added,
+                    )
+            # 2. boundary/data_constraints/acceptance_criteria 迁移到 additional_details
+            extras: list[str] = []
+            if isinstance(_legacy_bc, list):
+                extras.extend(f"[边界] {item}" for item in _legacy_bc if isinstance(item, (str, dict)))
+            if isinstance(_legacy_dc, list):
+                extras.extend(f"[数据约束] {item}" for item in _legacy_dc if isinstance(item, (str, dict)))
+            if isinstance(_legacy_ac, list):
+                extras.extend(f"[验收] {item}" for item in _legacy_ac if isinstance(item, (str, dict)))
+            if extras:
+                existing_add = srr.get("additional_details", "") or ""
+                srr["additional_details"] = (existing_add + "\n\n" + "\n".join(extras)).strip()
 
         # v2.1：保存原始需求文本（供追溯和审查完整性）
         if raw_requirement:
@@ -533,6 +756,8 @@ class ReqAgent:
             "logic": "logic",
             "duplication": "duplication",
         }
+        # v2.34: business_rules 已从总 SRR 移除，但若 LLM 仍输出且尚未迁移，此处做兼容
+        # （正常情况下 _post_process 已迁移到 cross_fp_interactions.shared_business_rules）
         for rule in srr.get("business_rules", []):
             if isinstance(rule, dict) and rule.get("type"):
                 t = rule["type"].lower().strip()
@@ -645,6 +870,7 @@ class ReqAgent:
                 system_prompt=pm.get("fp_agent", "FP_INTEGRATED_SYSTEM_PROMPT"),
                 schema_hint={"interaction_srr": dict, "functional_points": list, "dependencies": list},
                 temperature=0.2,
+                agent_name="FpAgent",
             )
             if isinstance(result, dict):
                 self.interaction_srr = result.get("interaction_srr")
@@ -659,6 +885,35 @@ class ReqAgent:
             self.last_fp_dependencies = []
             self.interaction_srr = None
             return []
+
+    @staticmethod
+    def update_fp_summary_from_fps(srr: dict, fps: list[dict]) -> dict:
+        """v2.22: 基于实际功能点列表更新总 SRR 的 fp_summary 字段。
+
+        在 FP 拆分/合并/重新生成后调用，确保总 SRR 的 fp_summary 与实际 FP 列表一致。
+        覆盖 LLM 首次解析时输出的 fp_summary（以实际入库的 FP 为准）。
+
+        Args:
+            srr: 总 SRR 字典（会被原地修改）
+            fps: 实际功能点列表，每个 FP 至少含 name/fp_type/priority/summary/module_id
+
+        Returns:
+            dict: 更新后的 SRR（原 srr 引用）
+        """
+        fp_summary = []
+        for fp in fps:
+            if not isinstance(fp, dict):
+                continue
+            fp_summary.append({
+                "name": fp.get("name", ""),
+                "fp_type": fp.get("fp_type", "workflow"),
+                "priority": fp.get("priority", "P2"),
+                "summary": fp.get("summary", ""),
+                "module": fp.get("module_id") or fp.get("suggested_module") or "",
+            })
+        srr["fp_summary"] = fp_summary
+        logger.debug("[ReqAgent] fp_summary 已更新: {} 个功能点", len(fp_summary))
+        return srr
 
 
 # 全局单例

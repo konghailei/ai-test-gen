@@ -968,7 +968,8 @@ function QuestionCard({ question: q, answer, isSkipped, onAnswer, onSkip, onUseD
              q.category === 'gap' ? '🔍 遗漏检测' :
              q.category === 'ambiguity' ? '❓ 歧义' :
              q.category === 'completeness' ? '📋 完整性' :
-             q.category === 'conflict' ? '⚠️ 冲突' : q.category}
+             q.category === 'conflict' ? '⚠️ 冲突' :
+             q.category === 'impact_analysis' ? '🔬 影响分析' : q.category}
           </span>
         )}
       </div>

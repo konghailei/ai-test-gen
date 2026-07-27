@@ -389,12 +389,21 @@ class MilvusVectorStore:
     # ========================================================================
 
     def add_requirement(self, req_id: str, srr_json: dict, metadata: dict | None = None) -> None:
-        """添加需求到向量库。"""
+        """添加需求到向量库。
+
+        v2.34: 支持 type 字段区分总 SRR 与功能点 SRR。
+            - 调用方未传 type 时默认 "requirement"（总 SRR，向后兼容）
+            - 调用方传 type="functional_point" 时保留，用于归档 FP 时区分文档类型
+        """
         self._ensure_connected()
         text = self._srr_to_text(srr_json)
         meta = metadata or {}
         meta["req_id"] = req_id
-        meta["doc_type"] = "requirement"
+        # v2.34: doc_type 与 type 保持一致（FP 归档时 type="functional_point"）
+        # 保留向后兼容：未显式指定 type 时默认 "requirement"
+        if "type" not in meta:
+            meta["type"] = "requirement"
+        meta["doc_type"] = meta["type"]
         # 产品隔离：优先使用传入 metadata 的 product_id，否则从 SRR 提取；兜底 PROD-DEFAULT。
         # 保证无论调用方是否显式传入，向量库 metadata 都带 product_id，
         # 使 search/get_all/count 的 product_id 过滤一致生效。
@@ -417,15 +426,29 @@ class MilvusVectorStore:
         modules: list[str] | None = None,
         top_k: int = 5,
         status: str | None = None,
+        doc_type: str | None = None,
+        fp_id: str | None = None,
+        requirement_id: str | None = None,
     ) -> list[dict]:
         """检索相似需求。
+
+        v2.34 扩展：
+            - 新增 doc_type 过滤（"requirement" / "functional_point"），实现总 SRR 与 FP 隔离
+            - 新增 fp_id 过滤（按功能点 ID 过滤，仅对 FP 记录生效）
+            - 新增 requirement_id 过滤（按需求 ID 过滤，可同时匹配总 SRR 和该需求下的 FP）
 
         Args:
             query: 查询文本
             product_id: 按产品过滤
-            modules: 按模块过滤
+            modules: 按模块过滤（同时作用于总 SRR 的 modules 和 FP 的 modules）
             top_k: Top-K
             status: 按状态过滤（archived/draft）
+            doc_type: 按文档类型过滤（v2.34 新增）
+                - "requirement": 仅检索总 SRR 记录
+                - "functional_point": 仅检索功能点 SRR 记录
+                - None: 同时检索两类（默认，向后兼容）
+            fp_id: 按功能点 ID 过滤（v2.34 新增，仅对 FP 记录生效）
+            requirement_id: 按需求 ID 过滤（v2.34 新增）
 
         Returns:
             list[dict]: 相似需求列表
@@ -437,22 +460,37 @@ class MilvusVectorStore:
             conditions.append(f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"')
         if status:
             conditions.append(f'metadata["status"] == "{_safe_id(status, "status")}"')
+        if doc_type:
+            conditions.append(f'metadata["type"] == "{_safe_id(doc_type, "type")}"')
+        if requirement_id:
+            conditions.append(f'metadata["requirement_id"] == "{_safe_id(requirement_id, "requirement_id")}"')
         where_filter = " && ".join(conditions) if conditions else None
 
         # modules 无法用 Milvus expr 直接过滤（以逗号分隔字符串存储于 metadata），
         # 放大召回量后在内存中按模块过滤，保持行为一致。
-        fetch_k = top_k * 5 if modules else top_k
+        # fp_id 同理（FP 记录的 metadata.fp_id 不能直接用 Milvus expr 过滤）。
+        need_mem_filter = bool(modules) or bool(fp_id)
+        fetch_k = top_k * 5 if need_mem_filter else top_k
         formatted = self._search("requirements", query, top_k=fetch_k, where_filter=where_filter)
 
-        if modules:
-            wanted = {m for m in modules}
+        if need_mem_filter:
+            wanted_modules = {m for m in modules} if modules else None
             filtered = []
             for r in formatted:
-                raw = r.get("metadata", {}).get("modules", "")
-                stored = raw.split(",") if isinstance(raw, str) and raw else (raw or [])
-                stored_set = {m.strip() for m in stored if isinstance(m, str) and m.strip()}
-                if wanted & stored_set:
-                    filtered.append(r)
+                meta = r.get("metadata", {}) or {}
+                # 模块过滤
+                if wanted_modules is not None:
+                    raw = meta.get("modules", "")
+                    stored = raw.split(",") if isinstance(raw, str) and raw else (raw or [])
+                    stored_set = {m.strip() for m in stored if isinstance(m, str) and m.strip()}
+                    if not (wanted_modules & stored_set):
+                        continue
+                # 功能点 ID 过滤
+                if fp_id:
+                    rec_fp_id = meta.get("fp_id", "")
+                    if rec_fp_id != fp_id:
+                        continue
+                filtered.append(r)
             formatted = filtered[:top_k]
         return formatted
 

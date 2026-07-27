@@ -110,7 +110,9 @@ class BoundaryCondition(BaseModel):
 class BusinessRule(BaseModel):
     """业务规则。
 
-    对应 SRR.business_rules[]。
+    对应功能点 SRR 的 business_rules[] 与总 SRR 的
+    cross_fp_interactions.shared_business_rules[]（v2.34 起，总 SRR 顶层
+    不再保留 business_rules 字段）。
     """
     model_config = ConfigDict(extra="ignore")
 
@@ -277,6 +279,24 @@ class Assumption(BaseModel):
     )
 
 
+class FPSummary(BaseModel):
+    """v2.22: 功能点概要（总 SRR 中的 FP 全景视图）。
+
+    对应 SRR.fp_summary[]，仅记录功能点的概要信息，
+    不展开内部细节（内部细节由功能点 SRR sub_srr 承载）。
+    后端基于实际 FunctionalPoint 列表生成，不依赖 LLM 输出。
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(default="", description="功能点名称")
+    fp_type: Literal[
+        "workflow", "constraint", "calculation",
+        "api_behavior", "data_record", "config",
+    ] = Field(default="workflow", description="功能点类型")
+    priority: Literal["P0", "P1", "P2", "P3"] = Field(default="P2", description="优先级")
+    summary: str = Field(default="", description="功能点一句话概要")
+    module: str = Field(default="", description="所属模块")
+
 
 # ============================================================================
 # 字段冲突模型（KB 补全时产生，docs/01 §4.4.1）
@@ -348,6 +368,123 @@ class OptimizationContext(BaseModel):
 
 
 # ============================================================================
+# v2.32: 跨功能点交互规则（总 SRR 核心职责，业界最佳实践）
+# ============================================================================
+
+class CrossFpFlow(BaseModel):
+    """跨功能点流程交互。
+
+    描述两个或多个功能点之间的调用顺序、数据传递契约。
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(default="", description="交互名称")
+    source_fp: str = Field(default="", description="发起方功能点名称")
+    target_fp: str = Field(default="", description="接收方功能点名称")
+    interaction_type: Literal["sequence", "data_flow", "event", "dependency"] = Field(
+        default="sequence", description="交互类型：顺序调用/数据流/事件/依赖"
+    )
+    description: str = Field(default="", description="交互描述：调用时机、传递数据、返回结果")
+
+
+class SharedBusinessRule(BaseModel):
+    """跨功能点共享业务规则。
+
+    同时适用于 ≥2 个功能点的规则（如全局权限模型、统一编码规则）。
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = Field(default="", description="规则 ID")
+    rule: str = Field(default="", description="规则描述")
+    applied_fps: list[str] = Field(default_factory=list, description="适用的功能点名称列表")
+
+
+class FpContract(BaseModel):
+    """功能点契约。
+
+    功能点之间的输入/输出契约（A 的输出是 B 的输入）。
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    provider_fp: str = Field(default="", description="提供方功能点")
+    consumer_fp: str = Field(default="", description="消费方功能点")
+    data_fields: list[str] = Field(default_factory=list, description="传递的数据字段")
+    contract_desc: str = Field(default="", description="契约描述：数据格式、约束、时机")
+
+
+class CrossFpInteractions(BaseModel):
+    """跨功能点交互规则（总 SRR 核心字段）。
+
+    v2.32: 总 SRR 的核心职责——描述功能点之间的交互规则，
+    而非功能点内部细节（内部细节由功能点 SRR 承载）。
+    对应业界最佳实践：IEEE 830 §2 产品视角、ISO 29148 SyRS 层级。
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    cross_fp_flows: list[CrossFpFlow] = Field(
+        default_factory=list, description="跨 FP 流程交互列表"
+    )
+    shared_business_rules: list[SharedBusinessRule] = Field(
+        default_factory=list, description="跨 FP 共享业务规则"
+    )
+    fp_contracts: list[FpContract] = Field(
+        default_factory=list, description="FP 之间的输入/输出契约"
+    )
+    global_constraints: list[str] = Field(
+        default_factory=list, description="全局约束（跨 FP 适用的强制约束）"
+    )
+
+
+# ============================================================================
+# v2.32: 历史数据影响分析（优化需求独立章节，参考 Volere §22）
+# ============================================================================
+
+class LegacyDataImpact(BaseModel):
+    """历史数据影响分析。
+
+    v2.32: 优化/改进类需求必须包含此字段，描述对已有历史数据的影响。
+    作为总 SRR 的独立章节（参考 Volere §22 迁移到新产品）。
+    子字段基于业界实践：影响范围/数据盘点/字段映射/迁移策略/兼容性/回滚/验证/风险。
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    is_optimization: bool = Field(default=False, description="是否为优化需求")
+    impact_scope: str = Field(default="", description="影响范围：受影响的功能点、数据实体、上下游系统、用户角色")
+    data_inventory: list[str] = Field(
+        default_factory=list,
+        description="数据盘点与分类：主数据/在途业务数据/历史业务数据/日志缓存，标注是否迁移",
+    )
+    field_mapping: list[str] = Field(
+        default_factory=list,
+        description="字段映射关系：老系统字段 → 新系统字段的映射表（含类型/长度/编码差异）",
+    )
+    migration_strategy: str = Field(
+        default="",
+        description="数据迁移策略：全量/增量/并行双写、迁移窗口、迁移顺序、停机安排",
+    )
+    compatibility_analysis: str = Field(
+        default="",
+        description="兼容性分析：数据格式兼容、编码规则统一、关联关系完整性",
+    )
+    rollback_strategy: str = Field(
+        default="",
+        description="回滚策略：备份方案、回滚时间窗、回滚触发条件、回滚演练",
+    )
+    verification_method: str = Field(
+        default="",
+        description="验证方法：数量校验、业务关联校验、并行运行比对",
+    )
+    risks: list[str] = Field(
+        default_factory=list,
+        description="风险与缓解：业务逻辑丢失、数据不一致、停机超时等风险及应对",
+    )
+    user_clarification: str = Field(
+        default="",
+        description="用户在澄清环节填写的具体影响范围（原始输入，LLM 据此生成完整分析）",
+    )
+
+
+# ============================================================================
 # SRR 主模型
 # ============================================================================
 
@@ -357,36 +494,39 @@ class SRR(BaseModel):
     这是系统的核心数据结构，贯穿需求解析→澄清→质量门禁→用例生成全流程。
     对应 docs/01-requirement-parsing.md §2.1。
 
-    字段校验级别（docs/01 §3.4）：
-    - Critical（必填）：requirement.title, requirement.summary, flows.happy_path, data_constraints
-    - Important：preconditions, flows.alternate_flows, boundary_conditions, business_rules
-    - Optional：non_functional, relationships, test_points_hint
+    v2.32 字段重构（基于业界最佳实践 IEEE 830 / ISO 29148 / Volere）：
+    - **总 SRR 移除**：boundary_conditions / data_constraints / acceptance_criteria
+      （字段级内容下沉到功能点 SRR，避免重复维护与不一致）
+    - **总 SRR 新增**：cross_fp_interactions（跨功能点交互规则，总 SRR 核心职责）
+    - **总 SRR 新增**：legacy_data_impact（历史数据影响分析，优化需求独立章节）
+    - **v2.34 移除**：business_rules 顶层字段（与 cross_fp_interactions.shared_business_rules 重复）
+      跨 FP 共享规则统一由 cross_fp_interactions.shared_business_rules 承载
+    - **保留全局基线**：non_functional（全局非功能基线）
+    - **保留追溯**：fp_summary / relationships / dependencies / api_definitions
+
+    字段校验级别：
+    - Critical（必填）：requirement.title, requirement.summary, flows.happy_path
+    - Important：preconditions, flows.alternate_flows, cross_fp_interactions
+    - Optional：non_functional, relationships, legacy_data_impact, optimization_context
     """
     srr_version: str = Field(default="1.0", description="SRR 版本号")
     requirement: Requirement = Field(..., description="需求基本信息")
+    # v2.22: 功能点概要（由后端基于实际 FP 列表生成，LLM 首次解析时可输出初步概要）
+    fp_summary: list[FPSummary] = Field(
+        default_factory=list, description="功能点概要列表（仅概要，不展开内部细节）"
+    )
     preconditions: list[str] = Field(default_factory=list, description="前置条件列表")
     flows: Flows = Field(default_factory=Flows, description="流程集合")
-    boundary_conditions: list[BoundaryCondition] = Field(
-        default_factory=list, description="边界条件列表"
-    )
-    business_rules: list[BusinessRule] = Field(
-        default_factory=list, description="业务规则列表"
-    )
-    data_constraints: list[DataConstraint] = Field(
-        default_factory=list, description="数据约束列表"
-    )
+    # v2.34: 总 SRR 不再保留 business_rules 顶层字段，跨 FP 共享规则
+    # 统一写入 cross_fp_interactions.shared_business_rules（避免重复维护）
     non_functional: NonFunctional = Field(
-        default_factory=NonFunctional, description="非功能性需求"
+        default_factory=NonFunctional, description="全局非功能性需求基线"
     )
     relationships: list[Relationship] = Field(
         default_factory=list, description="需求关联关系"
     )
     test_points_hint: list[TestPoint] = Field(
         default_factory=list, description="测试点提示列表"
-    )
-    # ========== v2.1 新增字段 ==========
-    acceptance_criteria: list[AcceptanceCriterion] = Field(
-        default_factory=list, description="验收标准列表"
     )
     api_definitions: list[ApiDefinition] = Field(
         default_factory=list, description="接口定义列表"
@@ -401,7 +541,7 @@ class SRR(BaseModel):
         default_factory=list, description="界面/交互规则列表"
     )
     data_model: list[DataModel] = Field(
-        default_factory=list, description="数据模型列表"
+        default_factory=list, description="数据模型列表（全局 ERD 与数据字典）"
     )
     assumptions: list[Assumption] = Field(
         default_factory=list, description="假设与约束列表"
@@ -409,13 +549,22 @@ class SRR(BaseModel):
     additional_details: str = Field(
         default="", description="兜底字段：无法映射到标准字段的原文内容"
     )
-    # ===================================
     field_conflicts: list[FieldConflict] = Field(
         default_factory=list, description="字段冲突列表（KB 补全时产生）"
     )
     optimization_context: OptimizationContext | None = Field(
         default=None, description="优化需求上下文（仅优化需求时存在）"
     )
+    # ========== v2.32 新增字段 ==========
+    cross_fp_interactions: CrossFpInteractions = Field(
+        default_factory=CrossFpInteractions,
+        description="跨功能点交互规则（总 SRR 核心职责：FP 间调用顺序/共享规则/契约/全局约束）",
+    )
+    legacy_data_impact: LegacyDataImpact | None = Field(
+        default=None,
+        description="历史数据影响分析（优化需求独立章节，参考 Volere §22）",
+    )
+    # ===================================
 
     # 澄清元数据（由 ClarifyAgent 写入）
     _clarification: dict = {}

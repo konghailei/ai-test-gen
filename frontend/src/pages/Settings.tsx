@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database, Image } from 'lucide-react'
+import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database, Image, Sparkles, Code } from 'lucide-react'
 import { settings as settingsApi, health, auth, knowledge } from '../api/client'
 import type { LLMConfig, LLMProviderItem, HealthStatus } from '../types'
 
@@ -11,6 +11,8 @@ const DEFAULT_PROVIDER: LLMProviderItem = {
   base_url: 'https://api.deepseek.com/v1',
   model: 'deepseek-chat',
   is_primary: false,
+  enable_thinking: false,
+  thinking_params: '',
 }
 
 export default function Settings() {
@@ -142,6 +144,8 @@ export default function Settings() {
         base_url: p.base_url || undefined,
         model: p.model || undefined,
         is_primary: p.is_primary,
+        enable_thinking: p.enable_thinking || false,
+        thinking_params: p.thinking_params || '',
       })))
       setConfig(updated)
       setEditing(false)
@@ -253,6 +257,21 @@ export default function Settings() {
                         <button onClick={() => setShowKeys(prev => ({ ...prev, [p.provider]: !prev[p.provider] }))} className="ml-2 text-slate-400 hover:text-slate-600 inline-flex">
                           {showKeys[p.provider] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
                         </button>
+                      )}
+                    </div>
+                    <div className="col-span-2 flex items-center gap-2 pt-1">
+                      <span className="text-slate-400">思考模式</span>
+                      {p.enable_thinking ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 text-[10px] font-medium">
+                          <Sparkles className="w-3 h-3" /> 已启用
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 text-[11px]">未启用</span>
+                      )}
+                      {p.enable_thinking && p.thinking_params && (
+                        <span className="text-[10px] text-slate-400 truncate ml-2" title={p.thinking_params}>
+                          自定义参数已配置
+                        </span>
                       )}
                     </div>
                   </div>
@@ -383,6 +402,61 @@ export default function Settings() {
                       </button>
                     </div>
                   </div>
+                </div>
+
+                {/* v2.36: 思考模式开关 */}
+                <div className="mt-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-indigo-500" />
+                      <div>
+                        <label className="text-sm font-medium text-slate-700">思考模式</label>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          启用深度推理（仅对支持思考的模型生效，如 Hy3 / GLM-4.5 / GLM-5 / Qwen3 / DeepSeek-R1 / Claude 3.5+）
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => updateField(idx, 'enable_thinking', !p.enable_thinking)}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        p.enable_thinking ? 'bg-primary-600' : 'bg-slate-300'
+                      }`}
+                      aria-pressed={p.enable_thinking}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        p.enable_thinking ? 'translate-x-6' : 'translate-x-1'
+                      }`} />
+                    </button>
+                  </div>
+
+                  {/* v2.37: 自定义思考参数（仅思考模式开启时显示） */}
+                  {p.enable_thinking && (
+                    <div className="mt-3 pt-3 border-t border-slate-200">
+                      <label className="text-xs font-medium text-slate-600 flex items-center gap-1">
+                        <Code className="w-3 h-3" />
+                        自定义思考参数
+                        <span className="text-slate-400 font-normal">（可选，留空则使用内置规则）</span>
+                      </label>
+                      <textarea
+                        value={p.thinking_params || ''}
+                        onChange={e => updateField(idx, 'thinking_params', e.target.value)}
+                        className="input-field mt-1.5 text-xs font-mono"
+                        rows={3}
+                        placeholder='{"thinking": {"type": "enabled"}} 或 {"enable_thinking": true}'
+                      />
+                      <div className="mt-1.5 flex items-start gap-1.5">
+                        <AlertCircle className="w-3 h-3 text-slate-400 mt-0.5 flex-shrink-0" />
+                        <div className="text-[11px] text-slate-400 leading-relaxed">
+                          <p>JSON 格式，优先级高于内置规则。常见示例：</p>
+                          <p>· 腾讯混元/GLM/DeepSeek-V4：<code className="text-indigo-500">{'{"thinking":{"type":"enabled"}}'}</code></p>
+                          <p>· Qwen3：<code className="text-indigo-500">{'{"enable_thinking":true}'}</code></p>
+                          <p>· Claude：<code className="text-indigo-500">{'{"thinking":{"type":"enabled","budget_tokens":10000}}'}</code></p>
+                          <p>· OpenAI o 系列：<code className="text-indigo-500">{'{"reasoning_effort":"high"}'}</code></p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}

@@ -35,6 +35,58 @@ is_first_deploy() {
   [ -d "$PACK_DIR/images" ] && [ "$(ls -A "$PACK_DIR/images" 2>/dev/null)" ]
 }
 
+# 智能合并 .env 配置文件：新增变量不覆盖已有值
+# 用法: merge_env_config <模板文件> <目标文件>
+#   - 模板中已有的 KEY=VALUE 但目标已存在 → 保留目标值（不覆盖）
+#   - 模板中有而目标中没有的变量 → 追加到目标末尾
+#   - 注释行和空行保持原样
+merge_env_config() {
+  local template="$1"
+  local target="$2"
+  local tmpfile
+
+  [ ! -f "$template" ] && return 0
+  [ ! -f "$target" ] && { cp "$template" "$target"; return 0; }
+
+  tmpfile=$(mktemp)
+  # 读取目标文件已有 KEY 集合
+  local -A existing_keys
+  while IFS='=' read -r key rest; do
+    # 跳过注释和空行
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" ]] && continue
+    key="${key%%[[:space:]]*}"
+    existing_keys["$key"]=1
+  done < "$target"
+
+  # 写入目标文件副本
+  cp "$target" "$tmpfile"
+
+  # 遍历模板，追加新变量
+  local added=0
+  while IFS= read -r line; do
+    # 提取 KEY
+    local key="${line%%=*}"
+    key="${key%%[[:space:]]*}"
+    # 跳过注释、空行、已存在变量
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$line" ]] && continue
+    if [[ -z "${existing_keys[$key]:-}" ]]; then
+      echo "$line" >> "$tmpfile"
+      existing_keys["$key"]=1
+      added=$((added + 1))
+    fi
+  done < "$template"
+
+  if [ "$added" -gt 0 ]; then
+    cp "$tmpfile" "$target"
+    info "配置合并: ${target} 新增了 ${added} 个变量（已有值保持不变）"
+  else
+    info "配置合并: ${target} 无新增变量"
+  fi
+  rm -f "$tmpfile"
+}
+
 # ---------- 解析参数 ----------
 ENV_FILE=""
 while [ $# -gt 0 ]; do
@@ -307,7 +359,20 @@ if [ -d code ] && [ "$(ls -A code/ 2>/dev/null)" ]; then
   # 3d. 复制根目录配置
   [ -f code/.dockerignore ] && cp code/.dockerignore . 2>/dev/null || true
   
-  # 3e. 重建应用镜像（利用已有 base 镜像缓存，只产生新 CODE 层）
+  # 3e. 智能合并配置文件（新增变量不覆盖已有值）
+  #     - install.env → 合并到已存在的 install.env 或 .env
+  #     - 保护内网已创建的 key/密码等敏感信息
+  if [ -f install.env ]; then
+    if [ -f .env ]; then
+      merge_env_config install.env .env
+    else
+      merge_env_config install.env install.env
+    fi
+  fi
+  # 清理包内配置模板，避免与运行时配置混淆
+  rm -f install.env 2>/dev/null || true
+  
+  # 3f. 重建应用镜像（利用已有 base 镜像缓存，只产生新 CODE 层）
   if command -v docker compose &>/dev/null; then
     COMPOSE_CMD="docker compose"
   else

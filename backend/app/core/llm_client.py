@@ -226,7 +226,10 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int | None = None,
         provider: str | None = None,
-    ) -> str:
+        agent_name: str = "",
+        return_usage: bool = False,
+        _skip_log: bool = False,
+    ) -> str | tuple:
         """调用 LLM 生成文本（主入口）。
 
         Args:
@@ -238,9 +241,15 @@ class LLMClient:
             max_tokens: 最大生成 token 数。None 表示不限
             provider: 指定供应商名称（如 "deepseek"/"openai"）。若指定且可用，
                       仅使用该供应商；不可用时回退到正常候选列表。
+            agent_name: 调用方 Agent 名称，用于 LLM 调用日志（仅直接调用 call 时记录；
+                        call_json 会自行记录并传 _skip_log=True 避免重复）。
+            return_usage: True 时返回 (content, usage_dict, model_used) 元组，
+                          供 call_json 获取 token 用量；默认 False 返回 content 字符串。
+            _skip_log: True 时跳过本方法的日志记录（由调用方 call_json 统一记录）。
 
         Returns:
-            str: LLM 生成的文本内容
+            str | tuple: 默认返回 LLM 生成的文本；return_usage=True 时返回
+                         (文本, token用量字典, 模型名) 元组。
 
         Raises:
             RuntimeError: 所有提供商均不可用或重试耗尽
@@ -251,7 +260,13 @@ class LLMClient:
         """
         # 断路器检查
         if not self._breaker.allow_request():
-            raise LLMBreakerOpenError("LLM 断路器开启，服务暂不可用（错误率超阈值）")
+            err = LLMBreakerOpenError("LLM 断路器开启，服务暂不可用（错误率超阈值）")
+            if not _skip_log:
+                await self._log_call(
+                    agent_name, system_prompt or "", prompt, "", None,
+                    temperature, 0, {}, False, str(err)[:500],
+                )
+            raise err
 
         # 优化 4：LLM 响应缓存（仅缓存 temperature=0 的确定性调用）
         import hashlib
@@ -260,7 +275,11 @@ class LLMClient:
         ).hexdigest()
         if temperature == 0 and cache_key in self._response_cache:
             logger.debug("[LLM] 缓存命中: key={}", cache_key[:12])
-            return self._response_cache[cache_key]
+            cached = self._response_cache[cache_key]
+            # 缓存命中非真实 LLM 调用，不写日志
+            if return_usage:
+                return cached, {}, "", ""
+            return cached
 
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -270,12 +289,19 @@ class LLMClient:
         # 构建候选提供商列表（主 -> 备）
         providers = self._candidate_providers(model, provider=provider)
         if not providers:
-            raise LLMNoProviderAvailable("无可用 LLM 提供商（未配置 API Key）")
+            err = LLMNoProviderAvailable("无可用 LLM 提供商（未配置 API Key）")
+            if not _skip_log:
+                await self._log_call(
+                    agent_name, system_prompt or "", prompt, "", None,
+                    temperature, 0, {}, False, str(err)[:500],
+                )
+            raise err
 
+        start_ts = time.time()
         last_error: Exception | None = None
         for provider in providers:
             try:
-                result = await self._call_with_retry(
+                content, usage, model_used = await self._call_with_retry(
                     provider, messages, temperature, response_format, max_tokens
                 )
                 self._breaker.record_success()
@@ -284,9 +310,19 @@ class LLMClient:
                 if temperature == 0:
                     if len(self._response_cache) >= self._CACHE_MAX_SIZE:
                         self._response_cache.pop(next(iter(self._response_cache)))
-                    self._response_cache[cache_key] = result
+                    self._response_cache[cache_key] = content
                     logger.debug("[LLM] 缓存写入: key={}", cache_key[:12])
-                return result
+                duration_ms = int((time.time() - start_ts) * 1000)
+                if not _skip_log:
+                    await self._log_call(
+                        agent_name, system_prompt or "", prompt, content, None,
+                        temperature, duration_ms, usage, True, "",
+                        model_used=model_used,
+                        provider_used=provider["key"],
+                    )
+                if return_usage:
+                    return content, usage, model_used, provider["key"]
+                return content
             except _RetryableError as e:
                 # 重试耗尽 → 记录失败，尝试下一提供商
                 last_error = e
@@ -304,7 +340,15 @@ class LLMClient:
 
         # 所有提供商均失败
         self._breaker.record_failure()
-        raise LLMNoProviderAvailable(f"所有 LLM 提供商均不可用: {last_error}")
+        duration_ms = int((time.time() - start_ts) * 1000)
+        err = LLMNoProviderAvailable(f"所有 LLM 提供商均不可用: {last_error}")
+        if not _skip_log:
+            await self._log_call(
+                agent_name, system_prompt or "", prompt, "", None,
+                temperature, duration_ms, {}, False, str(err)[:500],
+                provider_used=provider["key"] if providers else "",
+            )
+        raise err
 
     async def call_json(
         self,
@@ -316,12 +360,23 @@ class LLMClient:
         max_tokens: int | None = None,
         provider: str | None = None,
         allow_array: bool = False,
+        agent_name: str = "",
+        task_id: str = "",
+        req_id: str = "",
     ) -> dict | list:
         """调用 LLM 并解析为 JSON 对象或数组。
 
         Args:
             allow_array: True 时不启用 response_format="json"（避免 json_object 约束
                          阻止 LLM 输出 JSON 数组）。调用方 prompt 应自行约束输出格式。
+            agent_name: 调用方 Agent 名称（如 ReqAgent/ClarifyAgent/GenAgent/ReviewAgent/FpAgent），
+                        用于 LLM 调用日志。不传则记为 "unknown"。
+            task_id: 关联的异步任务 ID（可选）。
+            req_id: 关联的需求 ID（可选）。
+
+        Note:
+            日志记录在 call + _parse_json 两步完成后统一写入 llm_call_logs，
+            通过 _skip_log=True 避免 call 内部重复记录。日志失败不阻断主流程。
         """
         formatted_prompt = prompt
         if schema_hint:
@@ -332,16 +387,43 @@ class LLMClient:
         else:
             formatted_prompt += "\n\n请严格返回 JSON，不要返回任何额外文本。"
 
-        text = await self.call(
-            formatted_prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            response_format=None if allow_array else "json",
-            model=model,
-            max_tokens=max_tokens,
-            provider=provider,
-        )
-        return self._parse_json(text, schema_hint)
+        start_ts = time.time()
+        text = ""
+        usage: dict = {}
+        model_used = ""
+        provider_key = ""
+        parsed: Any = None
+        try:
+            text, usage, model_used, provider_key = await self.call(
+                formatted_prompt,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                response_format=None if allow_array else "json",
+                model=model,
+                max_tokens=max_tokens,
+                provider=provider,
+                agent_name=agent_name,
+                return_usage=True,
+                _skip_log=True,
+            )
+            parsed = self._parse_json(text, schema_hint)
+            duration_ms = int((time.time() - start_ts) * 1000)
+            await self._log_call(
+                agent_name or "unknown", system_prompt or "", formatted_prompt, text,
+                parsed, temperature, duration_ms, usage, True, "",
+                task_id=task_id, req_id=req_id, model_used=model_used,
+                provider_used=provider_key,
+            )
+            return parsed
+        except Exception as e:
+            duration_ms = int((time.time() - start_ts) * 1000)
+            await self._log_call(
+                agent_name or "unknown", system_prompt or "", formatted_prompt, text,
+                parsed, temperature, duration_ms, usage, False, str(e)[:500],
+                task_id=task_id, req_id=req_id, model_used=model_used,
+                provider_used=provider_key,
+            )
+            raise
 
     async def call_vision(
         self,
@@ -445,6 +527,15 @@ class LLMClient:
                 else:
                     kwargs["max_tokens"] = 4096
 
+                # v2.37: 思考模式开关 — 优先使用自定义参数，否则使用内置规则
+                if provider.get("enable_thinking"):
+                    custom_params = self._parse_thinking_params(provider.get("thinking_params", ""))
+                    if custom_params:
+                        kwargs.update(custom_params)
+                    else:
+                        thinking_kwargs = self._build_thinking_kwargs(provider["model"])
+                        kwargs.update(thinking_kwargs)
+
                 response = await litellm.acompletion(**kwargs)
                 content = response.choices[0].message.content
                 if not content:
@@ -496,19 +587,43 @@ class LLMClient:
         all_configs: dict = getattr(settings, "_all_provider_configs", {})
         primary_provider = getattr(settings, "LLM_PROVIDER", "deepseek")
 
-        # 若指定了 provider，优先尝试仅返回该供应商
+        # 若指定了 provider，优先返回该供应商，并追加其他可用供应商作为故障转移候选
+        # v2.27: 旧版指定 provider 时仅返回该供应商，若其调用失败（如 403/额度耗尽）
+        # 无故障转移目标，直接报"所有 LLM 提供商均不可用"。现改为追加备用供应商，
+        # 确保指定供应商失败后能自动回退到其他可用供应商。
         if provider and all_configs and provider in all_configs:
             cfg = all_configs[provider]
             if cfg.get("api_key"):
                 key = f"{provider}:{cfg.get('model', '')}"
                 if self._provider_disabled_until.get(key, 0) < now:
-                    return [{
+                    primary_candidate = {
                         "key": key,
                         "api_key": cfg["api_key"],
                         "base_url": cfg.get("base_url", ""),
                         "model": model or cfg.get("model", ""),
-                    }]
-            # 指定 provider 不可用 -> 回退到正常逻辑（不 return）
+                        "enable_thinking": cfg.get("enable_thinking", False),
+                        "thinking_params": cfg.get("thinking_params", ""),
+                    }
+                    # 追加备用供应商作为故障转移候选（仅当未指定 model 时）
+                    backup_candidates: list[dict] = []
+                    if not model:
+                        for p_name, p_cfg in all_configs.items():
+                            if p_name == provider:
+                                continue
+                            if not p_cfg.get("api_key"):
+                                continue
+                            b_key = f"{p_name}:{p_cfg.get('model', '')}"
+                            if self._provider_disabled_until.get(b_key, 0) < now:
+                                backup_candidates.append({
+                                    "key": b_key,
+                                    "api_key": p_cfg["api_key"],
+                                    "base_url": p_cfg.get("base_url", ""),
+                                    "model": p_cfg.get("model", ""),
+                                    "enable_thinking": p_cfg.get("enable_thinking", False),
+                                    "thinking_params": p_cfg.get("thinking_params", ""),
+                                })
+                    return [primary_candidate] + backup_candidates
+            # 指定 provider 不可用（被禁用或无 api_key）-> 回退到正常逻辑（不 return）
 
         candidates: list[dict] = []
 
@@ -524,6 +639,8 @@ class LLMClient:
                             "api_key": cfg["api_key"],
                             "base_url": cfg.get("base_url", ""),
                             "model": model or cfg.get("model", ""),
+                            "enable_thinking": cfg.get("enable_thinking", False),
+                            "thinking_params": cfg.get("thinking_params", ""),
                         })
 
             # 备用供应商（仅当没有指定 model 时）
@@ -540,6 +657,8 @@ class LLMClient:
                             "api_key": p_cfg["api_key"],
                             "base_url": p_cfg.get("base_url", ""),
                             "model": p_cfg.get("model", ""),
+                            "enable_thinking": p_cfg.get("enable_thinking", False),
+                            "thinking_params": p_cfg.get("thinking_params", ""),
                         })
 
         # 回退到传统单例模式
@@ -556,6 +675,8 @@ class LLMClient:
                         "api_key": primary["api_key"],
                         "base_url": primary["base_url"],
                         "model": model or primary["model"],
+                        "enable_thinking": False,  # 传统单例模式不支持思考开关
+                        "thinking_params": "",     # 传统单例模式不支持自定义参数
                     })
 
             # 备用提供商
@@ -568,9 +689,95 @@ class LLMClient:
                         "api_key": fallback["api_key"],
                         "base_url": fallback["base_url"],
                         "model": fallback["model"],
+                        "enable_thinking": False,  # 传统单例模式不支持思考开关
+                        "thinking_params": "",     # 传统单例模式不支持自定义参数
                     })
 
         return candidates
+
+    @staticmethod
+    def _parse_thinking_params(thinking_params: str) -> dict[str, Any]:
+        """v2.37: 解析自定义思考参数 JSON 字符串。
+
+        支持用户在设置页面输入自定义思考参数，灵活接入各种思考模式。
+        参数格式示例：
+            {"thinking": {"type": "enabled"}}                    # 腾讯混元/GLM/DeepSeek-V4
+            {"thinking": {"type": "enabled", "budget_tokens": 8000}}  # Claude
+            {"enable_thinking": true}                             # Qwen3
+            {"reasoning_effort": "high"}                          # OpenAI o 系列
+
+        Args:
+            thinking_params: JSON 字符串（可能为空或非法）
+
+        Returns:
+            dict: 解析后的参数字典（空字典表示无自定义参数或解析失败）
+        """
+        if not thinking_params or not thinking_params.strip():
+            return {}
+        try:
+            params = json.loads(thinking_params.strip())
+            if isinstance(params, dict):
+                return params
+            logger.warning("[LLMClient] 自定义思考参数非 JSON 对象: {}", thinking_params[:80])
+            return {}
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning("[LLMClient] 自定义思考参数 JSON 解析失败: {} | 原文: {}",
+                           str(e), thinking_params[:80])
+            return {}
+
+    @staticmethod
+    def _build_thinking_kwargs(model: str) -> dict[str, Any]:
+        """v2.36: 根据模型名称构建思考模式参数。
+
+        不同供应商/模型对思考模式的参数支持不同（参考腾讯云 TokenHub 官方文档）：
+        - DeepSeek R1 系列 / QwQ / reasoner：模型本身即推理模型，无需额外参数
+        - 腾讯混元 Hy3 / Hy3-preview：支持 thinking={"type": "enabled"}（默认 disabled）
+        - GLM 4.5+ / GLM-Z1 / GLM-5 系列：支持 thinking={"type": "enabled"}
+        - Qwen3 系列（非推理型号）：支持 enable_thinking=True
+        - Claude 3.5+ / Claude 4：支持 thinking={"type": "enabled", "budget_tokens": N}
+
+        TokenHub 平台统一采用 OpenAI 兼容的 thinking 参数格式：
+            开启：{"thinking": {"type": "enabled"}}
+            关闭：{"thinking": {"type": "disabled"}}
+
+        策略：对已知支持思考的模型系列返回相应参数，由 litellm 负责转换。
+        对不支持思考的模型传参不会报错（会被忽略），但为避免歧义，
+        此方法仅对已知支持思考的模型系列返回参数。
+
+        Args:
+            model: 模型名称（如 "hy3", "glm-4.5", "qwen3-reasoning", "deepseek-r1"）
+
+        Returns:
+            dict: 思考模式参数字典（空字典表示该模型无需额外参数）
+        """
+        model_lower = (model or "").lower()
+
+        # DeepSeek R1 系列 / QwQ / reasoner：模型本身即推理模型，无需额外参数
+        if "r1" in model_lower or "qwq" in model_lower or "reasoner" in model_lower:
+            return {}
+
+        # 腾讯混元 Hy3 / Hy3-preview：支持 thinking 参数（默认 disabled，需显式开启）
+        if "hy3" in model_lower or "hunyuan" in model_lower:
+            return {"thinking": {"type": "enabled"}}
+
+        # GLM 4.5+ / GLM-Z1 / GLM-5 系列：支持 thinking 参数
+        if "glm" in model_lower and (
+            "4.5" in model_lower or "z1" in model_lower
+            or "-thinking" in model_lower
+            or "glm-5" in model_lower or "glm5" in model_lower
+        ):
+            return {"thinking": {"type": "enabled"}}
+
+        # Qwen3 系列（非推理型号）：支持 enable_thinking 参数
+        if "qwen3" in model_lower and "reasoning" not in model_lower and "-reasoner" not in model_lower:
+            return {"enable_thinking": True}
+
+        # Claude 3.5+ / Claude 4：支持 extended thinking
+        if "claude" in model_lower and ("3-5" in model_lower or "3.5" in model_lower or "-4" in model_lower):
+            return {"thinking": {"type": "enabled", "budget_tokens": 10000}}
+
+        # 其他模型：不传思考参数（避免不支持的模型报错）
+        return {}
 
     async def _call_with_retry(
         self,
@@ -590,7 +797,7 @@ class LLMClient:
             max_tokens: 最大 token 数
 
         Returns:
-            str: 生成文本
+            tuple[str, dict, str]: (生成文本, token 使用量字典, 实际使用的模型名)
 
         Raises:
             _RetryableError: 重试耗尽（可故障转移）
@@ -613,15 +820,43 @@ class LLMClient:
                 if max_tokens:
                     kwargs["max_tokens"] = max_tokens
                 else:
-                    # 默认 max_tokens=16384，防止 LLM 提供商使用过小的默认值导致输出截断
-                    kwargs["max_tokens"] = 16384
+                    # v2.24: 默认 max_tokens=32768，防止长 SRR JSON 输出被截断
+                    # （16384 token 约 32K-49K 字符，部分复杂 SRR 会超出导致 JSON 解析失败）
+                    kwargs["max_tokens"] = 32768
+
+                # v2.37: 思考模式开关 — 优先使用自定义参数，否则使用内置规则
+                if provider.get("enable_thinking"):
+                    custom_params = self._parse_thinking_params(provider.get("thinking_params", ""))
+                    if custom_params:
+                        # 用户自定义参数优先
+                        kwargs.update(custom_params)
+                    else:
+                        # 回退到内置规则
+                        thinking_kwargs = self._build_thinking_kwargs(provider["model"])
+                        kwargs.update(thinking_kwargs)
 
                 response = await litellm.acompletion(**kwargs)
                 content = response.choices[0].message.content
                 if not content:
                     raise _RetryableError("LLM 返回空内容")
+                # v2.24: 检测输出是否因 max_tokens 截断
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                if finish_reason == "length":
+                    logger.warning(
+                        "[LLM] 输出被 max_tokens={} 截断 (content_len={})，JSON 解析可能失败",
+                        kwargs.get("max_tokens"), len(content),
+                    )
+                # 提取 token 使用量（可能为 None）
+                usage_obj = getattr(response, "usage", None)
+                usage: dict = {}
+                if usage_obj:
+                    usage = {
+                        "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+                        "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+                    }
                 logger.debug("LLM 调用成功 [provider={}, attempt={}]", provider["key"], attempt)
-                return content
+                return content, usage, provider["model"]
 
             except _NonRetryableError:
                 raise
@@ -702,6 +937,83 @@ class LLMClient:
                 self.PROVIDER_DISABLE_SECONDS,
             )
 
+    async def _log_call(
+        self,
+        agent_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        response: str,
+        parsed_json: Any,
+        temperature: float,
+        duration_ms: int,
+        token_usage: dict,
+        success: bool,
+        error_message: str = "",
+        task_id: str = "",
+        req_id: str = "",
+        model_used: str = "",
+        provider_used: str = "",
+    ) -> None:
+        """记录 LLM 调用到数据库（不阻断主流程）。
+
+        使用独立 DB session（async_session），避免依赖调用方的 session——
+        Agent 多在异步上下文/后台协程中运行，调用方 session 可能已关闭。
+
+        任何异常只 logger.warning，不向上传播，确保日志失败不影响主流程。
+
+        Args:
+            agent_name: 调用方 Agent 名称
+            system_prompt: 系统提示词
+            user_prompt: 用户提示词
+            response: LLM 返回的完整响应文本
+            parsed_json: 解析后的 JSON（dict/list，失败时为 None）
+            temperature: 温度参数
+            duration_ms: 调用耗时（毫秒）
+            token_usage: token 使用量字典
+            success: 是否成功
+            error_message: 失败时的错误信息
+            task_id: 关联的异步任务 ID
+            req_id: 关联的需求 ID
+            model_used: 实际使用的模型名
+            provider_used: 实际使用的供应商 key（格式 "provider:model"）。
+                          v2.27: 旧版用 settings.LLM_PROVIDER（全局主供应商），
+                          导致日志无法区分实际使用的供应商。现改为传入实际值。
+        """
+        try:
+            from app.db.database import async_session
+            from app.db.models import LLMCallLog
+            from app.config import settings
+
+            # v2.27: 优先使用实际供应商 key，回退到全局主供应商
+            # provider_used 格式为 "provider_name:model_name"，提取供应商名
+            if provider_used and ":" in provider_used:
+                provider_name = provider_used.split(":", 1)[0]
+            elif provider_used:
+                provider_name = provider_used
+            else:
+                provider_name = getattr(settings, "LLM_PROVIDER", "") or ""
+            log_entry = LLMCallLog(
+                agent_name=agent_name or "unknown",
+                task_id=task_id or None,
+                req_id=req_id or None,
+                provider=provider_name,
+                model=model_used or "",
+                system_prompt=system_prompt or "",
+                user_prompt=user_prompt or "",
+                response=response or "",
+                parsed_json=parsed_json if isinstance(parsed_json, (dict, list)) else None,
+                temperature=temperature,
+                duration_ms=duration_ms,
+                token_usage=token_usage if token_usage else None,
+                success=success,
+                error_message=error_message or None,
+            )
+            async with async_session() as session:
+                session.add(log_entry)
+                await session.commit()
+        except Exception as e:
+            logger.warning("[LLM/Log] 日志记录失败（不阻断）: {}", str(e)[:200])
+
     @staticmethod
     def _parse_json(text: str, schema_hint: dict | None) -> dict:
         """解析 LLM 输出为 JSON，容忍常见格式问题。
@@ -728,10 +1040,16 @@ class LLMClient:
             # 容忍：提取首个 {...} 或 [...] 块
             data = _extract_json_block(cleaned)
             if data is None:
-                # 最后尝试：修复常见 JSON 问题（尾随逗号、单引号）
+                # 最后尝试：修复常见 JSON 问题（尾随逗号、单引号、截断补全）
                 data = _try_repair_json(cleaned)
             if data is None:
-                raise LLMJsonParseError(f"LLM 输出无法解析为 JSON (len={len(cleaned)}): {cleaned[:200]}")
+                # v2.24: 输出超长时附加截断提示
+                trunc_hint = ""
+                if len(cleaned) > 20000:
+                    trunc_hint = "（输出可能被 max_tokens 截断，请检查 LLM 配置）"
+                raise LLMJsonParseError(
+                    f"LLM 输出无法解析为 JSON (len={len(cleaned)}){trunc_hint}: {cleaned[:200]}"
+                )
 
         if not isinstance(data, dict):
             # 容忍 LLM 返回 list（如 GenAgent 的 [{"test_suite": [...]}] 或直接用例数组）

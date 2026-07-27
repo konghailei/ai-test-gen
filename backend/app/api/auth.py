@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.auth import AuthToken, _decode
+from app.core.operation_logger import log_operation
 from app.db.database import get_session
 from app.db.models import User
 from app.models.api_schemas import ApiResponse
@@ -176,18 +177,30 @@ async def login(
     if user is None:
         logger.warning("[auth] 登录失败：用户不存在 - username={}", body.username)
         _record_login_failure(body.username, client_ip)
+        await log_operation(
+            username=body.username, action="login", ip_address=client_ip,
+            success=False, error_message="用户不存在",
+        )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
     # 检查账户是否启用
     if not user.is_active:
         logger.warning("[auth] 登录失败：账户已禁用 - username={}", body.username)
         _record_login_failure(body.username, client_ip)
+        await log_operation(
+            username=body.username, user_id=user.id, action="login", ip_address=client_ip,
+            success=False, error_message="账户已禁用",
+        )
         raise HTTPException(status_code=401, detail="账户已禁用，请联系管理员")
 
     # 验证密码
     if not verify_password(body.password, user.password_hash):
         logger.warning("[auth] 登录失败：密码错误 - username={}", body.username)
         _record_login_failure(body.username, client_ip)
+        await log_operation(
+            username=body.username, user_id=user.id, action="login", ip_address=client_ip,
+            success=False, error_message="密码错误",
+        )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
     # 登录成功：清除失败计数
@@ -215,6 +228,11 @@ async def login(
 
     logger.info("[auth] 登录成功: username={}, role={}, menus={}",
                  user.username, role_name, len(permissions))
+
+    await log_operation(
+        username=user.username, user_id=user.id, action="login", ip_address=client_ip,
+        detail={"role": role_name},
+    )
 
     return ApiResponse(
         success=True,
@@ -298,6 +316,10 @@ async def change_password(
     # 验证当前密码
     if not verify_password(body.current_password, user.password_hash):
         logger.warning("[auth] 修改密码失败：当前密码错误 - username={}", username)
+        await log_operation(
+            username=username, user_id=user.id, action="change_password",
+            success=False, error_message="当前密码错误",
+        )
         raise HTTPException(status_code=401, detail="当前密码错误")
 
     # 检查新旧密码是否相同
@@ -310,6 +332,10 @@ async def change_password(
     await session.commit()
 
     logger.info("[auth] 用户 {} 已成功修改密码", username)
+
+    await log_operation(
+        username=username, user_id=user.id, action="change_password",
+    )
 
     return ApiResponse(
         success=True,

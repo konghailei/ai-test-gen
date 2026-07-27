@@ -70,6 +70,9 @@ class Requirement(Base):
     vectorization_status: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
     vectorization_error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
+    # v2.33: 多人协作冲突检测——每次 srr_json 被修改时自增，前端轮询对比 revision 判断是否需要刷新
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+
     __table_args__ = (
         Index("idx_req_product_module", "product_id", "module"),
         Index("idx_req_status", "status"),
@@ -270,6 +273,11 @@ class LLMConfig(Base):
     base_url: Mapped[str] = mapped_column(String(512), default="")
     model: Mapped[str] = mapped_column(String(128), default="")
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    # v2.36: 思考模式开关（仅对支持思考的模型生效，如 deepseek-r1/glm-4.5/qwen3-reasoning 等）
+    enable_thinking: Mapped[bool] = mapped_column(Boolean, default=False)
+    # v2.37: 自定义思考参数（JSON 字符串，为空时使用内置规则；非空时优先使用自定义参数）
+    # 示例：'{"thinking": {"type": "enabled", "budget_tokens": 8000}}' 或 '{"enable_thinking": true}'
+    thinking_params: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -439,6 +447,9 @@ class AnalysisTask(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     result_json: Mapped[dict] = mapped_column(JSON, default=dict)  # 任务结果（req_id/questions 等）
     error: Mapped[str] = mapped_column(Text, default="")
+    # v2.23: 阶段耗时追踪 — 自动记录每个 phase 的 start/end/duration_ms
+    # 结构：{"parse": {"start": "ISO", "end": "ISO", "duration_ms": 12345}, ...}
+    phase_timings: Mapped[dict] = mapped_column(JSON, default=dict)
     created_by: Mapped[str] = mapped_column(String(64), default="api")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -457,6 +468,7 @@ class AnalysisTask(Base):
             "message": self.message,
             "result_json": self.result_json or {},
             "error": self.error,
+            "phase_timings": self.phase_timings or {},
             "created_at": self.created_at.isoformat() if self.created_at else "",
             "updated_at": self.updated_at.isoformat() if self.updated_at else "",
             "completed_at": self.completed_at.isoformat() if self.completed_at else "",
@@ -471,7 +483,7 @@ DEFAULT_MENUS = [
     "dashboard", "requirements", "generate", "testcases",
     "dependency_graph", "knowledge", "knowledge_qa", "projects_modules",
     "admin", "admin_dashboard", "admin_products", "admin_prompts", "admin_settings",
-    "admin_users", "admin_roles", "admin_kb",
+    "admin_users", "admin_roles", "admin_kb", "admin_logs",
 ]
 
 class Role(Base):
@@ -763,4 +775,81 @@ class FPDependencyHistory(Base):
     __table_args__ = (
         Index("idx_fp_dephist_fp", "source_fp_id", "target_fp_id"),
         Index("idx_fp_dephist_action", "action"),
+    )
+
+
+# ============================================================================
+# 17. LLM 调用日志表（llm_call_logs，记录每次 LLM 调用的完整输入输出）
+# ============================================================================
+
+class LLMCallLog(Base):
+    """LLM 调用日志表。
+
+    记录每次 LLM 调用的完整 system_prompt / user_prompt / response / parsed_json，
+    用于排查 Agent 输出问题、审计 LLM 行为、统计 token 消耗。
+
+    写入由 llm_client._log_call 触发，使用独立 DB session，不阻断主流程。
+    """
+    __tablename__ = "llm_call_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    agent_name: Mapped[str] = mapped_column(
+        String(64), default="unknown", index=True,
+        comment="调用方 Agent 名称（ReqAgent/ClarifyAgent/GenAgent/ReviewAgent/FpAgent 等）",
+    )
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="关联的异步任务 ID")
+    req_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="关联的需求 ID")
+    provider: Mapped[str] = mapped_column(String(32), default="", comment="LLM 提供商（openai/azure/anthropic/deepseek 等）")
+    model: Mapped[str] = mapped_column(String(64), default="", comment="模型名称")
+    system_prompt: Mapped[str] = mapped_column(Text, default="", comment="系统提示词")
+    user_prompt: Mapped[str] = mapped_column(Text, default="", comment="用户提示词")
+    response: Mapped[str] = mapped_column(Text, default="", comment="LLM 返回的完整响应")
+    parsed_json: Mapped[dict | None] = mapped_column(JSON, nullable=True, comment="解析后的 JSON（如 call_json 成功）")
+    temperature: Mapped[float] = mapped_column(Float, default=0.3, comment="温度参数")
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0, comment="调用耗时（毫秒）")
+    token_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True, comment="token 使用量（prompt/completion/total_tokens）")
+    success: Mapped[bool] = mapped_column(Boolean, default=True, index=True, comment="是否成功")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True, comment="失败时的错误信息")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        Index("idx_llmlog_agent_created", "agent_name", "created_at"),
+        Index("idx_llmlog_req_created", "req_id", "created_at"),
+    )
+
+
+# ============================================================================
+# 18. 用户操作日志表（operation_logs，记录用户关键操作）
+# ============================================================================
+
+class OperationLog(Base):
+    """用户操作日志表。
+
+    记录用户的关键操作（登录/上传/澄清/重生成/删除/归档/FP 合并复用/提示词更新等），
+    用于审计与问题排查。写入由 operation_logger.log_operation 触发，不阻断主流程。
+    """
+    __tablename__ = "operation_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True, comment="操作用户 ID")
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="操作用户名")
+    action: Mapped[str] = mapped_column(
+        String(64), index=True,
+        comment="操作类型（login/change_password/upload_requirement/clarify/regenerate/generate_testcase/delete_requirement/archive/fp_merge/fp_reuse/fp_delete/prompt_update 等）",
+    )
+    target_type: Mapped[str | None] = mapped_column(String(32), nullable=True, comment="操作目标类型（requirement/fp/testcase/prompt/product）")
+    target_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="操作目标 ID")
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True, comment="操作详情（修改前后值、请求参数摘要）")
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="客户端 IP")
+    success: Mapped[bool] = mapped_column(Boolean, default=True, index=True, comment="是否成功")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True, comment="失败时的错误信息")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        Index("idx_oplog_action_created", "action", "created_at"),
+        Index("idx_oplog_user_created", "username", "created_at"),
     )

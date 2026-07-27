@@ -191,6 +191,8 @@ class LLMConfigItem(BaseModel):
     base_url: str = Field(default="", description="API 基础地址")
     model: str = Field(default="", description="模型名称")
     is_primary: bool = Field(default=False, description="是否为主供应商")
+    enable_thinking: bool = Field(default=False, description="是否启用思考模式（仅对支持思考的模型生效）")
+    thinking_params: str = Field(default="", description="自定义思考参数（JSON 字符串，为空时使用内置规则）")
 
 
 class LLMConfigRequest(BaseModel):

@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback, memo } from 'react'
+import { useState, useEffect, useCallback, memo, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers, Clock, Download, FilePlus, Image as ImageIcon } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers, Clock, Download, FilePlus, Image as ImageIcon, ChevronDown } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
-import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product } from '../types'
+import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product, RequirementRevision } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -252,14 +252,37 @@ export default function RequirementDetail() {
   const [finalizing, setFinalizing] = useState(false)
   // v1.6: 确认需求完成
   const [confirming, setConfirming] = useState(false)
-  // v2.0: 导出 XMind
+  // v2.0: 导出 XMind；v2.20 支持选择 XMind 2020+ JSON / XMind 8 XML 两种格式
   const [exporting, setExporting] = useState(false)
+  const [xmindFormat, setXmindFormat] = useState<'xmind' | 'xmind8'>('xmind')
+  // v2.20: 下拉菜单改用 click 控制（hover 在某些浏览器/自动化测试中不稳定）
+  const [xmindDropdownOpen, setXmindDropdownOpen] = useState(false)
+  const xmindDropdownRef = useRef<HTMLDivElement>(null)
+
+  // v2.33: 多人协作冲突检测——轮询 revision + 任务运行状态
+  const [conflictDetected, setConflictDetected] = useState(false)
+  const [taskRunningInfo, setTaskRunningInfo] = useState<{ message: string; task_type: string } | null>(null)
+  const localRevisionRef = useRef<number | null>(null)
+  const isLocalMutationRef = useRef(false)
+  const prevTaskRunningRef = useRef(false)
+
+  // 点击外部关闭下拉菜单
+  useEffect(() => {
+    if (!xmindDropdownOpen) return
+    const handler = (e: MouseEvent) => {
+      if (xmindDropdownRef.current && !xmindDropdownRef.current.contains(e.target as Node)) {
+        setXmindDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [xmindDropdownOpen])
 
   const handleExportXmind = async () => {
     if (!id) return
     setExporting(true)
     try {
-      const res = await reqApi.exportXmind(id)
+      const res = await reqApi.exportXmind(id, xmindFormat)
       alert(`已导出 XMind 文件：${res.filename}（${(res.size / 1024).toFixed(1)} KB）`)
     } catch (e: any) {
       alert('XMind 导出失败: ' + (e?.message || '未知错误'))
@@ -281,7 +304,19 @@ export default function RequirementDetail() {
     req_title: string
     direct_modules: { id: string; name: string }[]
     indirect_modules: { id: string; name: string; reason: string; depth: number }[]
-    affected_requirements: { id: string; title: string; priority: string; modules: string[] }[]
+    affected_fps: {
+      fp_id: string
+      fp_name: string
+      fp_status: string
+      module_id: string
+      module_name: string
+      impact_reason: string
+      depth: number
+      source_fp_name: string
+      kb_context: string
+      existing_cases_count: number
+    }[]
+    total_affected: number
   } | null>(null)
 
   // ---- v1.6.1: 泛化 SRR 字段保存（FieldEditor 用） ----
@@ -297,6 +332,8 @@ export default function RequirementDetail() {
     target[path[path.length - 1]] = newValue
     await reqApi.update(id, srr)
     setReq(prev => prev ? { ...prev, srr_json: srr } : prev)
+    // v2.33: 本地变更后刷新 revision 基线，避免下次轮询误报冲突
+    refreshRevisionBaseline()
   }
 
   // 模块名称映射（ID→名称），用于 SRR 中显示模块名称
@@ -325,6 +362,77 @@ export default function RequirementDetail() {
   }, [id])
 
   useEffect(() => { prodApi.list().then(list => setProducts(list || [])) }, [])
+
+  // v2.33: 多人协作冲突检测——初次加载 revision 基线
+  useEffect(() => {
+    if (!id) return
+    reqApi.getRevision(id).then((info: RequirementRevision) => {
+      localRevisionRef.current = info.revision
+      if (info.task_running) {
+        setTaskRunningInfo({ message: info.task_message, task_type: info.task_type })
+      }
+    }).catch(() => {})
+  }, [id])
+
+  // v2.33: 每 5 秒轮询 revision，检测他人修改 + 任务运行状态
+  useEffect(() => {
+    if (!id) return
+    const timer = setInterval(async () => {
+      try {
+        const info = await reqApi.getRevision(id)
+        const wasTaskRunning = prevTaskRunningRef.current
+        const isTaskRunning = info.task_running
+
+        // 任务状态更新（实时反映后端任务进度）
+        if (isTaskRunning) {
+          setTaskRunningInfo({ message: info.task_message, task_type: info.task_type })
+        } else {
+          setTaskRunningInfo(null)
+        }
+
+        // 任务刚完成（running → idle）：静默刷新基线，避免任务自身 revision 变化误报为冲突
+        if (wasTaskRunning && !isTaskRunning) {
+          localRevisionRef.current = info.revision
+          // 任务完成后自动刷新需求详情，展示最新内容
+          try {
+            const updated = await reqApi.get(id)
+            setReq(updated)
+          } catch {}
+        } else if (
+          !isTaskRunning &&  // 无任务运行时才检测冲突（任务运行期间锁机制保证无并发修改）
+          localRevisionRef.current !== null &&
+          info.revision > localRevisionRef.current &&
+          !isLocalMutationRef.current
+        ) {
+          // 冲突检测：远程 revision > 本地基线，且非本地刚变更
+          setConflictDetected(true)
+        }
+
+        // 重置标记
+        isLocalMutationRef.current = false
+        prevTaskRunningRef.current = isTaskRunning
+      } catch {
+        // 静默失败，不打扰用户
+      }
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [id])
+
+  /** 本地变更后刷新 revision 基线，避免下次轮询误报冲突 */
+  const refreshRevisionBaseline = useCallback(async () => {
+    if (!id) return
+    try {
+      isLocalMutationRef.current = true
+      const info = await reqApi.getRevision(id)
+      localRevisionRef.current = info.revision
+      prevTaskRunningRef.current = info.task_running
+      if (info.task_running) {
+        setTaskRunningInfo({ message: info.task_message, task_type: info.task_type })
+      } else {
+        setTaskRunningInfo(null)
+      }
+    } catch {}
+  }, [id])
 
   const loadQuestions = async () => {
     if (!id) return
@@ -377,6 +485,8 @@ export default function RequirementDetail() {
       await reqApi.submitClarify(id, answers)
       setClarifyDone(true)
       setShowClarify(false)
+      // v2.33: 澄清提交会触发后端 revision 自增，刷新基线
+      refreshRevisionBaseline()
     } catch (e: any) {
       alert('提交失败: ' + e.message)
     } finally {
@@ -403,6 +513,8 @@ export default function RequirementDetail() {
       const updated = await reqApi.get(id)
       setReq(updated)
       setEditing(false)
+      // v2.33: 本地编辑保存后刷新 revision 基线
+      refreshRevisionBaseline()
     } catch (e: any) {
       if (e instanceof SyntaxError) {
         setSaveError('JSON 格式错误: ' + e.message)
@@ -421,9 +533,11 @@ export default function RequirementDetail() {
       try {
         const updated = await reqApi.get(id)
         setReq(updated)
+        // v2.33: 归档变更 revision，刷新基线
+        refreshRevisionBaseline()
       } catch {}
     }
-  }, [id])
+  }, [id, refreshRevisionBaseline])
 
   const handleFinalize = async () => {
     if (!id) return
@@ -432,6 +546,8 @@ export default function RequirementDetail() {
       await reqApi.finalize(id)
       const updated = await reqApi.get(id)
       setReq(updated)
+      // v2.33: 生成最终SRR后刷新 revision 基线
+      refreshRevisionBaseline()
     } catch (e: any) {
       alert('生成最终SRR失败: ' + e.message)
     } finally {
@@ -447,6 +563,8 @@ export default function RequirementDetail() {
       await reqApi.confirm(id)
       const updated = await reqApi.get(id)
       setReq(updated)
+      // v2.33: 确认状态变更后刷新 revision 基线
+      refreshRevisionBaseline()
     } catch (e: any) {
       alert('确认失败: ' + e.message)
     } finally {
@@ -557,7 +675,7 @@ export default function RequirementDetail() {
               <Layers className="w-4 h-4 text-primary-500" />
               功能点（FP）审核
             </h3>
-            <FPSRRViewer reqId={id!} productId={detail.product_id} status={detail.status} />
+            <FPSRRViewer reqId={id!} productId={detail.product_id} status={detail.status} onChanged={refreshRevisionBaseline} />
           </div>
         )}
 
@@ -661,114 +779,343 @@ export default function RequirementDetail() {
           }}
         />
 
-        {/* 边界条件 */}
-        <FieldEditor
-          label="边界条件"
-          fieldPath="boundary_conditions"
-          value={srr.boundary_conditions || []}
-          valueType="object[]"
-          placeholder={'[{"field":"字段名","condition":"边界条件","expect":"预期结果"}]'}
-          onSave={saveSrrField}
-          disabled={detail.status === 'archived'}
-          render={(v) => {
-            const bcs = Array.isArray(v) ? v : []
-            if (!bcs.length) return <p className="text-xs text-slate-400 italic"></p>
+        {/* 跨功能点交互规则（v2.32: 替代原 boundary_conditions，总 SRR 核心职责；v2.34: 4 个子字段全部可编辑） */}
+        {(() => {
+          const cfi = srr.cross_fp_interactions || {}
+          const flows = Array.isArray(cfi.cross_fp_flows) ? cfi.cross_fp_flows : []
+          const sharedRules = Array.isArray(cfi.shared_business_rules) ? cfi.shared_business_rules : []
+          const contracts = Array.isArray(cfi.fp_contracts) ? cfi.fp_contracts : []
+          const globalConstraints = Array.isArray(cfi.global_constraints) ? cfi.global_constraints : []
+          const hasContent = flows.length > 0 || sharedRules.length > 0 || contracts.length > 0 || globalConstraints.length > 0
+          if (!hasContent && detail.status !== 'archived') {
+            // 空内容时也显示一个可编辑入口，方便用户手动添加
             return (
-              <div className="grid grid-cols-2 gap-2">
-                {bcs.map((b: any, i: number) => (
-                  <div key={i} className="p-3 bg-slate-50 rounded-xl text-sm">
-                    <span className="font-medium text-slate-700">{b.field}: </span>
-                    <span className="text-slate-500">{b.condition}</span>
-                    <p className="text-xs text-slate-400 mt-0.5">→ {b.expect}</p>
-                  </div>
-                ))}
-                
-              </div>
+              <FieldEditor
+                label="跨功能点交互规则"
+                fieldPath="cross_fp_interactions"
+                value={cfi}
+                valueType="json"
+                placeholder='{"cross_fp_flows":[],"shared_business_rules":[],"fp_contracts":[],"global_constraints":[]}'
+                onSave={saveSrrField}
+                disabled={false}
+                render={() => (
+                  <p className="text-xs text-slate-400 italic">暂无跨 FP 交互规则。点击编辑添加（FP 调用顺序、共享规则、契约、全局约束）</p>
+                )}
+              />
             )
-          }}
-        />
+          }
+          if (!hasContent) return null
+          return (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <GitBranch className="w-4 h-4 text-indigo-500" />
+                <h4 className="text-sm font-semibold text-slate-700">跨功能点交互规则</h4>
+              </div>
+              {/* FP 调用顺序（可编辑） */}
+              <FieldEditor
+                label="FP 调用顺序"
+                fieldPath="cross_fp_interactions.cross_fp_flows"
+                value={flows}
+                valueType="object[]"
+                placeholder='[{"name":"登录后加载菜单","source_fp":"用户登录","target_fp":"菜单加载","interaction_type":"sequence","description":"登录成功触发菜单加载"}]'
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => {
+                  const list = Array.isArray(v) ? v : []
+                  if (!list.length) return <p className="text-xs text-slate-400 italic">点击编辑添加 FP 调用顺序</p>
+                  return (
+                    <div className="space-y-1.5">
+                      {list.map((f: any, i: number) => (
+                        <div key={i} className="flex items-center gap-2 text-sm text-slate-600 p-2 bg-indigo-50/50 rounded-lg">
+                          <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-600 rounded text-xs font-medium">{f.source_fp || f.from || '?'}</span>
+                          <span className="text-slate-400">→</span>
+                          <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-600 rounded text-xs font-medium">{f.target_fp || f.to || '?'}</span>
+                          {(f.description || f.contract) && <span className="text-xs text-slate-500 ml-1">{f.description || f.contract}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                }}
+              />
+              {/* 共享业务规则（可编辑，v2.34 替代原顶层 business_rules） */}
+              <FieldEditor
+                label="共享业务规则"
+                fieldPath="cross_fp_interactions.shared_business_rules"
+                value={sharedRules}
+                valueType="object[]"
+                placeholder='[{"id":"SBR-01","rule":"全链路TLS加密","applied_fps":["用户登录","数据查询"]}]'
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => {
+                  const list = Array.isArray(v) ? v : []
+                  if (!list.length) return <p className="text-xs text-slate-400 italic">点击编辑添加跨 FP 共享规则</p>
+                  return (
+                    <div className="space-y-1.5">
+                      {list.map((r: any, i: number) => (
+                        <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                          <span>{typeof r === 'string' ? r : `${r.id || ''}: ${r.rule || ''}`}</span>
+                          {typeof r === 'object' && Array.isArray(r.applied_fps) && r.applied_fps.length > 0 && (
+                            <span className="text-[10px] px-1 bg-emerald-50 text-emerald-600 rounded">适用于 {r.applied_fps.length} 个 FP</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                }}
+              />
+              {/* FP 间契约（可编辑） */}
+              <FieldEditor
+                label="FP 间契约"
+                fieldPath="cross_fp_interactions.fp_contracts"
+                value={contracts}
+                valueType="object[]"
+                placeholder='[{"provider_fp":"用户登录","consumer_fp":"菜单加载","data_fields":["user_id","token"],"contract_desc":"登录返回 token"}]'
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => {
+                  const list = Array.isArray(v) ? v : []
+                  if (!list.length) return <p className="text-xs text-slate-400 italic">点击编辑添加 FP 间契约</p>
+                  return (
+                    <div className="space-y-1.5">
+                      {list.map((c: any, i: number) => (
+                        <div key={i} className="text-sm text-slate-600 p-2 bg-slate-50 rounded-lg">
+                          <span className="font-medium">{c.provider_fp || c.fp_a || '?'}</span>
+                          <span className="text-slate-400 mx-1">→</span>
+                          <span className="font-medium">{c.consumer_fp || c.fp_b || '?'}</span>
+                          {(c.contract_desc || c.contract) && <p className="text-xs text-slate-500 mt-0.5">{c.contract_desc || c.contract}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  )
+                }}
+              />
+              {/* 全局约束（可编辑） */}
+              <FieldEditor
+                label="全局约束"
+                fieldPath="cross_fp_interactions.global_constraints"
+                value={globalConstraints}
+                valueType="string[]"
+                placeholder='["所有接口响应时间 ≤ 200ms","统一使用 ISO 8601 时间格式"]'
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => {
+                  const list = Array.isArray(v) ? v : []
+                  if (!list.length) return <p className="text-xs text-slate-400 italic">点击编辑添加全局约束</p>
+                  return (
+                    <div className="space-y-1.5">
+                      {list.map((g: any, i: number) => (
+                        <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
+                          <AlertCircle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
+                          <span>{typeof g === 'string' ? g : (g.constraints || g.rule || JSON.stringify(g))}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                }}
+              />
+            </div>
+          )
+        })()}
 
-        {/* 业务规则 */}
+        {/* v2.34: 总 SRR 不再展示顶层 business_rules（已迁移到 cross_fp_interactions.shared_business_rules） */}
+
+        {/* 全局非功能需求基线（v2.34: 新增可编辑展示） */}
         <FieldEditor
-          label="业务规则"
-          fieldPath="business_rules"
-          value={srr.business_rules || []}
-          valueType="object[]"
-          placeholder={'[{"id":"BR-001","rule":"规则描述","type":"validation"}]'}
+          label="全局非功能需求基线"
+          fieldPath="non_functional"
+          value={srr.non_functional || {}}
+          valueType="json"
+          placeholder='{"performance":"响应时间 ≤ 200ms","security":"全链路 TLS 加密","compatibility":"支持 Chrome 90+","accessibility":"WCAG 2.1 AA"}'
           onSave={saveSrrField}
           disabled={detail.status === 'archived'}
           render={(v) => {
-            const rules = Array.isArray(v) ? v : []
-            if (!rules.length) return <p className="text-xs text-slate-400 italic"></p>
+            const nf = (v && typeof v === 'object') ? v : {}
+            const entries = Object.entries(nf).filter(([, val]) => val)
+            if (!entries.length) return <p className="text-xs text-slate-400 italic">点击编辑添加全局非功能需求（性能/安全/兼容性/可访问性）</p>
             return (
               <div className="space-y-1.5">
-                {rules.map((r: any, i: number) => (
-                  <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
-                    <span>{typeof r === 'string' ? r : `${r.id}: ${r.rule}`}</span>
-                    {typeof r !== 'string' && r.type && <span className="text-[10px] px-1 bg-slate-100 rounded text-slate-500">{brTypeLabel(r.type)}</span>}
-                  </div>
-                ))}
-                
+                {entries.map(([k, val]: any, i: number) => {
+                  const labels: Record<string, string> = {
+                    performance: '性能', security: '安全',
+                    compatibility: '兼容性', accessibility: '可访问性',
+                  }
+                  return (
+                    <div key={i} className="flex items-start gap-2 text-sm text-slate-600">
+                      <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-[10px] font-medium flex-shrink-0 mt-0.5">
+                        {labels[k] || k}
+                      </span>
+                      <span>{String(val)}</span>
+                    </div>
+                  )
+                })}
               </div>
             )
           }}
         />
 
-        {/* 数据约束 */}
-        <FieldEditor
-          label="数据约束"
-          fieldPath="data_constraints"
-          value={srr.data_constraints || []}
-          valueType="object[]"
-          placeholder={'[{"field":"字段","type":"string","required":true,"constraints":"约束","example":"示例"}]'}
-          onSave={saveSrrField}
-          disabled={detail.status === 'archived'}
-          render={(v) => {
-            const dcs = Array.isArray(v) ? v : []
-            if (!dcs.length) return <p className="text-xs text-slate-400 italic"></p>
+        {/* 历史数据影响分析（v2.32: 替代原 data_constraints + acceptance_criteria；v2.34: 支持编辑） */}
+        {(() => {
+          const ldi = srr.legacy_data_impact
+          if (!ldi || typeof ldi !== 'object') {
+            // 非优化需求也提供一个编辑入口，允许用户手动标记为优化需求
+            // v2.35: 归档状态也允许编辑影响范围分析内容
             return (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead><tr className="bg-slate-50"><th className="px-3 py-2 text-left text-xs text-slate-500">字段</th><th className="px-3 py-2 text-left text-xs text-slate-500">类型</th><th className="px-3 py-2 text-left text-xs text-slate-500">必填</th><th className="px-3 py-2 text-left text-xs text-slate-500">约束</th></tr></thead>
-                  <tbody>
-                    {dcs.map((d: any, i: number) => (
-                      <tr key={i} className="border-t border-slate-100"><td className="px-3 py-2 font-medium">{d.field}</td><td className="px-3 py-2 text-slate-500">{d.type}</td><td className="px-3 py-2">{d.required ? '✅' : ''}</td><td className="px-3 py-2 text-slate-500">{d.constraints}</td></tr>
-                    ))}
-                  </tbody>
-                </table>
-                
-              </div>
+              <FieldEditor
+                label="历史数据影响分析"
+                fieldPath="legacy_data_impact"
+                value={ldi || null}
+                valueType="json"
+                placeholder='{"is_optimization":true,"impact_scope":"受影响的功能点/数据/系统","migration_strategy":"..."}'
+                onSave={saveSrrField}
+                disabled={false}
+                render={() => (
+                  <p className="text-xs text-slate-400 italic">暂无历史数据影响分析。若此需求为优化/改进类，点击编辑补充影响范围、迁移策略等</p>
+                )}
+              />
             )
-          }}
-        />
-
-        {/* 验收标准 */}
-        <FieldEditor
-          label="验收标准"
-          fieldPath="acceptance_criteria"
-          value={srr.acceptance_criteria || []}
-          valueType="object[]"
-          placeholder={'[{"id":"AC-001","description":"验收描述","type":"functional"}]'}
-          onSave={saveSrrField}
-          disabled={detail.status === 'archived'}
-          render={(v) => {
-            const acs = Array.isArray(v) ? v : []
-            if (!acs.length) return <p className="text-xs text-slate-400 italic"></p>
-            return (
-              <div className="space-y-1.5">
-                {acs.map((ac: any, i: number) => (
-                  <div key={i} className="flex items-center gap-2 text-sm text-slate-600 pl-3 border-l-2 border-emerald-200">
-                    <Clock className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
-                    <span>{typeof ac === 'string' ? ac : `${ac.id}: ${ac.description}`}</span>
-                    {typeof ac !== 'string' && ac.type && <span className="text-[10px] px-1 bg-emerald-50 rounded text-emerald-600">{acTypeLabel(ac.type)}</span>}
-                  </div>
-                ))}
-                
+          }
+          const hasContent = ldi.is_optimization || ldi.impact_scope || ldi.user_clarification ||
+            (Array.isArray(ldi.data_inventory) && ldi.data_inventory.length > 0) ||
+            (Array.isArray(ldi.field_mapping) && ldi.field_mapping.length > 0) ||
+            ldi.migration_strategy || ldi.compatibility_analysis || ldi.rollback_strategy ||
+            ldi.verification_method || (Array.isArray(ldi.risks) && ldi.risks.length > 0)
+          if (!hasContent) return null
+          return (
+            <div className="space-y-3 p-4 bg-amber-50/30 border border-amber-200 rounded-xl">
+              <div className="flex items-center gap-2">
+                <Database className="w-4 h-4 text-amber-600" />
+                <h4 className="text-sm font-semibold text-slate-700">历史数据影响分析</h4>
+                {ldi.is_optimization && (
+                  <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded text-[10px] font-medium">优化需求</span>
+                )}
               </div>
-            )
-          }}
-        />
+              {/* 影响范围（可编辑） */}
+              <FieldEditor
+                label="影响范围"
+                fieldPath="legacy_data_impact.impact_scope"
+                value={ldi.impact_scope || ''}
+                valueType="string"
+                placeholder="受影响的功能点、数据实体、上下游系统"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => v ? <p className="text-sm text-slate-600">{String(v)}</p> : <p className="text-xs text-slate-400 italic">点击编辑添加影响范围</p>}
+              />
+              {/* 用户澄清（可编辑） */}
+              <FieldEditor
+                label="用户澄清（影响范围描述）"
+                fieldPath="legacy_data_impact.user_clarification"
+                value={ldi.user_clarification || ''}
+                valueType="string"
+                placeholder="用户在澄清环节填写的具体影响范围"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => v ? <p className="text-sm text-slate-600 p-2 bg-white/50 rounded">{String(v)}</p> : <p className="text-xs text-slate-400 italic">点击编辑添加用户澄清</p>}
+              />
+              {/* 迁移策略（可编辑） */}
+              <FieldEditor
+                label="迁移策略"
+                fieldPath="legacy_data_impact.migration_strategy"
+                value={ldi.migration_strategy || ''}
+                valueType="string"
+                placeholder="全量/增量/并行双写、迁移窗口、停机安排"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => v ? <p className="text-sm text-slate-600">{String(v)}</p> : <p className="text-xs text-slate-400 italic">点击编辑添加迁移策略</p>}
+              />
+              {/* 兼容性分析（可编辑） */}
+              <FieldEditor
+                label="兼容性分析"
+                fieldPath="legacy_data_impact.compatibility_analysis"
+                value={ldi.compatibility_analysis || ''}
+                valueType="string"
+                placeholder="格式兼容、编码统一、关联关系完整性"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => v ? <p className="text-sm text-slate-600">{String(v)}</p> : <p className="text-xs text-slate-400 italic">点击编辑添加兼容性分析</p>}
+              />
+              {/* 回滚策略（可编辑） */}
+              <FieldEditor
+                label="回滚策略"
+                fieldPath="legacy_data_impact.rollback_strategy"
+                value={ldi.rollback_strategy || ''}
+                valueType="string"
+                placeholder="备份方案、回滚时间窗、触发条件、演练"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => v ? <p className="text-sm text-slate-600">{String(v)}</p> : <p className="text-xs text-slate-400 italic">点击编辑添加回滚策略</p>}
+              />
+              {/* 验证方法（可编辑） */}
+              <FieldEditor
+                label="验证方法"
+                fieldPath="legacy_data_impact.verification_method"
+                value={ldi.verification_method || ''}
+                valueType="string"
+                placeholder="数量校验、业务关联校验、并行运行比对"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => v ? <p className="text-sm text-slate-600">{String(v)}</p> : <p className="text-xs text-slate-400 italic">点击编辑添加验证方法</p>}
+              />
+              {/* 数据盘点（可编辑） */}
+              <FieldEditor
+                label="数据盘点"
+                fieldPath="legacy_data_impact.data_inventory"
+                value={Array.isArray(ldi.data_inventory) ? ldi.data_inventory : []}
+                valueType="string[]"
+                placeholder="主数据/在途数据/历史数据/日志，标注是否迁移"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => {
+                  const list = Array.isArray(v) ? v : []
+                  if (!list.length) return <p className="text-xs text-slate-400 italic">点击编辑添加数据盘点</p>
+                  return (
+                    <ul className="list-disc list-inside text-sm text-slate-600 space-y-0.5">
+                      {list.map((d: string, i: number) => <li key={i}>{d}</li>)}
+                    </ul>
+                  )
+                }}
+              />
+              {/* 字段映射（可编辑） */}
+              <FieldEditor
+                label="字段映射"
+                fieldPath="legacy_data_impact.field_mapping"
+                value={Array.isArray(ldi.field_mapping) ? ldi.field_mapping : []}
+                valueType="string[]"
+                placeholder="老系统字段 → 新系统字段映射表"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => {
+                  const list = Array.isArray(v) ? v : []
+                  if (!list.length) return <p className="text-xs text-slate-400 italic">点击编辑添加字段映射</p>
+                  return (
+                    <ul className="list-disc list-inside text-sm text-slate-600 space-y-0.5">
+                      {list.map((f: string, i: number) => <li key={i}>{f}</li>)}
+                    </ul>
+                  )
+                }}
+              />
+              {/* 风险与缓解（可编辑） */}
+              <FieldEditor
+                label="风险与缓解"
+                fieldPath="legacy_data_impact.risks"
+                value={Array.isArray(ldi.risks) ? ldi.risks : []}
+                valueType="string[]"
+                placeholder="业务逻辑丢失、数据不一致、停机超时"
+                onSave={saveSrrField}
+                disabled={false}
+                render={(v) => {
+                  const list = Array.isArray(v) ? v : []
+                  if (!list.length) return <p className="text-xs text-slate-400 italic">点击编辑添加风险与缓解</p>
+                  return (
+                    <ul className="list-disc list-inside text-sm text-slate-600 space-y-0.5">
+                      {list.map((r: string, i: number) => <li key={i}>{r}</li>)}
+                    </ul>
+                  )
+                }}
+              />
+            </div>
+          )
+        })()}
       </div>
     )
   }
@@ -1210,7 +1557,7 @@ export default function RequirementDetail() {
         <div className="text-center py-12">
           <Loader2 className="w-8 h-8 mx-auto mb-3 text-primary-400 animate-spin" />
           <p className="text-slate-500 font-medium">正在分析影响范围...</p>
-          <p className="text-sm text-slate-400 mt-1">基于模块依赖图谱 BFS 遍历</p>
+          <p className="text-sm text-slate-400 mt-1">基于 FP 依赖图谱 + 模块依赖图谱分析</p>
         </div>
       )
     }
@@ -1227,12 +1574,12 @@ export default function RequirementDetail() {
       )
     }
 
-    if (impactData.direct_modules.length === 0 && impactData.indirect_modules.length === 0) {
+    if (impactData.direct_modules.length === 0 && impactData.indirect_modules.length === 0 && impactData.affected_fps.length === 0) {
       return (
         <div className="text-center py-12">
           <Share2 className="w-12 h-12 mx-auto mb-3 text-slate-300" />
-          <p className="text-slate-500 font-medium">该需求未关联模块</p>
-          <p className="text-sm text-slate-400 mt-1">关联模块后可以分析对其他模块的影响范围</p>
+          <p className="text-slate-500 font-medium">该需求未关联模块且无 FP 依赖关系</p>
+          <p className="text-sm text-slate-400 mt-1">关联模块或建立 FP 依赖关系后可分析影响范围</p>
         </div>
       )
     }
@@ -1274,32 +1621,58 @@ export default function RequirementDetail() {
           </div>
         )}
 
-        {/* 受影响的其他需求 */}
-        {impactData.affected_requirements.length > 0 ? (
+        {/* 受影响的功能点（基于 FP 依赖图谱 BFS 分析） */}
+        {impactData.affected_fps.length > 0 ? (
           <div>
             <h3 className="text-sm font-semibold text-slate-700 mb-2">
-              受影响的需求
-              <span className="text-xs font-normal text-slate-400 ml-2">（{impactData.affected_requirements.length} 个）</span>
+              受影响的功能点
+              <span className="text-xs font-normal text-slate-400 ml-2">（{impactData.total_affected} 个，基于 FP 依赖图谱 BFS 分析）</span>
             </h3>
-            <div className="space-y-2">
-              {impactData.affected_requirements.map(r => (
-                <div key={r.id} className="flex items-center justify-between px-4 py-3 bg-white rounded-xl border border-slate-200 hover:border-primary-300 cursor-pointer transition-colors"
-                  onClick={() => navigate(`/requirements/${r.id}`)}>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-slate-700 truncate">{r.title}</p>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">{r.priority}</span>
-                      <span className="text-xs text-slate-400">{r.id}</span>
+            <div className="space-y-3">
+              {impactData.affected_fps.map(fp => (
+                <div key={fp.fp_id} className="px-4 py-3 bg-white rounded-xl border border-slate-200 hover:border-primary-300 transition-colors">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <p className="text-sm font-medium text-slate-700 truncate">{fp.fp_name}</p>
+                      {fp.fp_status === 'archived' && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 font-medium flex-shrink-0">已归档</span>
+                      )}
+                      {fp.fp_status && fp.fp_status !== 'archived' && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 font-medium flex-shrink-0">{fp.fp_status}</span>
+                      )}
                     </div>
+                    <span className="text-xs text-slate-400 flex-shrink-0">{fp.depth}跳</span>
                   </div>
-                  <ArrowLeft className="w-4 h-4 text-slate-300 rotate-180" />
+                  <div className="flex items-center gap-2 mb-1">
+                    {fp.module_name && (
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">{fp.module_name}</span>
+                    )}
+                    {fp.existing_cases_count > 0 && (
+                      <span className="text-xs text-slate-400">已有 {fp.existing_cases_count} 条用例</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-500 mb-1">{fp.impact_reason}</p>
+                  {fp.source_fp_name && (
+                    <p className="text-xs text-slate-400">来源：依赖「{fp.source_fp_name}」</p>
+                  )}
+                  {/* KB 知识库说明（仅已归档 FP 有值） */}
+                  {fp.kb_context && (
+                    <div className="mt-2 p-2.5 bg-blue-50/50 rounded-lg border border-blue-100">
+                      <div className="flex items-center gap-1 mb-1">
+                        <Database className="w-3 h-3 text-blue-500" />
+                        <span className="text-xs font-medium text-blue-700">知识库说明</span>
+                      </div>
+                      <p className="text-xs text-slate-600 whitespace-pre-wrap">{fp.kb_context}</p>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           </div>
         ) : (
           <div className="text-center py-6">
-            <p className="text-sm text-slate-400">没有其他需求受影响</p>
+            <p className="text-sm text-slate-400">没有其他功能点受影响</p>
+            <p className="text-xs text-slate-300 mt-1">建立 FP 依赖关系后可分析受影响的功能点</p>
           </div>
         )}
 
@@ -1353,11 +1726,35 @@ export default function RequirementDetail() {
                   <Edit3 className="w-4 h-4" /> 编辑 SRR
                 </button>
               )}
-              {/* v2.0: 导出 XMind 思维导图（任何状态都可导出） */}
-              <button onClick={handleExportXmind} disabled={exporting} className="btn-secondary">
-                {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                导出 XMind
-              </button>
+              {/* v2.0: 导出 XMind 思维导图（任何状态都可导出）；v2.20 支持选择格式（click 控制） */}
+              <div className="flex items-center" ref={xmindDropdownRef}>
+                <button onClick={handleExportXmind} disabled={exporting}
+                  className="btn-secondary flex items-center gap-2 disabled:opacity-50 rounded-r-none border-r-0">
+                  {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  {xmindFormat === 'xmind8' ? '导出 XMind 8' : '导出 XMind'}
+                </button>
+                <div className="relative">
+                  <button disabled={exporting}
+                    onClick={() => setXmindDropdownOpen(o => !o)}
+                    className="btn-secondary rounded-l-none px-3 disabled:opacity-50"
+                    aria-expanded={xmindDropdownOpen}
+                    aria-haspopup="menu">
+                    <ChevronDown className={`w-4 h-4 transition-transform ${xmindDropdownOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {xmindDropdownOpen && (
+                    <div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-20 min-w-[180px] py-1">
+                      <button onClick={() => { setXmindFormat('xmind'); setXmindDropdownOpen(false) }}
+                        className={`w-full text-left px-3 py-2 text-xs hover:bg-slate-50 ${xmindFormat === 'xmind' ? 'bg-primary-50 text-primary-600 font-medium' : 'text-slate-600'}`}>
+                        XMind 2020+ / Zen（JSON）
+                      </button>
+                      <button onClick={() => { setXmindFormat('xmind8'); setXmindDropdownOpen(false) }}
+                        className={`w-full text-left px-3 py-2 text-xs hover:bg-slate-50 ${xmindFormat === 'xmind8' ? 'bg-primary-50 text-primary-600 font-medium' : 'text-slate-600'}`}>
+                        XMind 8（XML）
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
               {/* active / confirmed → 可归档（归档后导入知识库） */}
               {(detail.status === 'active' || detail.status === 'confirmed') && (
                 <button onClick={() => setShowArchiveModal(true)} className="btn-secondary">
@@ -1381,6 +1778,39 @@ export default function RequirementDetail() {
         <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 flex items-start gap-2">
           <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <span>{clarifyError}</span>
+        </div>
+      )}
+
+      {/* v2.33: 多人协作冲突提示条 —— 他人修改了需求内容，提示刷新 */}
+      {conflictDetected && (
+        <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-sm text-amber-800 flex items-center justify-between gap-3 animate-slide-up">
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            <span className="truncate">需求已被他人修改，当前页面内容可能已过期。建议刷新页面获取最新内容。</span>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={() => setConflictDetected(false)}
+              className="text-xs text-amber-700 hover:text-amber-900 underline"
+            >
+              稍后
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              className="px-3 py-1 bg-amber-500 text-white rounded-lg text-xs font-medium hover:bg-amber-600 transition-colors flex items-center gap-1"
+            >
+              <RefreshCw className="w-3 h-3" /> 刷新页面
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* v2.33: 任务运行中提示条 —— 有分析任务正在执行，此期间无法进行其他分析操作 */}
+      {taskRunningInfo && !conflictDetected && (
+        <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-700 flex items-center gap-2">
+          <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
+          <span>{taskRunningInfo.message || `正在执行${taskRunningInfo.task_type}任务...`}</span>
+          <span className="text-xs text-blue-500 ml-1">（此期间无法进行其他分析操作）</span>
         </div>
       )}
 
@@ -1778,11 +2208,27 @@ function ClarifyHistoryTab({
               </div>
 
               {/* 澄清记录：Q&A 列表 */}
-              {isClarify && entry.questions && entry.questions.length > 0 && (
-                <div className="space-y-2 mb-3">
-                  {entry.questions.map((q, qi) => {
-                    const answer = entry.answers?.[q.id] || ''
-                    return (
+              {isClarify && (() => {
+                // v2.29: 优先使用 qa_records（结构化，含 question 文本），兜底用 questions+answers
+                const qaList = entry.qa_records && entry.qa_records.length > 0
+                  ? entry.qa_records.map(qa => ({
+                      id: qa.id,
+                      field: qa.field || '',
+                      question: qa.question || '',
+                      priority: qa.priority || '',
+                      answer: qa.answer || '',
+                    }))
+                  : (entry.questions || []).map(q => ({
+                      id: q.id,
+                      field: q.field || '',
+                      question: q.question || '',
+                      priority: q.priority || '',
+                      answer: entry.answers?.[q.id] || '',
+                    }))
+                if (qaList.length === 0) return null
+                return (
+                  <div className="space-y-2 mb-3">
+                    {qaList.map((q, qi) => (
                       <div key={qi} className="bg-slate-50 rounded-lg p-3">
                         <div className="flex items-start gap-2">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${
@@ -1790,22 +2236,22 @@ function ClarifyHistoryTab({
                             q.priority === 'important' ? 'bg-amber-100 text-amber-600' :
                             'bg-slate-100 text-slate-500'
                           }`}>
-                            {q.priority === 'critical' ? '关键' : q.priority === 'important' ? '重要' : q.priority === 'optional' ? '可选' : q.priority}
+                            {q.priority === 'critical' ? '关键' : q.priority === 'important' ? '重要' : q.priority === 'optional' ? '可选' : q.priority || '普通'}
                           </span>
                           <div className="flex-1 min-w-0">
                             <p className="text-sm text-slate-700 font-medium">{q.question}</p>
-                            {answer && (
+                            {q.answer && (
                               <p className="text-sm text-slate-600 mt-1 pl-3 border-l-2 border-slate-200">
-                                {answer}
+                                {q.answer}
                               </p>
                             )}
                           </div>
                         </div>
                       </div>
-                    )
-                  })}
-                </div>
-              )}
+                    ))}
+                  </div>
+                )
+              })()}
 
               {/* 重新生成记录：标题变化 */}
               {!isClarify && entry.previous_title && entry.new_title && (

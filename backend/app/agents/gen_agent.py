@@ -148,6 +148,7 @@ class GenAgent:
                 temperature=0.4,
                 max_tokens=32768,
                 allow_array=True,  # 允许 LLM 输出 JSON 数组，不锁死 json_object
+                agent_name="GenAgent",
             )
         except Exception as e:
             logger.error("[GenAgent] LLM 调用失败: {}", str(e)[:200])

@@ -56,6 +56,131 @@ FIELD_PRIORITY: dict[str, int] = {
 }
 
 
+# ============================================================================
+# v2.25: 字段到问题的智能映射表 — 降级时生成具体、可回答的澄清问题
+# ============================================================================
+# 当 LLM 不可用（如配额耗尽）导致 _generate_kb_queries / _refine_unresolved_to_questions
+# 降级时，使用此映射表为每个缺口字段生成：
+# 1. 具体的问题文案（含需求标题 + 字段业务含义）
+# 2. 上下文描述（含功能点信息，帮助用户理解"是哪部分的规则"）
+# 3. 默认 input_type（优先 multi_select，让用户多选降低回答成本）
+# 4. 默认 options（基于行业最佳实践的标准选项）
+
+FIELD_QUESTION_TEMPLATES: dict[str, dict] = {
+    "flows.alternate_flows": {
+        "field_desc": "异常/边界流程",
+        "question_template": "【{req_title}】缺少异常和边界处理流程，请选择需要覆盖的异常场景（可多选）：",
+        "input_type": "multi_select",
+        "options": [
+            "网络异常/断线重连处理",
+            "权限不足/越权访问处理",
+            "并发冲突/数据竞争处理",
+            "输入越界/非法数据处理",
+            "超时/重试机制",
+            "资源耗尽/降级处理",
+        ],
+        "context_template": "当前需求已解析出 {fp_count} 个功能点（{fp_names}），但缺少各功能点的异常/边界流程。这些流程对测试用例的边界覆盖至关重要。",
+    },
+    "data_constraints": {
+        "field_desc": "数据约束/校验规则",
+        "question_template": "【{req_title}】缺少数据校验规则，请选择需要覆盖的约束类型（可多选）：",
+        "input_type": "multi_select",
+        "options": [
+            "字符串长度限制（最小/最大长度）",
+            "格式校验（邮箱/手机号/URL/日期）",
+            "数值范围限制（最小值/最大值）",
+            "必填字段校验",
+            "唯一性约束（如用户名不可重复）",
+            "枚举值限制（如状态只能是 A/B/C）",
+        ],
+        "context_template": "当前需求涉及 {fp_count} 个功能点，但未明确数据约束。数据校验规则是生成边界测试用例的关键依据。",
+    },
+    "business_rules": {
+        "field_desc": "核心业务规则",
+        "question_template": "【{req_title}】缺少核心业务规则，请选择需要补充的规则类型（可多选）：",
+        "input_type": "multi_select",
+        "options": [
+            "权限控制规则（谁能做什么）",
+            "状态流转规则（状态机）",
+            "计算/计费规则",
+            "触发条件与通知规则",
+            "数据可见性规则",
+            "审批流程规则",
+        ],
+        "context_template": "当前需求已解析出 {fp_count} 个功能点，但缺少业务规则定义。业务规则是测试用例逻辑覆盖的核心依据。",
+    },
+    "flows.happy_path": {
+        "field_desc": "正常操作流程",
+        "question_template": "【{req_title}】缺少正常操作流程，请描述用户从开始到完成的主要步骤：",
+        "input_type": "text",
+        "options": [],
+        "context_template": "当前需求已解析出 {fp_count} 个功能点，但缺少正常流程描述。",
+    },
+    "acceptance_criteria": {
+        "field_desc": "验收标准",
+        "question_template": "【{req_title}】缺少验收标准，请补充功能上线时需要满足的可验证条件：",
+        "input_type": "text",
+        "options": [],
+        "context_template": "当前需求缺少验收标准，这将影响测试通过的判定。",
+    },
+    "requirement.summary": {
+        "field_desc": "功能概述",
+        "question_template": "【{req_title}】缺少功能概述，请用一段话描述产品做什么、面向谁、解决什么问题：",
+        "input_type": "text",
+        "options": [],
+        "context_template": "当前需求缺少功能概述。",
+    },
+}
+
+
+def _build_field_question(field: str, description: str, srr: dict) -> dict:
+    """根据字段路径和 SRR 上下文，生成具体的澄清问题。
+
+    v2.25: 降级路径专用 — 当 LLM 不可用时，使用 FIELD_QUESTION_TEMPLATES
+    生成包含需求标题、功能点信息、多选选项的具体问题。
+
+    Args:
+        field: 字段路径（如 "flows.alternate_flows"）
+        description: 字段描述（来自 COMPLETENESS_CHECKLIST）
+        srr: 当前 SRR，用于提取需求标题和功能点信息
+
+    Returns:
+        dict: 包含 question/context/input_type/options 的字典
+    """
+    req_info = srr.get("requirement", {}) or {}
+    req_title = req_info.get("title", "当前需求") or "当前需求"
+
+    # 提取功能点信息
+    fp_summary = srr.get("fp_summary", []) or []
+    fp_count = len(fp_summary)
+    fp_names = "、".join([fp.get("name", "") for fp in fp_summary[:3] if fp.get("name")])
+    if fp_count > 3:
+        fp_names += f" 等{fp_count}个功能点"
+
+    template = FIELD_QUESTION_TEMPLATES.get(field, {})
+    if template:
+        question = template["question_template"].format(req_title=req_title)
+        context = template["context_template"].format(
+            fp_count=fp_count, fp_names=fp_names or "未识别",
+        )
+        return {
+            "question": question,
+            "context": context,
+            "input_type": template["input_type"],
+            "options": list(template["options"]),
+            "default_answer": "",
+        }
+
+    # 未知字段：使用 description 生成通用问题
+    return {
+        "question": f"【{req_title}】缺少{description}，请补充具体内容：",
+        "context": f"当前需求已解析出 {fp_count} 个功能点，但缺少{description}。",
+        "input_type": "text",
+        "options": [],
+        "default_answer": "",
+    }
+
+
 class ClarifyAgent:
     """需求澄清 Agent。
 
@@ -79,6 +204,64 @@ class ClarifyAgent:
     def __init__(self) -> None:
         """初始化 ClarifyAgent。"""
         self._llm = llm_client
+
+    @staticmethod
+    def _dedup_questions(questions: list[dict], stage: str = "") -> list[dict]:
+        """问题列表去重（v2.31 新增）。
+
+        作为最终安全网，确保返回给用户的问题列表绝不重复。
+        去重策略（双重）：
+        1. 按 field+question 全文去重（相同 field 且相同 question 只保留第一条）
+        2. 按 id 去重（相同 id 只保留第一条）
+
+        Args:
+            questions: 待去重的问题列表
+            stage: 调用阶段标识（用于日志，如 "after_refine" / "final"）
+
+        Returns:
+            list[dict]: 去重后的问题列表
+        """
+        if not questions:
+            return questions
+
+        deduped: list[dict] = []
+        seen_q_keys: set[str] = set()  # field+question 全文去重
+        seen_ids: set[str] = set()     # id 去重
+        skipped = 0
+
+        for q in questions:
+            field = q.get("field", "")
+            question_text = (q.get("question", "") or "").strip()
+            qid = q.get("id", "")
+
+            # 双重去重：field+question 全文 + id
+            q_key = f"{field}::{question_text}" if question_text else f"__no_q__::{field}"
+            if q_key in seen_q_keys:
+                skipped += 1
+                logger.info(
+                    "[ClarifyAgent] 去重({}) 跳过重复问题: field={!r} question={!r}",
+                    stage, field, question_text[:60],
+                )
+                continue
+            if qid and qid in seen_ids:
+                skipped += 1
+                logger.info(
+                    "[ClarifyAgent] 去重({}) 跳过重复 id: id={} field={!r}",
+                    stage, qid, field,
+                )
+                continue
+
+            seen_q_keys.add(q_key)
+            if qid:
+                seen_ids.add(qid)
+            deduped.append(q)
+
+        if skipped > 0:
+            logger.info(
+                "[ClarifyAgent] 去重({}) 完成: 原始 {} 条 → 去重后 {} 条（跳过 {} 条）",
+                stage, len(questions), len(deduped), skipped,
+            )
+        return deduped
 
     async def clarify(self, srr: dict, session = None) -> dict:
         """对 SRR 执行需求澄清。
@@ -195,7 +378,9 @@ class ClarifyAgent:
 
         # ③a 用需求摘要做全局搜索，供 PG 增强和问题查询复用
         summary = srr.get("requirement", {}).get("summary", "")
+        _t_sim = time.time()
         global_similar = await asyncio.to_thread(self._search_similar_requirements, srr)
+        _d_sim = int((time.time() - _t_sim) * 1000)
 
         # ③b PG 关系增强（先跑，供后续 Q&A 查询使用）
         _t_sql = time.time()
@@ -268,28 +453,75 @@ class ClarifyAgent:
         # ⑧ KB 未答上的问题 → 直接作为人工澄清问题（不需要 LLM 再生成一套）
         # KB 查询已经通过了 _generate_kb_queries 的质量审查和 _verify_kb_answers 的答案审核，
         # 能答的已自动补全，不能答的就是真正需要人工介入的缺口。
+        # v2.25: 使用 _build_field_question 丰富 context/options，即使 LLM 精炼失败也有可用选项
+        # v2.29: 按 field+question 双重去重——
+        #   - 同 field 且同 question 文本（前40字符）→ 视为重复，只保留一条
+        #   - 同 field 但不同 question（不同维度，如"文本长度"vs"文件大小"）→ 保留，生成唯一 id
+        #   - 空 field → 按 question 文本去重
+        # v2.30: 修复 id 冲突——同 field 的多问题用 _N 后缀区分，避免 _refine 时被 dict 覆盖
         unresolved_qa = [qa for qa in kb_answers if not qa.get("answered")]
         if unresolved_qa:
-            questions = [
-                {
-                    "id": f"kb_{qa.get('field','gap').replace('.','_')}",
-                    "field": qa.get("field", ""),
+            seen_keys: set[str] = set()
+            field_counters: dict[str, int] = {}  # 每个 field 的问题计数，用于生成唯一 id
+            questions = []
+            for qa in unresolved_qa:
+                field = qa.get("field", "")
+                question_text = qa.get("question", "") or ""
+                # 双重去重：field + question 前40字符
+                dedup_key = f"{field}::{question_text[:40]}" if question_text else field
+                if dedup_key in seen_keys:
+                    logger.info(
+                        "[ClarifyAgent] 跳过重复 KB 未答问题: field={!r} question={!r}",
+                        field, question_text[:60],
+                    )
+                    continue
+                seen_keys.add(dedup_key)
+
+                # 生成唯一 id：同 field 的第 N 个问题用 _N 后缀
+                field_counters[field] = field_counters.get(field, 0) + 1
+                field_slug = field.replace('.', '_') if field else "gap"
+                if field_counters[field] == 1:
+                    qid = f"kb_{field_slug}"
+                else:
+                    qid = f"kb_{field_slug}_{field_counters[field]}"
+
+                desc = qa.get("missing_desc", field)
+                # v2.25: 使用智能映射表生成 context/input_type/options
+                q_data = _build_field_question(field, desc, augmented_srr)
+                questions.append({
+                    "id": qid,
+                    "field": field,
                     "priority": qa.get("priority", "important"),
                     "category": "completeness",
-                    "question": qa.get("question", ""),
-                    "context": qa.get("missing_desc", "知识库中未找到相关信息，请补充具体内容"),
+                    # 优先使用 KB 查询时生成的问题（LLM 版），降级时使用模板问题
+                    "question": question_text or q_data["question"],
+                    "context": q_data["context"],
                     "default_answer": qa.get("missing_desc", ""),
-                    "input_type": "text",
-                    "options": [],
-                }
-                for qa in unresolved_qa
-            ]
+                    "input_type": q_data["input_type"],
+                    "options": q_data["options"],
+                })
             questions = self._ensure_critical_questions(
-                questions, unresolved_qa, completeness,
+                questions, unresolved_qa, completeness, srr=augmented_srr,
             )
+            # v2.30: 去重 _ensure_critical_questions 添加的重复问题（按 id 去重）
+            seen_ids: set[str] = set()
+            deduped: list[dict] = []
+            for q in questions:
+                qid = q.get("id", "")
+                if qid and qid in seen_ids:
+                    logger.info("[ClarifyAgent] 跳过 _ensure_critical 重复问题: id={}", qid)
+                    continue
+                if qid:
+                    seen_ids.add(qid)
+                deduped.append(q)
+            questions = deduped
             # ⭐ 精炼：为 KB 未答转人工的澄清问题补充可选项（input_type/options），
             # 降低用户回答成本。LLM 失败则保留原 text + 空选项降级。
+            _t_refine = time.time()
             questions = await self._refine_unresolved_to_questions(questions, augmented_srr, kb_provider=kb_provider)
+            _d_refine = int((time.time() - _t_refine) * 1000)
+            # v2.31: 精炼后去重——LLM 精炼时可能修改 question 文本导致重复
+            questions = self._dedup_questions(questions, stage="after_refine")
         else:
             questions = []
 
@@ -306,6 +538,22 @@ class ClarifyAgent:
 
         # ⑨ 冷启动深度问题已移除：不再生成固定的模块/边界/依赖问题，
         # 只提问基于需求文档实际分析产生的问题（KB 查询、缺失维度、字段冲突等）。
+
+        # ⑨b 优化需求场景检测（v2.30 新增，v2.32 扩展为多问题）：
+        # 如果需求是优化/改进/升级类需求，必须询问"是否影响历史数据"，
+        # 并提供文本输入框让用户填写具体影响的历史数据范围，
+        # 避免优化需求破坏已有数据或导致历史数据不一致。
+        opt_questions = self._detect_optimization_impact(srr)
+        if opt_questions:
+            questions.extend(opt_questions)
+            logger.info(
+                "[ClarifyAgent] 检测到优化需求，添加历史数据影响问题: {} 个",
+                len(opt_questions),
+            )
+
+        # v2.31: 最终全文去重安全网——在所有问题生成完成后，按 field+question 全文去重，
+        # 确保无论前面哪个环节遗漏，最终返回给用户的问题列表绝不重复。
+        questions = self._dedup_questions(questions, stage="final")
 
         logger.info("[ClarifyAgent] KB已回答: {}, 待人工澄清(LLM精炼): {}",
                     sum(1 for a in kb_answers if a.get("answered")), len(questions))
@@ -347,6 +595,16 @@ class ClarifyAgent:
             "kb_access_log": kb_access_log[:settings.KB_ACCESS_LOG_MAX_ENTRIES],
             # ⭐ v2.12 新增：字段冲突列表（docs/01 §4.4.1），供前端展示人工确认
             "field_conflicts": field_conflicts,
+            # ⭐ v2.24 新增：子阶段耗时分解（供任务管理展示 KB 检索 vs LLM 调用）
+            "phase_breakdown": {
+                "kb_status_check_ms": _d1 + _d2,
+                "kb_similar_search_ms": _d_sim,
+                "pg_enrich_ms": _d_sql,
+                "llm_kb_query_gen_ms": _d3,
+                "kb_qa_ms": _d4,
+                "kb_apply_ms": _d5,
+                "llm_question_refine_ms": _d_refine if unresolved_qa else 0,
+            },
         }
 
         logger.info("[ClarifyAgent] ◀ 澄清完成 ▶ 下一节点 QualityGate: status={}, "
@@ -362,6 +620,8 @@ class ClarifyAgent:
         """检查 SRR 完整性 + 内容质量，返回缺失字段列表和评分。
 
         v2.8: 增加了 shallow_check（内容质量检测），字段存在但内容空洞也标记为缺失。
+        v2.34: 新增 optimization 级别，仅当 legacy_data_impact.is_optimization=True
+               时才检查迁移/回滚等专项字段，避免对新建需求误报。
 
         Args:
             srr: SRR JSON 字典
@@ -371,6 +631,7 @@ class ClarifyAgent:
                 "critical_missing": [...],
                 "important_missing": [...],
                 "optional_missing": [...],
+                "optimization_missing": [...],  # v2.34 新增
                 "completeness_score": float,
                 "passed": bool
             }
@@ -379,24 +640,42 @@ class ClarifyAgent:
             "critical_missing": [],
             "important_missing": [],
             "optional_missing": [],
+            "optimization_missing": [],
             "completeness_score": 1.0,
             "passed": True,
         }
 
+        # v2.34: 判断是否为优化需求（is_optimization=True 或关键词命中）
+        ldi = srr.get("legacy_data_impact") or {}
+        is_opt = bool(ldi.get("is_optimization")) if isinstance(ldi, dict) else False
+        # 关键词兜底：LLM 漏判时，若原文含优化关键词也视为优化需求
+        if not is_opt:
+            title = (srr.get("requirement") or {}).get("title", "")
+            summary = (srr.get("requirement") or {}).get("summary", "")
+            detect_text = f"{title}\n{summary}".lower()
+            is_opt = any(kw in detect_text for kw in self.OPTIMIZATION_KEYWORDS)
+
         for level, fields in prompts.COMPLETENESS_CHECKLIST.items():
+            # v2.34: optimization 级别仅对优化需求检查
+            if level == "optimization" and not is_opt:
+                continue
             for field, desc in fields.items():
                 val = self._get_nested_value(srr, field)
                 if not self._has_meaningful_content(field, val):
                     result[f"{level}_missing"].append({"field": field, "description": desc})
 
-        # 评分
+        # 评分（optimization_missing 不计入总分，避免非优化需求被误扣）
         missing_weight = (
             len(result["critical_missing"]) * 3
             + len(result["important_missing"]) * 1
             + len(result["optional_missing"]) * 0.3
         )
-        total = sum(len(v) for v in prompts.COMPLETENESS_CHECKLIST.values())
-        result["completeness_score"] = max(0.0, 1.0 - missing_weight / total)
+        # 总分仅统计 critical/important/optional（不含 optimization）
+        total = sum(
+            len(v) for k, v in prompts.COMPLETENESS_CHECKLIST.items()
+            if k != "optimization"
+        )
+        result["completeness_score"] = max(0.0, 1.0 - missing_weight / total) if total else 1.0
         result["passed"] = len(result["critical_missing"]) == 0
         return result
 
@@ -522,21 +801,37 @@ class ClarifyAgent:
             ]
             context_snippets.append("验收标准: " + "; ".join(ac_texts))
 
-        br = srr.get("business_rules", []) or []
+        # v2.34: 总 SRR 的 business_rules 已迁移到 cross_fp_interactions.shared_business_rules
+        # 优先从 shared_business_rules 提取，兼容旧数据中仍存在的顶层 business_rules
+        cfi = srr.get("cross_fp_interactions") or {}
+        br = cfi.get("shared_business_rules", []) or srr.get("business_rules", []) or []
         if isinstance(br, list) and br:
             br_texts = [
                 b.get("rule", str(b)) if isinstance(b, dict) else str(b)
                 for b in br[:3]
             ]
-            context_snippets.append("业务规则: " + "; ".join(br_texts))
+            context_snippets.append("跨FP共享规则: " + "; ".join(br_texts))
 
         # 构建缺口列表
         gaps: list[dict] = []
-        for m in completeness.get("critical_missing", []) + completeness.get("important_missing", []):
+        # v2.34: 合并 optimization_missing（优化需求专项缺口）
+        all_missing = (
+            completeness.get("critical_missing", [])
+            + completeness.get("important_missing", [])
+            + completeness.get("optimization_missing", [])
+        )
+        for m in all_missing:
+            # 判断优先级
+            if m in completeness.get("critical_missing", []):
+                priority = "critical"
+            elif m in completeness.get("optimization_missing", []):
+                priority = "optimization"
+            else:
+                priority = "important"
             gaps.append({
                 "field": m["field"],
                 "描述": m.get("description", m["field"]),
-                "priority": "critical" if m in completeness.get("critical_missing", []) else "important",
+                "priority": priority,
                 "_is_baseline": False,
             })
 
@@ -597,6 +892,7 @@ class ClarifyAgent:
         gaps_count = (
             len(completeness.get("critical_missing", []))
             + len(completeness.get("important_missing", []))
+            + len(completeness.get("optimization_missing", []))  # v2.34: 优化需求专项缺口
         )
         if is_incremental:
             baseline = srr.get("_baseline_gaps")
@@ -617,6 +913,7 @@ class ClarifyAgent:
                 schema_hint={"queries": list},
                 temperature=0.3,
                 provider=kb_provider,
+                agent_name="ClarifyAgent",
             )
             queries = result.get("queries", [])
             if queries:
@@ -626,7 +923,7 @@ class ClarifyAgent:
                 )
                 # 构建合法 field 集合（防止 LLM 编造列表中不存在的缺口）
                 valid_fields: set[str] = set()
-                for m in completeness.get("critical_missing", []) + completeness.get("important_missing", []):
+                for m in completeness.get("critical_missing", []) + completeness.get("important_missing", []) + completeness.get("optimization_missing", []):
                     valid_fields.add(m["field"])
                 if is_incremental:
                     bg = srr.get("_baseline_gaps")
@@ -639,6 +936,9 @@ class ClarifyAgent:
                             valid_fields.add(f"baseline.{g}")
 
                 validated: list[dict] = []
+                # v2.31: 源头去重——按 field+question 双重去重，防止 LLM 返回重复查询
+                # 同 field 不同 question 保留（不同维度的查询），相同 field+question 只保留一条
+                seen_query_keys: set[str] = set()
                 for q in queries:
                     if not isinstance(q, dict) or not q.get("question"):
                         continue
@@ -649,6 +949,16 @@ class ClarifyAgent:
                             field,
                         )
                         continue
+                    # 源头去重：field+question 前 40 字符
+                    q_text = q["question"][:40]
+                    query_dedup_key = f"{field}::{q_text}"
+                    if query_dedup_key in seen_query_keys:
+                        logger.info(
+                            "[ClarifyAgent] 源头去重: 跳过重复 KB 查询 field={!r} question={!r}",
+                            field, q["question"][:60],
+                        )
+                        continue
+                    seen_query_keys.add(query_dedup_key)
                     validated.append({
                         "field": q.get("field", ""),
                         "missing_desc": q.get(
@@ -666,43 +976,15 @@ class ClarifyAgent:
             return []
 
         except Exception as e:
-            # v2.18: LLM 失败时降级为使用缺口 field 名生成简单查询
-            # 避免 _generate_kb_queries 失败导致整个 KB 查询流程失效
-            logger.warning(
-                "[ClarifyAgent] LLM KB 查询生成失败，降级为模板查询: {}",
+            # v2.26: 不再降级——LLM 失败直接抛异常，由上层 _run_requirement_analysis
+            # 捕获并标记任务 failed，前端展示"生成澄清问题失败"。
+            # 旧版降级生成 "{desc}的相关规则和约束是什么？" 太模糊，用户无法分清是哪部分规则，
+            # 且静默吞错后仍标记 completed，违反错误可见性原则。
+            logger.error(
+                "[ClarifyAgent] LLM KB 查询生成失败（不降级，中断流水线）: {}",
                 str(e)[:300],
             )
-            fallback_queries: list[dict] = []
-            for m in completeness.get("critical_missing", []) + completeness.get("important_missing", []):
-                field = m.get("field", "")
-                desc = m.get("description", field)
-                if field:
-                    fallback_queries.append({
-                        "field": field,
-                        "question": f"{desc}的相关规则和约束是什么？",
-                        "priority": m.get("priority", "important"),
-                        "_is_baseline": False,
-                        "_gap_keys": None,
-                    })
-            # 增量文档的 baseline 缺口也降级处理
-            if is_incremental:
-                baseline = srr.get("_baseline_gaps")
-                if isinstance(baseline, list):
-                    req_title = srr.get("requirement", {}).get("title", "当前需求")
-                    for gap in baseline:
-                        gap_str = str(gap)[:60]
-                        fallback_queries.append({
-                            "field": "_baseline_context",
-                            "question": f"{req_title}的{gap_str}历史版本内容是什么？",
-                            "priority": "critical",
-                            "_is_baseline": True,
-                            "_gap_keys": ["happy_path", "alternate_flows", "data_constraints", "business_rules", "preconditions"],
-                        })
-            logger.info(
-                "[ClarifyAgent] 降级生成 KB 查询: {} 条（模板模式）",
-                len(fallback_queries),
-            )
-            return fallback_queries
+            raise RuntimeError(f"生成知识库查询失败: {str(e)[:300]}") from e
 
     # ========================================================================
     @staticmethod
@@ -716,11 +998,16 @@ class ClarifyAgent:
         keys = q.get("_gap_keys") or ["happy_path", "alternate_flows", "data_constraints", "business_rules", "preconditions"]
         block: dict = {}
         flows = src_srr.get("flows", {}) or {}
+        # v2.34: 兼容旧 KB 数据（business_rules 在顶层）和新数据（在 cross_fp_interactions.shared_business_rules）
+        cfi_src = src_srr.get("cross_fp_interactions") or {}
         for k in keys:
             if k == "happy_path":
                 v = flows.get("happy_path")
             elif k == "alternate_flows":
                 v = flows.get("alternate_flows")
+            elif k == "business_rules":
+                # 优先取 shared_business_rules，回退到顶层 business_rules（旧数据）
+                v = cfi_src.get("shared_business_rules") or src_srr.get(k)
             else:
                 v = src_srr.get(k)
             if v:
@@ -785,7 +1072,9 @@ class ClarifyAgent:
                 else:
                     parts.append(f"  · {str(a)[:80]}")
 
-        br = block.get("business_rules")
+        # v2.34: 兼容 KB 旧数据（顶层 business_rules）和新数据（cross_fp_interactions.shared_business_rules）
+        cfi_block = block.get("cross_fp_interactions") or {}
+        br = block.get("business_rules") or cfi_block.get("shared_business_rules") or []
         if isinstance(br, list) and br:
             parts.append("【业务规则】")
             for r in br[:5]:
@@ -1097,6 +1386,7 @@ class ClarifyAgent:
                 schema_hint={"verifications": list},
                 temperature=0.1,
                 provider=kb_provider,
+                agent_name="ClarifyAgent",
             )
             verifications = result.get("verifications", []) or []
             for v in verifications:
@@ -1159,13 +1449,14 @@ class ClarifyAgent:
         try:
             items = [
                 {
+                    "index": idx,  # v2.30: 用 index 作为唯一 key，避免 id 冲突
                     "id": q.get("id"),
                     "field": q.get("field"),
                     "question": q.get("question", ""),
                     "context": q.get("context", ""),
                     "default_answer": q.get("default_answer", ""),
                 }
-                for q in questions
+                for idx, q in enumerate(questions)
             ]
             req_summary = (srr.get("requirement", {}) or {}).get("summary", "")
             user_prompt = (
@@ -1173,7 +1464,8 @@ class ClarifyAgent:
                 f"【需补充回答形式与候选选项的澄清问题】\n"
                 f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
                 f"请为每个问题判断最合适的回答形式（text/select/multi_select），"
-                f"若 select 则给出 2-4 个候选选项，并尽量给出建议默认答案。只输出 JSON。"
+                f"若 select 则给出 2-4 个候选选项，并尽量给出建议默认答案。\n"
+                f"⚠️ 必须为每个问题返回对应的精炼结果，使用相同的 index 标识。只输出 JSON。"
             )
             result = await self._llm.call_json(
                 prompt=user_prompt,
@@ -1181,10 +1473,16 @@ class ClarifyAgent:
                 schema_hint={"questions": list},
                 temperature=0.2,
                 provider=kb_provider,
+                agent_name="ClarifyAgent",
             )
-            refined = {q.get("id"): q for q in result.get("questions", []) if q.get("id")}
-            for q in questions:
-                r = refined.get(q.get("id"))
+            # v2.30: 用 index 作为 key，避免相同 id 被覆盖
+            refined_by_idx: dict[int, dict] = {}
+            for r in result.get("questions", []) or []:
+                idx_val = r.get("index")
+                if isinstance(idx_val, int) and 0 <= idx_val < len(questions):
+                    refined_by_idx[idx_val] = r
+            for idx, q in enumerate(questions):
+                r = refined_by_idx.get(idx)
                 if not r:
                     continue
                 it = r.get("input_type")
@@ -1199,10 +1497,14 @@ class ClarifyAgent:
                     q["default_answer"] = r["default_answer"]
             logger.info("[ClarifyAgent] 未答问题选项精炼完成: {} 题", len(questions))
         except Exception as e:
-            logger.warning(
-                "[ClarifyAgent] 未答问题选项精炼失败，保留原 text 问题: {}",
-                str(e)[:200],
+            # v2.26: 不再降级——LLM 精炼失败直接抛异常，由上层中断流水线。
+            # 旧版降级保留 text + 空选项，导致用户看到模糊问题无法分清是哪部分规则，
+            # 违反错误可见性原则。
+            logger.error(
+                "[ClarifyAgent] 未答问题选项精炼失败（不降级，中断流水线）: {}",
+                str(e)[:300],
             )
+            raise RuntimeError(f"生成澄清问题选项失败: {str(e)[:300]}") from e
 
         return questions
 
@@ -1386,9 +1688,11 @@ class ClarifyAgent:
 
         # v2.1: 对 critical + important 缺失字段都尝试 KB 补全
         # critical 字段（如 happy_path / data_constraints）从相似需求补全价值更高
+        # v2.34: 合并 optimization_missing（优化需求专项字段也尝试 KB 补全）
         missing_fields = (
             completeness.get("critical_missing", [])
             + completeness.get("important_missing", [])
+            + completeness.get("optimization_missing", [])
         )
         for missing in missing_fields:
             field = missing["field"]
@@ -1629,6 +1933,7 @@ class ClarifyAgent:
                 system_prompt=prompt_manager.get("clarify_agent", "SYSTEM_PROMPT"),
                 schema_hint={"questions": list, "quality_report": dict},
                 temperature=0.2,
+                agent_name="ClarifyAgent",
             )
             # 后处理：仅过滤掉 optional 问题（保留全部 critical/important，不截断）
             questions = result.get("questions", [])
@@ -1642,25 +1947,166 @@ class ClarifyAgent:
             )
             raise
 
+    # ========================================================================
+    # 优化需求场景检测（v2.30 新增）
+    # ========================================================================
+
+    # 优化类需求关键词——命中任一即视为优化需求
+    OPTIMIZATION_KEYWORDS: tuple[str, ...] = (
+        "优化", "改进", "升级", "重构", "调整", "改造", "迁移",
+        "替换", "增强", "完善", "迭代", "改版", "重做", "提速",
+        "optimize", "improve", "upgrade", "refactor", "enhance",
+    )
+
+    def _detect_optimization_impact(self, srr: dict) -> list[dict]:
+        """检测需求是否为优化/改进类，若是则返回「历史数据影响」问题列表。
+
+        v2.30: 优化类需求（含"优化/改进/升级/重构"等关键词）可能影响已有数据
+        或破坏向后兼容。此方法在 ClarifyAgent 步骤⑨b 调用，生成 critical
+        级别的人工澄清问题，确保用户确认历史数据影响范围。
+
+        v2.32: 扩展为返回两个问题：
+        1. multi_select 问题：判断是否影响历史数据及影响类型
+        2. text 输入问题：让用户填写具体影响的历史数据范围（受影响的表/字段/数据量等）
+           该问题的答案将写入 SRR.legacy_data_impact.user_clarification
+
+        检测维度：
+        1. 需求标题/摘要中是否包含优化关键词
+        2. 原始需求文本中是否包含优化关键词（前 5000 字符）
+
+        Args:
+            srr: SRR JSON 字典
+
+        Returns:
+            list[dict]: 若为优化需求，返回澄清问题列表（含 multi_select + text 两个问题）；
+                        否则返回空列表
+        """
+        req = srr.get("requirement", {}) or {}
+        title = (req.get("title", "") or "").lower()
+        summary = (req.get("summary", "") or "").lower()
+        raw_text = (srr.get("_raw_text", "") or "")[:5000].lower()
+
+        # 合并所有可检测文本
+        detect_text = f"{title}\n{summary}\n{raw_text}"
+
+        # 检测是否包含优化关键词
+        hit_keywords = [kw for kw in self.OPTIMIZATION_KEYWORDS if kw in detect_text]
+        if not hit_keywords:
+            return []
+
+        logger.info(
+            "[ClarifyAgent] 优化需求检测命中: keywords={}",
+            hit_keywords[:5],
+        )
+
+        # 生成历史数据影响问题
+        req_title = req.get("title", "当前需求") or "当前需求"
+        keyword_hint = ", ".join(hit_keywords[:3])
+
+        # 问题1：multi_select——判断是否影响历史数据及影响类型
+        impact_type_question = {
+            "id": "kb_optimization_impact",
+            "field": "optimization_impact",
+            "priority": "critical",
+            "category": "impact_analysis",
+            "question": f"【{req_title}】检测到这是优化/改进类需求，请问此次优化是否会影响已有历史数据？",
+            "context": (
+                f"需求文档中检测到优化关键词（{keyword_hint}）。"
+                "优化类需求可能涉及数据结构变更、接口变更、业务逻辑调整等，"
+                "可能影响已有历史数据的可用性、一致性或完整性。"
+                "请明确影响范围，以便生成对应的回归测试和数据迁移测试用例。"
+            ),
+            "default_answer": "",
+            "input_type": "multi_select",
+            "options": [
+                "不影响历史数据，仅新增功能",
+                "影响历史数据结构（需数据迁移）",
+                "影响历史数据内容（需数据清洗）",
+                "影响接口兼容性（需向后兼容）",
+                "影响业务逻辑（需回归测试）",
+                "不确定，需要进一步评估",
+            ],
+        }
+
+        # 问题2：text 输入——让用户填写具体影响的历史数据范围
+        # 答案将写入 SRR.legacy_data_impact.user_clarification，供 LLM 生成完整影响分析
+        impact_scope_question = {
+            "id": "kb_optimization_impact_scope",
+            "field": "legacy_data_impact.user_clarification",
+            "priority": "important",
+            "category": "impact_analysis",
+            "question": f"请描述此次优化具体影响的历史数据范围（可留空）",
+            "context": (
+                "请列出受影响的数据实体/数据库表/字段、预估数据量、上下游系统等。"
+                "例如：「影响 user 表的 phone 字段（约 50 万行），需从 varchar(11) 扩展为 varchar(20)；"
+                "订单表 order 的 status 枚举值需新增 2 个状态（约 1000 万行）。」"
+                "该描述将作为历史数据影响分析的输入，用于生成数据迁移与回归测试用例。"
+                "若上一题已选择「不影响历史数据」，本题可留空。"
+            ),
+            "default_answer": "",
+            "input_type": "text",
+            "options": [],
+        }
+
+        return [impact_type_question, impact_scope_question]
+
     def _ensure_critical_questions(
         self,
         llm_questions: list[dict],
         unresolved_qa: list[dict],
         completeness: dict,
+        srr: dict | None = None,
     ) -> list[dict]:
         """保证 critical 字段缺失一定被问（规则层强制守卫）。
 
         方向A（v2.9）：LLM 主导问题生成，但 critical 字段（summary /
         acceptance_criteria）缺失会直接阻断 SRR 生成，必须兜底确保被问到，
         避免 LLM 漏判导致需求缺口漏网。important / 语义遗漏 / 歧义完全由 LLM 决定。
+
+        v2.31: 统一追加问题的结构——使用 _build_field_question 重新构建问题，
+        避免追加原始 qa 字典（id 格式不同、缺少 category 等字段）导致结构不一致。
+        同时按 field+question 双重去重，避免追加与已有问题重复的 qa。
         """
         critical_fields = {m["field"] for m in completeness.get("critical_missing", [])}
+        # 收集已有问题的 field 和 question 前40字符，用于去重
         llm_fields = {q.get("field") for q in llm_questions}
+        existing_q_keys: set[str] = set()
+        for q in llm_questions:
+            f = q.get("field", "")
+            qt = (q.get("question", "") or "")[:40]
+            existing_q_keys.add(f"{f}::{qt}")
+
         guarded = list(llm_questions)
         for qa in unresolved_qa:
-            if qa.get("field") in critical_fields and qa.get("field") not in llm_fields:
-                guarded.append(qa)
-                logger.debug("[ClarifyAgent] critical 守卫补回问题: field={}", qa.get("field"))
+            field = qa.get("field", "")
+            if field in critical_fields and field not in llm_fields:
+                # v2.31: 双重去重——field+question 前40字符
+                qt = (qa.get("question", "") or "")[:40]
+                dedup_key = f"{field}::{qt}"
+                if dedup_key in existing_q_keys:
+                    logger.info(
+                        "[ClarifyAgent] critical 守卫跳过重复问题: field={!r} question={!r}",
+                        field, qt,
+                    )
+                    continue
+                existing_q_keys.add(dedup_key)
+
+                # v2.31: 统一问题结构——用 _build_field_question 构建
+                desc = qa.get("missing_desc", field)
+                q_data = _build_field_question(field, desc, srr or {})
+                question_text = qa.get("question", "") or q_data["question"]
+                guarded.append({
+                    "id": f"kb_{field.replace('.', '_')}",
+                    "field": field,
+                    "priority": qa.get("priority", "critical"),
+                    "category": "completeness",
+                    "question": question_text,
+                    "context": q_data["context"],
+                    "default_answer": qa.get("missing_desc", ""),
+                    "input_type": q_data["input_type"],
+                    "options": q_data["options"],
+                })
+                logger.debug("[ClarifyAgent] critical 守卫补回问题: field={}", field)
         return guarded
 
     # ========================================================================

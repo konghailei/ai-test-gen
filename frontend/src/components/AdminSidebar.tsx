@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../auth'
 import {
-  Settings, Shield, Package, FileText, Users, UserCog, LayoutDashboard, Database,
+  Settings, Shield, Package, FileText, Users, UserCog, LayoutDashboard, Database, Activity,
 } from 'lucide-react'
 
 function navItems(permissions: string[]) {
@@ -13,6 +13,7 @@ function navItems(permissions: string[]) {
     { key: 'admin_kb', path: '/admin/knowledge', label: '知识库', icon: Database },
     { key: 'admin_users', path: '/admin/users', label: '用户管理', icon: Users },
     { key: 'admin_roles', path: '/admin/roles', label: '角色管理', icon: UserCog },
+    { key: 'admin_logs', path: '/admin/logs', label: '日志查看', icon: Activity },
     { key: 'admin_settings', path: '/admin/settings', label: '系统设置', icon: Settings },
   ]
   return items.filter(i => has(i.key))

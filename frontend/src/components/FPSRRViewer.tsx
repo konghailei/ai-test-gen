@@ -13,6 +13,8 @@ interface Props {
   reqId: string
   productId?: string
   status?: string
+  /** v2.33: FP 变更（合并/编辑/删除/重新生成）后通知父组件刷新 revision 基线 */
+  onChanged?: () => void
 }
 
 interface FPDepEdge { source_fp_id: string; target_fp_id: string; relation_type: string }
@@ -27,7 +29,7 @@ const RELATION_LABELS: Record<string, string> = {
   lifecycle_scenarios: '同流程', conflicts_with: '互斥',
 }
 
-export default function FPSRRViewer({ reqId, productId, status }: Props) {
+export default function FPSRRViewer({ reqId, productId, status, onChanged }: Props) {
   const [fps, setFps] = useState<FPItem[]>([])
   const [deps, setDeps] = useState<{ dependencies: FPDepEdge[] }>({ dependencies: [] })
   const [modules, setModules] = useState<any[]>([])
@@ -47,6 +49,8 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
   const [merging, setMerging] = useState(false)
   const [editSrrFpId, setEditSrrFpId] = useState<string | null>(null)
   const [editSrrJson, setEditSrrJson] = useState('')
+  // v2.23: 功能点审核通过未分配模块的警告提示
+  const [approveWarning, setApproveWarning] = useState<{ fpId: string; fpName: string; message: string } | null>(null)
   const isArchived = status === 'archived'
   const navigate = useNavigate()
 
@@ -96,6 +100,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
     await reqApi.fpUpdate(reqId, fpId, { srr_json: srr })
     // 更新本地 fps 状态
     setFps(prev => prev.map(f => f.id === fpId ? { ...f, srr_json: srr } : f))
+    onChanged?.()
   }
 
   const handleSaveSrr = async () => {
@@ -105,16 +110,11 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
       await reqApi.fpUpdate(reqId, editSrrFpId, { srr_json: parsed })
       await load()
       setEditSrrFpId(null)
+      onChanged?.()
     } catch { }
   }
 
-  // 全量重新拆分
-  const handleResplit = async () => {
-    if (!confirm('重新拆分会先删除当前所有功能点，基于原始文档重新生成。确定继续？')) return
-    setLoading(true)
-    try { await reqApi.fpSplit(reqId, []); await load(); await loadDeps() } catch { }
-    setLoading(false)
-  }
+  // v2.20: 移除"重新拆分"功能，只保留合并能力
 
   const [mergeModal, setMergeModal] = useState(false)
   const [mergeName, setMergeName] = useState('')
@@ -136,7 +136,13 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
     if (ids.length < 2) return
     setMerging(true)
     setMergeModal(false)
-    try { await reqApi.fpMerge(reqId, ids, mergeName); setSelected(new Set()); await load(); await loadDeps() } catch { }
+    try {
+      await reqApi.fpMerge(reqId, ids, mergeName)
+      setSelected(new Set())
+      await load()
+      await loadDeps()
+      onChanged?.()
+    } catch { }
     setMerging(false)
   }
 
@@ -147,8 +153,33 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
   }
 
   const approve = async (fpId: string) => {
-    await reqApi.fpApprove(reqId, fpId)
-    setFps(prev => prev.map(f => f.id === fpId ? { ...f, status: 'approved' } : f))
+    const fp = fps.find(f => f.id === fpId)
+    if (!fp) return
+    // v2.23: 前置校验 modules — 未分配模块不允许审核通过，显示提示而非无反应
+    if (!fp.module_id && !(fp.modules?.length)) {
+      setApproveWarning({
+        fpId,
+        fpName: fp.name,
+        message: `功能点「${fp.name}」未分配模块，请先点击编辑按钮选择对应模块后再审核通过`,
+      })
+      // 5 秒后自动清除警告
+      setTimeout(() => setApproveWarning(prev => prev?.fpId === fpId ? null : prev), 5000)
+      return
+    }
+    setApproveWarning(null)
+    try {
+      await reqApi.fpApprove(reqId, fpId)
+      setFps(prev => prev.map(f => f.id === fpId ? { ...f, status: 'approved' } : f))
+    } catch (e: any) {
+      // 后端返回 409 等错误时显示友好提示
+      const errMsg = e?.message || e?.detail || '审核通过失败，请重试'
+      setApproveWarning({
+        fpId,
+        fpName: fp.name,
+        message: errMsg,
+      })
+      setTimeout(() => setApproveWarning(prev => prev?.fpId === fpId ? null : prev), 5000)
+    }
   }
 
   const startRegen = (fpId: string) => {
@@ -161,6 +192,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
     try {
       await reqApi.fpRegenerate(reqId, fpId, regenHint)
       await load()
+      onChanged?.()
     } catch { }
     setRegeneratingId(null)
     setShowRegenModal(null)
@@ -170,6 +202,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
     await reqApi.fpUpdate(reqId, fpId, { name: editName || undefined, modules: editModules.length > 0 ? editModules : undefined })
     setFps(prev => prev.map(f => f.id === fpId ? { ...f, name: editName || f.name, modules: editModules.length > 0 ? editModules : f.modules, module_id: editModules.length > 0 ? editModules[0] : f.module_id } : f))
     setEditingId(null); setEditModules([]); setShowFpModulePicker(false)
+    onChanged?.()
   }
 
   // 影响分析
@@ -197,7 +230,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* 审核进度 + 重新拆分 */}
+      {/* 审核进度 + 合并操作（v2.20: 移除重新拆分，只保留合并） */}
       {!isArchived && (
         <>
         {fps.length > 0 && (
@@ -215,7 +248,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
         )}
         <div className="flex items-center justify-between">
           <span className="text-xs text-slate-400">
-            上传时自动拆分。拆分不准确可重新拆分。
+            上传时自动拆分。拆分不准确可多选合并调整。
           </span>
           <div className="flex items-center gap-2">
             {selected.size >= 2 && (
@@ -225,10 +258,6 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                 合并 {selected.size} 个
               </button>
             )}
-            <button onClick={handleResplit} disabled={loading}
-              className="btn-secondary text-xs flex items-center gap-1.5">
-              <RefreshCw className="w-3.5 h-3.5" /> 重新拆分
-            </button>
           </div>
         </div>
         </>
@@ -318,47 +347,67 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                           </button>
                         )}
                         {!isArchived && (
+                          <button
+                            onClick={() => startRegen(fp.id)}
+                            className="p-1.5 text-amber-600 hover:bg-amber-50 rounded-lg"
+                            title="AI 重新生成"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {/* v2.35: 归档功能点也允许编辑子 SRR（编辑后同步更新总 SRR/向量库/用例） */}
+                        <button
+                          onClick={() => handleEditSrr(fp.id, fp.srr_json)}
+                          className="p-1.5 text-indigo-500 hover:bg-indigo-50 rounded-lg"
+                          title="编辑子 SRR"
+                        >
+                          <FileCode className="w-3.5 h-3.5" />
+                        </button>
+                        {editingId === fp.id ? (
                           <>
-                            <button
-                              onClick={() => startRegen(fp.id)}
-                              className="p-1.5 text-amber-600 hover:bg-amber-50 rounded-lg"
-                              title="AI 重新生成"
-                            >
-                              <RefreshCw className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => handleEditSrr(fp.id, fp.srr_json)}
-                              className="p-1.5 text-indigo-500 hover:bg-indigo-50 rounded-lg"
-                              title="编辑子 SRR"
-                            >
-                              <FileCode className="w-3.5 h-3.5" />
-                            </button>
-                            {editingId === fp.id ? (
-                              <>
-                                <button onClick={() => updateFP(fp.id)} className="p-1 text-emerald-600"><Save className="w-3.5 h-3.5" /></button>
-                                <button onClick={() => setEditingId(null)} className="p-1 text-slate-400"><X className="w-3.5 h-3.5" /></button>
-                              </>
-                            ) : (
-                              <button
-                                onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModules((fp.modules || (fp.module_id ? [fp.module_id] : [])) as string[]) }}
-                                className="p-1.5 text-slate-400 hover:text-primary-500 rounded-lg"
-                              >
-                                <Edit3 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                            {productId && (
-                              <button
-                                onClick={() => runImpact(fp.id)}
-                                className="p-1.5 text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg"
-                                title="影响分析"
-                              >
-                                <Share2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
+                            <button onClick={() => updateFP(fp.id)} className="p-1 text-emerald-600"><Save className="w-3.5 h-3.5" /></button>
+                            <button onClick={() => setEditingId(null)} className="p-1 text-slate-400"><X className="w-3.5 h-3.5" /></button>
                           </>
+                        ) : (
+                          <button
+                            onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModules((fp.modules || (fp.module_id ? [fp.module_id] : [])) as string[]) }}
+                            className="p-1.5 text-slate-400 hover:text-primary-500 rounded-lg"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {productId && (
+                          <button
+                            onClick={() => runImpact(fp.id)}
+                            className="p-1.5 text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg"
+                            title="影响分析"
+                          >
+                            <Share2 className="w-3.5 h-3.5" />
+                          </button>
                         )}
                       </div>
                     </div>
+
+                    {/* v2.23: 审核通过未分配模块的警告提示 */}
+                    {approveWarning?.fpId === fp.id && (
+                      <div className="mx-4 mb-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 animate-slide-up">
+                        <AlertTriangle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs text-amber-700 font-medium">{approveWarning.message}</p>
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setApproveWarning(null)
+                            // 自动展开编辑模式，引导用户选择模块
+                            if (!isExpanded) toggle(fp.id)
+                          }}
+                          className="text-xs text-amber-600 hover:text-amber-800 font-medium flex-shrink-0"
+                        >
+                          去编辑
+                        </button>
+                      </div>
+                    )}
 
                     {/* 编辑态 */}
                     {editingId === fp.id && (
@@ -394,22 +443,22 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                     {/* SRR 展开内容 */}
                     {isExpanded && (
                       <div className="px-4 pb-4 bg-slate-50/50 space-y-3">
-                        {/* 子 SRR 内容（兼容新旧两种格式） */}
+                        {/* 子 SRR 内容（v2.28 精简为 6 个核心字段，兼容旧格式） */}
                         {fp.srr_json && Object.keys(fp.srr_json).length > 0 && (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            {/* 描述 / summary */}
+                            {/* 1. 概述 summary（兼容旧格式 requirement.summary） */}
                             <div className="md:col-span-2">
                               <FieldEditor
                                 label="概述"
-                                fieldPath="requirement.summary"
-                                value={fp.srr_json.requirement?.summary || fp.srr_json.description || ''}
+                                fieldPath="summary"
+                                value={(fp.srr_json as any).summary || (fp.srr_json as any).requirement?.summary || (fp.srr_json as any).description || ''}
                                 valueType="string"
                                 onSave={saveFpField(fp.id)}
-                                disabled={isArchived}
+                                disabled={false}
                                 render={(v) => <p className="text-sm text-slate-600 mt-0.5">{String(v || '')}</p>}
                               />
                             </div>
-                            {/* 正常流程 */}
+                            {/* 2. 正常流程 */}
                             <div className="md:col-span-2">
                               <FieldEditor
                                 label="正常流程"
@@ -417,7 +466,7 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                                 value={fp.srr_json.flows?.happy_path?.steps || []}
                                 valueType="object[]"
                                 onSave={saveFpField(fp.id)}
-                                disabled={isArchived}
+                                disabled={false}
                                 render={(v) => {
                                   const steps = Array.isArray(v) ? v : []
                                   if (!steps.length) return <p className="text-xs text-slate-400 italic">暂无流程步骤</p>
@@ -436,14 +485,48 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                                 }}
                               />
                             </div>
-                            {/* 业务规则 */}
+                            {/* 2b. 异常分支流程（flows.alternate_flows） */}
+                            {(() => {
+                              const altFlows = (fp.srr_json as any).flows?.alternate_flows || []
+                              if (!altFlows.length) return null
+                              return (
+                                <div className="md:col-span-2">
+                                  <FieldEditor
+                                    label="异常分支流程"
+                                    fieldPath="flows.alternate_flows"
+                                    value={altFlows}
+                                    valueType="object[]"
+                                    onSave={saveFpField(fp.id)}
+                                    disabled={false}
+                                    render={(v) => {
+                                      const flows = Array.isArray(v) ? v : []
+                                      if (!flows.length) return <p className="text-xs text-slate-400 italic">暂无异常分支</p>
+                                      return (
+                                        <div className="mt-1 space-y-1">
+                                          {flows.map((f: any, i: number) => (
+                                            <div key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-amber-200">
+                                              <span className="font-medium text-slate-700">{f.name}</span>
+                                              <span className="text-slate-400 mx-1">·</span>
+                                              <span className="text-slate-500">触发：{f.trigger}</span>
+                                              <span className="text-slate-400 mx-1">→</span>
+                                              <span className="text-amber-600">{f.expect}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )
+                                    }}
+                                  />
+                                </div>
+                              )
+                            })()}
+                            {/* 3. 业务规则 */}
                             <FieldEditor
                               label="业务规则"
                               fieldPath="business_rules"
                               value={(fp.srr_json as any).business_rules || []}
                               valueType="object[]"
                               onSave={saveFpField(fp.id)}
-                              disabled={isArchived}
+                              disabled={false}
                               render={(v) => {
                                 const rules = Array.isArray(v) ? v : []
                                 if (!rules.length) return <p className="text-xs text-slate-400 italic">暂无</p>
@@ -458,14 +541,14 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                                 )
                               }}
                             />
-                            {/* 验收标准 */}
+                            {/* 4. 验收标准 */}
                             <FieldEditor
                               label="验收标准"
                               fieldPath="acceptance_criteria"
                               value={(fp.srr_json as any).acceptance_criteria || []}
                               valueType="object[]"
                               onSave={saveFpField(fp.id)}
-                              disabled={isArchived}
+                              disabled={false}
                               render={(v) => {
                                 const acs = Array.isArray(v) ? v : []
                                 if (!acs.length) return <p className="text-xs text-slate-400 italic">暂无</p>
@@ -480,17 +563,80 @@ export default function FPSRRViewer({ reqId, productId, status }: Props) {
                                 )
                               }}
                             />
-                            {/* 前置条件 */}
-                            {fp.srr_json.preconditions?.length > 0 && (
-                              <div>
-                                <span className="text-[10px] text-slate-400 uppercase tracking-wider">前置条件</span>
-                                <ul className="mt-1 space-y-0.5">
-                                  {fp.srr_json.preconditions.map((p: string, i: number) => (
-                                    <li key={i} className="text-xs text-slate-600">• {p}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
+                            {/* 5. 数据约束 */}
+                            {(() => {
+                              const dc = (fp.srr_json as any).data_constraints || []
+                              if (!Array.isArray(dc) || !dc.length) return null
+                              return (
+                                <div className="md:col-span-2">
+                                  <FieldEditor
+                                    label="数据约束"
+                                    fieldPath="data_constraints"
+                                    value={dc}
+                                    valueType="object[]"
+                                    onSave={saveFpField(fp.id)}
+                                    disabled={false}
+                                    render={(v) => {
+                                      const items = Array.isArray(v) ? v : []
+                                      if (!items.length) return <p className="text-xs text-slate-400 italic">暂无</p>
+                                      return (
+                                        <div className="mt-1 overflow-x-auto">
+                                          <table className="w-full text-xs">
+                                            <thead>
+                                              <tr className="text-slate-400 border-b border-slate-200">
+                                                <th className="text-left py-1 pr-2">字段</th>
+                                                <th className="text-left py-1 px-2">类型</th>
+                                                <th className="text-left py-1 px-2">必填</th>
+                                                <th className="text-left py-1 px-2">约束</th>
+                                                {items.some((d: any) => d.example) && <th className="text-left py-1 pl-2">示例</th>}
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {items.map((d: any, i: number) => (
+                                                <tr key={i} className="border-b border-slate-100">
+                                                  <td className="py-1 pr-2 text-slate-700 font-medium">{d.field}</td>
+                                                  <td className="py-1 px-2 text-slate-500">{d.type}</td>
+                                                  <td className="py-1 px-2">
+                                                    {d.required ? <span className="text-rose-500">必填</span> : <span className="text-slate-400">可选</span>}
+                                                  </td>
+                                                  <td className="py-1 px-2 text-slate-600">{d.constraints}</td>
+                                                  {items.some((d2: any) => d2.example) && <td className="py-1 pl-2 text-slate-400 italic">{d.example || '-'}</td>}
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      )
+                                    }}
+                                  />
+                                </div>
+                              )
+                            })()}
+                            {/* 6. 非功能需求 */}
+                            {(() => {
+                              const nf = (fp.srr_json as any).non_functional
+                              if (!nf || typeof nf !== 'object' || Object.keys(nf).length === 0) return null
+                              const items = [
+                                { key: 'performance', label: '性能', value: nf.performance },
+                                { key: 'security', label: '安全', value: nf.security },
+                                { key: 'compatibility', label: '兼容性', value: nf.compatibility },
+                                { key: 'accessibility', label: '可访问性', value: nf.accessibility },
+                              ].filter(it => it.value)
+                              if (!items.length) return null
+                              return (
+                                <div className="md:col-span-2">
+                                  <span className="text-[10px] text-slate-400 uppercase tracking-wider">非功能需求</span>
+                                  <div className="mt-1 grid grid-cols-2 gap-2">
+                                    {items.map(it => (
+                                      <div key={it.key} className="text-xs px-2 py-1 bg-slate-50 rounded border border-slate-100">
+                                        <span className="text-slate-400 mr-1">{it.label}：</span>
+                                        <span className="text-slate-600">{it.value}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )
+                            })()}
                           </div>
                         )}
 

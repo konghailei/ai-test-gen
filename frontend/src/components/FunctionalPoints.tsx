@@ -11,7 +11,6 @@ interface Props {
 export default function FunctionalPoints({ reqId, productId, status }: Props) {
   const [fps, setFps] = useState<any[]>([])
   const [fpLoading, setFpLoading] = useState(false)
-  const [resplitting, setResplitting] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const [editModules, setEditModules] = useState<string[]>([])
@@ -40,16 +39,7 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
     try { setModules(await prodApi.listModules(productId) || []) } catch { }
   }
 
-  // v1.5.1: "重新拆分" — 用一体式 prompt 重新生成 FP（需先删除旧的）
-  const handleResplit = async () => {
-    if (!confirm('重新拆分会先删除当前所有功能点，然后基于原始文档重新生成。确定继续？')) return
-    setResplitting(true)
-    try {
-      await reqApi.fpSplit(reqId, [])  // 空 BP 列表=全量重新拆分
-      await loadFP()
-    } catch { }
-    setResplitting(false)
-  }
+  // v2.20: 移除"重新拆分"功能，只保留合并和复用能力
 
   const updateFP = async (fpId: string) => {
     await reqApi.fpUpdate(reqId, fpId, { name: editName || undefined, modules: editModules.length > 0 ? editModules : undefined })
@@ -104,22 +94,17 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
 
   return (
     <div className="space-y-4">
-      {/* 归档锁定提示 */}
+      {/* v2.35: 归档状态提示（归档功能点仍可编辑，编辑后同步更新关联数据） */}
       {isArchived && (
-        <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
+        <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-700">
           <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-          <span>此需求已归档，功能点已锁定为只读。</span>
+          <span>此需求已归档。功能点仍可编辑，编辑后将同步更新总 SRR、向量库和关联用例。</span>
         </div>
       )}
 
-      {/* 操作栏 */}
+      {/* 操作栏（v2.20: 移除重新拆分，只保留复用） */}
       {!isArchived && (
         <div className="flex items-center gap-3 flex-wrap">
-          <button onClick={handleResplit} disabled={resplitting || fpLoading}
-            className="btn-secondary text-sm flex items-center gap-1.5">
-            {resplitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-            重新拆分
-          </button>
           {/* v2.3: 复用功能点按钮 */}
           <button onClick={() => { setShowReuseModal(true); setReuseSearch(''); setReuseModuleFilter(''); loadReusable() }}
             className="btn-secondary text-sm flex items-center gap-1.5">
@@ -127,7 +112,7 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
             复用已有功能点
           </button>
           <span className="text-xs text-slate-400">
-            上传需求时已自动拆分功能点。可重新拆分或从已归档需求复用。
+            上传需求时已自动拆分功能点。可从已归档需求复用。
           </span>
         </div>
       )}
@@ -246,18 +231,19 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
                         </p>
                       )}
                     </div>
-                    {!isArchived && (
                     <div className="flex items-center gap-1 ml-2">
+                      {/* v2.35: 归档功能点也允许编辑（名称/模块变更后同步更新关联数据） */}
                       <button onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModules((fp.modules || (fp.module_id ? [fp.module_id] : [])) as string[]) }}
                         className="p-1 text-slate-400 hover:text-primary-500 rounded" title="编辑">
                         <Edit3 className="w-3.5 h-3.5" />
                       </button>
-                      <button onClick={() => deleteFP(fp.id)}
-                        className="p-1 text-slate-400 hover:text-red-500 rounded" title="删除">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      {!isArchived && (
+                        <button onClick={() => deleteFP(fp.id)}
+                          className="p-1 text-slate-400 hover:text-red-500 rounded" title="删除">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
-                    )}
                   </div>
                 )}
               </div>
@@ -266,7 +252,7 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
         </div>
       ) : (
         <p className="text-sm text-slate-400 py-8 text-center">
-          {isArchived ? '此需求已归档，暂无功能点数据。' : '暂无功能点。点击「重新拆分」或「复用已有功能点」。'}
+          {isArchived ? '此需求已归档，暂无功能点数据。' : '暂无功能点。点击「复用已有功能点」。'}
         </p>
       )}
 

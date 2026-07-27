@@ -340,8 +340,8 @@ export default function TestCases() {
             </button>
             <div className="relative group">
               <button disabled={exporting || !filterProject || cases.length === 0}
-                className="btn-secondary rounded-l-none px-2 disabled:opacity-50">
-                <ChevronDown className="w-3 h-3" />
+                className="btn-secondary rounded-l-none px-3 disabled:opacity-50">
+                <ChevronDown className="w-4 h-4" />
               </button>
               <div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-20 hidden group-hover:block min-w-[160px]">
                 <button onClick={() => setXmindFormat('xmind')}

@@ -56,11 +56,11 @@ export default function Layout() {
     refreshProducts()
   }, [])
 
-  // v2.14: 轮询进行中任务数（角标显示）
+  // v2.14: 轮询进行中任务数（角标显示）；v2.20: 只显示未结束任务（running+pending），failed/completed 不计入
   useEffect(() => {
     const pollRunningCount = async () => {
       try {
-        const res = await reqApi.listTasks({ status: 'running', limit: 1 })
+        const res = await reqApi.listTasks({ status: 'running,pending', limit: 1 })
         setRunningTaskCount(res.total || 0)
       } catch { /* 忽略 */ }
     }

@@ -5,8 +5,10 @@ import type {
   ApiResponse, Requirement, RequirementDetail, TestCase, TestPattern,
   KnowledgeStats, ClarifyQuestion, PaginatedData, LLMConfig, HealthStatus, KbFlowback, KbEntry, KbQAAskResponse, KbQAReference, KbQARecord,
   KbAugmentation, FieldConflict, ClarifyHistoryEntry, KbDiagnostics, KbModelStatus, AnalysisTaskInfo,
-  FPBusinessPoint, FPItem, FPDependencyItem, FPNameSuggestion,
+  FPItem, FPDependencyItem, FPNameSuggestion,
   ReqVersionSummary, ReqVersionDetail,
+  LLMCallLogItem, LLMCallLogDetail, OperationLogItem,
+  RequirementRevision,
 } from '../types'
 
 const BASE = '/api'
@@ -147,14 +149,26 @@ export const requirements = {
             return json
         })
     },
-  /** 影响分析：基于模块依赖图谱分析需求变更的影响范围 */
+  /** 影响分析：基于模块依赖图谱 + FP 依赖图谱分析需求变更的影响范围 */
   impactAnalysis: (id: string) =>
     request<{
       req_id: string
       req_title: string
       direct_modules: { id: string; name: string }[]
       indirect_modules: { id: string; name: string; reason: string; depth: number }[]
-      affected_requirements: { id: string; title: string; priority: string; modules: string[] }[]
+      affected_fps: {
+        fp_id: string
+        fp_name: string
+        fp_status: string
+        module_id: string
+        module_name: string
+        impact_reason: string
+        depth: number
+        source_fp_name: string
+        kb_context: string
+        existing_cases_count: number
+      }[]
+      total_affected: number
     }>(`/requirements/${id}/impact`),
 
   // 后端返回 { req_id, status, questions[], quality_report, kb_status, auto_augmentations }
@@ -232,9 +246,11 @@ export const requirements = {
       `/requirements/${id}/versions/${versionIndex}/restore`,
       { method: 'POST' },
     ),
-  /** v2.0 需求 SRR → XMind 思维导图导出（直接触发浏览器下载 .xmind 文件） */
-  exportXmind: async (id: string): Promise<{ filename: string; size: number }> => {
-    const resp = await fetch(`${BASE}/requirements/${id}/export/xmind`, {
+  /** v2.0 需求 SRR → XMind 思维导图导出（直接触发浏览器下载 .xmind 文件）
+   *  v2.20: 支持 format 参数选择 XMind 2020+ JSON 或 XMind 8 XML 格式
+   */
+  exportXmind: async (id: string, format: 'xmind' | 'xmind8' = 'xmind'): Promise<{ filename: string; size: number }> => {
+    const resp = await fetch(`${BASE}/requirements/${id}/export/xmind?format=${format}`, {
       headers: { Authorization: `Bearer ${getToken()}` },
     })
     if (!resp.ok) {
@@ -254,7 +270,8 @@ export const requirements = {
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+    // 延迟释放 URL，确保浏览器已开始下载（部分浏览器 a.click() 是异步的）
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
     return { filename, size: blob.size }
   },
   /** 补充信息后重新生成需求分析（异步任务模式，返回 task_id 供轮询）
@@ -279,22 +296,15 @@ export const requirements = {
       const json = await res.json()
       if (!res.ok && json.detail) throw new Error(json.detail)
       if (json.success === false) throw new Error(json.message || '请求失败')
-      return json as { task_id: string; req_id: string; status: string; previous_title: string }
+      return json.data as { task_id: string; req_id: string; status: string; previous_title: string }
     })
   },
   /** v1.6: 确认需求完成（pending_review → confirmed），允许生成测试用例 */
   confirm: (id: string) =>
     request<{ req_id: string; status: string }>(`/requirements/${id}/confirm`, { method: 'POST' }),
-  /** 运行影响分析（基于需求关联模块的依赖图谱 BFS 遍历） */
-  analyzeImpact: (reqId: string) =>
-    request<{
-      req_id: string
-      req_title: string
-      direct_modules: { id: string; name: string }[]
-      indirect_modules: { id: string; name: string; reason: string; depth: number }[]
-      affected_requirements: { id: string; title: string; priority: string; modules: string[] }[]
-    }>(`/requirements/${reqId}/impact`),
-
+  /** v2.33: 轻量查询 revision + 任务状态，供前端轮询检测多人协作冲突 */
+  getRevision: (id: string) =>
+    request<RequirementRevision>(`/requirements/${id}/revision`),
   /** v2.14: 查询分析任务列表（任务管理） */
   listTasks: (params?: { status?: string; task_type?: string; product_id?: string; limit?: number; offset?: number }) => {
     const query = new URLSearchParams()
@@ -316,12 +326,6 @@ export const requirements = {
   cancelTask: (taskId: string) =>
     request<AnalysisTaskInfo>(`/requirements/tasks/${taskId}/cancel`, { method: 'POST' }),
   /** v1.4 功能点 */
-  fpExtractBP: (reqId: string) =>
-    request<{ business_points: FPBusinessPoint[] }>(`/requirements/${reqId}/fp/extract-bp`, { method: 'POST' }),
-  fpSplit: (reqId: string, bpNames: string[]) =>
-    request<{ functional_points: { id: string; name: string; fp_type: string; module_id: string | null }[]; total: number }>(
-      `/requirements/${reqId}/fp/split`, { method: 'POST', body: JSON.stringify({ req_id: reqId, bp_names: bpNames }) }
-    ),
   fpList: (reqId: string) =>
     request<{ items: FPItem[]; total: number }>(`/requirements/${reqId}/fp`),
   fpDependencies: (reqId: string) =>
@@ -637,7 +641,8 @@ export const settings = {
   get: () => request<LLMConfig>('/settings/llm'),
   update: (providers: Array<{
     provider: string; provider_label?: string; api_key: string;
-    base_url?: string; model?: string; is_primary?: boolean
+    base_url?: string; model?: string; is_primary?: boolean;
+    enable_thinking?: boolean; thinking_params?: string
   }>) =>
     request<LLMConfig>('/settings/llm', {
       method: 'PUT',
@@ -648,6 +653,46 @@ export const settings = {
       `/settings/llm/test${providerName ? `?provider_name=${providerName}` : ''}`,
       { method: 'POST' }
     ),
+}
+
+// ============================================================
+// v2.22: 日志管理（管理员） — LLM 调用日志 + 用户操作日志
+// ============================================================
+export const logs = {
+  /** LLM 调用日志列表（分页，不含完整 prompt/response） */
+  listLlmLogs: (params: {
+    page?: number; page_size?: number;
+    agent_name?: string; task_id?: string; req_id?: string; success?: boolean;
+  } = {}) => {
+    const sp = new URLSearchParams({
+      page: String(params.page || 1),
+      page_size: String(params.page_size || 20),
+    })
+    if (params.agent_name) sp.set('agent_name', params.agent_name)
+    if (params.task_id) sp.set('task_id', params.task_id)
+    if (params.req_id) sp.set('req_id', params.req_id)
+    if (params.success !== undefined) sp.set('success', String(params.success))
+    return request<PaginatedData<LLMCallLogItem>>(`/admin/llm-logs?${sp}`)
+  },
+  /** LLM 调用日志详情（含完整 system_prompt/user_prompt/response/parsed_json） */
+  getLlmLogDetail: (id: number) =>
+    request<LLMCallLogDetail>(`/admin/llm-logs/${id}`),
+  /** 用户操作日志列表（分页） */
+  listOperationLogs: (params: {
+    page?: number; page_size?: number;
+    username?: string; action?: string; target_type?: string; target_id?: string; success?: boolean;
+  } = {}) => {
+    const sp = new URLSearchParams({
+      page: String(params.page || 1),
+      page_size: String(params.page_size || 20),
+    })
+    if (params.username) sp.set('username', params.username)
+    if (params.action) sp.set('action', params.action)
+    if (params.target_type) sp.set('target_type', params.target_type)
+    if (params.target_id) sp.set('target_id', params.target_id)
+    if (params.success !== undefined) sp.set('success', String(params.success))
+    return request<PaginatedData<OperationLogItem>>(`/admin/operation-logs?${sp}`)
+  },
 }
 
 // ============================================================

@@ -19,6 +19,16 @@ export interface RawImage {
   content_type: string
 }
 
+/** v2.33: 多人协作冲突检测——需求 revision 轮询响应 */
+export interface RequirementRevision {
+  revision: number
+  updated_at: string
+  status: string
+  task_running: boolean
+  task_type: string
+  task_message: string
+}
+
 export interface RequirementDetail extends Requirement {
   module: string
   modules: string[]
@@ -62,7 +72,7 @@ export interface ClarifyQuestion {
   field: string
   question: string
   priority: 'critical' | 'important' | 'optional'
-  category?: 'completeness' | 'ambiguity' | 'gap' | 'conflict' | 'cold_start'
+  category?: 'completeness' | 'ambiguity' | 'gap' | 'conflict' | 'cold_start' | 'impact_analysis'
   context: string
   default_answer?: string
   input_type?: 'text' | 'select' | 'multi_select'
@@ -108,6 +118,14 @@ export interface ClarifyHistoryEntry {
   action: 'clarify' | 'regenerate'
   questions?: ClarifyQuestion[]
   answers?: Record<string, string>
+  /** v2.29: 结构化 Q&A 记录（含 question 文本和 answer），优先于 questions+answers 展示 */
+  qa_records?: Array<{
+    id: string
+    field?: string
+    question?: string
+    priority?: string
+    answer?: string
+  }>
   extra_notes?: string
   auto_augmentations?: KbAugmentation[]
   field_conflicts?: FieldConflict[]
@@ -224,6 +242,10 @@ export interface LLMProviderItem {
   base_url: string
   model: string
   is_primary: boolean
+  /** v2.36: 思考模式开关（仅对支持思考的模型生效） */
+  enable_thinking?: boolean
+  /** v2.37: 自定义思考参数（JSON 字符串，为空时使用内置规则） */
+  thinking_params?: string
 }
 
 export interface LLMConfig {
@@ -324,6 +346,12 @@ export interface KbEntry {
 }
 
 /** v2.14: 异步分析任务信息（任务管理 + 进度轮询） */
+export interface PhaseTiming {
+  start: string      // ISO 时间戳
+  end?: string       // ISO 时间戳（阶段结束时填充）
+  duration_ms?: number  // 阶段耗时（毫秒）
+}
+
 export interface AnalysisTaskInfo {
   id: string
   task_type: string  // upload_requirement / submit_clarify / regenerate / analyze_impact
@@ -336,6 +364,7 @@ export interface AnalysisTaskInfo {
   message: string
   result_json: Record<string, unknown>
   error: string
+  phase_timings?: Record<string, PhaseTiming>  // v2.23: 阶段耗时追踪
   created_at: string
   updated_at: string
   completed_at: string | null
@@ -440,14 +469,47 @@ export interface PromptHistoryItem {
 }
 
 // ============================================================================
-// v1.4 功能点（FunctionalPoint）
+// v2.22: 日志系统（LLM 调用日志 + 用户操作日志）
 // ============================================================================
-export interface FPBusinessPoint {
-  name: string
-  summary: string
-  suggested_module_id?: string
+export interface LLMCallLogItem {
+  id: number
+  agent_name: string
+  task_id: string | null
+  req_id: string | null
+  provider: string
+  model: string
+  temperature: number
+  duration_ms: number
+  token_usage: Record<string, number> | null
+  success: boolean
+  error_message: string | null
+  created_at: string
 }
 
+export interface LLMCallLogDetail extends LLMCallLogItem {
+  system_prompt: string
+  user_prompt: string
+  response: string
+  parsed_json: Record<string, unknown> | null
+}
+
+export interface OperationLogItem {
+  id: number
+  user_id: number
+  username: string
+  action: string
+  target_type: string
+  target_id: string
+  detail: Record<string, unknown> | string | null
+  ip_address: string | null
+  success: boolean
+  error_message: string | null
+  created_at: string
+}
+
+// ============================================================================
+// v1.4 功能点（FunctionalPoint）
+// ============================================================================
 export interface FPItem {
   id: string
   name: string
@@ -519,7 +581,8 @@ export interface FPNameSuggestion {
   req_id: string
 }
 
-/** v3.0: FP 影响功能说明（存于 SRR impact_analysis 数组） */
+/** v3.0: FP 影响功能说明（存于 SRR impact_analysis 数组）
+ * v2.35: 移除 affected_requirements（不再分析受影响的需求） */
 export interface FPImpactDescription {
   fp_id: string
   fp_name: string
@@ -541,11 +604,6 @@ export interface FPImpactDescription {
     module_name: string
     reason: string
     depth: number
-  }[]
-  affected_requirements: {
-    id: string
-    title: string
-    matched_modules?: string[]
   }[]
   description: string
   test_focus: string

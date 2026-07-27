@@ -8,7 +8,7 @@
 - docs/03-case-generation-flow.md §5.2（置信度计算 + 字段语义统一）
 
 审核维度（6 项，docs/03 §5.1）：
-    1. 完整性：覆盖所有 flows、boundary、business_rules
+    1. 完整性：覆盖所有 flows、boundary、business_rules（含总 SRR 的 cross_fp_interactions.shared_business_rules 与 FP SRR 的 business_rules）
     2. 去重：语义重复用例
     3. 可执行性：前置条件 + 步骤 + 预期完整
     4. 一致性：用例间无矛盾
@@ -269,6 +269,7 @@ class ReviewAgent:
                 system_prompt=prompt_manager.get("review_agent", "SYSTEM_PROMPT"),
                 schema_hint={"issues": list, "avg_confidence": float},
                 temperature=0.2,
+                agent_name="ReviewAgent",
             )
             return result
         except Exception as e:

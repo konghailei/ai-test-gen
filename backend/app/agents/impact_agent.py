@@ -325,18 +325,19 @@ class ImpactAnalysisAgent:
     async def _analyze_fp_impact(self, fp_id: str, session) -> dict:
         """分析功能点变更的影响范围（FP + 模块双图谱）。
 
+        v2.35: 移除 affected_requirements 分析（不再分析受影响的需求）。
+
         步骤：
             1. 反向 BFS FPDependency（找谁依赖此 FP，≤3 跳）
             2. 取 FP 所属 module_id，调用 _analyze_module_impact() 找受影响模块
-            3. 用受影响模块匹配同产品其他需求
-            4. LLM 合成 description + test_focus
+            3. LLM 合成 description + test_focus
 
         Args:
             fp_id: 功能点 ID
             session: 数据库会话
 
         Returns:
-            dict: 含 fp 信息 / affected_fps / affected_modules / affected_requirements
+            dict: 含 fp 信息 / affected_fps / affected_modules
                   / description / test_focus / generated_at / is_auto_generated
         """
         # 1. 查询当前 FP
@@ -357,7 +358,6 @@ class ImpactAnalysisAgent:
 
         # 3. 模块级影响分析（复用现有方法）
         affected_modules_raw: list[dict] = []
-        affected_requirements: list[dict] = []
         if fp_info["module_id"]:
             module_impact = await self._analyze_module_impact([fp_info["module_id"]], session)
             # 查询模块名称
@@ -389,23 +389,9 @@ class ImpactAnalysisAgent:
                         "depth": 0,
                     })
 
-            # 4. 受影响需求（复用 _find_regression_requirements 逻辑）
-            # 需要构造一个伪 SRR 来调用现有方法
-            current_req = await session.get(Requirement, fp_record.requirement_id)
-            if current_req:
-                pseudo_srr = {
-                    "requirement": {
-                        "id": current_req.id,
-                        "product_id": current_req.product_id,
-                    }
-                }
-                affected_requirements = await self._find_regression_requirements(
-                    module_impact["all_affected_modules"], pseudo_srr, session
-                )
-
-        # 5. LLM 合成 description + test_focus
+        # 4. LLM 合成 description + test_focus
         description, test_focus = await self._build_fp_impact_description(
-            fp_info, affected_fps, affected_modules_raw, affected_requirements
+            fp_info, affected_fps, affected_modules_raw
         )
 
         from datetime import datetime, timezone
@@ -413,7 +399,6 @@ class ImpactAnalysisAgent:
             **fp_info,
             "affected_fps": affected_fps,
             "affected_modules": affected_modules_raw,
-            "affected_requirements": affected_requirements,
             "description": description,
             "test_focus": test_focus,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -538,21 +523,21 @@ class ImpactAnalysisAgent:
         fp: dict,
         affected_fps: list[dict],
         affected_modules: list[dict],
-        affected_requirements: list[dict],
     ) -> tuple[str, str]:
         """用 LLM 合成自然语言影响描述 + 测试关注点。
+
+        v2.35: 移除 affected_requirements 参数（不再分析受影响的需求）。
 
         Args:
             fp: 当前功能点信息
             affected_fps: 受影响 FP 列表
             affected_modules: 受影响模块列表
-            affected_requirements: 受影响需求列表
 
         Returns:
             tuple: (description, test_focus)
         """
         # 无任何影响时，直接返回降级文本（不调用 LLM）
-        if not affected_fps and not affected_modules and not affected_requirements:
+        if not affected_fps and not affected_modules:
             return (
                 f"功能点「{fp.get('fp_name', '')}」当前无被依赖关系，变更影响范围仅限自身。",
                 f"重点验证功能点「{fp.get('fp_name', '')}」自身的 happy_path 和边界条件。",
@@ -561,16 +546,17 @@ class ImpactAnalysisAgent:
         try:
             result = await llm_client.call_json(
                 prompt=prompts.build_fp_impact_description_prompt(
-                    fp, affected_fps, affected_modules, affected_requirements,
+                    fp, affected_fps, affected_modules,
                 ),
                 system_prompt=prompts.FP_IMPACT_DESCRIPTION_SYSTEM_PROMPT,
                 schema_hint={"description": str, "test_focus": str},
                 temperature=0.3,
+                agent_name="FpAgent",
             )
             description = result.get("description", "")
             test_focus = result.get("test_focus", "")
             if not description:
-                description = f"功能点「{fp.get('fp_name', '')}」变更影响 {len(affected_fps)} 个功能点、{len(affected_modules)} 个模块、{len(affected_requirements)} 个需求。"
+                description = f"功能点「{fp.get('fp_name', '')}」变更影响 {len(affected_fps)} 个功能点、{len(affected_modules)} 个模块。"
             if not test_focus:
                 test_focus = "重点回归受影响功能点的核心流程。"
             return description, test_focus
@@ -579,10 +565,9 @@ class ImpactAnalysisAgent:
             # 降级：纯规则拼接
             fp_names = ", ".join(f.get("fp_name", "") for f in affected_fps[:5])
             mod_names = ", ".join(m.get("module_name", "") for m in affected_modules[:5])
-            req_titles = ", ".join(r.get("title", "") for r in affected_requirements[:5])
             description = (
                 f"功能点「{fp.get('fp_name', '')}」变更影响："
-                f"功能点[{fp_names or '无'}]; 模块[{mod_names or '无'}]; 需求[{req_titles or '无'}]。"
+                f"功能点[{fp_names or '无'}]; 模块[{mod_names or '无'}]。"
             )
             test_focus = "重点回归受影响功能点的 happy_path 和关键 alternate_flows。"
             return description, test_focus
@@ -596,9 +581,23 @@ class ImpactAnalysisAgent:
         req_id: str,
         session,
     ) -> dict:
-        """对一条需求做全量影响分析。"""
+        """对一条需求做全量影响分析（v2.35: 基于 FP 依赖图谱分析受影响功能点）。
+
+        v2.35 变更：
+            - 移除 affected_requirements（不再分析受影响的需求）
+            - KB 查询改为只查已归档 FP（status='archived'），使用向量库 doc_type=functional_point 过滤
+            - 修复 TestCase.functional_point_id 字段不存在 bug（改为按 case_json.related_fp 名称匹配）
+            - 保留模块级影响分析作为参考
+
+        Args:
+            req_id: 需求 ID
+            session: 数据库会话
+
+        Returns:
+            dict: 含 requirement / module_impact / affected_fps / total_affected
+        """
         from sqlalchemy import func
-        from app.api.knowledge import search_kb
+        from app.db.milvus_store import vector_store
 
         # 1. 加载需求和 FP
         req_data = await session.get(Requirement, req_id)
@@ -614,12 +613,12 @@ class ImpactAnalysisAgent:
         own_fps = fp_result.scalars().all()
         own_fp_ids = {fp.id for fp in own_fps}
 
-        # 2. 模块 BFS
+        # 2. 模块 BFS（保留模块级影响作为参考）
         mod_impact = await self._analyze_module_impact(involved_modules, session) if involved_modules else {
             "direct_modules": [], "indirect_modules": [], "all_affected_modules": [],
         }
 
-        # 3. FP 反向 BFS
+        # 3. FP 反向 BFS（基于 FP 依赖图谱分析受影响的功能点）
         all_affected_fps: dict[str, dict] = {}
         for fp in own_fps:
             try:
@@ -638,45 +637,92 @@ class ImpactAnalysisAgent:
             except Exception as e:
                 logger.warning("[ImpactAgent] FP BFS 失败 fp={}: {}", fp.id, str(e)[:100])
 
-        # 4. KB 查询
-        kb_contexts: dict[str, str] = {}
-        for fid, fp_info in list(all_affected_fps.items())[:10]:
-            try:
-                kb_hits = await search_kb(
-                    query=f"{fp_info['fp_name']} 功能 规格 规则",
-                    top_k=2,
-                )
-                if kb_hits:
-                    texts = []
-                    for h in kb_hits[:2]:
-                        t = h.get("content") or h.get("text") or ""
-                        texts.append(t[:500])
-                    kb_contexts[fid] = "\n\n".join(texts)
-            except Exception as e:
-                logger.warning("[ImpactAgent] KB 查询失败 fp={}: {}", fid, e)
-
-        # 5. 补充模块名
+        # 4. 补充 FP 状态、模块名（用于后续 KB 查询和展示）
         fp_ids_list = list(all_affected_fps.keys())
         fp_mod_map: dict[str, str] = {}
+        fp_status_map: dict[str, str] = {}
         if fp_ids_list:
             mr = await session.execute(
-                select(FunctionalPoint.id, FunctionalPoint.module_id).where(FunctionalPoint.id.in_(fp_ids_list))
+                select(FunctionalPoint.id, FunctionalPoint.module_id, FunctionalPoint.status)
+                .where(FunctionalPoint.id.in_(fp_ids_list))
             )
-            fp_mod_map = {row[0]: row[1] or "" for row in mr.all()}
+            for row in mr.all():
+                fp_mod_map[row[0]] = row[1] or ""
+                fp_status_map[row[0]] = row[2] or ""
         mod_ids = {v for v in fp_mod_map.values() if v}
         mod_name_map: dict[str, str] = {}
         if mod_ids:
             mn = await session.execute(select(Module.id, Module.name).where(Module.id.in_(mod_ids)))
             mod_name_map = {row[0]: row[1] for row in mn.all()}
 
-        # 用例数
-        from app.db.models import TestCase
+        # 5. KB 查询：只对已归档（status='archived'）的 FP 查询知识库
+        # v2.35: 使用 vector_store.search_similar_requirements 按 doc_type=functional_point 过滤
+        # 已归档 FP 在归档时已写入向量库（type=functional_point），可直接检索其说明
+        kb_contexts: dict[str, str] = {}
+        for fid, fp_info in list(all_affected_fps.items())[:10]:
+            # 仅已归档 FP 查询 KB（未归档 FP 未写入向量库，查询无意义）
+            if fp_status_map.get(fid) != "archived":
+                continue
+            try:
+                kb_hits = vector_store.search_similar_requirements(
+                    query=f"{fp_info['fp_name']} 功能 规格 规则",
+                    doc_type="functional_point",
+                    status="archived",
+                    top_k=2,
+                )
+                if kb_hits:
+                    texts = []
+                    for h in kb_hits[:2]:
+                        # 优先从 metadata.srr_json 提取结构化说明，其次用 document 文本
+                        meta = h.get("metadata", {}) or {}
+                        srr_json_str = meta.get("srr_json", "")
+                        if srr_json_str:
+                            try:
+                                src_srr = json.loads(srr_json_str)
+                                # 提取 FP 的摘要说明
+                                req_info = src_srr.get("requirement", {}) or {}
+                                summary = req_info.get("summary", "")
+                                if summary:
+                                    texts.append(f"功能概述：{summary[:300]}")
+                                # 提取 flows
+                                flows = src_srr.get("flows", {}) or {}
+                                happy = flows.get("happy_path", [])
+                                if happy:
+                                    texts.append(f"正常流程：{str(happy)[:200]}")
+                            except Exception:
+                                pass
+                        # 兜底：用 document 文本
+                        if not texts:
+                            t = h.get("document") or h.get("content") or h.get("text") or ""
+                            if t:
+                                texts.append(t[:500])
+                    if texts:
+                        kb_contexts[fid] = "\n\n".join(texts)
+            except Exception as e:
+                logger.warning("[ImpactAgent] KB 查询失败 fp={}: {}", fid, str(e)[:150])
+
+        # 6. 用例数统计（v2.35: 修复 TestCase.functional_point_id 不存在 bug）
+        # TestCase 模型无 functional_point_id 外键字段，用例通过 case_json.related_fp（FP 名称）引用
+        # 改为查询同产品下用例的 case_json，按 related_fp 名称匹配
         case_counts: dict[str, int] = {}
-        for fid in fp_ids_list:
-            cnt = await session.execute(
-                select(func.count()).select_from(TestCase).where(TestCase.functional_point_id == fid)
+        if fp_ids_list:
+            # 构建 fp_id → fp_name 映射
+            fp_name_for_count = {fid: all_affected_fps[fid]["fp_name"] for fid in fp_ids_list}
+            # 查询同产品下所有用例（case_json 中含 related_fp 字段）
+            case_result = await session.execute(
+                select(TestCaseModel.case_json, TestCaseModel.req_id).where(
+                    TestCaseModel.product_id == req_data.product_id
+                )
             )
-            case_counts[fid] = cnt.scalar() or 0
+            for row in case_result.all():
+                case_json = row[0] or {}
+                related_fp = case_json.get("related_fp", "") or case_json.get("functional_point", "") or ""
+                if not related_fp:
+                    continue
+                # 按 FP 名称匹配计数
+                for fid, fname in fp_name_for_count.items():
+                    if related_fp == fname:
+                        case_counts[fid] = case_counts.get(fid, 0) + 1
 
         affected_fps_list = []
         for fid, info in all_affected_fps.items():
@@ -684,6 +730,7 @@ class ImpactAnalysisAgent:
             affected_fps_list.append({
                 "fp_id": info["fp_id"],
                 "fp_name": info["fp_name"],
+                "fp_status": fp_status_map.get(fid, ""),
                 "module_id": mid,
                 "module_name": mod_name_map.get(mid, ""),
                 "impact_reason": info["reason"],

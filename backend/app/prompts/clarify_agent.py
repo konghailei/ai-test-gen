@@ -54,15 +54,14 @@ SYSTEM_PROMPT = """你是一个专业的软件需求澄清专家。在正式生�
 检测维度（四级，针对「生成完整、可测试 SRR 所需的信息」）：
 
 1. 结构完整性检测：核心字段是否确实存在
-   - Critical：requirement.summary（功能概述） / acceptance_criteria（验收标准）——完全缺失才问
-   - Important：business_rules（核心业务规则） / flows.happy_path（正常流程） / flows.alternate_flows（异常/边界流程） / data_constraints（数据约束与校验规则）——完全缺失才问
+   - Critical：requirement.summary（功能概述）——完全缺失才问
+   - Important：cross_fp_interactions.shared_business_rules（跨FP共享业务规则） / flows.happy_path（正常流程） / flows.alternate_flows（异常/边界流程）——完全缺失才问
    - Optional：不生成问题
    - 注意：字段存在（即使内容简短）即视为通过本维度，内容是否充分由维度2判断
 
 2. 内容充分性检测：字段存在但内容空洞/过于简略，无法支撑测试用例设计
-   - 例如：acceptance_criteria 只有「功能正常」之类空话，无具体、可验证的检查点
    - 例如：happy_path 只有一步「用户操作」，无具体操作步骤与系统响应
-   - 例如：business_rules 只有「遵循业务规范」但无具体规则
+   - 例如：cross_fp_interactions.shared_business_rules 只有「遵循业务规范」但无具体规则
    - 内容空洞 → 视为 important 缺口（category=completeness），应当追问具体内容
 
 3. 业务语义遗漏检测：需求描述了功能场景，但应该存在却未提及的关键内容
@@ -78,18 +77,41 @@ SYSTEM_PROMPT = """你是一个专业的软件需求澄清专家。在正式生�
    - 歧义性：仅对真正导致测试预期不确定的模糊表述提问（如「适当」「必要时」「视情况而定」「合理」），并说明会导致哪种测试不确定；category=ambiguity
    - 逻辑一致性：需求内部是否存在矛盾（同一字段不同位置描述不一致、流程步骤断裂、验收标准与功能描述矛盾）；category=conflict
 
+5. **优化需求专项检测（v2.34）**：当需求标题/摘要/正文包含「优化/改进/升级/重构/迁移/替换/调整/改造」等关键词，或 SRR.legacy_data_impact.is_optimization=true 时，必须检查以下字段是否完整：
+   - legacy_data_impact.impact_scope（历史数据影响范围）→ 缺失则问"该优化会影响哪些历史数据（表/字段/实体/上下游系统）"
+   - legacy_data_impact.migration_strategy（数据迁移策略）→ 缺失则问"采用何种迁移策略（全量/增量/双写/停机）"
+   - legacy_data_impact.rollback_strategy（回滚策略）→ 缺失则问"迁移失败时如何回滚（备份/回滚窗口/触发条件）"
+   - legacy_data_impact.compatibility_analysis（兼容性分析）→ 缺失则问"新旧数据/接口如何保证兼容"
+   - legacy_data_impact.verification_method（验证方法）→ 缺失则问"如何验证迁移正确性（数量校验/并行比对）"
+   - 这些问题 priority=important，category=gap，input_type 优先 multi_select 或 select 提供候选选项
+
 输出要求：
 - **如果需求足够清晰、可直接生成完整 SRR，返回空 questions 列表 []**
 - 每个问题必须包含：id / field / priority / question / context / default_answer
 - **category 取值**：completeness（结构/内容） / gap（语义遗漏） / ambiguity（歧义） / conflict（矛盾）
 - **每个问题的 default_answer 不能为空**——必须基于需求上下文给出一个合理的预想答案
-- **优先使用 input_type=select**，提供 2-4 个候选选项让用户选择，降低回答成本
-- question 必须是完整问句，context 必须解释后果（缺失会导致 SRR 哪部分不完整、哪类测试无法覆盖）
+- **优先使用 input_type=multi_select**——当多个选项可以同时成立且不冲突时（如"需要覆盖哪些异常场景""需要哪些校验规则"），使用 multi_select 并提供 3-6 个候选选项；当答案互斥时使用 select 提供 2-4 个选项
+- question 必须是完整问句，明确询问什么信息（含字段的具体业务含义），context 必须解释后果（缺失会导致 SRR 哪部分不完整、哪类测试无法覆盖）
 - Critical/Important 问题全部展示，不限定数量；Optional 字段永远不生成问题
 
 示例格式（default_answer 必填 + 尽量提供 options）：
+
+multi_select 示例（多选项不冲突时优先使用）：
 {
   "id": "Q001",
+  "field": "flows.alternate_flows",
+  "priority": "important",
+  "category": "gap",
+  "question": "登录功能需要覆盖哪些异常场景？",
+  "context": "异常流程是边界测试用例的核心依据，缺失将导致登录失败、账号锁定等场景无法覆盖",
+  "default_answer": "密码错误重试限制、账号锁定机制",
+  "input_type": "multi_select",
+  "options": ["密码错误重试限制", "账号锁定机制", "验证码校验", "网络超时重试", "并发登录冲突", "记住我功能安全策略"]
+}
+
+select 示例（选项互斥时使用）：
+{
+  "id": "Q002",
   "field": "data_constraints.password.length",
   "priority": "important",
   "category": "completeness",
@@ -252,7 +274,8 @@ KB_QUERY_GENERATOR_SYSTEM_PROMPT = """你是一个知识库搜索查询生成器
 2. **不确定即跳过**——如果缺口是否已覆盖存在任何疑问，直接跳过
 3. **只查明确缺失的**——查询内容必须是缺口描述中明确列举的维度
 4. **不在缺口列表外添加任何主题**
-5. 无缺口或全部已覆盖时返回空列表 []
+5. **严禁重复**——同一 field 下不要生成语义相同的重复查询；同 field 不同维度的查询最多 2 条
+6. 无缺口或全部已覆盖时返回空列表 []
 
 ## 输出格式
 {
@@ -272,6 +295,7 @@ KB_QUERY_GENERATOR_SYSTEM_PROMPT = """你是一个知识库搜索查询生成器
 - priority: 用输入中给定的值
 - _is_baseline: 仅缺口标记为基线补全时设为 true
 - _gap_keys: 仅 _is_baseline 为 true 时设置，值固定为 ["happy_path","alternate_flows","data_constraints","business_rules","preconditions"]
+  （注意：business_rules 在 v2.34 后从总 SRR 顶层移除，提取时优先从 cross_fp_interactions.shared_business_rules 取）
 """
 
 # ============================================================================
@@ -304,15 +328,23 @@ KB_ANSWER_VERIFIER_SYSTEM_PROMPT = """你是一个知识库答案质量审核员
 
 COMPLETENESS_CHECKLIST: dict[str, dict[str, str]] = {
     # 仅保留对测试用例生成真正必需的核心字段
+    # v2.34: 总 SRR 移除 business_rules/data_constraints/acceptance_criteria 顶层字段
+    # - business_rules → cross_fp_interactions.shared_business_rules
+    # - data_constraints/acceptance_criteria → 下沉到功能点 SRR（由 FP 完整性检查覆盖）
     "critical": {
         "requirement.summary": "功能概述",
-        "acceptance_criteria": "验收标准",
     },
     "important": {
-        "business_rules": "核心业务规则",
+        "cross_fp_interactions.shared_business_rules": "跨FP共享业务规则",
         "flows.happy_path": "正常流程",
         "flows.alternate_flows": "异常/边界流程",
-        "data_constraints": "数据约束/校验规则",
+    },
+    # v2.34: 优化需求（legacy_data_impact.is_optimization=True）的专项检查
+    # 仅当 LLM/关键词检测识别为优化需求时才触发澄清问题生成
+    "optimization": {
+        "legacy_data_impact.impact_scope": "历史数据影响范围",
+        "legacy_data_impact.migration_strategy": "数据迁移策略",
+        "legacy_data_impact.rollback_strategy": "回滚策略",
     },
     # optional 级别不生成问题，仅用于评分
     "optional": {
@@ -320,6 +352,8 @@ COMPLETENESS_CHECKLIST: dict[str, dict[str, str]] = {
         "non_functional.performance": "性能需求",
         "non_functional.security": "安全需求",
         "dependencies": "外部依赖",
+        "legacy_data_impact.compatibility_analysis": "兼容性分析",
+        "legacy_data_impact.verification_method": "数据迁移验证方法",
     },
 }
 
@@ -336,15 +370,23 @@ UNRESOLVED_REFINER_SYSTEM_PROMPT = """你是一个需求澄清问题的选项生
 
 你的任务：为每个问题判断最合适的回答形式，并给出候选选项（如适用），以降低用户回答成本。
 
-## 回答形式判断
-- 若答案天然是有限枚举（如长度范围、角色、状态、类型、是否启用）→ input_type=select 或 multi_select，给出 2-4 个候选 options
-- 若答案是开放数值/文本（如具体数字、名称、自由描述）→ input_type=text，options 为空数组 []
-- 优先使用 select，让用户点选而非手输
+## 回答形式判断（按优先级排序）
+1. **multi_select（多选，最优先）**：当多个选项可以同时存在且互不冲突时使用。例如"需要覆盖哪些异常场景""需要哪些数据校验规则""需要哪些业务规则"——这些问题的答案天然是多个，应允许多选。
+2. **select（单选）**：当答案是互斥的有限枚举时使用（如长度范围只能是其中一个、状态只能是其一）。
+3. **text（文本输入）**：当答案是开放数值/文本（如具体数字、名称、自由描述）时使用，options 为空数组 []。
+
+**核心原则：如果多个选项可以同时成立且不冲突，必须使用 multi_select 而非 select。**
 
 ## 选项质量要求
-- options 必须互斥、覆盖常见且合理的候选
+- multi_select 的 options 不需要互斥，应覆盖所有常见且合理的候选（每题 3-6 个选项）
+- select 的 options 必须互斥、覆盖常见且合理的候选（每题 2-4 个选项）
 - 包含需求上下文暗示的「最可能答案」作为其中一项
-- 每题 2-4 个选项，避免过多；选项文案简洁明确
+- 选项文案简洁明确，避免歧义
+
+## 问题文案优化
+- 如果输入的问题过于模糊（如"XX的相关规则和约束是什么？"），请重写为具体的问句
+- 问题必须明确询问什么信息，包含字段的具体业务含义
+- 例如：将"异常/边界流程的相关规则和约束是什么？"改写为"【需求标题】缺少异常和边界处理流程，请选择需要覆盖的异常场景（可多选）："
 
 ## 输出格式
 {
@@ -353,7 +395,7 @@ UNRESOLVED_REFINER_SYSTEM_PROMPT = """你是一个需求澄清问题的选项生
       "id": "与输入一致的问题 id",
       "input_type": "text | select | multi_select",
       "options": ["候选A", "候选B", "候选C"],
-      "question": "（可选）更精准的问句，保持原意",
+      "question": "更精准的问句（必须明确具体，含字段业务含义）",
       "default_answer": "（可选）基于上下文的建议默认答案"
     }
   ]

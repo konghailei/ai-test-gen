@@ -24,6 +24,7 @@ import AdminDashboard from './pages/AdminDashboard'
 import AdminKnowledgeBase from './pages/AdminKnowledgeBase'
 import UserManual from './pages/UserManual'
 import Tasks from './pages/Tasks'
+import Logs from './pages/Logs'
 
 /** 路由守卫：未登录 → 登录页 */
 function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -114,6 +115,7 @@ export default function App() {
           <Route path="knowledge" element={<AdminGuard><AdminKnowledgeBase /></AdminGuard>} />
           <Route path="users" element={<AdminGuard><UserManagement /></AdminGuard>} />
           <Route path="roles" element={<AdminGuard><RoleManagement /></AdminGuard>} />
+          <Route path="logs" element={<AdminGuard><Logs /></AdminGuard>} />
           <Route path="settings" element={<AdminGuard><Settings /></AdminGuard>} />
           <Route path="*" element={<Navigate to="/admin" replace />} />
         </Route>
