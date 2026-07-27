@@ -2,85 +2,251 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ═══════════════════════════════════════════════════════════════
+   Apple Design Tokens — 与设计稿一致的 CSS 变量
+   ═══════════════════════════════════════════════════════════════ */
 @layer base {
+  :root {
+    /* brand */
+    --brand-500: #007aff;
+    --brand-600: #0064d6;
+    --brand-700: #004fad;
+    --brand-800: #003b82;
+    --brand-400: #2e8dff;
+    --brand-300: #66abff;
+
+    /* background */
+    --background: #ffffff;
+    --background-muted: #f2f2f7;
+    --background-elevated: #ffffff;
+
+    /* foreground */
+    --foreground: #1d1d1f;
+    --foreground-secondary: #3a3a3c;
+    --foreground-tertiary: #8e8e93;
+    --foreground-quaternary: #aeaeb2;
+
+    /* border / input */
+    --border: #e5e5ea;
+    --input: #d1d1d6;
+    --ring: #007aff;
+
+    /* state */
+    --state-success: #34c759;
+    --state-success-surface: #e9f9ee;
+    --state-error: #ff3b30;
+    --state-error-surface: #ffecea;
+    --state-warning: #ff9500;
+    --state-warning-surface: #fff4e6;
+
+    /* radius */
+    --radius: 1.2rem;
+
+    /* typography */
+    --font-sans: 'DM Sans', 'PingFang SC', 'Microsoft YaHei', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+    /* shadows */
+    --shadow-apple-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05), 0 1px 3px -1px rgba(0, 0, 0, 0.05);
+    --shadow-apple-md: 0 4px 8px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+    --shadow-apple-lg: 0 8px 24px -8px rgba(0, 0, 0, 0.08), 0 4px 8px -4px rgba(0, 0, 0, 0.05);
+    --shadow-apple-xl: 0 16px 40px -10px rgba(0, 0, 0, 0.10), 0 8px 16px -8px rgba(0, 0, 0, 0.06);
+
+    /* sidebar */
+    --sidebar-bg: #f2f2f7;
+    --sidebar-border: #e5e5ea;
+    --sidebar-foreground: #1d1d1f;
+    --sidebar-accent: #e5e5ea;
+    --sidebar-primary: #007aff;
+    --sidebar-primary-foreground: #ffffff;
+  }
+
   html, body, #root {
     @apply h-full;
   }
-  body {
-    @apply bg-gradient-to-br from-slate-50 to-blue-50;
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
-  ::-webkit-scrollbar { width: 6px; }
-  ::-webkit-scrollbar-track { @apply bg-transparent; }
-  ::-webkit-scrollbar-thumb { @apply bg-slate-300 rounded-full hover:bg-slate-400; }
-  /* 修复 select 箭头和下拉样式 */
+  body {
+    background: var(--background-muted);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    letter-spacing: -0.01em;
+  }
+
+  /* Apple 风格滚动条 */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(142, 142, 147, 0.35);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(142, 142, 147, 0.55);
+    background-clip: content-box;
+  }
+
+  /* select 箭头和下拉样式 */
   select {
     @apply cursor-pointer;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 12px center;
     background-size: 14px;
     padding-right: 36px;
   }
-  /* 下拉选项样式 */
   select option {
-    @apply py-2 px-3 text-sm text-slate-700 bg-white;
+    @apply py-2 px-3 text-sm;
+    color: var(--foreground);
+    background: var(--background);
   }
   select option:checked {
-    @apply bg-primary-50 text-primary-700;
+    background: var(--brand-500);
+    color: #ffffff;
   }
-  select:focus option:hover {
-    @apply bg-primary-100;
+
+  /* 标题字重与字距更贴近 Apple */
+  h1, h2, h3, h4 {
+    letter-spacing: -0.02em;
   }
 }
 
 @layer components {
+  /* ── Card ── */
   .card {
-    @apply bg-white rounded-2xl shadow-sm border border-slate-100 p-6 transition-all duration-200 hover:shadow-md;
+    @apply bg-white rounded-apple border border-apple-300 p-6 transition-all duration-200;
+    box-shadow: var(--shadow-apple-sm);
   }
   .card-hover {
-    @apply hover:shadow-lg hover:border-primary-200 hover:-translate-y-0.5;
+    @apply hover:shadow-apple-md hover:border-apple-400 transition-all duration-200;
   }
+
+  /* ── Buttons ── */
   .btn-primary {
-    @apply inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-primary-600 to-primary-500 text-white rounded-xl font-medium text-sm shadow-sm hover:from-primary-700 hover:to-primary-600 hover:shadow-md active:scale-[0.97] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-white rounded-apple-md font-medium text-sm transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed;
+    background: var(--brand-500);
+    box-shadow: var(--shadow-apple-sm);
   }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--brand-600);
+    box-shadow: var(--shadow-apple-md);
+  }
+  .btn-primary:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
   .btn-secondary {
-    @apply inline-flex items-center gap-2 px-4 py-2.5 bg-white text-slate-700 rounded-xl font-medium text-sm border border-slate-200 shadow-sm hover:bg-slate-50 hover:border-slate-300 active:scale-[0.97] transition-all duration-150;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white rounded-apple-md font-medium text-sm border transition-all duration-150;
+    color: var(--foreground);
+    border-color: var(--input);
+    box-shadow: var(--shadow-apple-sm);
   }
+  .btn-secondary:hover {
+    background: var(--background-muted);
+    border-color: var(--border);
+  }
+  .btn-secondary:active {
+    transform: scale(0.97);
+  }
+
   .btn-ghost {
-    @apply inline-flex items-center gap-2 px-3 py-2 text-slate-600 rounded-lg font-medium text-sm hover:bg-slate-100 active:scale-[0.97] transition-all duration-150;
+    @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-apple-sm font-medium text-sm transition-all duration-150;
+    color: var(--foreground-secondary);
   }
+  .btn-ghost:hover {
+    background: var(--background-muted);
+    color: var(--foreground);
+  }
+  .btn-ghost:active {
+    transform: scale(0.97);
+  }
+
   .btn-danger {
-    @apply inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-danger-500 to-red-500 text-white rounded-xl font-medium text-sm shadow-sm hover:from-red-600 hover:to-red-600 active:scale-[0.97] transition-all duration-150;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-white rounded-apple-md font-medium text-sm transition-all duration-150;
+    background: var(--state-error);
+    box-shadow: var(--shadow-apple-sm);
   }
+  .btn-danger:hover {
+    background: #d70015;
+    box-shadow: var(--shadow-apple-md);
+  }
+  .btn-danger:active {
+    transform: scale(0.97);
+  }
+
+  /* ── Inputs ── */
   .input-field {
-    @apply w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-400 transition-all duration-150;
+    @apply w-full px-4 py-2.5 rounded-apple-md border bg-white text-sm transition-all duration-150;
+    color: var(--foreground);
+    border-color: var(--input);
   }
+  .input-field::placeholder {
+    color: var(--foreground-tertiary);
+  }
+  .input-field:focus {
+    outline: none;
+    border-color: var(--ring);
+    box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+  }
+
   .select-field {
-    @apply w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-400 transition-all duration-150 appearance-none;
+    @apply w-full px-4 py-2.5 rounded-apple-md border bg-white text-sm transition-all duration-150 appearance-none;
+    color: var(--foreground);
+    border-color: var(--input);
   }
+  .select-field:focus {
+    outline: none;
+    border-color: var(--ring);
+    box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.15);
+  }
+
+  /* ── Badges ── */
   .badge {
     @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
   }
-  .badge-p0 { @apply badge bg-red-50 text-red-700 ring-1 ring-red-600/20; }
-  .badge-p1 { @apply badge bg-orange-50 text-orange-700 ring-1 ring-orange-600/20; }
-  .badge-p2 { @apply badge bg-blue-50 text-blue-700 ring-1 ring-blue-600/20; }
-  .badge-p3 { @apply badge bg-slate-50 text-slate-600 ring-1 ring-slate-400/20; }
-  .badge-active { @apply badge bg-green-50 text-green-700 ring-1 ring-green-600/20; }
-  .badge-draft { @apply badge bg-yellow-50 text-yellow-700 ring-1 ring-yellow-600/20; }
-  .badge-approved { @apply badge bg-emerald-50 text-emerald-700 ring-1 ring-emerald-600/20; }
-  .badge-reviewed { @apply badge bg-blue-50 text-blue-700 ring-1 ring-blue-600/20; }
-  .badge-rejected { @apply badge bg-red-50 text-red-700 ring-1 ring-red-600/20; }
-  .label { @apply block text-sm font-medium text-slate-700 mb-1.5; }
-  .section-title { @apply text-lg font-semibold text-slate-800; }
-  .page-title { @apply text-2xl font-bold text-slate-900; }
+  .badge-p0 { @apply badge; background: var(--state-error-surface); color: var(--state-error); }
+  .badge-p1 { @apply badge; background: var(--state-warning-surface); color: var(--state-warning); }
+  .badge-p2 { @apply badge; background: #e8f2ff; color: var(--brand-500); }
+  .badge-p3 { @apply badge; background: var(--background-muted); color: var(--foreground-tertiary); }
+  .badge-active { @apply badge; background: var(--state-success-surface); color: var(--state-success); }
+  .badge-draft { @apply badge; background: var(--state-warning-surface); color: var(--state-warning); }
+  .badge-approved { @apply badge; background: var(--state-success-surface); color: var(--state-success); }
+  .badge-reviewed { @apply badge; background: #e8f2ff; color: var(--brand-500); }
+  .badge-rejected { @apply badge; background: var(--state-error-surface); color: var(--state-error); }
+
+  /* ── Typography ── */
+  .label {
+    @apply block text-sm font-medium mb-1.5;
+    color: var(--foreground);
+  }
+  .section-title {
+    @apply text-lg font-semibold;
+    color: var(--foreground);
+  }
+  .page-title {
+    @apply text-2xl font-bold;
+    color: var(--foreground);
+    letter-spacing: -0.02em;
+  }
 }
 
-/* SSE progress bar animation */
+/* SSE 进度条动画 */
 .progress-bar {
-  @apply h-2 rounded-full bg-gradient-to-r from-primary-500 via-accent-400 to-primary-500 bg-[length:200%_100%] animate-gradient;
+  @apply h-2 rounded-full bg-[length:200%_100%] animate-gradient;
+  background-image: linear-gradient(90deg, var(--brand-500), var(--brand-300), var(--brand-500));
 }
 
-/* Skeleton loading */
+/* 骨架屏 */
 .skeleton {
-  @apply bg-gradient-to-r from-slate-200 via-slate-100 to-slate-200 bg-[length:200%_100%] animate-gradient rounded-lg;
+  @apply bg-[length:200%_100%] animate-gradient rounded-apple-sm;
+  background-image: linear-gradient(90deg, #e5e5ea, #f2f2f7, #e5e5ea);
 }
+
+/* 无滚动条工具类 */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

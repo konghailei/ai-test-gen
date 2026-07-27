@@ -640,6 +640,20 @@ const SECTIONS: ManualSection[] = [
   },
 ]
 
+/* ===================== 章节图标色映射（Apple 设计系统 CSS 变量） ===================== */
+const SECTION_COLOR_STYLES: Record<string, { color: string; background: string }> = {
+  'text-slate-600 bg-slate-50': { color: 'var(--foreground-secondary)', background: 'var(--background-muted)' },
+  'text-blue-600 bg-blue-50': { color: 'var(--brand-500)', background: 'rgba(0, 122, 255, 0.08)' },
+  'text-indigo-600 bg-indigo-50': { color: 'var(--brand-500)', background: 'rgba(0, 122, 255, 0.08)' },
+  'text-green-600 bg-green-50': { color: 'var(--state-success)', background: 'var(--state-success-surface)' },
+  'text-purple-600 bg-purple-50': { color: 'var(--brand-500)', background: 'rgba(0, 122, 255, 0.08)' },
+  'text-amber-600 bg-amber-50': { color: 'var(--state-warning)', background: 'var(--state-warning-surface)' },
+  'text-red-600 bg-red-50': { color: 'var(--state-error)', background: 'var(--state-error-surface)' },
+  'text-teal-600 bg-teal-50': { color: 'var(--state-success)', background: 'var(--state-success-surface)' },
+  'text-cyan-600 bg-cyan-50': { color: 'var(--brand-500)', background: 'rgba(0, 122, 255, 0.08)' },
+}
+const getSectionColorStyle = (color: string) => SECTION_COLOR_STYLES[color] || { color: 'var(--foreground-secondary)', background: 'var(--background-muted)' }
+
 export default function UserManual() {
   const navigate = useNavigate()
   const [activeId, setActiveId] = useState(SECTIONS[0].id)
@@ -656,31 +670,37 @@ export default function UserManual() {
   return (
     <div className="flex gap-6 h-[calc(100vh-8rem)]">
       {/* 左侧功能菜单 */}
-      <aside className="w-56 shrink-0 bg-white rounded-2xl border border-slate-100 shadow-sm p-3 overflow-y-auto">
+      <aside className="w-56 shrink-0 rounded-apple p-3 overflow-y-auto"
+        style={{ background: 'var(--background)', border: '1px solid var(--border)', boxShadow: 'var(--shadow-apple-sm)' }}>
         <div className="flex items-center gap-2 px-2 py-2 mb-2">
-          <BookOpen className="w-4 h-4 text-primary-500" />
-          <span className="text-sm font-semibold text-slate-700">功能导航</span>
+          <BookOpen className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+          <span className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>功能导航</span>
         </div>
         <nav className="space-y-1">
           {SECTIONS.map(section => {
             const Icon = section.icon
             const isActive = section.id === activeId
+            const activeStyle = getSectionColorStyle(section.color)
             return (
               <button
                 key={section.id}
                 onClick={() => setActiveId(section.id)}
-                className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 text-left ${
-                  isActive
-                    ? 'bg-gradient-to-r from-primary-50 to-primary-50/50 text-primary-700 shadow-sm'
-                    : 'text-slate-500 hover:bg-slate-50 hover:text-slate-700'
-                }`}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 text-left"
+                style={isActive
+                  ? { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-600)', boxShadow: 'var(--shadow-apple-sm)' }
+                  : { color: 'var(--foreground-tertiary)' }
+                }
               >
-                <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${isActive ? section.color : 'bg-slate-100 text-slate-400'}`}>
+                <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                  style={isActive
+                    ? { background: activeStyle.background, color: activeStyle.color }
+                    : { background: 'var(--background-muted)', color: 'var(--foreground-quaternary)' }
+                  }>
                   <Icon className="w-3.5 h-3.5" />
                 </div>
                 <div className="min-w-0">
                   <div className="truncate">{section.title}</div>
-                  <div className="text-[10px] text-slate-400 truncate">{section.subtitle}</div>
+                  <div className="text-[10px] truncate" style={{ color: 'var(--foreground-quaternary)' }}>{section.subtitle}</div>
                 </div>
               </button>
             )
@@ -689,7 +709,8 @@ export default function UserManual() {
 
         <button
           onClick={() => navigate(-1)}
-          className="w-full flex items-center gap-2 px-3 py-2.5 mt-4 rounded-xl text-sm text-slate-500 hover:bg-slate-50 transition-all"
+          className="w-full flex items-center gap-2 px-3 py-2.5 mt-4 rounded-xl text-sm transition-all"
+          style={{ color: 'var(--foreground-tertiary)' }}
         >
           <ArrowLeft className="w-4 h-4" />
           返回
@@ -697,23 +718,27 @@ export default function UserManual() {
       </aside>
 
       {/* 右侧内容区 */}
-      <div className="flex-1 bg-white rounded-2xl border border-slate-100 shadow-sm overflow-y-auto">
+      <div className="flex-1 rounded-apple overflow-y-auto"
+        style={{ background: 'var(--background)', border: '1px solid var(--border)', boxShadow: 'var(--shadow-apple-sm)' }}>
         {/* Section Header */}
-        <div className="sticky top-0 bg-white/95 backdrop-blur-sm border-b border-slate-100 px-7 py-5 z-10">
+        <div className="sticky top-0 border-b px-7 py-5 z-10"
+          style={{ background: 'rgba(255, 255, 255, 0.95)', backdropFilter: 'blur(4px)', borderColor: 'var(--border)' }}>
           <div className="flex items-center gap-3">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${active.color}`}>
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center"
+              style={{ background: getSectionColorStyle(active.color).background, color: getSectionColorStyle(active.color).color }}>
               <ActiveIcon className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold text-slate-800">{active.title}</h1>
+                <h1 className="text-xl font-bold" style={{ color: 'var(--foreground)' }}>{active.title}</h1>
                 {version && (
-                  <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 text-xs font-mono">v{version}</span>
+                  <span className="px-2 py-0.5 rounded-md text-xs font-mono"
+                    style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>v{version}</span>
                 )}
               </div>
-              <p className="text-xs text-slate-400 mt-0.5">{active.subtitle}</p>
+              <p className="text-xs mt-0.5" style={{ color: 'var(--foreground-quaternary)' }}>{active.subtitle}</p>
               {version && (
-                <p className="text-[11px] text-slate-300 mt-0.5">📌 用户手册 v{version} · 与系统版本保持一致</p>
+                <p className="text-[11px] mt-0.5" style={{ color: 'var(--foreground-quaternary)' }}>📌 用户手册 v{version} · 与系统版本保持一致</p>
               )}
             </div>
           </div>
@@ -723,14 +748,14 @@ export default function UserManual() {
           {/* 功能说明 */}
           <section>
             <div className="flex items-center gap-2 mb-4">
-              <Layers className="w-4 h-4 text-primary-500" />
-              <h2 className="text-base font-semibold text-slate-700">功能说明</h2>
+              <Layers className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+              <h2 className="text-base font-semibold" style={{ color: 'var(--foreground-secondary)' }}>功能说明</h2>
             </div>
             <div className="space-y-2.5">
               {active.features.map((item, i) => (
-                <div key={i} className="flex gap-3 text-sm p-2.5 rounded-lg hover:bg-slate-50 transition-all">
-                  <span className="text-primary-500 font-medium whitespace-nowrap min-w-[90px] shrink-0">{item.label}</span>
-                  <span className="text-slate-600">{item.desc}</span>
+                <div key={i} className="flex gap-3 text-sm p-2.5 rounded-lg transition-all" style={{ borderRadius: 'calc(var(--radius) * 0.5)' }}>
+                  <span className="font-medium whitespace-nowrap min-w-[90px] shrink-0" style={{ color: 'var(--brand-500)' }}>{item.label}</span>
+                  <span style={{ color: 'var(--foreground-secondary)' }}>{item.desc}</span>
                 </div>
               ))}
             </div>
@@ -740,14 +765,15 @@ export default function UserManual() {
           {active.terms && active.terms.length > 0 && (
             <section>
               <div className="flex items-center gap-2 mb-4">
-                <BookOpen className="w-4 h-4 text-primary-500" />
-                <h2 className="text-base font-semibold text-slate-700">术语对照（英文标识 → 中文解释）</h2>
+                <BookOpen className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+                <h2 className="text-base font-semibold" style={{ color: 'var(--foreground-secondary)' }}>术语对照（英文标识 → 中文解释）</h2>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 {active.terms.map((t, i) => (
-                  <div key={i} className="p-3 rounded-lg bg-slate-50 border border-slate-100">
-                    <div className="text-sm font-semibold text-primary-600 font-mono">{t.term}</div>
-                    <div className="text-xs text-slate-500 leading-relaxed mt-1">{t.desc}</div>
+                  <div key={i} className="p-3 rounded-lg"
+                    style={{ background: 'var(--background-muted)', border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+                    <div className="text-sm font-semibold font-mono" style={{ color: 'var(--brand-500)' }}>{t.term}</div>
+                    <div className="text-xs leading-relaxed mt-1" style={{ color: 'var(--foreground-tertiary)' }}>{t.desc}</div>
                   </div>
                 ))}
               </div>
@@ -758,24 +784,26 @@ export default function UserManual() {
           {active.steps && active.steps.length > 0 && (
             <section>
               <div className="flex items-center gap-2 mb-4">
-                <Image className="w-4 h-4 text-primary-500" />
-                <h2 className="text-base font-semibold text-slate-700">操作步骤</h2>
+                <Image className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+                <h2 className="text-base font-semibold" style={{ color: 'var(--foreground-secondary)' }}>操作步骤</h2>
               </div>
               <div className="space-y-6">
                 {active.steps.map((s, i) => (
-                  <div key={i} className="rounded-xl border border-slate-100 overflow-hidden">
-                    <div className="flex items-center gap-2 px-4 py-3 bg-slate-50/60 border-b border-slate-100">
-                      <span className="w-6 h-6 rounded-full bg-primary-500 text-white flex items-center justify-center text-xs font-bold shrink-0">{i + 1}</span>
-                      <span className="text-sm font-semibold text-slate-700">{s.title}</span>
+                  <div key={i} className="rounded-xl border overflow-hidden" style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
+                    <div className="flex items-center gap-2 px-4 py-3 border-b" style={{ background: 'rgba(242, 242, 247, 0.6)', borderColor: 'var(--border)' }}>
+                      <span className="w-6 h-6 rounded-full text-white flex items-center justify-center text-xs font-bold shrink-0"
+                        style={{ background: 'var(--brand-500)' }}>{i + 1}</span>
+                      <span className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>{s.title}</span>
                     </div>
                     <div className="p-4 space-y-3">
-                      <p className="text-sm text-slate-600 leading-relaxed">{s.desc}</p>
+                      <p className="text-sm leading-relaxed" style={{ color: 'var(--foreground-secondary)' }}>{s.desc}</p>
                       {s.img && (
                         <img
                           src={`/manual-imgs/${s.img}`}
                           alt={s.title}
                           loading="lazy"
-                          className="w-full rounded-lg border border-slate-100"
+                          className="w-full rounded-lg border"
+                          style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}
                         />
                       )}
                     </div>
@@ -789,10 +817,11 @@ export default function UserManual() {
           {active.diagram && (
             <section>
               <div className="flex items-center gap-2 mb-4">
-                <Workflow className="w-4 h-4 text-primary-500" />
-                <h2 className="text-base font-semibold text-slate-700">系统逻辑结构</h2>
+                <Workflow className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+                <h2 className="text-base font-semibold" style={{ color: 'var(--foreground-secondary)' }}>系统逻辑结构</h2>
               </div>
-              <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4">
+              <div className="rounded-xl border p-4"
+                style={{ background: 'rgba(242, 242, 247, 0.6)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
                 {active.diagram}
               </div>
             </section>
@@ -801,19 +830,21 @@ export default function UserManual() {
           {/* 实现逻辑 */}
           <section>
             <div className="flex items-center gap-2 mb-4">
-              <Cpu className="w-4 h-4 text-green-500" />
-              <h2 className="text-base font-semibold text-slate-700">实现逻辑</h2>
+              <Cpu className="w-4 h-4" style={{ color: 'var(--state-success)' }} />
+              <h2 className="text-base font-semibold" style={{ color: 'var(--foreground-secondary)' }}>实现逻辑</h2>
             </div>
             <div className="space-y-3">
               {active.logic.map((item, i) => (
-                <div key={i} className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                <div key={i} className="p-4 rounded-xl"
+                  style={{ background: 'var(--background-muted)', border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
                   <div className="flex items-center gap-2 mb-1.5">
-                    <span className="w-6 h-6 rounded-full bg-green-100 text-green-600 flex items-center justify-center text-xs font-bold shrink-0">
+                    <span className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
+                      style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>
                       {i + 1}
                     </span>
-                    <span className="text-sm font-semibold text-slate-700">{item.step}</span>
+                    <span className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>{item.step}</span>
                   </div>
-                  <p className="text-xs text-slate-500 leading-relaxed ml-8">{item.detail}</p>
+                  <p className="text-xs leading-relaxed ml-8" style={{ color: 'var(--foreground-tertiary)' }}>{item.detail}</p>
                 </div>
               ))}
             </div>
@@ -823,24 +854,24 @@ export default function UserManual() {
           {active.config && active.config.length > 0 && (
             <section>
               <div className="flex items-center gap-2 mb-4">
-                <Zap className="w-4 h-4 text-amber-500" />
-                <h2 className="text-base font-semibold text-slate-700">关键配置</h2>
+                <Zap className="w-4 h-4" style={{ color: 'var(--state-warning)' }} />
+                <h2 className="text-base font-semibold" style={{ color: 'var(--foreground-secondary)' }}>关键配置</h2>
               </div>
-              <div className="overflow-hidden rounded-xl border border-slate-100">
+              <div className="overflow-hidden rounded-xl border" style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="bg-slate-50 text-slate-500 text-xs">
+                    <tr className="text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
                       <th className="px-4 py-2.5 text-left font-medium">配置项</th>
                       <th className="px-4 py-2.5 text-left font-medium">值</th>
                       <th className="px-4 py-2.5 text-left font-medium">说明</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-50">
+                  <tbody>
                     {active.config.map((item, i) => (
-                      <tr key={i} className="hover:bg-slate-50/50">
-                        <td className="px-4 py-2.5 text-slate-700 font-medium whitespace-nowrap">{item.key}</td>
-                        <td className="px-4 py-2.5 text-primary-600 font-mono text-xs">{item.value}</td>
-                        <td className="px-4 py-2.5 text-slate-500 text-xs">{item.note || '-'}</td>
+                      <tr key={i} style={{ borderBottom: i < active.config!.length - 1 ? '1px solid var(--background-muted)' : 'none' }}>
+                        <td className="px-4 py-2.5 font-medium whitespace-nowrap" style={{ color: 'var(--foreground-secondary)' }}>{item.key}</td>
+                        <td className="px-4 py-2.5 font-mono text-xs" style={{ color: 'var(--brand-500)' }}>{item.value}</td>
+                        <td className="px-4 py-2.5 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{item.note || '-'}</td>
                       </tr>
                     ))}
                   </tbody>

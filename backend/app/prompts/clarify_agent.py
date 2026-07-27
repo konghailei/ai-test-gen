@@ -76,13 +76,19 @@ SYSTEM_PROMPT = """你是一个专业的软件需求澄清专家。在正式生�
 4. 歧义性与逻辑一致性检测：
    - 歧义性：仅对真正导致测试预期不确定的模糊表述提问（如「适当」「必要时」「视情况而定」「合理」），并说明会导致哪种测试不确定；category=ambiguity
    - 逻辑一致性：需求内部是否存在矛盾（同一字段不同位置描述不一致、流程步骤断裂、验收标准与功能描述矛盾）；category=conflict
+   - **逻辑矛盾检测（v2.39 强化）**：重点识别以下明显逻辑矛盾，作为 critical 级别 conflict 提问：
+     * 自相矛盾：同一句中出现对立表述，如「已存在仓房信息且不存在仓房信息」「必须包含但不得包含」「是用户且不是用户」
+     * 错别字冲突：同一句中混用易混淆术语导致逻辑冲突，如「已存在仓库信息且不存在仓房信息」（仓库 vs 仓房）
+     * 条件冲突：流程的前置条件与后续步骤矛盾，如前置「用户已登录」但后续步骤为「跳转登录页」
+     * 数据冲突：同一字段在不同位置约束不一致，如 data_constraints 中字段长度为「8-20 位」但验收标准要求「支持 6 位」
+     * 状态冲突：状态机定义存在不可达状态或循环依赖
+     这些矛盾会导致测试预期无法确定，必须先请用户澄清正确表述。
+     问题格式建议使用 input_type=select 提供候选选项（如「应统一为 X」「应统一为 Y」「为错别字」「其他」），降低用户回答成本。
 
 5. **优化需求专项检测（v2.34）**：当需求标题/摘要/正文包含「优化/改进/升级/重构/迁移/替换/调整/改造」等关键词，或 SRR.legacy_data_impact.is_optimization=true 时，必须检查以下字段是否完整：
-   - legacy_data_impact.impact_scope（历史数据影响范围）→ 缺失则问"该优化会影响哪些历史数据（表/字段/实体/上下游系统）"
-   - legacy_data_impact.migration_strategy（数据迁移策略）→ 缺失则问"采用何种迁移策略（全量/增量/双写/停机）"
-   - legacy_data_impact.rollback_strategy（回滚策略）→ 缺失则问"迁移失败时如何回滚（备份/回滚窗口/触发条件）"
-   - legacy_data_impact.compatibility_analysis（兼容性分析）→ 缺失则问"新旧数据/接口如何保证兼容"
-   - legacy_data_impact.verification_method（验证方法）→ 缺失则问"如何验证迁移正确性（数量校验/并行比对）"
+   - legacy_data_impact.impact_scope（影响范围）→ 缺失则问"该优化会影响哪些历史数据（表/字段/实体/上下游系统/用户角色）"
+   - legacy_data_impact.migration_plan（迁移方案）→ 缺失则问"采用何种迁移策略（全量/增量/双写/停机）、字段映射、兼容性如何保证"
+   - legacy_data_impact.rollback_and_validation（验证与回滚）→ 缺失则问"迁移失败时如何回滚（备份/回滚窗口/触发条件）、如何验证迁移正确性（数量校验/并行比对）"
    - 这些问题 priority=important，category=gap，input_type 优先 multi_select 或 select 提供候选选项
 
 输出要求：
@@ -341,10 +347,11 @@ COMPLETENESS_CHECKLIST: dict[str, dict[str, str]] = {
     },
     # v2.34: 优化需求（legacy_data_impact.is_optimization=True）的专项检查
     # 仅当 LLM/关键词检测识别为优化需求时才触发澄清问题生成
+    # v2.40: 字段精简，从 5 个检查点合并为 3 个核心维度
     "optimization": {
-        "legacy_data_impact.impact_scope": "历史数据影响范围",
-        "legacy_data_impact.migration_strategy": "数据迁移策略",
-        "legacy_data_impact.rollback_strategy": "回滚策略",
+        "legacy_data_impact.impact_scope": "影响范围",
+        "legacy_data_impact.migration_plan": "迁移方案",
+        "legacy_data_impact.rollback_and_validation": "验证与回滚",
     },
     # optional 级别不生成问题，仅用于评分
     "optional": {
@@ -352,8 +359,6 @@ COMPLETENESS_CHECKLIST: dict[str, dict[str, str]] = {
         "non_functional.performance": "性能需求",
         "non_functional.security": "安全需求",
         "dependencies": "外部依赖",
-        "legacy_data_impact.compatibility_analysis": "兼容性分析",
-        "legacy_data_impact.verification_method": "数据迁移验证方法",
     },
 }
 

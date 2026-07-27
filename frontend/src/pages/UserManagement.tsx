@@ -22,11 +22,11 @@ function EditModal({
   const [password, setPassword] = useState('')
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !saving && onClose()}>
-      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} onClick={() => !saving && onClose()}>
+      <div className="max-w-sm w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
-          <Edit3 className="w-5 h-5 text-primary-500" />
-          <h2 className="text-lg font-semibold text-slate-800">{user ? '编辑用户' : '新建用户'}</h2>
+          <Edit3 className="w-5 h-5 text-[var(--brand-500)]" />
+          <h2 className="text-lg font-semibold text-[var(--foreground)]">{user ? '编辑用户' : '新建用户'}</h2>
         </div>
         <div className="space-y-3">
           {!user && (
@@ -62,7 +62,7 @@ function EditModal({
             <label className="flex items-center gap-2 text-sm cursor-pointer pt-1">
               <input type="checkbox" checked={isActive}
                 onChange={e => setIsActive(e.target.checked)}
-                className="w-4 h-4 rounded border-slate-300 text-primary-600" />
+                className="w-4 h-4 rounded border-[var(--input)] text-[var(--brand-600)]" />
               启用账户
             </label>
           )}
@@ -149,10 +149,10 @@ export default function UserManagement() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="page-title flex items-center gap-2">
-            <Users className="w-6 h-6 text-primary-500" />
+            <Users className="w-6 h-6 text-[var(--brand-500)]" />
             用户管理
           </h1>
-          <p className="text-sm text-slate-500 mt-1">管理员 — 系统用户创建与管理</p>
+          <p className="text-sm text-[var(--foreground-tertiary)] mt-1">管理员 — 系统用户创建与管理</p>
         </div>
         <button onClick={() => setShowAdd(true)} className="btn-primary">
           <Plus className="w-4 h-4" /> 新建用户
@@ -178,41 +178,41 @@ export default function UserManagement() {
         ) : (
           <table className="w-full">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/50">
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">用户名</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">显示名称</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">邮箱</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">角色</th>
-                <th className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5 w-20">状态</th>
-                <th className="text-right text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5 w-20">操作</th>
+              <tr className="border-b border-[var(--border)] bg-[var(--background-muted)]">
+                <th className="text-left text-xs font-semibold text-[var(--foreground-tertiary)] uppercase tracking-wider px-5 py-3.5">用户名</th>
+                <th className="text-left text-xs font-semibold text-[var(--foreground-tertiary)] uppercase tracking-wider px-5 py-3.5">显示名称</th>
+                <th className="text-left text-xs font-semibold text-[var(--foreground-tertiary)] uppercase tracking-wider px-5 py-3.5">邮箱</th>
+                <th className="text-left text-xs font-semibold text-[var(--foreground-tertiary)] uppercase tracking-wider px-5 py-3.5">角色</th>
+                <th className="text-center text-xs font-semibold text-[var(--foreground-tertiary)] uppercase tracking-wider px-5 py-3.5 w-20">状态</th>
+                <th className="text-right text-xs font-semibold text-[var(--foreground-tertiary)] uppercase tracking-wider px-5 py-3.5 w-20">操作</th>
               </tr>
             </thead>
             <tbody>
               {users.map(u => (
-                <tr key={u.id} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                <tr key={u.id} className="border-b border-[var(--border)] hover:bg-[var(--background-muted)] transition-colors">
                   <td className="px-5 py-3.5">
-                    <span className="text-sm font-semibold text-slate-800">{u.username}</span>
+                    <span className="text-sm font-semibold text-[var(--foreground)]">{u.username}</span>
                   </td>
-                  <td className="px-5 py-3.5 text-sm text-slate-600">{u.display_name || '-'}</td>
-                  <td className="px-5 py-3.5 text-sm text-slate-400">{u.email || '-'}</td>
+                  <td className="px-5 py-3.5 text-sm text-[var(--foreground-secondary)]">{u.display_name || '-'}</td>
+                  <td className="px-5 py-3.5 text-sm text-[var(--foreground-tertiary)]">{u.email || '-'}</td>
                   <td className="px-5 py-3.5">
-                    <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
+                    <span className="text-xs bg-[var(--background-muted)] text-[var(--foreground-secondary)] px-2 py-0.5 rounded-full">
                       {u.role_name || '无'}
                     </span>
                   </td>
                   <td className="px-5 py-3.5 text-center">
                     <span className={`text-[11px] px-1.5 py-0.5 rounded-full ${
-                      u.is_active ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'
+                      u.is_active ? 'bg-[var(--state-success-surface)] text-[var(--state-success)]' : 'bg-[var(--state-error-surface)] text-[var(--state-error)]'
                     }`}>{u.is_active ? '启用' : '禁用'}</span>
                   </td>
                   <td className="px-5 py-3.5">
                     <div className="flex justify-end gap-1">
                       <button onClick={() => setEditTarget(u)}
-                        className="p-1.5 rounded-lg text-slate-400 hover:text-primary-600 hover:bg-primary-50 transition-colors"
+                        className="p-1.5 rounded-[calc(var(--radius)*0.5)] text-[var(--foreground-tertiary)] hover:text-[var(--brand-600)] hover:bg-[rgba(0,122,255,0.08)] transition-colors"
                         title="编辑"><Edit3 className="w-4 h-4" /></button>
                       <button onClick={() => handleDelete(u)}
-                        className={`p-1.5 rounded-lg transition-colors ${
-                          u.username === 'admin' ? 'text-slate-200 cursor-not-allowed' : 'text-slate-400 hover:text-red-600 hover:bg-red-50'
+                        className={`p-1.5 rounded-[calc(var(--radius)*0.5)] transition-colors ${
+                          u.username === 'admin' ? 'text-[var(--foreground-quaternary)] cursor-not-allowed' : 'text-[var(--foreground-tertiary)] hover:text-[var(--state-error)] hover:bg-[var(--state-error-surface)]'
                         }`}
                         title={u.username === 'admin' ? '系统管理员不可删除' : '删除'}>
                         <Trash2 className="w-4 h-4" />
@@ -222,7 +222,7 @@ export default function UserManagement() {
                 </tr>
               ))}
               {!users.length && (
-                <tr><td colSpan={6} className="px-5 py-16 text-center text-sm text-slate-400">暂无用户</td></tr>
+                <tr><td colSpan={6} className="px-5 py-16 text-center text-sm text-[var(--foreground-tertiary)]">暂无用户</td></tr>
               )}
             </tbody>
           </table>

@@ -64,6 +64,20 @@ function formatDuration(ms: number): string {
   return `${hr}h ${min % 60}m`
 }
 
+/** 将语义色名映射到 Apple 设计系统 CSS 变量（用于动态图标/文本着色） */
+const COLOR_VAR_MAP: Record<string, string> = {
+  primary: 'var(--brand-500)',
+  warning: 'var(--state-warning)',
+  success: 'var(--state-success)',
+  violet: 'var(--brand-500)',
+  accent: 'var(--brand-500)',
+  indigo: 'var(--brand-500)',
+  slate: 'var(--foreground-tertiary)',
+  red: 'var(--state-error)',
+  amber: 'var(--state-warning)',
+}
+const colorToVar = (c: string) => COLOR_VAR_MAP[c] || 'var(--foreground-tertiary)'
+
 export default function Tasks() {
   const { selectedProductId } = useProduct()
   const navigate = useNavigate()
@@ -134,9 +148,9 @@ export default function Tasks() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="page-title flex items-center gap-2">
-            <ListTodo className="w-5 h-5 text-primary-500" /> 任务管理
+            <ListTodo className="w-5 h-5" style={{ color: 'var(--brand-500)' }} /> 任务管理
           </h1>
-          <p className="text-sm text-slate-500 mt-1">
+          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
             查看所有分析任务的运行状态 — 共 {total} 个任务
           </p>
         </div>
@@ -151,11 +165,11 @@ export default function Tasks() {
           <button
             key={s}
             onClick={() => setFilterStatus(s)}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-all ${
-              filterStatus === s
-                ? 'bg-primary-500 text-white'
-                : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
-            }`}
+            className="px-3 py-1.5 text-sm rounded-lg transition-all"
+            style={filterStatus === s
+              ? { background: 'var(--brand-500)', color: '#ffffff' }
+              : { background: 'var(--background)', border: '1px solid var(--border)', color: 'var(--foreground-secondary)' }
+            }
           >
             {statusFilterLabels[s]}
           </button>
@@ -165,19 +179,19 @@ export default function Tasks() {
       {/* 任务列表 */}
       <div className="card overflow-hidden">
         {loading ? (
-          <div className="flex items-center justify-center py-16 text-slate-400">
+          <div className="flex items-center justify-center py-16" style={{ color: 'var(--foreground-quaternary)' }}>
             <Loader2 className="w-5 h-5 animate-spin mr-2" /> 加载中...
           </div>
         ) : tasks.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+          <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--foreground-quaternary)' }}>
             <ListTodo className="w-10 h-10 mb-3 opacity-30" />
             <p className="text-sm">暂无任务记录</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 border-b border-slate-100">
-                <tr className="text-left text-xs text-slate-500 uppercase tracking-wider">
+              <thead style={{ background: 'var(--background-muted)', borderBottom: '1px solid var(--border)' }}>
+                <tr className="text-left text-xs uppercase tracking-wider" style={{ color: 'var(--foreground-tertiary)' }}>
                   <th className="px-4 py-3 font-semibold">任务类型</th>
                   <th className="px-4 py-3 font-semibold">关联需求</th>
                   <th className="px-4 py-3 font-semibold">状态</th>
@@ -187,7 +201,7 @@ export default function Tasks() {
                   <th className="px-4 py-3 font-semibold">操作</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-50">
+              <tbody>
                 {tasks.map(task => {
                   const typeInfo = TASK_TYPE_LABELS[task.task_type] || { label: task.task_type, icon: FileText, color: 'slate' }
                   const statusInfo = STATUS_LABELS[task.status] || { label: task.status, color: 'slate', icon: AlertCircle }
@@ -207,45 +221,45 @@ export default function Tasks() {
                     <Fragment key={task.id}>
                       <tr
                         onClick={() => handleRowClick(task)}
-                        className="hover:bg-slate-50 cursor-pointer transition-colors"
+                        className="cursor-pointer transition-colors"
+                        style={{ borderBottom: '1px solid var(--background-muted)' }}
                       >
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
-                            <Icon className={`w-4 h-4 text-${typeInfo.color}-500 flex-shrink-0`} />
-                            <span className="font-medium text-slate-700">{typeInfo.label}</span>
+                            <Icon className="w-4 h-4 flex-shrink-0" style={{ color: colorToVar(typeInfo.color) }} />
+                            <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{typeInfo.label}</span>
                           </div>
                         </td>
                         <td className="px-4 py-3">
                           <div className="max-w-[280px]">
-                            <p className="text-slate-700 truncate">{task.req_title || '(无标题)'}</p>
-                            <p className="text-xs text-slate-400 font-mono truncate">{task.req_id || '-'}</p>
+                            <p className="truncate" style={{ color: 'var(--foreground-secondary)' }}>{task.req_title || '(无标题)'}</p>
+                            <p className="text-xs font-mono truncate" style={{ color: 'var(--foreground-quaternary)' }}>{task.req_id || '-'}</p>
                           </div>
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1.5">
-                            <StatusIcon className={`w-3.5 h-3.5 text-${statusInfo.color}-500 ${isRunning ? 'animate-spin' : ''}`} />
-                            <span className={`text-${statusInfo.color}-600 font-medium`}>{statusInfo.label}</span>
+                            <StatusIcon className={`w-3.5 h-3.5 ${isRunning ? 'animate-spin' : ''}`} style={{ color: colorToVar(statusInfo.color) }} />
+                            <span className="font-medium" style={{ color: colorToVar(statusInfo.color) }}>{statusInfo.label}</span>
                           </div>
                           {task.message && (
-                            <p className="text-xs text-slate-400 mt-0.5 truncate max-w-[200px]">{task.message}</p>
+                            <p className="text-xs mt-0.5 truncate max-w-[200px]" style={{ color: 'var(--foreground-quaternary)' }}>{task.message}</p>
                           )}
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
-                            <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                            <div className="w-20 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--background-muted)' }}>
                               <div
-                                className={`h-full rounded-full transition-all ${
-                                  task.status === 'failed' ? 'bg-red-400' :
-                                  task.status === 'completed' ? 'bg-success-500' :
-                                  'bg-primary-500'
-                                }`}
-                                style={{ width: `${task.progress}%` }}
+                                className="h-full rounded-full transition-all"
+                                style={{
+                                  width: `${task.progress}%`,
+                                  background: task.status === 'failed' ? 'var(--state-error)' : task.status === 'completed' ? 'var(--state-success)' : 'var(--brand-500)',
+                                }}
                               />
                             </div>
-                            <span className="text-xs text-slate-500">{task.progress}%</span>
+                            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{task.progress}%</span>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-slate-500 text-xs">
+                        <td className="px-4 py-3 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                           {formatDate(task.created_at)}
                         </td>
                         <td className="px-4 py-3 text-xs">
@@ -259,15 +273,16 @@ export default function Tasks() {
                                 handleRowClick(task)
                               }
                             }}
-                            className={`inline-flex items-center gap-1 ${hasTimings ? 'text-slate-600 hover:text-indigo-600 cursor-pointer' : 'text-slate-500 cursor-default'}`}
+                            className={`inline-flex items-center gap-1 ${hasTimings ? 'cursor-pointer' : 'cursor-default'}`}
+                            style={{ color: hasTimings ? 'var(--foreground-secondary)' : 'var(--foreground-tertiary)' }}
                             title={hasTimings ? '点击查看阶段耗时明细' : '暂无阶段耗时数据'}
                           >
-                            <Clock className="w-3 h-3 text-slate-400" />
+                            <Clock className="w-3 h-3" style={{ color: 'var(--foreground-quaternary)' }} />
                             {durationSec < 60 ? `${durationSec}s` : `${Math.floor(durationSec / 60)}m ${durationSec % 60}s`}
                             {hasTimings && (
                               isExpanded
-                                ? <ChevronDown className="w-3 h-3 text-slate-400" />
-                                : <ChevronRight className="w-3 h-3 text-slate-400" />
+                                ? <ChevronDown className="w-3 h-3" style={{ color: 'var(--foreground-quaternary)' }} />
+                                : <ChevronRight className="w-3 h-3" style={{ color: 'var(--foreground-quaternary)' }} />
                             )}
                           </button>
                         </td>
@@ -275,7 +290,8 @@ export default function Tasks() {
                           {isRunning ? (
                             <button
                               onClick={(e) => handleCancel(e, task.id)}
-                              className="p-1 text-slate-400 hover:text-red-500 rounded transition-colors"
+                              className="p-1 rounded transition-colors"
+                              style={{ color: 'var(--foreground-quaternary)' }}
                               title="取消任务"
                             >
                               <Ban className="w-3.5 h-3.5" />
@@ -283,11 +299,11 @@ export default function Tasks() {
                           ) : (
                             <button
                               onClick={(e) => { e.stopPropagation(); setDetailTask(task) }}
-                              className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors ${
-                                task.status === 'failed'
-                                  ? 'text-red-600 hover:bg-red-50'
-                                  : 'text-slate-500 hover:bg-slate-100'
-                              }`}
+                              className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors"
+                              style={task.status === 'failed'
+                                ? { color: 'var(--state-error)' }
+                                : { color: 'var(--foreground-tertiary)' }
+                              }
                               title="查看任务详情"
                             >
                               <Info className="w-3.5 h-3.5" />
@@ -298,11 +314,11 @@ export default function Tasks() {
                       </tr>
                       {/* v2.23: 阶段耗时明细展开行 */}
                       {isExpanded && hasTimings && (
-                        <tr className="bg-slate-50/50">
+                        <tr style={{ background: 'rgba(242, 242, 247, 0.5)' }}>
                           <td colSpan={7} className="px-4 py-3">
                             <div className="ml-8 max-w-2xl">
-                              <div className="flex items-center gap-1.5 mb-2 text-xs font-medium text-slate-600">
-                                <Clock className="w-3.5 h-3.5 text-indigo-500" />
+                              <div className="flex items-center gap-1.5 mb-2 text-xs font-medium" style={{ color: 'var(--foreground-secondary)' }}>
+                                <Clock className="w-3.5 h-3.5" style={{ color: 'var(--brand-500)' }} />
                                 阶段耗时明细
                               </div>
                               <div className="space-y-1">
@@ -327,22 +343,22 @@ export default function Tasks() {
                                   return (
                                     <div key={phaseKey}>
                                       <div className="flex items-center gap-3 text-xs">
-                                        <span className={`w-24 flex-shrink-0 flex items-center gap-1 ${isPhaseDone ? 'text-slate-600' : 'text-indigo-600 font-medium'}`}>
+                                        <span className="w-24 flex-shrink-0 flex items-center gap-1" style={{ color: isPhaseDone ? 'var(--foreground-secondary)' : 'var(--brand-500)', fontWeight: isPhaseDone ? 400 : 500 }}>
                                           {isPhaseDone
-                                            ? <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                                            ? <CheckCircle2 className="w-3 h-3" style={{ color: 'var(--state-success)' }} />
                                             : <Loader2 className="w-3 h-3 animate-spin" />}
                                           {label}
                                         </span>
-                                        <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                                        <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--background-muted)' }}>
                                           <div
-                                            className={`h-full rounded-full ${isPhaseDone ? 'bg-emerald-400' : 'bg-indigo-400'}`}
-                                            style={{ width: `${Math.max(pct, 3)}%` }}
+                                            className="h-full rounded-full"
+                                            style={{ width: `${Math.max(pct, 3)}%`, background: isPhaseDone ? 'var(--state-success)' : 'var(--brand-400)' }}
                                           />
                                         </div>
-                                        <span className={`w-16 text-right font-mono ${isPhaseDone ? 'text-slate-500' : 'text-indigo-600'}`}>
+                                        <span className="w-16 text-right font-mono" style={{ color: isPhaseDone ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }}>
                                           {formatDuration(elapsed)}
                                         </span>
-                                        <span className="w-10 text-right text-slate-400">{pct}%</span>
+                                        <span className="w-10 text-right" style={{ color: 'var(--foreground-quaternary)' }}>{pct}%</span>
                                       </div>
                                       {/* v2.24: kb_search 子阶段明细 — 区分 KB 检索 vs LLM 调用 */}
                                       {subBreakdown && (
@@ -354,16 +370,16 @@ export default function Tasks() {
                                             const subPct = elapsed > 0 ? Math.round((subMs / elapsed) * 100) : 0
                                             return (
                                               <div key={subKey} className="flex items-center gap-2 text-[11px]">
-                                                <span className={`w-20 flex-shrink-0 ${isLLM ? 'text-amber-600' : 'text-slate-400'}`}>
+                                                <span className="w-20 flex-shrink-0" style={{ color: isLLM ? 'var(--state-warning)' : 'var(--foreground-quaternary)' }}>
                                                   {isLLM && '🤖 '}{subLabel}
                                                 </span>
-                                                <div className="flex-1 h-1 bg-slate-100 rounded-full overflow-hidden">
+                                                <div className="flex-1 h-1 rounded-full overflow-hidden" style={{ background: 'var(--background-muted)' }}>
                                                   <div
-                                                    className={`h-full rounded-full ${isLLM ? 'bg-amber-300' : 'bg-slate-300'}`}
-                                                    style={{ width: `${Math.max(subPct, 2)}%` }}
+                                                    className="h-full rounded-full"
+                                                    style={{ width: `${Math.max(subPct, 2)}%`, background: isLLM ? 'var(--state-warning)' : 'var(--foreground-quaternary)' }}
                                                   />
                                                 </div>
-                                                <span className={`w-12 text-right font-mono ${isLLM ? 'text-amber-600' : 'text-slate-400'}`}>
+                                                <span className="w-12 text-right font-mono" style={{ color: isLLM ? 'var(--state-warning)' : 'var(--foreground-quaternary)' }}>
                                                   {formatDuration(subMs)}
                                                 </span>
                                               </div>
@@ -376,12 +392,12 @@ export default function Tasks() {
                                 })}
                               </div>
                               {/* 总耗时汇总 */}
-                              <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-200 text-xs">
-                                <span className="text-slate-500">
+                              <div className="flex items-center justify-between mt-2 pt-2 border-t text-xs" style={{ borderColor: 'var(--border)' }}>
+                                <span style={{ color: 'var(--foreground-tertiary)' }}>
                                   创建: {formatDate(task.created_at)}
                                   {task.completed_at && ` | 完成: ${formatDate(task.completed_at)}`}
                                 </span>
-                                <span className="font-medium text-slate-700">
+                                <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>
                                   总耗时: {formatDuration(duration)}
                                 </span>
                               </div>
@@ -401,22 +417,25 @@ export default function Tasks() {
       {/* v2.24: 任务详情弹窗（替代原列表下方错误卡片） */}
       {detailTask && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0, 0, 0, 0.4)' }}
           onClick={() => setDetailTask(null)}
         >
           <div
-            className="bg-white rounded-2xl shadow-xl max-w-lg w-full mx-4 max-h-[80vh] overflow-hidden flex flex-col"
+            className="max-w-lg w-full mx-4 max-h-[80vh] overflow-hidden flex flex-col"
+            style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }}
             onClick={e => e.stopPropagation()}
           >
             {/* 弹窗头部 */}
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-              <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
-                <Info className="w-4 h-4 text-slate-400" />
+            <div className="flex items-center justify-between px-5 py-4 border-b" style={{ borderColor: 'var(--border)' }}>
+              <h3 className="text-sm font-semibold flex items-center gap-2" style={{ color: 'var(--foreground)' }}>
+                <Info className="w-4 h-4" style={{ color: 'var(--foreground-quaternary)' }} />
                 任务详情
               </h3>
               <button
                 onClick={() => setDetailTask(null)}
-                className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors"
+                className="p-1 rounded transition-colors"
+                style={{ color: 'var(--foreground-quaternary)' }}
               >
                 <X className="w-4 h-4" />
               </button>
@@ -427,41 +446,41 @@ export default function Tasks() {
               {/* 基本信息 */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">任务 ID</p>
-                  <p className="font-mono text-xs text-slate-600 break-all">{detailTask.id}</p>
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>任务 ID</p>
+                  <p className="font-mono text-xs break-all" style={{ color: 'var(--foreground-secondary)' }}>{detailTask.id}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">任务类型</p>
-                  <p className="text-slate-600">
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>任务类型</p>
+                  <p style={{ color: 'var(--foreground-secondary)' }}>
                     {TASK_TYPE_LABELS[detailTask.task_type]?.label || detailTask.task_type}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">状态</p>
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>状态</p>
                   <div className="flex items-center gap-1.5">
                     {(() => {
                       const si = STATUS_LABELS[detailTask.status] || { label: detailTask.status, color: 'slate', icon: AlertCircle }
                       const SIcon = si.icon
                       return (
                         <>
-                          <SIcon className={`w-3.5 h-3.5 text-${si.color}-500`} />
-                          <span className={`text-${si.color}-600 font-medium`}>{si.label}</span>
+                          <SIcon className="w-3.5 h-3.5" style={{ color: colorToVar(si.color) }} />
+                          <span className="font-medium" style={{ color: colorToVar(si.color) }}>{si.label}</span>
                         </>
                       )
                     })()}
                   </div>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">进度</p>
-                  <p className="text-slate-600">{detailTask.progress}%</p>
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>进度</p>
+                  <p style={{ color: 'var(--foreground-secondary)' }}>{detailTask.progress}%</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">创建时间</p>
-                  <p className="text-slate-600 text-xs">{formatDate(detailTask.created_at)}</p>
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>创建时间</p>
+                  <p className="text-xs" style={{ color: 'var(--foreground-secondary)' }}>{formatDate(detailTask.created_at)}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">完成时间</p>
-                  <p className="text-slate-600 text-xs">
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>完成时间</p>
+                  <p className="text-xs" style={{ color: 'var(--foreground-secondary)' }}>
                     {detailTask.completed_at ? formatDate(detailTask.completed_at) : '—'}
                   </p>
                 </div>
@@ -470,13 +489,14 @@ export default function Tasks() {
               {/* 关联需求 */}
               {detailTask.req_id && (
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">关联需求</p>
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>关联需求</p>
                   <button
                     onClick={() => {
                       navigate(`/requirements/${detailTask.req_id}`)
                       setDetailTask(null)
                     }}
-                    className="text-primary-600 hover:text-primary-700 text-xs font-medium"
+                    className="text-xs font-medium"
+                    style={{ color: 'var(--brand-500)' }}
                   >
                     {detailTask.req_title || detailTask.req_id}
                   </button>
@@ -486,18 +506,19 @@ export default function Tasks() {
               {/* 消息 */}
               {detailTask.message && (
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">消息</p>
-                  <p className="text-slate-600 text-xs bg-slate-50 rounded p-2">{detailTask.message}</p>
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>消息</p>
+                  <p className="text-xs rounded p-2" style={{ color: 'var(--foreground-secondary)', background: 'var(--background-muted)' }}>{detailTask.message}</p>
                 </div>
               )}
 
               {/* 错误信息（重点展示） */}
               {detailTask.error && (
                 <div>
-                  <p className="text-xs text-red-400 mb-0.5 flex items-center gap-1">
+                  <p className="text-xs mb-0.5 flex items-center gap-1" style={{ color: 'var(--state-error)' }}>
                     <AlertCircle className="w-3 h-3" /> 错误信息
                   </p>
-                  <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-3 max-h-48 overflow-y-auto break-all whitespace-pre-wrap">
+                  <div className="text-xs rounded p-3 max-h-48 overflow-y-auto break-all whitespace-pre-wrap"
+                    style={{ color: 'var(--state-error)', background: 'var(--state-error-surface)', border: '1px solid var(--state-error)' }}>
                     {detailTask.error}
                   </div>
                 </div>
@@ -506,7 +527,7 @@ export default function Tasks() {
               {/* 阶段耗时 */}
               {detailTask.phase_timings && Object.keys(detailTask.phase_timings).length > 0 && (
                 <div>
-                  <p className="text-xs text-slate-400 mb-0.5">阶段耗时</p>
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>阶段耗时</p>
                   <div className="space-y-1">
                     {Object.entries(detailTask.phase_timings).map(([phaseKey, t]: [string, PhaseTiming]) => {
                       if (!t?.start) return null
@@ -516,10 +537,10 @@ export default function Tasks() {
                         : Date.now() - new Date(t.start).getTime()
                       return (
                         <div key={phaseKey} className="flex items-center justify-between text-xs">
-                          <span className="text-slate-600">
+                          <span style={{ color: 'var(--foreground-secondary)' }}>
                             {isDone ? '✓' : '⏳'} {PHASE_LABELS[phaseKey] || phaseKey}
                           </span>
-                          <span className="font-mono text-slate-500">{formatDuration(elapsed)}</span>
+                          <span className="font-mono" style={{ color: 'var(--foreground-tertiary)' }}>{formatDuration(elapsed)}</span>
                         </div>
                       )
                     })}
@@ -529,7 +550,7 @@ export default function Tasks() {
             </div>
 
             {/* 弹窗底部 */}
-            <div className="px-5 py-3 border-t border-slate-100 flex justify-end gap-2">
+            <div className="px-5 py-3 border-t flex justify-end gap-2" style={{ borderColor: 'var(--border)' }}>
               {detailTask.req_id && (
                 <button
                   onClick={() => {

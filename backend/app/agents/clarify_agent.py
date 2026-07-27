@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import time
 from typing import Any
 
@@ -553,6 +554,14 @@ class ClarifyAgent:
 
         # v2.31: 最终全文去重安全网——在所有问题生成完成后，按 field+question 全文去重，
         # 确保无论前面哪个环节遗漏，最终返回给用户的问题列表绝不重复。
+        # v2.39: 在去重前先合并逻辑矛盾检测问题（避免被去重逻辑误删）
+        contradiction_questions = self._detect_logical_contradictions(srr)
+        if contradiction_questions:
+            questions.extend(contradiction_questions)
+            logger.info(
+                "[ClarifyAgent] 逻辑矛盾检测问题已合并: {} 个",
+                len(contradiction_questions),
+            )
         questions = self._dedup_questions(questions, stage="final")
 
         logger.info("[ClarifyAgent] KB已回答: {}, 待人工澄清(LLM精炼): {}",
@@ -2049,6 +2058,268 @@ class ClarifyAgent:
         }
 
         return [impact_type_question, impact_scope_question]
+
+    # ========================================================================
+    # 逻辑矛盾检测（v2.39 新增）
+    # ========================================================================
+    # 识别需求文档中明显的自相矛盾表述（如"已存在仓房信息且不存在仓房信息"）。
+    # 这类矛盾通常源于：
+    #   1. 同一句中出现"X"与"不X/无X"的对立表述（存在/不存在、必须/不能、是/不是）
+    #   2. 错别字导致的逻辑冲突（如"仓房"误写为"仓库"或反向）
+    # 规则层只能做明显的模式匹配守卫，复杂语义矛盾由 LLM 在系统提示强化下识别。
+
+    # 逻辑矛盾正则模式：在同一短句（30 字符内）出现对立表述
+    LOGICAL_CONTRADICTION_PATTERNS: tuple[tuple[str, str], ...] = (
+        # 存在 X 且 不/无 存在 X（"已存在仓房信息且不存在仓房信息"）
+        (
+            r'(存在|有)([^，。；,;]{1,20}?)\s*(?:且|又|并|而|但|同时)\s*(?:不|无|未|没有)(?:存在|有)\2',
+            '同一句中「存在{X}」与「不存在{X}」自相矛盾'
+        ),
+        # 必须 X 且 不能/不可/不得 X
+        (
+            r'(?:必须|应当|需要|应)([^，。；,;]{1,20}?)\s*(?:且|又|并|而|但|同时)\s*(?:不能|不可|不得|禁止|不应)(?:\1)',
+            '同一句中「必须{X}」与「不能{X}」自相矛盾'
+        ),
+        # 是 X 且 不是 X
+        (
+            r'是([^，。；,;]{1,20}?)\s*(?:且|又|并|而|但|同时)\s*不是\1',
+            '同一句中「是{X}」与「不是{X}」自相矛盾'
+        ),
+        # 允许 X 且 禁止 X
+        (
+            r'(?:允许|可以|支持)([^，。；,;]{1,20}?)\s*(?:且|又|并|而|但|同时)\s*(?:禁止|不允许|不可|不能)(?:\1)',
+            '同一句中「允许{X}」与「禁止{X}」自相矛盾'
+        ),
+        # 包含 X 且 不包含 X
+        (
+            r'(?:包含|包括|含有)([^，。；,;]{1,20}?)\s*(?:且|又|并|而|但|同时)\s*(?:不包含|不包括|不含)(?:\1)',
+            '同一句中「包含{X}」与「不包含{X}」自相矛盾'
+        ),
+    )
+
+    # 易混淆术语对（错别字检测）：同一句中出现则可能存在错别字导致的逻辑冲突
+    CONFUSABLE_TERM_PAIRS: tuple[tuple[str, str], ...] = (
+        ('仓房', '仓库'),  # 仓储系统常见
+        ('账单', '订单'),
+        ('用户', '客户'),
+        ('商品', '产品'),
+        ('上架', '下架'),
+        ('启用', '禁用'),
+        ('登录', '登出'),
+        ('新增', '删除'),
+        ('入库', '出库'),
+    )
+
+    def _detect_logical_contradictions(self, srr: dict) -> list[dict]:
+        """检测需求文档中明显的逻辑矛盾与错别字冲突。
+
+        v2.39: 规则层守卫——识别「已存在 X 且不存在 X」等明显自相矛盾表述，
+        以及错别字导致的逻辑冲突（如「仓房」与「仓库」混用）。
+        检测到的问题作为 critical 级别的 conflict 类别问题加入澄清列表。
+
+        扫描范围：
+        1. 原始需求文本（_raw_text，最权威）
+        2. SRR 中各字符串字段（summary、业务规则、流程步骤等）
+
+        Args:
+            srr: SRR JSON 字典
+
+        Returns:
+            list[dict]: 逻辑矛盾问题列表，每项含 category="conflict"、priority="critical"
+        """
+        questions: list[dict] = []
+        req = srr.get("requirement", {}) or {}
+        req_title = req.get("title", "当前需求") or "当前需求"
+
+        # 收集待扫描文本（带来源标识，便于生成精准问题）
+        texts_to_scan: list[tuple[str, str]] = []  # (text, source_label)
+
+        # 1. 原始需求文本
+        raw_text = srr.get("_raw_text", "") or ""
+        if raw_text:
+            texts_to_scan.append((raw_text, "原始需求文档"))
+
+        # 2. SRR 各字段文本
+        summary = req.get("summary", "") or ""
+        if summary:
+            texts_to_scan.append((summary, "功能概述"))
+
+        # flows 中的步骤描述
+        flows = srr.get("flows", {}) or {}
+        hp = flows.get("happy_path", {}) or {}
+        for step in (hp.get("steps") or [])[:10]:
+            if isinstance(step, dict):
+                action = step.get("action", "") or ""
+                expect = step.get("expect", "") or ""
+                if action:
+                    texts_to_scan.append((action, "正常流程步骤"))
+                if expect:
+                    texts_to_scan.append((expect, "正常流程预期"))
+
+        for af in (flows.get("alternate_flows") or [])[:5]:
+            if isinstance(af, dict):
+                trigger = af.get("trigger", "") or ""
+                expect = af.get("expect", "") or ""
+                if trigger:
+                    texts_to_scan.append((trigger, "异常流程触发条件"))
+                if expect:
+                    texts_to_scan.append((expect, "异常流程预期"))
+
+        # 业务规则
+        cfi = srr.get("cross_fp_interactions") or {}
+        br = cfi.get("shared_business_rules") or srr.get("business_rules") or []
+        if isinstance(br, list):
+            for r in br[:8]:
+                if isinstance(r, dict):
+                    rule_text = r.get("rule", "") or r.get("description", "") or ""
+                    if rule_text:
+                        texts_to_scan.append((rule_text, "业务规则"))
+                elif isinstance(r, str) and r:
+                    texts_to_scan.append((r, "业务规则"))
+
+        # 验收标准
+        ac = srr.get("acceptance_criteria") or []
+        if isinstance(ac, list):
+            for a in ac[:5]:
+                if isinstance(a, dict):
+                    desc = a.get("description", "") or ""
+                    if desc:
+                        texts_to_scan.append((desc, "验收标准"))
+                elif isinstance(a, str) and a:
+                    texts_to_scan.append((a, "验收标准"))
+
+        # 全局约束
+        gc = cfi.get("global_constraints") or []
+        if isinstance(gc, list):
+            for g in gc[:5]:
+                if isinstance(g, str) and g:
+                    texts_to_scan.append((g, "全局约束"))
+
+        # 按句拆分扫描（避免跨句误匹配）
+        sentence_split = re.compile(r'[，。；,;\n]')
+        seen_contradictions: set[str] = set()  # 去重
+
+        for text, source in texts_to_scan:
+            if not text or len(text) < 4:
+                continue
+            # 拆分为短句扫描（避免跨句误匹配，且短句内的矛盾更精准）
+            # 不再扫描整段原文——跨句匹配会产生与短句匹配相同的矛盾，导致重复
+            sentences = [s.strip() for s in sentence_split.split(text) if s.strip()]
+            # 若文本本身就是单句（无分隔符），则扫描原文
+            paragraphs = sentences if sentences else [text]
+
+            for paragraph in paragraphs:
+                if len(paragraph) < 4:
+                    continue
+
+                # 模式1：直接对立表述（存在 X 且 不存在 X）
+                for pattern, desc_template in self.LOGICAL_CONTRADICTION_PATTERNS:
+                    matches = re.finditer(pattern, paragraph)
+                    for m in matches:
+                        matched_text = m.group(0)
+                        # 提取被对立的实体（group 1 通常是 X）
+                        entity = m.group(1) if m.lastindex and m.lastindex >= 1 else ""
+                        # 去重 key（避免同一段落多次匹配同一矛盾）
+                        dedup_key = f"{source}::{matched_text}"
+                        if dedup_key in seen_contradictions:
+                            continue
+                        seen_contradictions.add(dedup_key)
+
+                        desc = desc_template.replace('{X}', f'「{entity}」') if entity else desc_template
+                        questions.append({
+                            "id": f"contradiction_{len(questions) + 1}",
+                            "field": "requirement.logic_consistency",
+                            "priority": "critical",
+                            "category": "conflict",
+                            "question": (
+                                f"【{req_title}】{source}中检测到逻辑矛盾："
+                                f"「{matched_text}」——{desc}。"
+                                f"请确认该表述的真实意图，并修正矛盾内容。"
+                            ),
+                            "context": (
+                                f"该矛盾位于{source}中。逻辑矛盾会导致测试预期不确定——"
+                                f"无法判断应验证「{entity}」为存在还是不存在。"
+                                f"常见原因：①笔误（如「仓房」误写为「仓库」）；"
+                                f"②复制粘贴遗留；③需求变更未同步更新。"
+                                f"请明确正确表述后再继续生成 SRR。"
+                            ),
+                            "default_answer": "",
+                            "input_type": "select",
+                            "options": [
+                                f"应保留「存在{entity}」，删除矛盾部分",
+                                f"应保留「不存在{entity}」，删除矛盾部分",
+                                "为错别字，请修正后重新表述",
+                                "其他情况（请在下方补充说明）",
+                            ],
+                        })
+                        logger.info(
+                            "[ClarifyAgent] 逻辑矛盾检测命中: source={} matched={!r} desc={}",
+                            source, matched_text[:60], desc,
+                        )
+
+                # 模式2：易混淆术语对（错别字检测）
+                # 同一段落中出现易混淆术语对，且段落涉及"存在/不存在/必须/不能"等对立词
+                for term_a, term_b in self.CONFUSABLE_TERM_PAIRS:
+                    if term_a in paragraph and term_b in paragraph:
+                        # 进一步检查是否涉及对立表述
+                        has_opposition = any(
+                            opp in paragraph for opp in
+                            ['存在', '不存在', '必须', '不能', '禁止', '允许', '是', '不是']
+                        )
+                        if not has_opposition:
+                            continue
+                        # 避免误报：术语对距离过远（>30字符）可能是合理并列
+                        idx_a = paragraph.find(term_a)
+                        idx_b = paragraph.find(term_b)
+                        distance = abs(idx_a - idx_b)
+                        if distance > 30:
+                            continue
+
+                        matched_text = paragraph[max(0, min(idx_a, idx_b) - 5):
+                                                 max(idx_a, idx_b) + max(len(term_a), len(term_b)) + 5]
+                        dedup_key = f"{source}::{term_a}/{term_b}::{matched_text}"
+                        if dedup_key in seen_contradictions:
+                            continue
+                        seen_contradictions.add(dedup_key)
+
+                        questions.append({
+                            "id": f"contradiction_{len(questions) + 1}",
+                            "field": "requirement.logic_consistency",
+                            "priority": "critical",
+                            "category": "conflict",
+                            "question": (
+                                f"【{req_title}】{source}中检测到可能的错别字冲突："
+                                f"同一句中同时出现「{term_a}」与「{term_b}」，"
+                                f"且涉及对立表述（存在/不存在、必须/不能等）。"
+                                f"原文片段：「{matched_text}」。请确认是否为错别字。"
+                            ),
+                            "context": (
+                                f"该问题位于{source}中。"
+                                f"「{term_a}」与「{term_b}」是常见易混淆术语，"
+                                f"在同一句中并列出现且伴随对立表述时，"
+                                f"通常意味着其中一个是错别字，需要人工确认正确表述。"
+                                f"错别字会直接导致测试预期错误，必须澄清。"
+                            ),
+                            "default_answer": "",
+                            "input_type": "select",
+                            "options": [
+                                f"应统一为「{term_a}」",
+                                f"应统一为「{term_b}」",
+                                f"两者是不同概念，无需修改（请在下方补充说明各自含义）",
+                                "其他情况（请在下方补充说明）",
+                            ],
+                        })
+                        logger.info(
+                            "[ClarifyAgent] 错别字冲突检测命中: source={} terms={}/{} distance={}",
+                            source, term_a, term_b, distance,
+                        )
+
+        if questions:
+            logger.info(
+                "[ClarifyAgent] 逻辑矛盾检测: 共识别 {} 个矛盾点",
+                len(questions),
+            )
+        return questions
 
     def _ensure_critical_questions(
         self,

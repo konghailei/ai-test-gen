@@ -269,8 +269,8 @@ export default function KnowledgeQA() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="page-title flex items-center gap-2"><MessageSquare className="w-5 h-5 text-primary-500" /> 知识问答</h1>
-          <p className="text-sm text-slate-500 mt-1">基于知识库的智能问答 — 输入问题获取 AI 分析</p>
+          <h1 className="page-title flex items-center gap-2"><MessageSquare className="w-5 h-5" style={{ color: 'var(--brand-500)' }} /> 知识问答</h1>
+          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>基于知识库的智能问答 — 输入问题获取 AI 分析</p>
         </div>
         <button onClick={() => { setShowHistory(true); loadHistory(1) }} className="btn-secondary text-sm">
           <History className="w-4 h-4" /> 问答历史
@@ -281,12 +281,13 @@ export default function KnowledgeQA() {
       {availableModules.length > 0 && (
         <div className="card p-4">
           <div className="flex items-center gap-2 flex-wrap">
-            <Layers className="w-4 h-4 text-slate-400 flex-shrink-0" />
-            <span className="text-sm text-slate-500">问答范围：</span>
+            <Layers className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--foreground-quaternary)' }} />
+            <span className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>问答范围：</span>
             {selectedModules.length > 0 && (
               <button
                 onClick={() => setSelectedModules([])}
-                className="px-2.5 py-0.5 text-xs rounded-full bg-slate-200 text-slate-600 hover:bg-slate-300"
+                className="px-2.5 py-0.5 text-xs rounded-full hover:opacity-80"
+                style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}
               >
                 全部模块
               </button>
@@ -297,18 +298,18 @@ export default function KnowledgeQA() {
                 <button
                   key={m.id}
                   onClick={() => toggleModule(m.id)}
-                  className={`px-2.5 py-0.5 text-xs rounded-full transition-colors ${
-                    selected
-                      ? 'bg-primary-500 text-white'
-                      : 'bg-slate-100 text-slate-600 hover:bg-primary-50 hover:text-primary-600'
-                  }`}
+                  className="px-2.5 py-0.5 text-xs rounded-full transition-colors"
+                  style={selected
+                    ? { background: 'var(--brand-500)', color: '#ffffff' }
+                    : { background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }
+                  }
                 >
                   {m.name}
                 </button>
               )
             })}
             {selectedModules.length > 0 && (
-              <span className="text-xs text-primary-500 ml-1">
+              <span className="text-xs ml-1" style={{ color: 'var(--brand-500)' }}>
                 已选 {selectedModules.length} 个 · 仅在此范围内问答
               </span>
             )}
@@ -321,7 +322,7 @@ export default function KnowledgeQA() {
         {/* Messages */}
         <div className="flex-1 space-y-5 mb-4 max-h-[60vh] overflow-y-auto">
           {messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+            <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--foreground-quaternary)' }}>
               <MessageSquare className="w-12 h-12 mb-3 opacity-30" />
               <p className="text-sm font-medium">输入问题，基于知识库进行智能问答</p>
               <div className="flex flex-wrap gap-2 mt-6 max-w-lg justify-center">
@@ -331,7 +332,8 @@ export default function KnowledgeQA() {
                   '系统有哪些关键业务规则？',
                 ].map((q, i) => (
                   <button key={i} onClick={() => { setInput(q); inputRef.current?.focus() }}
-                    className="px-3 py-1.5 text-xs bg-slate-100 hover:bg-primary-50 text-slate-500 hover:text-primary-600 rounded-lg transition-colors">
+                    className="px-3 py-1.5 text-xs rounded-lg transition-colors"
+                    style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
                     {q}
                   </button>
                 ))}
@@ -342,24 +344,29 @@ export default function KnowledgeQA() {
           {messages.map(msg => (
             <div key={msg.id} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
               {msg.role !== 'user' && (
-                <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 ${
-                  msg.isError ? 'bg-red-100' : 'bg-primary-100'
-                }`}>
-                  {msg.isError ? <AlertCircle className="w-3.5 h-3.5 text-red-500" /> : <Bot className="w-3.5 h-3.5 text-primary-600" />}
+                <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
+                  style={{ background: msg.isError ? 'var(--state-error-surface)' : 'rgba(0, 122, 255, 0.12)' }}>
+                  {msg.isError ? <AlertCircle className="w-3.5 h-3.5" style={{ color: 'var(--state-error)' }} /> : <Bot className="w-3.5 h-3.5" style={{ color: 'var(--brand-500)' }} />}
                 </div>
               )}
 
               <div className={`max-w-[80%] ${msg.role === 'user' ? '' : ''}`}>
                 {msg.role === 'user' && (
-                  <div className="px-4 py-2.5 bg-primary-500 text-white rounded-2xl rounded-br-md text-sm shadow-sm">
+                  <div className="px-4 py-2.5 text-white text-sm shadow-sm"
+                    style={{ background: 'var(--brand-500)', borderRadius: 'calc(var(--radius) * 1.1) calc(var(--radius) * 1.1) calc(var(--radius) * 1.1) 0.375rem', boxShadow: 'var(--shadow-apple-sm)' }}>
                     {msg.content}
                   </div>
                 )}
 
                 {(msg.role === 'assistant' || msg.role === 'system') && (
-                  <div className={`rounded-2xl rounded-bl-md px-4 py-3 border ${
-                    msg.isError ? 'bg-red-50 border-red-100 text-red-700' : 'bg-slate-50 border-slate-100 text-slate-700'
-                  }`}>
+                  <div className="px-4 py-3 border text-sm"
+                    style={{
+                      borderRadius: 'calc(var(--radius) * 1.1) calc(var(--radius) * 1.1) 0.375rem calc(var(--radius) * 1.1)',
+                      ...(msg.isError
+                        ? { background: 'var(--state-error-surface)', borderColor: 'var(--state-error)', color: 'var(--state-error)' }
+                        : { background: 'var(--background-muted)', borderColor: 'var(--border)', color: 'var(--foreground-secondary)' }
+                      )
+                    }}>
                     {/* Markdown rendered content */}
                     <div className="text-sm leading-relaxed space-y-2 markdown-body">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -368,23 +375,23 @@ export default function KnowledgeQA() {
                     </div>
 
                     {msg.isStreaming && (
-                      <span className="inline-block w-2 h-4 bg-primary-400 animate-pulse rounded-sm mt-1" />
+                      <span className="inline-block w-2 h-4 animate-pulse rounded-sm mt-1" style={{ background: 'var(--brand-400)' }} />
                     )}
 
                     {/* Sources */}
                     {msg.sources && msg.sources.length > 0 && !msg.isStreaming && (
-                      <div className="mt-4 pt-3 border-t border-slate-200">
-                        <p className="text-xs font-medium text-slate-500 mb-2 flex items-center gap-1">
+                      <div className="mt-4 pt-3 border-t" style={{ borderColor: 'var(--border)' }}>
+                        <p className="text-xs font-medium mb-2 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}>
                           <BookOpen className="w-3 h-3" /> 参考来源
                         </p>
                         <div className="space-y-1">
                           {msg.sources.map((s, i) => (
-                            <div key={i} className="flex items-center gap-2 text-xs text-slate-500 py-0.5">
+                            <div key={i} className="flex items-center gap-2 text-xs py-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
                               {s.type === 'requirement'
-                                ? <FileText className="w-3 h-3 text-primary-400 flex-shrink-0" />
-                                : <TestTube className="w-3 h-3 text-amber-400 flex-shrink-0" />}
+                                ? <FileText className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--brand-400)' }} />
+                                : <TestTube className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--state-warning)' }} />}
                               <span className="truncate">{s.title}</span>
-                              <span className="text-slate-300 flex-shrink-0">{(s.similarity * 100).toFixed(0)}%</span>
+                              <span className="flex-shrink-0" style={{ color: 'var(--foreground-quaternary)' }}>{(s.similarity * 100).toFixed(0)}%</span>
                             </div>
                           ))}
                         </div>
@@ -394,7 +401,8 @@ export default function KnowledgeQA() {
                     {/* KB status warning */}
                     {msg.kbStatus && !msg.isStreaming && (
                       !msg.kbStatus.search_ok ? (
-                        <div className="mt-3 flex items-start gap-2 text-xs text-amber-600 bg-amber-50 rounded-md px-3 py-2">
+                        <div className="mt-3 flex items-start gap-2 text-xs rounded-md px-3 py-2"
+                          style={{ color: 'var(--state-warning)', background: 'var(--state-warning-surface)' }}>
                           <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                           <span>
                             知识库检索失败：{msg.kbStatus.error || '未知错误'}。
@@ -402,7 +410,8 @@ export default function KnowledgeQA() {
                           </span>
                         </div>
                       ) : msg.kbStatus.total === 0 && (!msg.sources || msg.sources.length === 0) ? (
-                        <div className="mt-3 flex items-start gap-2 text-xs text-slate-500 bg-slate-50 rounded-md px-3 py-2">
+                        <div className="mt-3 flex items-start gap-2 text-xs rounded-md px-3 py-2"
+                          style={{ color: 'var(--foreground-tertiary)', background: 'var(--background-muted)' }}>
                           <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                           <span>
                             知识库中暂无已归档的需求或测试用例。请先归档需求后再进行问答，以获得更准确的参考。
@@ -413,15 +422,16 @@ export default function KnowledgeQA() {
 
                     {/* Action bar */}
                     {!msg.isStreaming && msg.role !== 'system' && !msg.isError && (
-                      <div className="flex items-center gap-3 mt-3 pt-2 border-t border-slate-200/50">
+                      <div className="flex items-center gap-3 mt-3 pt-2 border-t" style={{ borderColor: 'rgba(229, 229, 234, 0.5)' }}>
                         {!msg.isCorrected && msg.recordId && (
                           <button onClick={() => startCorrect(msg)}
-                            className="text-[10px] text-slate-400 hover:text-primary-500 transition-colors flex items-center gap-1">
+                            className="text-[10px] transition-colors flex items-center gap-1"
+                            style={{ color: 'var(--foreground-quaternary)' }}>
                             <Pencil className="w-3 h-3" /> 纠错
                           </button>
                         )}
                         {msg.isCorrected && (
-                          <span className="text-[10px] text-emerald-500 flex items-center gap-1">
+                          <span className="text-[10px] flex items-center gap-1" style={{ color: 'var(--state-success)' }}>
                             <CheckCircle2 className="w-3 h-3" /> 已纠错
                           </span>
                         )}
@@ -432,8 +442,9 @@ export default function KnowledgeQA() {
               </div>
 
               {msg.role === 'user' && (
-                <div className="w-7 h-7 rounded-full bg-slate-200 flex items-center justify-center flex-shrink-0">
-                  <User className="w-3.5 h-3.5 text-slate-500" />
+                <div className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
+                  style={{ background: 'var(--background-muted)' }}>
+                  <User className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
                 </div>
               )}
             </div>
@@ -442,12 +453,12 @@ export default function KnowledgeQA() {
         </div>
 
         {/* Input */}
-        <div className="border-t border-slate-100 pt-4">
+        <div className="border-t pt-4" style={{ borderColor: 'var(--border)' }}>
           {activeRecordId && (
-            <div className="flex items-center gap-2 mb-2 text-xs text-slate-400">
+            <div className="flex items-center gap-2 mb-2 text-xs" style={{ color: 'var(--foreground-quaternary)' }}>
               <CornerDownRight className="w-3 h-3" />
               追问中 · <button onClick={() => { setActiveRecordId(null); setMessages([]) }}
-                className="text-primary-500 hover:underline">新话题</button>
+                className="hover:underline" style={{ color: 'var(--brand-500)' }}>新话题</button>
             </div>
           )}
           <div className="flex items-end gap-2">
@@ -477,11 +488,15 @@ export default function KnowledgeQA() {
 
       {/* Correction Modal */}
       {correctingId && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setCorrectingId(null)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }}
+          onClick={() => setCorrectingId(null)}>
+          <div className="max-w-lg w-full p-6 animate-slide-up"
+            style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }}
+            onClick={e => e.stopPropagation()}>
             <div className="flex items-center gap-2 mb-4">
-              <PenSquare className="w-5 h-5 text-primary-500" />
-              <h2 className="text-lg font-semibold text-slate-800">纠错回答</h2>
+              <PenSquare className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+              <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>纠错回答</h2>
             </div>
             <textarea value={correctText} onChange={e => setCorrectText(e.target.value)}
               className="w-full input-field text-sm min-h-[150px]" />
@@ -499,22 +514,25 @@ export default function KnowledgeQA() {
       {/* History sidebar */}
       {showHistory && (
         <div className="fixed inset-0 z-50 flex justify-end" onClick={() => setShowHistory(false)}>
-          <div className="bg-white shadow-2xl w-[420px] h-full flex flex-col" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between p-4 border-b border-slate-100">
-              <h2 className="text-base font-semibold text-slate-800">问答历史</h2>
-              <button onClick={() => setShowHistory(false)}><X className="w-5 h-5 text-slate-400" /></button>
+          <div className="w-[420px] h-full flex flex-col"
+            style={{ background: 'var(--background)', boxShadow: 'var(--shadow-apple-xl)' }}
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: 'var(--border)' }}>
+              <h2 className="text-base font-semibold" style={{ color: 'var(--foreground)' }}>问答历史</h2>
+              <button onClick={() => setShowHistory(false)}><X className="w-5 h-5" style={{ color: 'var(--foreground-quaternary)' }} /></button>
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-2">
               {historyRecords.map(r => (
                 <div key={r.id} onClick={() => handleHistoryClick(r.id)}
-                  className="p-3 bg-slate-50 hover:bg-primary-50 rounded-xl text-sm cursor-pointer transition-colors border border-transparent hover:border-primary-200">
-                  <p className="font-medium text-slate-700">{r.question}</p>
-                  <p className="text-xs text-slate-400 mt-1 line-clamp-2">{r.answer}</p>
-                  <p className="text-[10px] text-slate-400 mt-2">{r.created_at?.slice(0, 16)}</p>
+                  className="p-3 rounded-xl text-sm cursor-pointer transition-colors border border-transparent"
+                  style={{ background: 'var(--background-muted)' }}>
+                  <p className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{r.question}</p>
+                  <p className="text-xs mt-1 line-clamp-2" style={{ color: 'var(--foreground-quaternary)' }}>{r.answer}</p>
+                  <p className="text-[10px] mt-2" style={{ color: 'var(--foreground-quaternary)' }}>{r.created_at?.slice(0, 16)}</p>
                 </div>
               ))}
               {historyRecords.length === 0 && (
-                <p className="text-slate-400 text-center py-12 text-sm">暂无问答记录</p>
+                <p className="text-center py-12 text-sm" style={{ color: 'var(--foreground-quaternary)' }}>暂无问答记录</p>
               )}
             </div>
           </div>

@@ -423,34 +423,62 @@ export default function RequirementClarify() {
 
       {/* P1 修复：异步任务轮询中的进度提示（submitting/regenerating 时显示 taskMessage） */}
       {((submitting || regenerating) && taskMessage) && (
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-2xl p-6 text-center">
-          <Loader2 className="w-10 h-10 text-blue-500 mx-auto mb-2 animate-spin" />
-          <h2 className="text-base font-semibold text-blue-800 mb-1">任务进行中</h2>
-          <p className="text-sm text-blue-600">{taskMessage}</p>
+        <div
+          className="border p-6 text-center"
+          style={{
+            background: 'rgba(0, 122, 255, 0.06)',
+            borderColor: 'rgba(0, 122, 255, 0.12)',
+            borderRadius: 'calc(var(--radius) * 1.1)',
+          }}
+        >
+          <Loader2 className="w-10 h-10 mx-auto mb-2 animate-spin" style={{ color: 'var(--brand-500)' }} />
+          <h2 className="text-base font-semibold mb-1" style={{ color: 'var(--foreground)' }}>任务进行中</h2>
+          <p className="text-sm" style={{ color: 'var(--brand-500)' }}>{taskMessage}</p>
         </div>
       )}
 
       {done ? (
-        <div className="bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-100 rounded-2xl p-8 text-center">
-          <CheckCircle2 className="w-12 h-12 text-emerald-500 mx-auto mb-3" />
-          <h2 className="text-lg font-semibold text-emerald-800 mb-1">澄清已提交</h2>
-          <p className="text-sm text-emerald-600">{taskMessage || '需求已确认，SRR 已重新生成...'}</p>
+        <div
+          className="border p-8 text-center"
+          style={{
+            background: 'var(--state-success-surface)',
+            borderColor: 'var(--state-success)',
+            borderRadius: 'calc(var(--radius) * 1.1)',
+          }}
+        >
+          <CheckCircle2 className="w-12 h-12 mx-auto mb-3" style={{ color: 'var(--state-success)' }} />
+          <h2 className="text-lg font-semibold mb-1" style={{ color: 'var(--foreground)' }}>澄清已提交</h2>
+          <p className="text-sm" style={{ color: 'var(--state-success)' }}>{taskMessage || '需求已确认，SRR 已重新生成...'}</p>
         </div>
       ) : regenDone ? (
-        <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-100 rounded-2xl p-8 text-center">
-          <CheckCircle2 className="w-12 h-12 text-purple-500 mx-auto mb-3" />
-          <h2 className="text-lg font-semibold text-purple-800 mb-1">需求分析已重新生成</h2>
-          <p className="text-sm text-purple-600">{taskMessage || '即将返回需求详情...'}</p>
+        <div
+          className="border p-8 text-center"
+          style={{
+            background: 'rgba(0, 122, 255, 0.06)',
+            borderColor: 'rgba(0, 122, 255, 0.12)',
+            borderRadius: 'calc(var(--radius) * 1.1)',
+          }}
+        >
+          <CheckCircle2 className="w-12 h-12 mx-auto mb-3" style={{ color: 'var(--brand-500)' }} />
+          <h2 className="text-lg font-semibold mb-1" style={{ color: 'var(--foreground)' }}>需求分析已重新生成</h2>
+          <p className="text-sm" style={{ color: 'var(--brand-500)' }}>{taskMessage || '即将返回需求详情...'}</p>
         </div>
       ) : regenMode ? (
         <div className="space-y-5">
           {/* 已确认状态提示 */}
-          <div className="bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-100 rounded-2xl p-5">
+          <div
+            className="border p-5"
+            style={{
+              background: 'var(--state-success-surface)',
+              borderColor: 'var(--state-success)',
+              borderRadius: 'calc(var(--radius) * 1.1)',
+            }}
+          >
             <div className="flex items-center gap-3">
-              <CheckCircle2 className="w-6 h-6 text-emerald-500 flex-shrink-0" />
+              <CheckCircle2 className="w-6 h-6 flex-shrink-0" style={{ color: 'var(--state-success)' }} />
               <div>
-                <h2 className="text-base font-semibold text-emerald-800">需求已确认</h2>
-                <p className="text-sm text-emerald-600 mt-0.5">
+                <h2 className="text-base font-semibold" style={{ color: 'var(--foreground)' }}>需求已确认</h2>
+                <p className="text-sm mt-0.5" style={{ color: 'var(--state-success)' }}>
                   该需求已完成分析。如需补充信息，可在下方输入并重新生成需求分析。
                 </p>
               </div>
@@ -461,8 +489,8 @@ export default function RequirementClarify() {
           {history.length > 0 && (
             <div className="card p-4">
               <div className="flex items-center gap-2 mb-3">
-                <History className="w-4 h-4 text-slate-400" />
-                <h3 className="text-sm font-semibold text-slate-700">操作历史 ({history.length} 条)</h3>
+                <History className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
+                <h3 className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>操作历史 ({history.length} 条)</h3>
               </div>
               <div className="space-y-2">
                 {history.slice(0, 3).map((entry, idx) => {
@@ -473,23 +501,28 @@ export default function RequirementClarify() {
                   })
                   return (
                     <div key={idx} className="flex items-center gap-2 text-sm">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                        isClarify ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'
-                      }`}>
+                      <span
+                        className="px-2 py-0.5 text-xs font-medium"
+                        style={{
+                          borderRadius: 'calc(var(--radius) * 0.5)',
+                          background: isClarify ? 'rgba(0, 122, 255, 0.08)' : 'rgba(0, 122, 255, 0.12)',
+                          color: 'var(--brand-500)',
+                        }}
+                      >
                         {isClarify ? '人工澄清' : '重新生成'}
                       </span>
                       {isClarify && entry.questions && (
-                        <span className="text-slate-500">{entry.questions.length} 个问题</span>
+                        <span style={{ color: 'var(--foreground-tertiary)' }}>{entry.questions.length} 个问题</span>
                       )}
                       {!isClarify && entry.extra_notes && (
-                        <span className="text-slate-500 truncate max-w-xs">{entry.extra_notes.slice(0, 40)}...</span>
+                        <span className="truncate max-w-xs" style={{ color: 'var(--foreground-tertiary)' }}>{entry.extra_notes.slice(0, 40)}...</span>
                       )}
-                      <span className="text-xs text-slate-400 ml-auto font-mono">{timeStr}</span>
+                      <span className="text-xs ml-auto font-mono" style={{ color: 'var(--foreground-tertiary)' }}>{timeStr}</span>
                     </div>
                   )
                 })}
                 {history.length > 3 && (
-                  <p className="text-xs text-slate-400 text-center pt-1">
+                  <p className="text-xs text-center pt-1" style={{ color: 'var(--foreground-tertiary)' }}>
                     还有 {history.length - 3} 条更早的记录，请在需求详情页查看
                   </p>
                 )}
@@ -500,19 +533,26 @@ export default function RequirementClarify() {
           {/* 重新生成输入区 */}
           <div className="card p-5 space-y-4">
             <div className="flex items-center gap-2">
-              <RefreshCw className="w-5 h-5 text-primary-500" />
-              <h3 className="text-base font-semibold text-slate-800">重新生成需求分析</h3>
+              <RefreshCw className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+              <h3 className="text-base font-semibold" style={{ color: 'var(--foreground)' }}>重新生成需求分析</h3>
             </div>
-            <p className="text-sm text-slate-500">
+            <p className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>
               可上传补充需求文件或输入补充说明，系统将原始需求与补充内容合并后重新调用 AI 解析。
-              <strong className="text-amber-600">补充文件不替代原始文件</strong>，两者内容在详情页均可查看。
+              <strong style={{ color: 'var(--state-warning)' }}>补充文件不替代原始文件</strong>，两者内容在详情页均可查看。
               此操作会记录到澄清历史中。
             </p>
 
             {/* 文件上传区 */}
-            <div className="p-4 border-2 border-dashed border-amber-200 rounded-xl hover:border-amber-300 transition-colors bg-amber-50/30">
+            <div
+              className="p-4 border-2 border-dashed transition-colors"
+              style={{
+                borderColor: 'var(--state-warning)',
+                borderRadius: 'calc(var(--radius) * 0.75)',
+                background: 'rgba(255, 149, 0, 0.05)',
+              }}
+            >
               <label className="label flex items-center gap-1.5">
-                <FileUp className="w-4 h-4 text-amber-500" />
+                <FileUp className="w-4 h-4" style={{ color: 'var(--state-warning)' }} />
                 上传补充需求文件（可选，支持多选 .md / .docx / .txt）
               </label>
               <input
@@ -527,9 +567,10 @@ export default function RequirementClarify() {
                   e.target.value = ''
                 }}
                 disabled={regenerating}
-                className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-medium file:bg-amber-50 file:text-amber-700 hover:file:bg-amber-100 disabled:opacity-50"
+                className="block w-full text-sm disabled:opacity-50"
+                style={{ color: 'var(--foreground-tertiary)' }}
               />
-              <p className="text-xs text-amber-600 mt-1">
+              <p className="text-xs mt-1" style={{ color: 'var(--state-warning)' }}>
                 补充文件可纠正原始文件中的错误，但不会替代原始文件内容
               </p>
             </div>
@@ -537,17 +578,25 @@ export default function RequirementClarify() {
             {/* 已选文件列表 */}
             {regenFiles.length > 0 && (
               <div className="space-y-2">
-                <p className="text-xs text-slate-400">已选择 {regenFiles.length} 个文件：</p>
+                <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>已选择 {regenFiles.length} 个文件：</p>
                 {regenFiles.map((f, i) => (
-                  <div key={i} className="flex items-center justify-between bg-slate-50 p-2.5 rounded-lg">
-                    <span className="text-xs text-slate-600 flex items-center gap-1.5">
-                      <FileUp className="w-3.5 h-3.5 text-slate-400" />
+                  <div
+                    key={i}
+                    className="flex items-center justify-between p-2.5"
+                    style={{
+                      background: 'var(--background-muted)',
+                      borderRadius: 'calc(var(--radius) * 0.5)',
+                    }}
+                  >
+                    <span className="text-xs flex items-center gap-1.5" style={{ color: 'var(--foreground-secondary)' }}>
+                      <FileUp className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
                       {f.name}
-                      <span className="text-slate-400">({(f.size / 1024).toFixed(1)} KB)</span>
+                      <span style={{ color: 'var(--foreground-tertiary)' }}>({(f.size / 1024).toFixed(1)} KB)</span>
                     </span>
                     <button
                       onClick={() => setRegenFiles(prev => prev.filter((_, idx) => idx !== i))}
-                      className="text-slate-400 hover:text-red-500 p-1"
+                      className="p-1"
+                      style={{ color: 'var(--foreground-tertiary)' }}
                       title="移除"
                       disabled={regenerating}
                     >
@@ -558,7 +607,7 @@ export default function RequirementClarify() {
               </div>
             )}
 
-            <div className="border-t border-slate-100 pt-3">
+            <div className="pt-3" style={{ borderTop: '1px solid var(--border)' }}>
               <label className="label">补充说明（可选，与文件至少填写一项）</label>
               <textarea
                 value={regenNotes}
@@ -570,7 +619,15 @@ export default function RequirementClarify() {
               />
             </div>
             {error && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 flex items-start gap-2">
+              <div
+                className="p-3 border text-sm flex items-start gap-2"
+                style={{
+                  background: 'var(--state-error-surface)',
+                  borderColor: 'var(--state-error)',
+                  borderRadius: 'calc(var(--radius) * 0.75)',
+                  color: 'var(--state-error)',
+                }}
+              >
                 <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" /> {error}
               </div>
             )}
@@ -594,13 +651,20 @@ export default function RequirementClarify() {
           {/* ===== 顶部状态栏 ===== */}
           <div className="card p-4 space-y-3">
             <div className="flex items-center gap-3">
-              <MessageCircle className="w-6 h-6 text-primary-500" />
+              <MessageCircle className="w-6 h-6" style={{ color: 'var(--brand-500)' }} />
               <div className="flex-1">
-                <h1 className="text-xl font-bold text-slate-900">需求澄清</h1>
-                <p className="text-sm text-slate-400">补充以下信息可让需求分析更精确</p>
+                <h1 className="text-xl font-bold" style={{ color: 'var(--foreground)' }}>需求澄清</h1>
+                <p className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>补充以下信息可让需求分析更精确</p>
               </div>
               {qualityReport && (
-                <div className={`px-3 py-1.5 rounded-lg text-sm font-medium ${scorePass ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+                <div
+                  className="px-3 py-1.5 text-sm font-medium"
+                  style={{
+                    borderRadius: 'calc(var(--radius) * 0.5)',
+                    background: scorePass ? 'var(--state-success-surface)' : 'var(--state-warning-surface)',
+                    color: scorePass ? 'var(--state-success)' : 'var(--state-warning)',
+                  }}
+                >
                   质量评分: {score.toFixed(2)} {scorePass ? '✅' : '❌'}
                 </div>
               )}
@@ -608,7 +672,15 @@ export default function RequirementClarify() {
 
             {/* 冷启动提示 */}
             {coldStart && (
-              <div className="flex items-center gap-2 px-3 py-2 bg-sky-50 border border-sky-100 rounded-lg text-sm text-sky-700">
+              <div
+                className="flex items-center gap-2 px-3 py-2 border text-sm"
+                style={{
+                  background: 'rgba(0, 122, 255, 0.06)',
+                  borderColor: 'rgba(0, 122, 255, 0.12)',
+                  borderRadius: 'calc(var(--radius) * 0.5)',
+                  color: 'var(--brand-500)',
+                }}
+              >
                 <Snowflake className="w-4 h-4 flex-shrink-0" />
                 <span>冷启动模式：知识库为空或为该产品首个需求，质量阈值已放宽至 0.60，建议人工重点审核</span>
               </div>
@@ -617,21 +689,29 @@ export default function RequirementClarify() {
             {/* 进度条 */}
             {questions.length > 0 && (
               <div className="space-y-1">
-                <div className="flex items-center justify-between text-xs text-slate-500">
+                <div className="flex items-center justify-between text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                   <span>进度: {answeredCount}/{totalCount} 已回答{skippedCount > 0 && ` · ${skippedCount} 已跳过`}</span>
                   <span>{Math.round((answeredCount / totalCount) * 100)}%</span>
                 </div>
-                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                <div className="h-2 rounded-full overflow-hidden" style={{ background: 'var(--background-muted)' }}>
                   <div
-                    className="h-full bg-primary-500 rounded-full transition-all duration-300"
-                    style={{ width: `${(answeredCount / totalCount) * 100}%` }}
+                    className="h-full rounded-full transition-all duration-300"
+                    style={{ width: `${(answeredCount / totalCount) * 100}%`, background: 'var(--brand-500)' }}
                   />
                 </div>
               </div>
             )}
 
             {error && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700 flex items-start gap-2">
+              <div
+                className="p-3 border text-sm flex items-start gap-2"
+                style={{
+                  background: 'var(--state-error-surface)',
+                  borderColor: 'var(--state-error)',
+                  borderRadius: 'calc(var(--radius) * 0.75)',
+                  color: 'var(--state-error)',
+                }}
+              >
                 <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
                 <span>{error}</span>
               </div>
@@ -639,14 +719,42 @@ export default function RequirementClarify() {
 
             {/* 草稿恢复提示 */}
             {draftPrompt && (
-              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800 flex items-center justify-between gap-3">
+              <div
+                className="p-3 border text-sm flex items-center justify-between gap-3"
+                style={{
+                  background: 'var(--state-warning-surface)',
+                  borderColor: 'var(--state-warning)',
+                  borderRadius: 'calc(var(--radius) * 0.75)',
+                  color: 'var(--state-warning)',
+                }}
+              >
                 <div className="flex items-center gap-2">
                   <Save className="w-4 h-4 flex-shrink-0" />
                   <span>检测到未提交草稿（{new Date(draftPrompt.timestamp).toLocaleString()}），是否恢复？</span>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={restoreDraft} className="px-3 py-1 bg-amber-600 text-white rounded-lg text-xs hover:bg-amber-700">恢复</button>
-                  <button onClick={dismissDraft} className="px-3 py-1 bg-white border border-amber-300 text-amber-700 rounded-lg text-xs hover:bg-amber-50">丢弃</button>
+                  <button
+                    onClick={restoreDraft}
+                    className="px-3 py-1 text-white text-xs"
+                    style={{
+                      background: 'var(--state-warning)',
+                      borderRadius: 'calc(var(--radius) * 0.5)',
+                    }}
+                  >
+                    恢复
+                  </button>
+                  <button
+                    onClick={dismissDraft}
+                    className="px-3 py-1 border text-xs"
+                    style={{
+                      background: 'var(--background)',
+                      borderColor: 'var(--state-warning)',
+                      color: 'var(--state-warning)',
+                      borderRadius: 'calc(var(--radius) * 0.5)',
+                    }}
+                  >
+                    丢弃
+                  </button>
                 </div>
               </div>
             )}
@@ -657,41 +765,68 @@ export default function RequirementClarify() {
             <div className="card overflow-hidden">
               <button
                 onClick={() => setShowKbPanel(!showKbPanel)}
-                className="w-full flex items-center gap-2 p-4 hover:bg-slate-50 transition-colors"
+                className="w-full flex items-center gap-2 p-4 transition-colors"
               >
-                {showKbPanel ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
-                <BookOpen className="w-4 h-4 text-primary-500" />
-                <span className="text-sm font-medium text-slate-700">KB 已自动补全 ({autoAugmentations.length} 项)</span>
+                {showKbPanel
+                  ? <ChevronDown className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
+                  : <ChevronRight className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />}
+                <BookOpen className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+                <span className="text-sm font-medium" style={{ color: 'var(--foreground-secondary)' }}>KB 已自动补全 ({autoAugmentations.length} 项)</span>
                 {!showKbPanel && (
-                  <span className="text-xs text-slate-400 ml-auto">无需人工回答</span>
+                  <span className="text-xs ml-auto" style={{ color: 'var(--foreground-tertiary)' }}>无需人工回答</span>
                 )}
               </button>
               {showKbPanel && (
-                <div className="px-4 pb-4 space-y-2 border-t border-slate-100 pt-3">
+                <div className="px-4 pb-4 space-y-2 pt-3" style={{ borderTop: '1px solid var(--border)' }}>
                   {autoAugmentations.map((aug, i) => {
                     const valueStr = formatAugValue(aug.value)
                     return (
-                      <details key={i} className="group border border-slate-100 rounded-lg overflow-hidden">
-                        <summary className="cursor-pointer flex items-start gap-2 text-sm p-2.5 hover:bg-slate-50 transition-colors">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5" />
+                      <details
+                        key={i}
+                        className="group border overflow-hidden"
+                        style={{
+                          borderColor: 'var(--border)',
+                          borderRadius: 'calc(var(--radius) * 0.5)',
+                        }}
+                      >
+                        <summary className="cursor-pointer flex items-start gap-2 text-sm p-2.5 transition-colors">
+                          <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5" style={{ color: 'var(--state-success)' }} />
                           <div className="flex-1">
-                            <span className="text-slate-600">
-                              <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded text-primary-600">{aug.field}</code>
+                            <span style={{ color: 'var(--foreground-secondary)' }}>
+                              <code
+                                className="text-xs px-1.5 py-0.5"
+                                style={{
+                                  background: 'var(--background-muted)',
+                                  borderRadius: 'calc(var(--radius) * 0.25)',
+                                  color: 'var(--brand-500)',
+                                }}
+                              >
+                                {aug.field}
+                              </code>
                               {' ← '}
-                              {aug.source_req_id && <span className="text-slate-500">{aug.source_req_id} </span>}
-                              <span className="text-slate-400">(相似度 {(aug.similarity * 100).toFixed(0)}%)</span>
+                              {aug.source_req_id && <span style={{ color: 'var(--foreground-tertiary)' }}>{aug.source_req_id} </span>}
+                              <span style={{ color: 'var(--foreground-tertiary)' }}>(相似度 {(aug.similarity * 100).toFixed(0)}%)</span>
                             </span>
                             {valueStr && (
-                              <p className="text-xs text-slate-400 mt-1 line-clamp-2 group-open:line-clamp-none">
+                              <p className="text-xs mt-1 line-clamp-2 group-open:line-clamp-none" style={{ color: 'var(--foreground-tertiary)' }}>
                                 {valueStr.slice(0, 200)}{valueStr.length > 200 ? '...' : ''}
                               </p>
                             )}
                           </div>
-                          <span className="text-slate-300 group-open:hidden text-xs mt-0.5">▸</span>
-                          <span className="text-slate-300 hidden group-open:inline text-xs mt-0.5">▾</span>
+                          <span className="group-open:hidden text-xs mt-0.5" style={{ color: 'var(--foreground-quaternary)' }}>▸</span>
+                          <span className="hidden group-open:inline text-xs mt-0.5" style={{ color: 'var(--foreground-quaternary)' }}>▾</span>
                         </summary>
                         {valueStr && (
-                          <pre className="p-2.5 bg-slate-50 border-t border-slate-100 text-[11px] text-slate-600 leading-relaxed whitespace-pre-wrap overflow-auto max-h-60">{valueStr}</pre>
+                          <pre
+                            className="p-2.5 border-t text-[11px] leading-relaxed whitespace-pre-wrap overflow-auto max-h-60"
+                            style={{
+                              background: 'var(--background-muted)',
+                              borderColor: 'var(--border)',
+                              color: 'var(--foreground-secondary)',
+                            }}
+                          >
+                            {valueStr}
+                          </pre>
                         )}
                       </details>
                     )
@@ -703,41 +838,77 @@ export default function RequirementClarify() {
 
           {/* ===== 字段冲突提示区 ===== */}
           {fieldConflicts.length > 0 && (
-            <div className="card p-4 space-y-3 border-amber-200">
+            <div className="card p-4 space-y-3" style={{ borderColor: 'var(--state-warning)' }}>
               <div className="flex items-center gap-2">
-                <AlertCircle className="w-5 h-5 text-amber-500" />
-                <h3 className="text-sm font-semibold text-slate-700">检测到 {fieldConflicts.length} 处字段冲突，请确认</h3>
+                <AlertCircle className="w-5 h-5" style={{ color: 'var(--state-warning)' }} />
+                <h3 className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>检测到 {fieldConflicts.length} 处字段冲突，请确认</h3>
               </div>
               {fieldConflicts.map((c, i) => (
-                <div key={i} className="p-3 bg-amber-50/50 rounded-xl space-y-2">
+                <div
+                  key={i}
+                  className="p-3 space-y-2"
+                  style={{
+                    background: 'var(--state-warning-surface)',
+                    borderRadius: 'calc(var(--radius) * 0.75)',
+                  }}
+                >
                   <div className="flex items-center gap-2">
-                    <code className="text-xs bg-white px-1.5 py-0.5 rounded text-amber-700 border border-amber-200">{c.field}</code>
-                    <span className="text-xs text-slate-400">相似度 {(c.kb_similarity * 100).toFixed(0)}%</span>
+                    <code
+                      className="text-xs px-1.5 py-0.5 border"
+                      style={{
+                        background: 'var(--background)',
+                        color: 'var(--state-warning)',
+                        borderColor: 'var(--state-warning)',
+                        borderRadius: 'calc(var(--radius) * 0.25)',
+                      }}
+                    >
+                      {c.field}
+                    </code>
+                    <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>相似度 {(c.kb_similarity * 100).toFixed(0)}%</span>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-sm">
-                    <div className="p-2 bg-white rounded-lg border border-slate-200">
-                      <div className="text-xs text-slate-400 mb-1">原文值 ({c.existing_source})</div>
-                      <div className="text-slate-700 text-xs break-all">{String(c.existing_value).slice(0, 100)}</div>
+                    <div
+                      className="p-2 border"
+                      style={{
+                        background: 'var(--background)',
+                        borderColor: 'var(--border)',
+                        borderRadius: 'calc(var(--radius) * 0.5)',
+                      }}
+                    >
+                      <div className="text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>原文值 ({c.existing_source})</div>
+                      <div className="text-xs break-all" style={{ color: 'var(--foreground-secondary)' }}>{String(c.existing_value).slice(0, 100)}</div>
                     </div>
-                    <div className="p-2 bg-white rounded-lg border border-slate-200">
-                      <div className="text-xs text-slate-400 mb-1">KB 建议 ({c.suggested_source})</div>
-                      <div className="text-slate-700 text-xs break-all">{String(c.suggested_value).slice(0, 100)}</div>
+                    <div
+                      className="p-2 border"
+                      style={{
+                        background: 'var(--background)',
+                        borderColor: 'var(--border)',
+                        borderRadius: 'calc(var(--radius) * 0.5)',
+                      }}
+                    >
+                      <div className="text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>KB 建议 ({c.suggested_source})</div>
+                      <div className="text-xs break-all" style={{ color: 'var(--foreground-secondary)' }}>{String(c.suggested_value).slice(0, 100)}</div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {(['existing', 'kb', 'custom'] as const).map(choice => (
-                      <button
-                        key={choice}
-                        onClick={() => setConflictResolution(c.field, choice)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                          conflictResolutions[c.field] === choice
-                            ? 'bg-primary-500 text-white'
-                            : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300'
-                        }`}
-                      >
-                        {choice === 'existing' ? '采用原文' : choice === 'kb' ? '采用 KB' : '自定义'}
-                      </button>
-                    ))}
+                    {(['existing', 'kb', 'custom'] as const).map(choice => {
+                      const isActive = conflictResolutions[c.field] === choice
+                      return (
+                        <button
+                          key={choice}
+                          onClick={() => setConflictResolution(c.field, choice)}
+                          className="px-3 py-1.5 text-xs font-medium border transition-all"
+                          style={{
+                            borderRadius: 'calc(var(--radius) * 0.5)',
+                            background: isActive ? 'var(--brand-500)' : 'var(--background)',
+                            borderColor: isActive ? 'var(--brand-500)' : 'var(--border)',
+                            color: isActive ? '#ffffff' : 'var(--foreground-secondary)',
+                          }}
+                        >
+                          {choice === 'existing' ? '采用原文' : choice === 'kb' ? '采用 KB' : '自定义'}
+                        </button>
+                      )
+                    })}
                   </div>
                   {conflictResolutions[c.field] === 'custom' && (
                     <textarea
@@ -755,14 +926,14 @@ export default function RequirementClarify() {
 
           {/* ===== 人工澄清问题区 ===== */}
           {questions.length === 0 && autoAugmentations.length === 0 ? (
-            <div className="card p-8 text-center text-slate-400">
+            <div className="card p-8 text-center" style={{ color: 'var(--foreground-tertiary)' }}>
               <FileText className="w-10 h-10 mx-auto mb-2 opacity-50" />
               <p>未检测到需要澄清的问题</p>
               <p className="text-xs mt-1">当前需求信息已足够完整</p>
             </div>
           ) : questions.length === 0 ? (
-            <div className="card p-6 text-center text-slate-500">
-              <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto mb-2" />
+            <div className="card p-6 text-center" style={{ color: 'var(--foreground-tertiary)' }}>
+              <CheckCircle2 className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--state-success)' }} />
               <p className="text-sm">所有缺口已由 KB 自动补全，无需人工澄清</p>
             </div>
           ) : (
@@ -827,25 +998,38 @@ export default function RequirementClarify() {
                   className="input-field text-sm"
                   placeholder="如有其他需要补充的信息，请在此填写（可选）"
                 />
-                <p className="text-xs text-slate-400">补充说明将一并提交给 AI，帮助生成更准确的需求分析</p>
+                <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>补充说明将一并提交给 AI，帮助生成更准确的需求分析</p>
               </div>
             </div>
           )}
 
           {/* ===== 底部操作栏（sticky） ===== */}
           {questions.length > 0 && (
-            <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-4 py-3 shadow-lg z-10">
+            <div
+              className="fixed bottom-0 left-0 right-0 px-4 py-3 z-10"
+              style={{
+                background: 'var(--background)',
+                borderTop: '1px solid var(--border)',
+                boxShadow: 'var(--shadow-apple-md)',
+              }}
+            >
               <div className="max-w-3xl mx-auto flex items-center justify-between gap-4">
                 {/* 左：草稿状态 */}
-                <div className="flex items-center gap-2 text-xs text-slate-400">
+                <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                   {draftSaved ? (
-                    <><Save className="w-3.5 h-3.5 text-emerald-500" /><span className="text-emerald-600">草稿已保存</span></>
+                    <>
+                      <Save className="w-3.5 h-3.5" style={{ color: 'var(--state-success)' }} />
+                      <span style={{ color: 'var(--state-success)' }}>草稿已保存</span>
+                    </>
                   ) : (
-                    <><Save className="w-3.5 h-3.5" /><span>草稿自动保存中</span></>
+                    <>
+                      <Save className="w-3.5 h-3.5" />
+                      <span>草稿自动保存中</span>
+                    </>
                   )}
                 </div>
                 {/* 中：进度 */}
-                <div className="text-xs text-slate-500 hidden sm:block">
+                <div className="text-xs hidden sm:block" style={{ color: 'var(--foreground-tertiary)' }}>
                   {answeredCount}/{totalCount} 已回答{skippedCount > 0 && ` · ${skippedCount} 已跳过`}
                 </div>
                 {/* 右：操作按钮 */}
@@ -882,18 +1066,27 @@ interface QuestionGroupProps {
 }
 
 function QuestionGroup({ title, icon, count, expanded, onToggle, accentColor, children }: QuestionGroupProps) {
-  const headerBg = accentColor === 'red' ? 'bg-red-50/50' : 'bg-amber-50/50'
-  const headerText = accentColor === 'red' ? 'text-red-700' : 'text-amber-700'
+  const accentColorVar = accentColor === 'red' ? 'var(--state-error)' : 'var(--state-warning)'
+  const accentSurfaceVar = accentColor === 'red' ? 'var(--state-error-surface)' : 'var(--state-warning-surface)'
   return (
-    <div className={`rounded-2xl border ${accentColor === 'red' ? 'border-red-100' : 'border-amber-100'} overflow-hidden`}>
+    <div
+      className="border overflow-hidden"
+      style={{
+        borderColor: accentColorVar,
+        borderRadius: 'calc(var(--radius) * 1.1)',
+      }}
+    >
       <button
         onClick={onToggle}
-        className={`w-full flex items-center gap-2 p-3 ${headerBg} hover:bg-opacity-75 transition-colors`}
+        className="w-full flex items-center gap-2 p-3 transition-colors"
+        style={{ background: accentSurfaceVar }}
       >
-        {expanded ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
+        {expanded
+          ? <ChevronDown className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
+          : <ChevronRight className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />}
         <span className="text-sm font-semibold">{icon}</span>
-        <span className={`text-sm font-semibold ${headerText}`}>{title}</span>
-        <span className={`text-xs ${headerText} opacity-70`}>({count} 个问题)</span>
+        <span className="text-sm font-semibold" style={{ color: accentColorVar }}>{title}</span>
+        <span className="text-xs opacity-70" style={{ color: accentColorVar }}>({count} 个问题)</span>
       </button>
       {expanded && (
         <div className="p-3 space-y-3">
@@ -923,16 +1116,28 @@ function QuestionCard({ question: q, answer, isSkipped, onAnswer, onSkip, onUseD
   const isSelect = q.input_type === 'select' || q.input_type === 'multi_select'
   const isMulti = q.input_type === 'multi_select'
   const selOptions = q.options || []
-  const accentBorder = accentColor === 'red' ? 'border-l-red-500' : 'border-l-amber-500'
+  const accentBorderColor = accentColor === 'red' ? 'var(--state-error)' : 'var(--state-warning)'
 
   return (
-    <div className={`relative p-4 bg-white rounded-xl border border-slate-200 border-l-4 ${accentBorder} ${isSkipped ? 'opacity-50' : ''}`}>
+    <div
+      className={`relative p-4 border border-l-4 ${isSkipped ? 'opacity-50' : ''}`}
+      style={{
+        background: 'var(--background)',
+        borderColor: 'var(--border)',
+        borderLeftColor: accentBorderColor,
+        borderRadius: 'calc(var(--radius) * 0.75)',
+      }}
+    >
       {/* 右上角操作 */}
       <div className="absolute top-3 right-3 flex items-center gap-1">
         {q.default_answer && !isSkipped && (
           <button
             onClick={onUseDefault}
-            className="flex items-center gap-1 px-2 py-1 text-xs text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
+            className="flex items-center gap-1 px-2 py-1 text-xs transition-colors"
+            style={{
+              color: 'var(--brand-500)',
+              borderRadius: 'calc(var(--radius) * 0.5)',
+            }}
             title="使用建议答案"
           >
             <Wand2 className="w-3 h-3" /> 建议答案
@@ -940,9 +1145,12 @@ function QuestionCard({ question: q, answer, isSkipped, onAnswer, onSkip, onUseD
         )}
         <button
           onClick={onSkip}
-          className={`flex items-center gap-1 px-2 py-1 text-xs rounded-lg transition-colors ${
-            isSkipped ? 'text-slate-500 bg-slate-100' : 'text-slate-400 hover:bg-slate-100'
-          }`}
+          className="flex items-center gap-1 px-2 py-1 text-xs transition-colors"
+          style={{
+            color: isSkipped ? 'var(--foreground-tertiary)' : 'var(--foreground-tertiary)',
+            background: isSkipped ? 'var(--background-muted)' : 'transparent',
+            borderRadius: 'calc(var(--radius) * 0.5)',
+          }}
           title={isSkipped ? '取消跳过' : '跳过此题'}
         >
           <SkipForward className="w-3 h-3" /> {isSkipped ? '取消跳过' : '跳过'}
@@ -951,19 +1159,36 @@ function QuestionCard({ question: q, answer, isSkipped, onAnswer, onSkip, onUseD
 
       {/* 问题文本 */}
       <div className="mb-2 pr-24">
-        <p className="text-sm font-medium text-slate-700">{q.question}</p>
+        <p className="text-sm font-medium" style={{ color: 'var(--foreground-secondary)' }}>{q.question}</p>
         <button
           onClick={() => setShowContext(!showContext)}
-          className="text-xs text-slate-400 hover:text-slate-600 mt-0.5"
+          className="text-xs mt-0.5"
+          style={{ color: 'var(--foreground-tertiary)' }}
         >
           {showContext ? '隐藏说明' : '为什么需要这个？'}
         </button>
         {showContext && (
-          <p className="text-xs text-slate-500 mt-1 p-2 bg-slate-50 rounded-lg">{q.context}</p>
+          <p
+            className="text-xs mt-1 p-2"
+            style={{
+              color: 'var(--foreground-tertiary)',
+              background: 'var(--background-muted)',
+              borderRadius: 'calc(var(--radius) * 0.5)',
+            }}
+          >
+            {q.context}
+          </p>
         )}
         {/* 分类标签 */}
         {q.category && (
-          <span className="inline-block mt-1 px-1.5 py-0.5 text-[10px] bg-slate-100 text-slate-500 rounded">
+          <span
+            className="inline-block mt-1 px-1.5 py-0.5 text-[10px]"
+            style={{
+              background: 'var(--background-muted)',
+              color: 'var(--foreground-tertiary)',
+              borderRadius: 'calc(var(--radius) * 0.25)',
+            }}
+          >
             {q.category === 'cold_start' ? '❄️ 冷启动' :
              q.category === 'gap' ? '🔍 遗漏检测' :
              q.category === 'ambiguity' ? '❓ 歧义' :
@@ -996,12 +1221,22 @@ function QuestionCard({ question: q, answer, isSkipped, onAnswer, onSkip, onUseD
                         onAnswer(answer === opt ? '' : opt)
                       }
                     }}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-sm border transition-all ${
-                      isSelected ? 'bg-primary-50 border-primary-300 text-primary-700' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
-                    }`}
+                    className="w-full text-left px-3 py-2 text-sm border transition-all"
+                    style={{
+                      borderRadius: 'calc(var(--radius) * 0.5)',
+                      background: isSelected ? 'rgba(0, 122, 255, 0.08)' : 'var(--background)',
+                      borderColor: isSelected ? 'rgba(0, 122, 255, 0.3)' : 'var(--border)',
+                      color: isSelected ? 'var(--brand-500)' : 'var(--foreground-secondary)',
+                    }}
                   >
                     <span className="inline-flex items-center gap-2">
-                      <span className={`w-4 h-4 rounded-${isMulti ? 'sm' : 'full'} border-2 flex items-center justify-center ${isSelected ? 'border-primary-500 bg-primary-500' : 'border-slate-300'}`}>
+                      <span
+                        className={`w-4 h-4 rounded-${isMulti ? 'sm' : 'full'} border-2 flex items-center justify-center`}
+                        style={{
+                          borderColor: isSelected ? 'var(--brand-500)' : 'var(--input)',
+                          background: isSelected ? 'var(--brand-500)' : 'transparent',
+                        }}
+                      >
                         {isSelected && <CheckCircle2 className="w-3 h-3 text-white" />}
                       </span>
                       {opt}
@@ -1031,7 +1266,7 @@ function QuestionCard({ question: q, answer, isSkipped, onAnswer, onSkip, onUseD
 
       {/* 跳过状态提示 */}
       {isSkipped && (
-        <div className="text-xs text-slate-400 italic mt-2">此问题已跳过</div>
+        <div className="text-xs italic mt-2" style={{ color: 'var(--foreground-tertiary)' }}>此问题已跳过</div>
       )}
     </div>
   )

@@ -17,11 +17,11 @@ function EditModal({
   const [d, setD] = useState(description)
   const [v, setV] = useState(version || '1.0')
   return (
-    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !saving && onClose()}>
-      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} onClick={() => !saving && onClose()}>
+      <div className="max-w-md w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
-          <Edit3 className="w-5 h-5 text-primary-500" />
-          <h2 className="text-lg font-semibold text-slate-800">编辑项目</h2>
+          <Edit3 className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+          <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>编辑项目</h2>
         </div>
         <div className="space-y-3">
           <div>
@@ -57,8 +57,8 @@ function AddForm({ onAdd, onCancel, adding }: {
   const [desc, setDesc] = useState('')
   const [version, setVersion] = useState('1.0')
   return (
-    <div className="flex items-start gap-2 mb-4 p-3 bg-slate-50 rounded-xl">
-      <span className="badge bg-primary-100 text-primary-600 text-xs shrink-0 mt-1">项目</span>
+    <div className="flex items-start gap-2 mb-4 p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.6)' }}>
+      <span className="badge text-xs shrink-0 mt-1" style={{ background: 'rgba(0, 122, 255, 0.12)', color: 'var(--brand-500)' }}>项目</span>
       <div className="flex-1 space-y-2">
         <input value={name} onChange={e => setName(e.target.value)} className="input-field text-sm py-1.5" placeholder="项目名称" autoFocus />
         <input value={desc} onChange={e => setDesc(e.target.value)} className="input-field text-sm py-1.5" placeholder="描述（可选）" />
@@ -143,15 +143,15 @@ export default function ProjectManagementPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="page-title flex items-center gap-2">
-            <FolderOpen className="w-6 h-6 text-primary-500" />
+            <FolderOpen className="w-6 h-6" style={{ color: 'var(--brand-500)' }} />
             项目管理
           </h1>
-          <p className="text-sm text-slate-500 mt-1">管理产品下的项目/版本 — 点击项目可跳转至对应的需求与用例页面</p>
+          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>管理产品下的项目/版本 — 点击项目可跳转至对应的需求与用例页面</p>
         </div>
       </div>
 
       {!activeProductId ? (
-        <div className="text-center py-16 text-slate-400">
+        <div className="text-center py-16" style={{ color: 'var(--foreground-tertiary)' }}>
           <FolderOpen className="w-12 h-12 mx-auto mb-3 opacity-50" />
           <p className="font-medium">请先选择一个产品</p>
           <p className="text-sm mt-1">选择产品后查看和管理其项目</p>
@@ -160,15 +160,15 @@ export default function ProjectManagementPage() {
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <h2 className="section-title flex items-center gap-2">
-              <FolderOpen className="w-5 h-5 text-primary-500" />
+              <FolderOpen className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
               {selectedProduct?.name || activeProductId}
-              <span className="text-sm font-normal text-slate-400">— 项目列表</span>
+              <span className="text-sm font-normal" style={{ color: 'var(--foreground-tertiary)' }}>— 项目列表</span>
             </h2>
           </div>
 
           <div className="flex items-center gap-2 mb-4">
             <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
               <input
                 value={search}
                 onChange={e => setSearch(e.target.value)}
@@ -186,34 +186,34 @@ export default function ProjectManagementPage() {
           )}
 
           {loading ? (
-            <div className="flex items-center justify-center py-10"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
+            <div className="flex items-center justify-center py-10"><Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--foreground-tertiary)' }} /></div>
           ) : filtered.length === 0 ? (
-            <p className="text-xs text-slate-400 py-8 text-center bg-slate-50 rounded-xl">
+            <p className="text-xs py-8 text-center" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.6)', color: 'var(--foreground-tertiary)' }}>
               {search ? '未找到匹配的项目' : '暂无项目'}
             </p>
           ) : (
             <div className="space-y-1.5">
               {filtered.map(proj => (
-                <div key={proj.id} className="flex items-center justify-between p-3 rounded-xl hover:bg-amber-50/50 transition-colors group border border-transparent hover:border-amber-100">
+                <div key={proj.id} className="flex items-center justify-between p-3 transition-colors group" style={{ borderRadius: 'calc(var(--radius) * 0.6)' }}>
                   <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                    <FolderOpen className="w-4 h-4 text-amber-500 flex-shrink-0" />
+                    <FolderOpen className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--state-warning)' }} />
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-slate-700 truncate">{proj.name}</p>
+                        <p className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }}>{proj.name}</p>
                         {proj.version && (
-                          <span className="text-xs px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded font-mono">
+                          <span className="text-xs px-1.5 py-0.5 font-mono" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
                             v{proj.version}
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-slate-400 truncate">{proj.description || '无描述'}</p>
+                      <p className="text-xs truncate" style={{ color: 'var(--foreground-tertiary)' }}>{proj.description || '无描述'}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
                     {/* 跳转到该项目下的需求页面 */}
                     <button
                       onClick={() => navigate(`/requirements?project_id=${encodeURIComponent(proj.id)}`)}
-                      className="btn-ghost p-1.5 text-slate-400 hover:text-primary-600 hover:bg-primary-50"
+                      className="btn-ghost p-1.5"
                       title="查看该项目下的需求"
                     >
                       <FileText className="w-3.5 h-3.5" />
@@ -221,17 +221,17 @@ export default function ProjectManagementPage() {
                     {/* 跳转到该项目下的用例页面 */}
                     <button
                       onClick={() => navigate(`/testcases?project_id=${encodeURIComponent(proj.id)}`)}
-                      className="btn-ghost p-1.5 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50"
+                      className="btn-ghost p-1.5"
                       title="查看该项目下的测试用例"
                     >
                       <TestTube className="w-3.5 h-3.5" />
                     </button>
                     <button onClick={() => setEditModal({ id: proj.id, name: proj.name, description: proj.description, version: proj.version })}
-                      className="btn-ghost p-1 text-slate-300 hover:text-slate-600">
+                      className="btn-ghost p-1">
                       <Edit3 className="w-3.5 h-3.5" />
                     </button>
                     <button onClick={() => handleDelete(proj.id)}
-                      className="btn-ghost p-1 text-slate-300 hover:text-red-500">
+                      className="btn-ghost p-1">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>

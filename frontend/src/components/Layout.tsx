@@ -4,7 +4,7 @@ import Sidebar from './Sidebar'
 import { health, requirements as reqApi } from '../api/client'
 import { useAuth } from '../auth'
 import { useProduct } from '../store/ProductContext'
-import { Menu, LogOut, User as UserIcon, Settings, ChevronDown, Building2, ShieldCheck, Key, X, Loader2, Save, Package, BookOpen, ListTodo } from 'lucide-react'
+import { Menu, LogOut, User as UserIcon, Settings, ChevronDown, Building2, ShieldCheck, Key, X, Loader2, Save, Package, BookOpen, ListTodo, Bell } from 'lucide-react'
 
 export default function Layout() {
   const { user, isLoggedIn, logout } = useAuth()
@@ -76,43 +76,94 @@ export default function Layout() {
 
   if (!isLoggedIn) return null
 
+  const sidebarWidth = collapsed ? 64 : 240
+
   return (
-    <div className="min-h-screen">
+    <div className="h-screen overflow-hidden flex" style={{ background: 'var(--background-muted)' }}>
       <Sidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
 
-      {/* Top bar */}
-      <header className={`fixed top-0 right-0 z-20 h-16 bg-white/80 backdrop-blur-md border-b border-slate-100 transition-all duration-300 flex items-center justify-between px-6 ${collapsed ? 'left-16' : 'left-60'}`}>
-        <div className="flex items-center gap-3">
-          <button onClick={() => setCollapsed(!collapsed)} className="btn-ghost p-1.5 -ml-1.5">
+      {/* Main area */}
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0" style={{ marginLeft: sidebarWidth, transition: 'margin-left 0.3s ease' }}>
+        {/* Top header — Apple 风格 64px */}
+        <header
+          className="flex items-center gap-4 flex-shrink-0"
+          style={{
+            height: 64,
+            background: 'var(--background)',
+            borderBottom: '1px solid var(--border)',
+            padding: '0 32px',
+          }}
+        >
+          {/* 折叠按钮 */}
+          <button
+            onClick={() => setCollapsed(!collapsed)}
+            className="flex items-center justify-center transition-colors"
+            style={{ width: 40, height: 40, borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-secondary)' }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--background-muted)' }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+            title="折叠菜单"
+          >
             <Menu className="w-5 h-5" />
           </button>
 
-          {/* 产品选择下拉框 */}
+          {/* 产品选择器 */}
           <div className="relative">
             <button
               onClick={() => setShowProductMenu(!showProductMenu)}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 hover:border-primary-300 transition-all text-sm"
+              className="flex items-center gap-2 transition-all"
+              style={{
+                height: 40,
+                padding: '0 14px',
+                border: '1px solid var(--input)',
+                borderRadius: 'calc(var(--radius) * 0.6)',
+                background: 'var(--background)',
+              }}
+              onMouseEnter={(e) => { if (!showProductMenu) e.currentTarget.style.borderColor = 'var(--ring)' }}
+              onMouseLeave={(e) => { if (!showProductMenu) e.currentTarget.style.borderColor = 'var(--input)' }}
               title="切换产品"
             >
               {productsLoading ? (
-                <Loader2 className="w-4 h-4 text-slate-400 animate-spin" />
+                <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'var(--foreground-tertiary)' }} />
               ) : (
-                <Building2 className="w-4 h-4 text-primary-500" />
+                <Building2 className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
               )}
-              <span className={`truncate max-w-[120px] ${selectedProductName ? 'text-slate-700 font-medium' : 'text-slate-400'}`}>
+              <span
+                className="truncate max-w-[120px]"
+                style={{
+                  fontSize: 14,
+                  fontWeight: 600,
+                  color: selectedProductName ? 'var(--foreground)' : 'var(--foreground-tertiary)',
+                }}
+              >
                 {selectedProductName || '未选择产品'}
               </span>
-              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showProductMenu ? 'rotate-180' : ''}`} />
+              <ChevronDown
+                className="w-3.5 h-3.5 transition-transform"
+                style={{ color: 'var(--foreground-tertiary)', transform: showProductMenu ? 'rotate(180deg)' : 'none' }}
+              />
             </button>
 
             {showProductMenu && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setShowProductMenu(false)} />
-                <div className="absolute left-0 top-full mt-1 z-20 w-60 bg-white rounded-xl shadow-lg border border-slate-100 py-1.5 animate-fade-in">
-                  <div className="px-3 py-1.5 text-[11px] text-slate-400 uppercase tracking-wider font-semibold">选择产品</div>
+                <div
+                  className="absolute left-0 top-full z-20 animate-scale-in"
+                  style={{
+                    marginTop: 4,
+                    width: 240,
+                    background: 'var(--background)',
+                    borderRadius: 'calc(var(--radius) * 0.6)',
+                    boxShadow: 'var(--shadow-apple-xl)',
+                    border: '1px solid var(--border)',
+                    padding: '6px',
+                  }}
+                >
+                  <div className="px-3 py-1.5 text-[11px] uppercase tracking-wider font-semibold" style={{ color: 'var(--foreground-tertiary)' }}>
+                    选择产品
+                  </div>
                   <div className="max-h-60 overflow-y-auto">
                     {products.length === 0 ? (
-                      <p className="px-3 py-4 text-sm text-slate-400 text-center">
+                      <p className="px-3 py-4 text-sm text-center" style={{ color: 'var(--foreground-tertiary)' }}>
                         {productsLoading ? '加载中...' : '暂无产品'}
                       </p>
                     ) : (
@@ -122,29 +173,42 @@ export default function Layout() {
                           onClick={() => {
                             setSelectedProduct(p.id, p.name)
                             setShowProductMenu(false)
-                            // 切换产品后刷新页面，保证所有数据重新加载
                             window.location.reload()
                           }}
-                          className={`flex items-center gap-2.5 w-full px-3 py-2 text-sm transition-all ${
-                            selectedProductId === p.id
-                              ? 'bg-primary-50 text-primary-700 font-medium'
-                              : 'text-slate-600 hover:bg-slate-50'
-                          }`}
+                          className="flex items-center gap-2.5 w-full transition-all"
+                          style={{
+                            padding: '8px 12px',
+                            borderRadius: 'calc(var(--radius) * 0.4)',
+                            fontSize: 13,
+                            fontWeight: selectedProductId === p.id ? 500 : 400,
+                            color: selectedProductId === p.id ? 'var(--brand-500)' : 'var(--foreground)',
+                            background: selectedProductId === p.id ? 'var(--brand-50, #e8f2ff)' : 'transparent',
+                          }}
+                          onMouseEnter={(e) => { if (selectedProductId !== p.id) e.currentTarget.style.background = 'var(--background-muted)' }}
+                          onMouseLeave={(e) => { if (selectedProductId !== p.id) e.currentTarget.style.background = 'transparent' }}
                         >
-                          <Package className={`w-4 h-4 flex-shrink-0 ${selectedProductId === p.id ? 'text-primary-500' : 'text-slate-400'}`} />
+                          <Package className="w-4 h-4 flex-shrink-0" style={{ color: selectedProductId === p.id ? 'var(--brand-500)' : 'var(--foreground-tertiary)' }} />
                           <span className="truncate">{p.name}</span>
                           {selectedProductId === p.id && (
-                            <span className="ml-auto w-2 h-2 rounded-full bg-primary-500 flex-shrink-0" />
+                            <span className="ml-auto w-2 h-2 rounded-full flex-shrink-0" style={{ background: 'var(--brand-500)' }} />
                           )}
                         </button>
                       ))
                     )}
                   </div>
                   {hasProductAdmin && (
-                    <div className="border-t border-slate-100 pt-1 mt-0.5">
+                    <div style={{ borderTop: '1px solid var(--border)', marginTop: 4, paddingTop: 4 }}>
                       <button
                         onClick={() => { navigate('/admin/products'); setShowProductMenu(false) }}
-                        className="flex items-center gap-2 w-full px-3 py-2 text-sm text-slate-500 hover:bg-slate-50 rounded-lg transition-all"
+                        className="flex items-center gap-2 w-full transition-all"
+                        style={{
+                          padding: '8px 12px',
+                          borderRadius: 'calc(var(--radius) * 0.4)',
+                          fontSize: 13,
+                          color: 'var(--foreground-secondary)',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--background-muted)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
                       >
                         <Settings className="w-4 h-4" />
                         管理产品
@@ -156,116 +220,215 @@ export default function Layout() {
             )}
           </div>
 
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            {status.version && <span className="px-2 py-0.5 bg-slate-100 rounded-md font-mono">v{status.version}</span>}
-            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md ${status.llm_configured ? 'bg-success-50 text-success-600' : 'bg-warning-50 text-warning-600'}`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${status.llm_configured ? 'bg-success-500' : 'bg-warning-500'}`} />
+          {/* 系统信息 */}
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {status.version && (
+              <span
+                className="font-mono"
+                style={{
+                  fontSize: 12, fontWeight: 600,
+                  padding: '4px 10px',
+                  borderRadius: 'calc(var(--radius) * 0.4)',
+                  background: 'var(--background-muted)',
+                  color: 'var(--foreground-tertiary)',
+                }}
+              >
+                v{status.version}
+              </span>
+            )}
+            <span
+              className="inline-flex items-center gap-1.5"
+              style={{
+                fontSize: 12, fontWeight: 500,
+                padding: '4px 10px',
+                height: 28,
+                borderRadius: 'calc(var(--radius) * 0.4)',
+                background: status.llm_configured ? 'var(--state-success-surface)' : 'var(--state-warning-surface)',
+                color: status.llm_configured ? 'var(--state-success)' : 'var(--state-warning)',
+              }}
+            >
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: status.llm_configured ? 'var(--state-success)' : 'var(--state-warning)' }} />
               LLM {status.llm_configured ? '已配置' : '未配置'}
             </span>
             {status.kb_empty && (
-              <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-md">冷启动模式</span>
-            )}
-          </div>
-        </div>
-
-        {/* 右侧：任务管理 + 用户手册 + 用户信息 */}
-        <div className="flex items-center gap-1">
-          {/* v2.14: 任务管理按钮（带进行中任务数角标） */}
-          <button
-            onClick={() => navigate('/tasks')}
-            className="relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-all text-sm text-slate-600"
-            title="任务管理"
-          >
-            <ListTodo className="w-4 h-4" />
-            <span className="hidden sm:inline">任务管理</span>
-            {runningTaskCount > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 flex items-center justify-center bg-primary-500 text-white text-[10px] font-medium rounded-full">
-                {runningTaskCount > 99 ? '99+' : runningTaskCount}
+              <span
+                className="inline-flex items-center"
+                style={{
+                  fontSize: 12, fontWeight: 500,
+                  padding: '4px 10px',
+                  height: 28,
+                  borderRadius: 'calc(var(--radius) * 0.4)',
+                  background: '#e8f2ff',
+                  color: 'var(--brand-500)',
+                }}
+              >
+                冷启动模式
               </span>
             )}
-          </button>
+          </div>
 
-          <button
-            onClick={() => navigate('/manual')}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-all text-sm text-slate-600"
-            title="用户手册"
-          >
-            <BookOpen className="w-4 h-4" />
-            <span className="hidden sm:inline">用户手册</span>
-          </button>
+          {/* 右侧操作区 */}
+          <div className="flex items-center gap-2 ml-auto flex-shrink-0">
+            {/* 任务管理（带角标） */}
+            <button
+              onClick={() => navigate('/tasks')}
+              className="relative flex items-center gap-1.5 transition-colors"
+              style={{ height: 40, padding: '0 12px', borderRadius: 'calc(var(--radius) * 0.5)', fontSize: 13, color: 'var(--foreground-secondary)' }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--background-muted)' }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+              title="任务管理"
+            >
+              <ListTodo className="w-[18px] h-[18px]" />
+              <span className="hidden lg:inline">任务管理</span>
+              {runningTaskCount > 0 && (
+                <span
+                  className="absolute flex items-center justify-center text-white font-medium"
+                  style={{
+                    top: 4, right: 4,
+                    minWidth: 18, height: 18, padding: '0 4px',
+                    fontSize: 10,
+                    borderRadius: 9,
+                    background: 'var(--state-error)',
+                  }}
+                >
+                  {runningTaskCount > 99 ? '99+' : runningTaskCount}
+                </span>
+              )}
+            </button>
 
-          {/* 用户信息 */}
-        <div className="relative">
-          <button
-            onClick={() => setShowUserMenu(!showUserMenu)}
-            className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-all"
-          >
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-primary-400 to-accent-400 flex items-center justify-center text-white text-sm font-bold shadow-sm">
-              {user?.display_name?.charAt(0) || user?.username?.charAt(0) || 'A'}
+            <button
+              onClick={() => navigate('/manual')}
+              className="flex items-center gap-1.5 transition-colors"
+              style={{ height: 40, padding: '0 12px', borderRadius: 'calc(var(--radius) * 0.5)', fontSize: 13, color: 'var(--foreground-secondary)' }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--background-muted)' }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+              title="用户手册"
+            >
+              <BookOpen className="w-[18px] h-[18px]" />
+              <span className="hidden lg:inline">用户手册</span>
+            </button>
+
+            {/* 用户区 */}
+            <div className="relative">
+              <button
+                onClick={() => setShowUserMenu(!showUserMenu)}
+                className="flex items-center gap-2 transition-colors"
+                style={{ height: 40, padding: '4px 8px 4px 4px', borderRadius: 'calc(var(--radius) * 0.5)' }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--background-muted)' }}
+                onMouseLeave={(e) => { if (!showUserMenu) e.currentTarget.style.background = 'transparent' }}
+              >
+                <div
+                  className="flex items-center justify-center text-white font-semibold flex-shrink-0"
+                  style={{ width: 32, height: 32, borderRadius: '50%', background: 'var(--brand-500)', fontSize: 13 }}
+                >
+                  {user?.display_name?.charAt(0) || user?.username?.charAt(0) || 'A'}
+                </div>
+                <div className="hidden sm:block text-left">
+                  <p className="text-[13px] font-medium leading-tight" style={{ color: 'var(--foreground)' }}>
+                    {user?.display_name || user?.username || '用户'}
+                  </p>
+                  <p className="text-[10px] leading-tight" style={{ color: 'var(--foreground-tertiary)' }}>
+                    {user?.role === 'admin' ? '管理员' : user?.role || '用户'}
+                  </p>
+                </div>
+                <ChevronDown className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
+              </button>
+
+              {showUserMenu && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setShowUserMenu(false)} />
+                  <div
+                    className="absolute right-0 top-full z-20 animate-scale-in"
+                    style={{
+                      marginTop: 4,
+                      width: 224,
+                      background: 'var(--background)',
+                      borderRadius: 'calc(var(--radius) * 0.6)',
+                      boxShadow: 'var(--shadow-apple-xl)',
+                      border: '1px solid var(--border)',
+                      padding: '6px',
+                    }}
+                  >
+                    <div className="px-3 py-2" style={{ borderBottom: '1px solid var(--border)' }}>
+                      <p className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>{user?.display_name || user?.username}</p>
+                      <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{user?.email || ''}</p>
+                    </div>
+                    <div className="py-1">
+                      {hasAdmin && (
+                        <button
+                          onClick={() => { navigate('/admin'); setShowUserMenu(false) }}
+                          className="flex items-center gap-2.5 w-full transition-colors"
+                          style={{ padding: '8px 12px', borderRadius: 'calc(var(--radius) * 0.4)', fontSize: 13, color: 'var(--state-warning)' }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--state-warning-surface)' }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                        >
+                          <ShieldCheck className="w-4 h-4" />
+                          管理后台
+                        </button>
+                      )}
+                      <button
+                        onClick={() => { navigate('/admin/settings'); setShowUserMenu(false) }}
+                        className="flex items-center gap-2.5 w-full transition-colors"
+                        style={{ padding: '8px 12px', borderRadius: 'calc(var(--radius) * 0.4)', fontSize: 13, color: 'var(--foreground-secondary)' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--background-muted)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                      >
+                        <Settings className="w-4 h-4" />
+                        系统设置
+                      </button>
+                    </div>
+                    <div style={{ borderTop: '1px solid var(--border)', marginTop: 4, paddingTop: 4 }}>
+                      <button
+                        onClick={() => { setShowUserMenu(false); setShowPwdModal(true) }}
+                        className="flex items-center gap-2.5 w-full transition-colors"
+                        style={{ padding: '8px 12px', borderRadius: 'calc(var(--radius) * 0.4)', fontSize: 13, color: 'var(--foreground-secondary)' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--background-muted)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                      >
+                        <Key className="w-4 h-4" />
+                        修改密码
+                      </button>
+                      <button
+                        onClick={handleLogout}
+                        className="flex items-center gap-2.5 w-full transition-colors"
+                        style={{ padding: '8px 12px', borderRadius: 'calc(var(--radius) * 0.4)', fontSize: 13, color: 'var(--state-error)' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--state-error-surface)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                      >
+                        <LogOut className="w-4 h-4" />
+                        退出登录
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
-            <div className="hidden sm:block text-left">
-              <p className="text-sm font-medium text-slate-700 leading-tight">{user?.display_name || user?.username || '用户'}</p>
-              <p className="text-[10px] text-slate-400 leading-tight">{user?.role === 'admin' ? '管理员' : user?.role || '用户'}</p>
-            </div>
-          </button>
+          </div>
+        </header>
 
-          {/* 用户下拉菜单 */}
-          {showUserMenu && (
-            <>
-              <div className="fixed inset-0 z-10" onClick={() => setShowUserMenu(false)} />
-              <div className="absolute right-0 top-full mt-1 z-20 w-56 bg-white rounded-xl shadow-lg border border-slate-100 py-1.5 animate-fade-in">
-                <div className="px-4 py-2 border-b border-slate-100">
-                  <p className="text-sm font-medium text-slate-700">{user?.display_name || user?.username}</p>
-                  <p className="text-xs text-slate-400">{user?.email || ''}</p>
-                </div>
-                <div className="px-1 py-1">
-                  {hasAdmin && (
-                    <button
-                      onClick={() => { navigate('/admin'); setShowUserMenu(false) }}
-                      className="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-amber-600 hover:bg-amber-50 rounded-lg transition-all"
-                    >
-                      <ShieldCheck className="w-4 h-4" />
-                      管理后台
-                    </button>
-                  )}
-                  <button
-                    onClick={() => { navigate('/settings'); setShowUserMenu(false) }}
-                    className="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 rounded-lg transition-all"
-                  >
-                    <Settings className="w-4 h-4" />
-                    系统设置
-                  </button>
-                </div>
-                <div className="border-t border-slate-100 px-1 pt-1">
-                  <button
-                    onClick={() => { setShowUserMenu(false); setShowPwdModal(true) }}
-                    className="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 rounded-lg transition-all"
-                  >
-                    <Key className="w-4 h-4" />
-                    修改密码
-                  </button>
-                  <button
-                    onClick={handleLogout}
-                    className="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-all"
-                  >
-                    <LogOut className="w-4 h-4" />
-                    退出登录
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-        </div>
-      </header>
+        {/* 内容区 */}
+        <main className="flex-1 overflow-y-auto animate-fade-in">
+          <div style={{ padding: 32, minHeight: 'calc(100vh - 64px)' }}>
+            <Outlet />
+          </div>
+        </main>
+      </div>
 
       {/* 修改密码弹窗 */}
       {showPwdModal && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !pwdSaving && setShowPwdModal(false)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in"
+          style={{ background: 'rgba(0, 0, 0, 0.3)', backdropFilter: 'blur(4px)' }}
+          onClick={() => !pwdSaving && setShowPwdModal(false)}
+        >
+          <div
+            className="animate-slide-up"
+            style={{ background: 'var(--background)', borderRadius: 'var(--radius)', boxShadow: 'var(--shadow-apple-2xl)', maxWidth: 384, width: '100%', padding: 24 }}
+            onClick={e => e.stopPropagation()}
+          >
             <div className="flex items-center gap-3 mb-4">
-              <Key className="w-5 h-5 text-primary-500" />
-              <h2 className="text-lg font-semibold text-slate-800">修改密码</h2>
+              <Key className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+              <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>修改密码</h2>
             </div>
             <div className="space-y-3">
               <div>
@@ -290,13 +453,6 @@ export default function Layout() {
           </div>
         </div>
       )}
-
-      {/* Main content */}
-      <main className={`pt-16 transition-all duration-300 ${collapsed ? 'ml-16' : 'ml-60'}`}>
-        <div className="p-6 min-h-[calc(100vh-4rem)] animate-fade-in">
-          <Outlet />
-        </div>
-      </main>
     </div>
   )
 }

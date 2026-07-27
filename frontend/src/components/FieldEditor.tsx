@@ -45,6 +45,28 @@ const ASSUMPTION_TYPE_OPTIONS = [
   { value: 'constraint', label: '约束' },
   { value: 'out_of_scope', label: '范围外' },
 ]
+// v2.38: 跨功能点交互类型枚举（中文标签）
+const INTERACTION_TYPE_OPTIONS = [
+  { value: 'sequence', label: '顺序调用' },
+  { value: 'parallel', label: '并行执行' },
+  { value: 'conditional', label: '条件分支' },
+  { value: 'trigger', label: '事件触发' },
+  { value: 'data_flow', label: '数据流转' },
+  { value: 'dependency', label: '依赖关系' },
+  { value: 'async_notify', label: '异步通知' },
+  { value: 'sync_call', label: '同步调用' },
+]
+// v2.38: 全局非功能需求类别枚举
+const NF_CATEGORY_OPTIONS = [
+  { value: 'performance', label: '性能' },
+  { value: 'security', label: '安全' },
+  { value: 'compatibility', label: '兼容性' },
+  { value: 'accessibility', label: '可访问性' },
+  { value: 'reliability', label: '可靠性' },
+  { value: 'maintainability', label: '可维护性' },
+  { value: 'scalability', label: '可扩展性' },
+  { value: 'usability', label: '易用性' },
+]
 
 /**
  * 通用 SRR 字段编辑器。
@@ -70,6 +92,7 @@ export default function FieldEditor({
   valueType = 'string',
   placeholder = '',
   disabled = false,
+  optionsData,
 }: {
   label: string
   fieldPath: string
@@ -79,16 +102,61 @@ export default function FieldEditor({
   valueType?: 'string' | 'string[]' | 'object[]' | 'json'
   placeholder?: string
   disabled?: boolean
+  /** 外部选项数据源（如功能点列表），传给 ArrayEditor 供 optionsSource 列使用 */
+  optionsData?: Record<string, { value: string; label: string }[]>
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [draftArr, setDraftArr] = useState<any[]>([])
   const [saving, setSaving] = useState(false)
 
-  const isArrayEdit = valueType === 'object[]'
+  // v2.38: string[] 也走列表编辑（每条一个输入框），object[] 走表格编辑
+  const isArrayEdit = valueType === 'object[]' || valueType === 'string[]'
+  const isStringList = valueType === 'string[]'
   const startEdit = () => {
-    if (isArrayEdit && Array.isArray(value)) {
-      setDraftArr(structuredClone(value))
+    if (isArrayEdit) {
+      const columns = isStringList
+        ? [{ key: 'value', label: '内容', placeholder: placeholder || '输入内容...', flex: 1 }]
+        : getColumns(fieldPath)
+      let cloned: any[]
+      if (isStringList) {
+        // string[] → 包装成 [{value: string}]
+        const arr = Array.isArray(value) ? value as any[] : []
+        cloned = arr.length > 0
+          ? arr.map((s: any) => ({ value: typeof s === 'string' ? s : String(s ?? '') }))
+          : [{ value: '' }]
+      } else {
+        // object[]
+        const arr = Array.isArray(value) ? value as any[] : []
+        cloned = structuredClone(arr)
+        // v2.37: 数据为空时自动添加一行空数据
+        if (cloned.length === 0) {
+          const emptyRow: any = {}
+          columns.forEach(c => {
+            if (c.defaultValue) {
+              emptyRow[c.key] = c.defaultValue(1)
+            } else if (c.type === 'checkbox') {
+              emptyRow[c.key] = false
+            } else if (c.type === 'number') {
+              emptyRow[c.key] = 1
+            } else if (c.type === 'multiselect') {
+              emptyRow[c.key] = []
+            } else {
+              emptyRow[c.key] = ''
+            }
+          })
+          cloned = [emptyRow]
+        }
+        // 给已有行补全 hidden 列的默认值（如 id）
+        columns.filter((c: any) => c.hidden && c.defaultValue).forEach(c => {
+          cloned.forEach((row: any, i: number) => {
+            if (row[c.key] == null || row[c.key] === '') {
+              row[c.key] = c.defaultValue!(i + 1)
+            }
+          })
+        })
+      }
+      setDraftArr(cloned)
     } else {
       setDraft(serializeValue(fieldPath, value, valueType))
     }
@@ -99,7 +167,15 @@ export default function FieldEditor({
   const commitEdit = async () => {
     setSaving(true)
     try {
-      const result = isArrayEdit ? draftArr : parseValue(fieldPath, draft, valueType)
+      let result: unknown
+      if (isStringList) {
+        // [{value: string}] → string[]
+        result = draftArr.map((row: any) => row.value || '').filter((s: string) => s.trim() !== '')
+      } else if (isArrayEdit) {
+        result = draftArr
+      } else {
+        result = parseValue(fieldPath, draft, valueType)
+      }
       await onSave(fieldPath, result)
       setEditing(false)
     } catch { } finally { setSaving(false) }
@@ -107,6 +183,9 @@ export default function FieldEditor({
 
   // ---- 编辑模式 ----
   if (editing) {
+    const editColumns = isStringList
+      ? [{ key: 'value', label: '内容', placeholder: placeholder || '输入内容...', flex: 1 }]
+      : getColumns(fieldPath)
     return (
       <div>
         <div className="flex items-center justify-between">
@@ -125,9 +204,10 @@ export default function FieldEditor({
         <div className="mt-1">
           {isArrayEdit ? (
             <ArrayEditor
-              columns={getColumns(fieldPath)}
+              columns={editColumns}
               items={draftArr}
               onChange={setDraftArr}
+              optionsData={optionsData}
             />
           ) : (
             <textarea
@@ -190,7 +270,7 @@ function getColumns(fieldPath: string): any[] {
   }
   if (base === 'business_rules') {
     return [
-      { key: 'id', label: 'ID', placeholder: 'BR-001', flex: 0.5 },
+      { key: 'id', label: 'ID', hidden: true, defaultValue: (i: number) => `BR-${String(i).padStart(3, '0')}` },
       { key: 'type', label: '类型', type: 'select', options: BR_TYPE_OPTIONS, flex: 0.6 },
       { key: 'rule', label: '规则描述', placeholder: '密码长度不少于8位', flex: 2 },
     ]
@@ -205,9 +285,41 @@ function getColumns(fieldPath: string): any[] {
   }
   if (base === 'acceptance_criteria') {
     return [
-      { key: 'id', label: 'ID', placeholder: 'AC-001', flex: 0.5 },
+      { key: 'id', label: 'ID', hidden: true, defaultValue: (i: number) => `AC-${String(i).padStart(3, '0')}` },
       { key: 'type', label: '类型', type: 'select', options: AC_TYPE_OPTIONS, flex: 0.6 },
       { key: 'description', label: '验收描述', placeholder: '用户可正常登录系统', flex: 2 },
+    ]
+  }
+  // v2.36: 跨功能点交互规则的字段列定义；v2.38: 功能点字段改为下拉选择，交互类型改为枚举
+  if (base === 'cross_fp_flows') {
+    return [
+      { key: 'name', label: '名称', placeholder: '登录后加载菜单', flex: 1 },
+      { key: 'source_fp', label: '源功能点', type: 'select', optionsSource: 'fps', flex: 0.9 },
+      { key: 'target_fp', label: '目标功能点', type: 'select', optionsSource: 'fps', flex: 0.9 },
+      { key: 'interaction_type', label: '交互类型', type: 'select', options: INTERACTION_TYPE_OPTIONS, flex: 0.8 },
+      { key: 'description', label: '描述', placeholder: '登录成功触发菜单加载', flex: 1.5 },
+    ]
+  }
+  if (base === 'shared_business_rules') {
+    return [
+      { key: 'id', label: 'ID', hidden: true, defaultValue: (i: number) => `SBR-${String(i).padStart(2, '0')}` },
+      { key: 'rule', label: '规则描述', placeholder: '全链路TLS加密', flex: 2 },
+      { key: 'applied_fps', label: '应用功能点', type: 'multiselect', optionsSource: 'fps', flex: 1.5 },
+    ]
+  }
+  if (base === 'fp_contracts') {
+    return [
+      { key: 'provider_fp', label: '提供方功能点', type: 'select', optionsSource: 'fps', flex: 0.9 },
+      { key: 'consumer_fp', label: '消费方功能点', type: 'select', optionsSource: 'fps', flex: 0.9 },
+      { key: 'data_fields', label: '数据字段', placeholder: 'user_id,token', flex: 1 },
+      { key: 'contract_desc', label: '契约描述', placeholder: '登录返回 token', flex: 1.5 },
+    ]
+  }
+  // v2.38: 全局非功能需求基线，对象转数组编辑（category + requirement）
+  if (base === 'non_functional') {
+    return [
+      { key: 'category', label: '类别', type: 'select', options: NF_CATEGORY_OPTIONS, flex: 0.8 },
+      { key: 'requirement', label: '要求描述', placeholder: '响应时间 ≤ 200ms', flex: 2 },
     ]
   }
   // v2.22: 功能点子 SRR 新增字段

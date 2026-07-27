@@ -88,81 +88,81 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.4)', backdropFilter: 'blur(4px)' }} onClick={onClose}>
+      <div className="max-w-5xl w-full max-h-[90vh] flex flex-col" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
         {/* 头部 */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+        <div className="flex items-center justify-between px-6 py-4 border-b" style={{ borderColor: 'var(--border)' }}>
           <div className="flex items-center gap-3">
-            <Cpu className="w-5 h-5 text-primary-500" />
-            <h2 className="text-lg font-semibold text-slate-800">LLM 调用详情 #{logId}</h2>
+            <Cpu className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+            <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>LLM 调用详情 #{logId}</h2>
             {detail && (
               <div className="flex items-center gap-2 text-xs">
-                <span className="px-2 py-0.5 bg-slate-100 rounded text-slate-600">
+                <span className="px-2 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>
                   {AGENT_LABELS[detail.agent_name] || detail.agent_name}
                 </span>
-                <span className="px-2 py-0.5 bg-slate-100 rounded text-slate-600">{detail.provider}</span>
-                <span className="px-2 py-0.5 bg-slate-100 rounded text-slate-600">{detail.model}</span>
+                <span className="px-2 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>{detail.provider}</span>
+                <span className="px-2 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>{detail.model}</span>
                 {detail.success ? (
-                  <span className="px-2 py-0.5 bg-emerald-50 text-emerald-600 rounded">成功</span>
+                  <span className="px-2 py-0.5 rounded" style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>成功</span>
                 ) : (
-                  <span className="px-2 py-0.5 bg-rose-50 text-rose-600 rounded">失败</span>
+                  <span className="px-2 py-0.5 rounded" style={{ background: 'var(--state-error-surface)', color: 'var(--state-error)' }}>失败</span>
                 )}
               </div>
             )}
           </div>
-          <button onClick={onClose} className="p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg">
+          <button onClick={onClose} className="p-1.5 rounded-lg" style={{ color: 'var(--foreground-tertiary)' }}>
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {loading ? (
           <div className="flex-1 flex items-center justify-center py-12">
-            <Loader2 className="w-6 h-6 text-primary-500 animate-spin" />
+            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
           </div>
         ) : !detail ? (
-          <div className="flex-1 flex items-center justify-center py-12 text-slate-400">加载失败</div>
+          <div className="flex-1 flex items-center justify-center py-12" style={{ color: 'var(--foreground-tertiary)' }}>加载失败</div>
         ) : (
           <>
             {/* 元信息 */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 px-6 py-3 bg-slate-50 border-b border-slate-100 text-xs">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 px-6 py-3 border-b text-xs" style={{ background: 'var(--background-muted)', borderColor: 'var(--border)' }}>
               <div>
-                <span className="text-slate-400">时间：</span>
-                <span className="text-slate-700">{formatTime(detail.created_at)}</span>
+                <span style={{ color: 'var(--foreground-tertiary)' }}>时间：</span>
+                <span style={{ color: 'var(--foreground-secondary)' }}>{formatTime(detail.created_at)}</span>
               </div>
               <div>
-                <span className="text-slate-400">耗时：</span>
-                <span className="text-slate-700">{formatDuration(detail.duration_ms)}</span>
+                <span style={{ color: 'var(--foreground-tertiary)' }}>耗时：</span>
+                <span style={{ color: 'var(--foreground-secondary)' }}>{formatDuration(detail.duration_ms)}</span>
               </div>
               <div>
-                <span className="text-slate-400">Token：</span>
-                <span className="text-slate-700">{formatTokens(detail.token_usage)}</span>
+                <span style={{ color: 'var(--foreground-tertiary)' }}>Token：</span>
+                <span style={{ color: 'var(--foreground-secondary)' }}>{formatTokens(detail.token_usage)}</span>
               </div>
               <div>
-                <span className="text-slate-400">温度：</span>
-                <span className="text-slate-700">{detail.temperature}</span>
+                <span style={{ color: 'var(--foreground-tertiary)' }}>温度：</span>
+                <span style={{ color: 'var(--foreground-secondary)' }}>{detail.temperature}</span>
               </div>
               {detail.task_id && (
                 <div className="truncate">
-                  <span className="text-slate-400">任务 ID：</span>
-                  <span className="text-slate-700 font-mono">{detail.task_id}</span>
+                  <span style={{ color: 'var(--foreground-tertiary)' }}>任务 ID：</span>
+                  <span className="font-mono" style={{ color: 'var(--foreground-secondary)' }}>{detail.task_id}</span>
                 </div>
               )}
               {detail.req_id && (
                 <div className="truncate">
-                  <span className="text-slate-400">需求 ID：</span>
-                  <span className="text-slate-700 font-mono">{detail.req_id}</span>
+                  <span style={{ color: 'var(--foreground-tertiary)' }}>需求 ID：</span>
+                  <span className="font-mono" style={{ color: 'var(--foreground-secondary)' }}>{detail.req_id}</span>
                 </div>
               )}
               {detail.error_message && (
-                <div className="col-span-2 text-rose-600">
-                  <span className="text-rose-400">错误：</span>
+                <div className="col-span-2" style={{ color: 'var(--state-error)' }}>
+                  <span style={{ color: 'var(--state-error)' }}>错误：</span>
                   {detail.error_message}
                 </div>
               )}
             </div>
 
             {/* 内容区 Tab */}
-            <div className="flex items-center gap-1 px-6 pt-3 border-b border-slate-100">
+            <div className="flex items-center gap-1 px-6 pt-3 border-b" style={{ borderColor: 'var(--border)' }}>
               {([
                 { key: 'system', label: 'System Prompt' },
                 { key: 'user', label: 'User Prompt' },
@@ -177,11 +177,10 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
                   <button
                     key={t.key}
                     onClick={() => setActiveSection(t.key)}
-                    className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${
-                      activeSection === t.key
-                        ? 'border-primary-500 text-primary-600'
-                        : 'border-transparent text-slate-500 hover:text-slate-700'
-                    } ${!hasContent ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${!hasContent ? 'opacity-40 cursor-not-allowed' : ''}`}
+                    style={activeSection === t.key
+                      ? { borderColor: 'var(--brand-500)', color: 'var(--brand-500)' }
+                      : { borderColor: 'transparent', color: 'var(--foreground-tertiary)' }}
                     disabled={!hasContent}
                   >
                     {t.label}
@@ -191,14 +190,14 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
             </div>
 
             {/* 文本内容 */}
-            <div className="flex-1 overflow-auto px-6 py-4 bg-slate-50/30">
+            <div className="flex-1 overflow-auto px-6 py-4">
               {activeSection === 'parsed' && detail.parsed_json ? (
-                <pre className="text-xs text-slate-700 font-mono whitespace-pre-wrap break-all">
+                <pre className="text-xs font-mono whitespace-pre-wrap break-all" style={{ color: 'var(--foreground-secondary)' }}>
                   {JSON.stringify(detail.parsed_json, null, 2)}
                 </pre>
               ) : (
                 <div className="relative">
-                  <pre className="text-xs text-slate-700 font-mono whitespace-pre-wrap break-all pr-12">
+                  <pre className="text-xs font-mono whitespace-pre-wrap break-all pr-12" style={{ color: 'var(--foreground-secondary)' }}>
                     {activeSection === 'system' ? (detail.system_prompt || '(空)')
                       : activeSection === 'user' ? (detail.user_prompt || '(空)')
                       : (detail.response || '(空)')}
@@ -209,7 +208,8 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
                         : activeSection === 'user' ? (detail.user_prompt || '')
                         : (detail.response || '')
                     )}
-                    className="absolute top-0 right-0 px-2 py-1 text-[10px] bg-white border border-slate-200 rounded text-slate-500 hover:text-primary-600 hover:border-primary-300"
+                    className="absolute top-0 right-0 px-2 py-1 text-[10px] border rounded"
+                    style={{ background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--foreground-tertiary)' }}
                   >
                     复制
                   </button>
@@ -265,7 +265,7 @@ function LlmLogsTab() {
   return (
     <div className="space-y-3">
       {/* 筛选 */}
-      <div className="flex flex-wrap items-center gap-2 p-3 bg-white rounded-xl border border-slate-100">
+      <div className="flex flex-wrap items-center gap-2 p-3 border" style={{ background: 'var(--background)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
         <select
           value={agentName}
           onChange={e => { setAgentName(e.target.value); setPage(1) }}
@@ -299,25 +299,26 @@ function LlmLogsTab() {
         </select>
         <button
           onClick={() => { setAgentName(''); setTaskId(''); setReqId(''); setSuccessFilter('all'); setPage(1) }}
-          className="px-3 py-1.5 text-xs text-slate-500 hover:text-slate-700"
+          className="px-3 py-1.5 text-xs hover:text-[var(--foreground)]"
+          style={{ color: 'var(--foreground-tertiary)' }}
         >
           重置
         </button>
-        <span className="ml-auto text-xs text-slate-400">共 {total} 条</span>
+        <span className="ml-auto text-xs" style={{ color: 'var(--foreground-tertiary)' }}>共 {total} 条</span>
       </div>
 
       {/* 表格 */}
-      <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+      <div className="overflow-hidden border" style={{ background: 'var(--background)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-6 h-6 text-primary-500 animate-spin" />
+            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
           </div>
         ) : items.length === 0 ? (
-          <div className="py-12 text-center text-sm text-slate-400">暂无 LLM 调用日志</div>
+          <div className="py-12 text-center text-sm" style={{ color: 'var(--foreground-tertiary)' }}>暂无 LLM 调用日志</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-500 text-xs">
+              <thead className="text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
                 <tr>
                   <th className="text-left px-3 py-2.5 font-medium">ID</th>
                   <th className="text-left px-3 py-2.5 font-medium">Agent</th>
@@ -332,36 +333,37 @@ function LlmLogsTab() {
               </thead>
               <tbody>
                 {items.map(log => (
-                  <tr key={log.id} className="border-t border-slate-100 hover:bg-slate-50/50">
-                    <td className="px-3 py-2 text-slate-400 text-xs">#{log.id}</td>
+                  <tr key={log.id} className="border-t hover:bg-[var(--background-muted)]" style={{ borderColor: 'var(--border)' }}>
+                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>#{log.id}</td>
                     <td className="px-3 py-2">
-                      <span className="px-2 py-0.5 bg-primary-50 text-primary-600 rounded text-xs">
+                      <span className="px-2 py-0.5 rounded text-xs" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>
                         {AGENT_LABELS[log.agent_name] || log.agent_name}
                       </span>
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-500">{log.model}</td>
-                    <td className="px-3 py-2 text-xs text-slate-500">
+                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{log.model}</td>
+                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                       {log.task_id && <div className="font-mono truncate max-w-[120px]" title={log.task_id}>{log.task_id}</div>}
-                      {log.req_id && <div className="font-mono text-slate-400 truncate max-w-[120px]" title={log.req_id}>{log.req_id}</div>}
+                      {log.req_id && <div className="font-mono truncate max-w-[120px]" style={{ color: 'var(--foreground-quaternary)' }} title={log.req_id}>{log.req_id}</div>}
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-500">{formatDuration(log.duration_ms)}</td>
-                    <td className="px-3 py-2 text-xs text-slate-500">{formatTokens(log.token_usage)}</td>
+                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{formatDuration(log.duration_ms)}</td>
+                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{formatTokens(log.token_usage)}</td>
                     <td className="px-3 py-2">
                       {log.success ? (
-                        <span className="flex items-center gap-1 text-xs text-emerald-600">
+                        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--state-success)' }}>
                           <CheckCircle2 className="w-3.5 h-3.5" /> 成功
                         </span>
                       ) : (
-                        <span className="flex items-center gap-1 text-xs text-rose-600" title={log.error_message || ''}>
+                        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--state-error)' }} title={log.error_message || ''}>
                           <XCircle className="w-3.5 h-3.5" /> 失败
                         </span>
                       )}
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{formatTime(log.created_at)}</td>
+                    <td className="px-3 py-2 text-xs whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>{formatTime(log.created_at)}</td>
                     <td className="px-3 py-2 text-right">
                       <button
                         onClick={() => setDetailId(log.id)}
-                        className="px-2 py-1 text-xs text-primary-600 hover:bg-primary-50 rounded inline-flex items-center gap-1"
+                        className="px-2 py-1 text-xs rounded inline-flex items-center gap-1 hover:bg-[rgba(0,122,255,0.08)]"
+                        style={{ color: 'var(--brand-500)' }}
                       >
                         <Eye className="w-3.5 h-3.5" /> 详情
                       </button>
@@ -375,22 +377,24 @@ function LlmLogsTab() {
 
         {/* 分页 */}
         {!loading && items.length > 0 && (
-          <div className="flex items-center justify-between px-3 py-2 border-t border-slate-100 text-xs">
-            <span className="text-slate-400">
+          <div className="flex items-center justify-between px-3 py-2 border-t text-xs" style={{ borderColor: 'var(--border)' }}>
+            <span style={{ color: 'var(--foreground-tertiary)' }}>
               第 {page} / {totalPages} 页
             </span>
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page <= 1}
-                className="p-1.5 text-slate-500 hover:bg-slate-100 rounded disabled:opacity-40"
+                className="p-1.5 rounded disabled:opacity-40 hover:bg-[var(--background-muted)]"
+                style={{ color: 'var(--foreground-tertiary)' }}
               >
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages}
-                className="p-1.5 text-slate-500 hover:bg-slate-100 rounded disabled:opacity-40"
+                className="p-1.5 rounded disabled:opacity-40 hover:bg-[var(--background-muted)]"
+                style={{ color: 'var(--foreground-tertiary)' }}
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
@@ -448,7 +452,7 @@ function OperationLogsTab() {
   return (
     <div className="space-y-3">
       {/* 筛选 */}
-      <div className="flex flex-wrap items-center gap-2 p-3 bg-white rounded-xl border border-slate-100">
+      <div className="flex flex-wrap items-center gap-2 p-3 border" style={{ background: 'var(--background)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
         <input
           value={username}
           onChange={e => { setUsername(e.target.value); setPage(1) }}
@@ -482,25 +486,26 @@ function OperationLogsTab() {
         </select>
         <button
           onClick={() => { setUsername(''); setAction(''); setTargetType(''); setSuccessFilter('all'); setPage(1) }}
-          className="px-3 py-1.5 text-xs text-slate-500 hover:text-slate-700"
+          className="px-3 py-1.5 text-xs hover:text-[var(--foreground)]"
+          style={{ color: 'var(--foreground-tertiary)' }}
         >
           重置
         </button>
-        <span className="ml-auto text-xs text-slate-400">共 {total} 条</span>
+        <span className="ml-auto text-xs" style={{ color: 'var(--foreground-tertiary)' }}>共 {total} 条</span>
       </div>
 
       {/* 表格 */}
-      <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+      <div className="overflow-hidden border" style={{ background: 'var(--background)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-6 h-6 text-primary-500 animate-spin" />
+            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
           </div>
         ) : items.length === 0 ? (
-          <div className="py-12 text-center text-sm text-slate-400">暂无操作日志</div>
+          <div className="py-12 text-center text-sm" style={{ color: 'var(--foreground-tertiary)' }}>暂无操作日志</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-500 text-xs">
+              <thead className="text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
                 <tr>
                   <th className="text-left px-3 py-2.5 font-medium">ID</th>
                   <th className="text-left px-3 py-2.5 font-medium">用户</th>
@@ -514,32 +519,32 @@ function OperationLogsTab() {
               </thead>
               <tbody>
                 {items.map(log => (
-                  <tr key={log.id} className="border-t border-slate-100 hover:bg-slate-50/50">
-                    <td className="px-3 py-2 text-slate-400 text-xs">#{log.id}</td>
-                    <td className="px-3 py-2 text-xs text-slate-700 font-medium">{log.username}</td>
+                  <tr key={log.id} className="border-t hover:bg-[var(--background-muted)]" style={{ borderColor: 'var(--border)' }}>
+                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>#{log.id}</td>
+                    <td className="px-3 py-2 text-xs font-medium" style={{ color: 'var(--foreground-secondary)' }}>{log.username}</td>
                     <td className="px-3 py-2">
-                      <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded text-xs">
+                      <span className="px-2 py-0.5 rounded text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>
                         {ACTION_LABELS[log.action] || log.action}
                       </span>
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-500">
+                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                       <div>{log.target_type || '-'}</div>
-                      {log.target_id && <div className="font-mono text-slate-400 truncate max-w-[120px]" title={log.target_id}>{log.target_id}</div>}
+                      {log.target_id && <div className="font-mono truncate max-w-[120px]" style={{ color: 'var(--foreground-quaternary)' }} title={log.target_id}>{log.target_id}</div>}
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-500 max-w-xs truncate" title={formatDetail(log.detail)}>{formatDetail(log.detail)}</td>
-                    <td className="px-3 py-2 text-xs text-slate-400 font-mono">{log.ip_address || '-'}</td>
+                    <td className="px-3 py-2 text-xs max-w-xs truncate" style={{ color: 'var(--foreground-tertiary)' }} title={formatDetail(log.detail)}>{formatDetail(log.detail)}</td>
+                    <td className="px-3 py-2 text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>{log.ip_address || '-'}</td>
                     <td className="px-3 py-2">
                       {log.success ? (
-                        <span className="flex items-center gap-1 text-xs text-emerald-600">
+                        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--state-success)' }}>
                           <CheckCircle2 className="w-3.5 h-3.5" /> 成功
                         </span>
                       ) : (
-                        <span className="flex items-center gap-1 text-xs text-rose-600" title={log.error_message || ''}>
+                        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--state-error)' }} title={log.error_message || ''}>
                           <XCircle className="w-3.5 h-3.5" /> 失败
                         </span>
                       )}
                     </td>
-                    <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{formatTime(log.created_at)}</td>
+                    <td className="px-3 py-2 text-xs whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>{formatTime(log.created_at)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -549,22 +554,24 @@ function OperationLogsTab() {
 
         {/* 分页 */}
         {!loading && items.length > 0 && (
-          <div className="flex items-center justify-between px-3 py-2 border-t border-slate-100 text-xs">
-            <span className="text-slate-400">
+          <div className="flex items-center justify-between px-3 py-2 border-t text-xs" style={{ borderColor: 'var(--border)' }}>
+            <span style={{ color: 'var(--foreground-tertiary)' }}>
               第 {page} / {totalPages} 页
             </span>
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page <= 1}
-                className="p-1.5 text-slate-500 hover:bg-slate-100 rounded disabled:opacity-40"
+                className="p-1.5 rounded disabled:opacity-40 hover:bg-[var(--background-muted)]"
+                style={{ color: 'var(--foreground-tertiary)' }}
               >
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages}
-                className="p-1.5 text-slate-500 hover:bg-slate-100 rounded disabled:opacity-40"
+                className="p-1.5 rounded disabled:opacity-40 hover:bg-[var(--background-muted)]"
+                style={{ color: 'var(--foreground-tertiary)' }}
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
@@ -586,36 +593,34 @@ export default function Logs() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-            <Activity className="w-5 h-5 text-primary-500" />
+          <h1 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--foreground)' }}>
+            <Activity className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
             日志查看
           </h1>
-          <p className="text-xs text-slate-400 mt-0.5">
+          <p className="text-xs mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
             查看大模型调用日志和用户操作日志，便于验证 AI 返回结果是否正确
           </p>
         </div>
       </div>
 
       {/* Tab 切换 */}
-      <div className="flex items-center gap-1 border-b border-slate-200">
+      <div className="flex items-center gap-1 border-b" style={{ borderColor: 'var(--input)' }}>
         <button
           onClick={() => setTab('llm')}
-          className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            tab === 'llm'
-              ? 'border-primary-500 text-primary-600'
-              : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
+          className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors"
+          style={tab === 'llm'
+            ? { borderColor: 'var(--brand-500)', color: 'var(--brand-500)' }
+            : { borderColor: 'transparent', color: 'var(--foreground-tertiary)' }}
         >
           <Cpu className="w-4 h-4" />
           LLM 调用日志
         </button>
         <button
           onClick={() => setTab('operation')}
-          className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            tab === 'operation'
-              ? 'border-primary-500 text-primary-600'
-              : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
+          className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors"
+          style={tab === 'operation'
+            ? { borderColor: 'var(--brand-500)', color: 'var(--brand-500)' }
+            : { borderColor: 'transparent', color: 'var(--foreground-tertiary)' }}
         >
           <FileText className="w-4 h-4" />
           用户操作日志

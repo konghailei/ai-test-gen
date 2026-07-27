@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ChevronDown, ChevronRight, Check, AlertTriangle, Sparkles, RefreshCw,
   Loader2, Edit3, Save, X, Clock, ExternalLink, Layers, GitBranch, Share2, FileCode,
@@ -40,6 +41,45 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
   const [editModule, setEditModule] = useState('')
   const [editModules, setEditModules] = useState<string[]>([])
   const [showFpModulePicker, setShowFpModulePicker] = useState(false)
+  // v2.42: 模块下拉框位置（Portal 渲染到 body，避免被父容器 overflow 遮挡）
+  const [fpPickerPos, setFpPickerPos] = useState<{ top: number; left: number; width: number; placement: 'bottom' | 'top' } | null>(null)
+  const fpModuleBtnRef = useRef<HTMLButtonElement>(null)
+  const fpPickerRef = useRef<HTMLDivElement>(null)
+
+  /** 计算模块选择器位置并打开（下方空间不足时向上展开） */
+  const openFpModulePicker = useCallback(() => {
+    if (!fpModuleBtnRef.current) return
+    const rect = fpModuleBtnRef.current.getBoundingClientRect()
+    const viewportH = window.innerHeight
+    const spaceBelow = viewportH - rect.bottom
+    const placement: 'bottom' | 'top' = spaceBelow >= 260 ? 'bottom' : 'top'
+    const top = placement === 'bottom' ? rect.bottom + 6 : rect.top - 6
+    setFpPickerPos({
+      top,
+      left: rect.left,
+      width: Math.max(rect.width, 220),
+      placement,
+    })
+    setShowFpModulePicker(true)
+  }, [])
+
+  // 点击外部或滚动时关闭模块选择器
+  useEffect(() => {
+    if (!showFpModulePicker) return
+    const handleClick = (e: MouseEvent) => {
+      if (fpPickerRef.current && !fpPickerRef.current.contains(e.target as Node) &&
+          fpModuleBtnRef.current && !fpModuleBtnRef.current.contains(e.target as Node)) {
+        setShowFpModulePicker(false)
+      }
+    }
+    const handleScroll = () => setShowFpModulePicker(false)
+    document.addEventListener('mousedown', handleClick)
+    window.addEventListener('scroll', handleScroll, true)
+    return () => {
+      document.removeEventListener('mousedown', handleClick)
+      window.removeEventListener('scroll', handleScroll, true)
+    }
+  }, [showFpModulePicker])
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null)
   const [showRegenModal, setShowRegenModal] = useState<string | null>(null)
   const [regenHint, setRegenHint] = useState('')
@@ -69,14 +109,28 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
     try { const r = await reqApi.fpDependencies(reqId); setDeps(r) } catch { }
   }
 
-  // 按模块分组
-  const grouped = new Map<string, FPItem[]>()
-  for (const fp of fps) {
-    const mod = fp.module_id || '_unassigned'
-    if (!grouped.has(mod)) grouped.set(mod, [])
-    grouped.get(mod)!.push(fp)
+  // 兼容 modules 数组与旧 module_id 字段
+  const getFpModules = (fp: FPItem): string[] => {
+    return (fp.modules as string[]) || (fp.module_id ? [fp.module_id] : [])
   }
-  const groups = [...grouped.entries()]
+  // 判断功能点是否未分配模块
+  const isFpUnassigned = (fp: FPItem): boolean => {
+    return (fp as any).needs_module || getFpModules(fp).length === 0
+  }
+
+  // 分组：未分配模块 + 已分配模块（按模块分组）
+  const unassignedFps = fps.filter(fp => isFpUnassigned(fp))
+  const assignedFps = fps.filter(fp => !isFpUnassigned(fp))
+
+  // 已分配模块的功能点按模块分组（一个 FP 若关联多模块，在每个模块分组中都显示）
+  const fpsByModule: Record<string, FPItem[]> = {}
+  assignedFps.forEach(fp => {
+    const mods = getFpModules(fp)
+    mods.forEach((mid: string) => {
+      if (!fpsByModule[mid]) fpsByModule[mid] = []
+      fpsByModule[mid].push(fp)
+    })
+  })
 
   const approved = fps.filter(f => f.status === 'approved').length
   const allApproved = fps.length > 0 && approved === fps.length
@@ -201,7 +255,7 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
   const updateFP = async (fpId: string) => {
     await reqApi.fpUpdate(reqId, fpId, { name: editName || undefined, modules: editModules.length > 0 ? editModules : undefined })
     setFps(prev => prev.map(f => f.id === fpId ? { ...f, name: editName || f.name, modules: editModules.length > 0 ? editModules : f.modules, module_id: editModules.length > 0 ? editModules[0] : f.module_id } : f))
-    setEditingId(null); setEditModules([]); setShowFpModulePicker(false)
+    setEditingId(null); setEditModules([]); setShowFpModulePicker(false); setFpPickerPos(null)
     onChanged?.()
   }
 
@@ -268,8 +322,18 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
           {isArchived ? '此需求已归档，暂无功能点数据。' : '暂无功能点数据。'}
         </p>
       ) : (
-        groups.map(([modId, fpList]) => {
-          const modName = modId === '_unassigned' ? '未分配模块' : (modules.find(m => m.id === modId)?.name || modId)
+        ([
+          ...(unassignedFps.length > 0
+            ? [{ key: '_unassigned', title: '未分配模块', fpList: unassignedFps, isUnassigned: true }]
+            : []),
+          ...Object.entries(fpsByModule).map(([modId, modFps]) => ({
+            key: modId,
+            title: modules.find(m => m.id === modId)?.name || modId,
+            fpList: modFps,
+            isUnassigned: false,
+          })),
+        ]).map(section => {
+          const { key: modId, title: modName, fpList } = section
           return (
             <div key={modId} className="border border-slate-200 rounded-xl overflow-hidden">
               {/* 模块标题 */}
@@ -415,27 +479,13 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                         <input value={editName} onChange={e => setEditName(e.target.value)}
                           className="input-field text-sm flex-1" placeholder="功能点名称" autoFocus />
                         <div className="relative">
-                          <button type="button" onClick={() => setShowFpModulePicker(!showFpModulePicker)}
+                          <button type="button" ref={fpModuleBtnRef} onClick={openFpModulePicker}
                             className="select-field text-sm flex items-center gap-1 max-w-[200px]">
                             {editModules.length > 0
                               ? editModules.map(id => modules.find((m: any) => m.id === id)?.name || id).join(', ')
                               : '选择模块'}
                             <span className="text-slate-400 ml-auto">▾</span>
                           </button>
-                          {showFpModulePicker && (
-                            <div className="absolute top-full left-0 bg-white border border-slate-200 rounded-lg shadow-lg z-20 max-h-48 overflow-y-auto min-w-[180px] p-2">
-                              {modules.map((m: any) => (
-                                <label key={m.id} className="flex items-center gap-2 px-2 py-1 hover:bg-slate-50 rounded cursor-pointer text-xs">
-                                  <input type="checkbox"
-                                    checked={editModules.includes(m.id)}
-                                    onChange={e => setEditModules(e.target.checked ? [...editModules, m.id] : editModules.filter(id => id !== m.id))}
-                                    className="w-3.5 h-3.5 text-primary-600 rounded" />
-                                  {m.name}
-                                </label>
-                              ))}
-                              {modules.length === 0 && <p className="text-xs text-slate-400 px-2 py-1">暂无模块</p>}
-                            </div>
-                          )}
                         </div>
                       </div>
                     )}
@@ -814,6 +864,75 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
             </div>
           </div>
         </div>
+      )}
+
+      {/* v2.42: 模块选择器 Portal —— 渲染到 body，避免被父容器 overflow 遮挡 */}
+      {showFpModulePicker && fpPickerPos && createPortal(
+        <div
+          ref={fpPickerRef}
+          className="fixed z-[100]"
+          style={{
+            top: fpPickerPos.placement === 'bottom' ? fpPickerPos.top : undefined,
+            bottom: fpPickerPos.placement === 'top' ? (window.innerHeight - fpPickerPos.top) : undefined,
+            left: fpPickerPos.left,
+            width: fpPickerPos.width,
+            maxHeight: 260,
+            overflowY: 'auto',
+            background: 'var(--background)',
+            border: '1px solid var(--border)',
+            borderRadius: 'calc(var(--radius) * 0.5)',
+            boxShadow: 'var(--shadow-apple-xl)',
+            padding: 6,
+          }}
+        >
+          {modules.length === 0 ? (
+            <p className="text-xs px-2 py-2" style={{ color: 'var(--foreground-tertiary)' }}>暂无模块</p>
+          ) : (
+            modules.map((m: any) => {
+              const checked = editModules.includes(m.id)
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => {
+                    setEditModules(checked
+                      ? editModules.filter(x => x !== m.id)
+                      : [...editModules, m.id])
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-2 transition-colors text-left"
+                  style={{
+                    borderRadius: 'calc(var(--radius) * 0.4)',
+                    background: checked ? 'rgba(0, 122, 255, 0.08)' : 'transparent',
+                    color: checked ? 'var(--brand-700)' : 'var(--foreground-secondary)',
+                    fontSize: 13,
+                  }}
+                  onMouseEnter={(e) => { if (!checked) e.currentTarget.style.background = 'var(--background-muted)' }}
+                  onMouseLeave={(e) => { if (!checked) e.currentTarget.style.background = 'transparent' }}
+                >
+                  <span
+                    className="w-4 h-4 flex items-center justify-center flex-shrink-0 border-2 transition-all"
+                    style={{
+                      borderRadius: 'calc(var(--radius) * 0.2)',
+                      borderColor: checked ? 'var(--brand-500)' : 'var(--input)',
+                      background: checked ? 'var(--brand-500)' : 'transparent',
+                    }}
+                  >
+                    {checked && <Check className="w-3 h-3" style={{ color: '#ffffff' }} />}
+                  </span>
+                  <span className="flex-1 truncate">{m.name}</span>
+                </button>
+              )
+            })
+          )}
+          {modules.length > 0 && (
+            <div style={{ borderTop: '1px solid var(--border)', marginTop: 4, paddingTop: 4 }}>
+              <p className="text-[11px] px-2 py-1" style={{ color: 'var(--foreground-tertiary)' }}>
+                已选 {editModules.length} 个模块
+              </p>
+            </div>
+          )}
+        </div>,
+        document.body
       )}
     </div>
   )

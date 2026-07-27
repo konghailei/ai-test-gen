@@ -356,31 +356,25 @@ def export_requirement_to_xmind(
             _children(cfi_node, cfi_kids)
             total_srr_kids.append(cfi_node)
 
-    # 1c-v2.32. 历史数据影响分析（仅优化需求）
+    # 1c-v2.32. 历史数据影响分析（仅优化需求）；v2.40: 字段精简为 4 核心维度
     ldi = srr.get("legacy_data_impact")
     if isinstance(ldi, dict) and ldi:
         ldi_kids: list = []
         for k, label in [
             ("impact_scope", "影响范围"),
+            ("migration_plan", "迁移方案"),
+            ("rollback_and_validation", "验证与回滚"),
             ("user_clarification", "用户澄清"),
-            ("migration_strategy", "迁移策略"),
-            ("compatibility_analysis", "兼容性分析"),
-            ("rollback_strategy", "回滚策略"),
-            ("verification_method", "验证方法"),
         ]:
             v = _as_str(ldi.get(k))
             if v.strip():
                 ldi_kids.append(_topic(f"{label}: {v}"))
-        for k, label in [
-            ("data_inventory", "数据盘点"),
-            ("field_mapping", "字段映射"),
-            ("risks", "风险与缓解"),
-        ]:
-            items = ldi.get(k) or []
-            if isinstance(items, list) and items:
-                sub_node = _build_list_node(items, label)
-                if sub_node:
-                    ldi_kids.append(sub_node)
+        # risks 仍为列表
+        items = ldi.get("risks") or []
+        if isinstance(items, list) and items:
+            sub_node = _build_list_node(items, "风险与缓解")
+            if sub_node:
+                ldi_kids.append(sub_node)
         if ldi_kids:
             ldi_node = _topic("历史数据影响分析")
             _children(ldi_node, ldi_kids)
@@ -719,31 +713,25 @@ def export_requirement_to_xmind_json(
             _jattach(cfi_node, cfi_kids)
             total_srr_kids.append(cfi_node)
 
-    # 1c-v2.32. 历史数据影响分析（仅优化需求）
+    # 1c-v2.32. 历史数据影响分析（仅优化需求）；v2.40: 字段精简为 4 核心维度
     ldi = srr.get("legacy_data_impact")
     if isinstance(ldi, dict) and ldi:
         ldi_kids: list = []
         for k, label in [
             ("impact_scope", "影响范围"),
+            ("migration_plan", "迁移方案"),
+            ("rollback_and_validation", "验证与回滚"),
             ("user_clarification", "用户澄清"),
-            ("migration_strategy", "迁移策略"),
-            ("compatibility_analysis", "兼容性分析"),
-            ("rollback_strategy", "回滚策略"),
-            ("verification_method", "验证方法"),
         ]:
             v = _as_str(ldi.get(k))
             if v.strip():
                 ldi_kids.append(_jtopic(f"{label}: {v}"))
-        for k, label in [
-            ("data_inventory", "数据盘点"),
-            ("field_mapping", "字段映射"),
-            ("risks", "风险与缓解"),
-        ]:
-            items = ldi.get(k) or []
-            if isinstance(items, list) and items:
-                sub_node = _jbuild_list(items, label)
-                if sub_node:
-                    ldi_kids.append(sub_node)
+        # risks 仍为列表
+        items = ldi.get("risks") or []
+        if isinstance(items, list) and items:
+            sub_node = _jbuild_list(items, "风险与缓解")
+            if sub_node:
+                ldi_kids.append(sub_node)
         if ldi_kids:
             ldi_node = _jtopic("历史数据影响分析")
             _jattach(ldi_node, ldi_kids)

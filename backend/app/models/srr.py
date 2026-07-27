@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 from typing import Literal
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 # ============================================================================
@@ -444,44 +444,99 @@ class LegacyDataImpact(BaseModel):
 
     v2.32: 优化/改进类需求必须包含此字段，描述对已有历史数据的影响。
     作为总 SRR 的独立章节（参考 Volere §22 迁移到新产品）。
-    子字段基于业界实践：影响范围/数据盘点/字段映射/迁移策略/兼容性/回滚/验证/风险。
+    v2.40: 基于业界数据迁移影响分析框架（DZone/SAP/Volere）精简字段，
+    从 10 个子字段合并为 4 个核心维度 + 2 个元数据字段：
+      - 影响范围（impact_scope）：合并原 data_inventory
+      - 迁移方案（migration_plan）：合并原 migration_strategy + field_mapping + compatibility_analysis
+      - 验证与回滚（rollback_and_validation）：合并原 rollback_strategy + verification_method
+      - 风险与缓解（risks）：独立保留
+      - 元数据：is_optimization（标识位）、user_clarification（用户原始输入）
+    旧数据中的 field_mapping/compatibility_analysis 等字段通过 validator 自动迁移到新字段。
     """
     model_config = ConfigDict(extra="ignore")
 
+    # ---- 元数据 ----
     is_optimization: bool = Field(default=False, description="是否为优化需求")
-    impact_scope: str = Field(default="", description="影响范围：受影响的功能点、数据实体、上下游系统、用户角色")
-    data_inventory: list[str] = Field(
-        default_factory=list,
-        description="数据盘点与分类：主数据/在途业务数据/历史业务数据/日志缓存，标注是否迁移",
-    )
-    field_mapping: list[str] = Field(
-        default_factory=list,
-        description="字段映射关系：老系统字段 → 新系统字段的映射表（含类型/长度/编码差异）",
-    )
-    migration_strategy: str = Field(
+    user_clarification: str = Field(
         default="",
-        description="数据迁移策略：全量/增量/并行双写、迁移窗口、迁移顺序、停机安排",
+        description="用户在澄清环节填写的具体影响范围（原始输入，LLM 据此生成完整分析）",
     )
-    compatibility_analysis: str = Field(
+
+    # ---- 核心维度（用户编辑的 4 个字段）----
+    impact_scope: str = Field(
         default="",
-        description="兼容性分析：数据格式兼容、编码规则统一、关联关系完整性",
+        description="影响范围：受影响的功能点、数据实体（主数据/在途数据/历史数据/日志）、上下游系统、用户角色",
     )
-    rollback_strategy: str = Field(
+    migration_plan: str = Field(
         default="",
-        description="回滚策略：备份方案、回滚时间窗、回滚触发条件、回滚演练",
+        description="迁移方案：含迁移策略（全量/增量/双写/停机）、字段映射（老→新）、兼容性分析（格式/编码/关联完整性）",
     )
-    verification_method: str = Field(
+    rollback_and_validation: str = Field(
         default="",
-        description="验证方法：数量校验、业务关联校验、并行运行比对",
+        description="验证与回滚：回滚策略（备份/回滚窗口/触发条件）+ 验证方法（数量校验/业务关联校验/并行比对）",
     )
     risks: list[str] = Field(
         default_factory=list,
         description="风险与缓解：业务逻辑丢失、数据不一致、停机超时等风险及应对",
     )
-    user_clarification: str = Field(
-        default="",
-        description="用户在澄清环节填写的具体影响范围（原始输入，LLM 据此生成完整分析）",
-    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_fields(cls, data: Any) -> Any:
+        """v2.40: 旧数据兼容——把已废弃的子字段内容合并到新字段。
+
+        旧 schema 有 10 个字段，新 schema 只有 6 个。为避免数据丢失，
+        旧数据中的 migration_strategy/field_mapping/compatibility_analysis
+        合并到 migration_plan；rollback_strategy/verification_method 合并到
+        rollback_and_validation；data_inventory 合并到 impact_scope。
+        仅当新字段为空且旧字段有内容时才合并。
+        """
+        if not isinstance(data, dict):
+            return data
+
+        # 迁移：旧 migration_strategy + field_mapping + compatibility_analysis → migration_plan
+        if not data.get("migration_plan"):
+            parts: list[str] = []
+            old_strategy = data.get("migration_strategy", "")
+            if old_strategy and isinstance(old_strategy, str) and old_strategy.strip():
+                parts.append(f"【迁移策略】{old_strategy.strip()}")
+            old_mapping = data.get("field_mapping", [])
+            if isinstance(old_mapping, list) and old_mapping:
+                mapping_text = "; ".join(str(m) for m in old_mapping if m)
+                if mapping_text:
+                    parts.append(f"【字段映射】{mapping_text}")
+            old_compat = data.get("compatibility_analysis", "")
+            if old_compat and isinstance(old_compat, str) and old_compat.strip():
+                parts.append(f"【兼容性分析】{old_compat.strip()}")
+            if parts:
+                data["migration_plan"] = "\n".join(parts)
+
+        # 迁移：旧 rollback_strategy + verification_method → rollback_and_validation
+        if not data.get("rollback_and_validation"):
+            parts: list[str] = []
+            old_rollback = data.get("rollback_strategy", "")
+            if old_rollback and isinstance(old_rollback, str) and old_rollback.strip():
+                parts.append(f"【回滚策略】{old_rollback.strip()}")
+            old_verify = data.get("verification_method", "")
+            if old_verify and isinstance(old_verify, str) and old_verify.strip():
+                parts.append(f"【验证方法】{old_verify.strip()}")
+            if parts:
+                data["rollback_and_validation"] = "\n".join(parts)
+
+        # 迁移：旧 data_inventory → impact_scope（追加到末尾）
+        old_inventory = data.get("data_inventory", [])
+        if isinstance(old_inventory, list) and old_inventory:
+            inventory_text = "; ".join(str(i) for i in old_inventory if i)
+            if inventory_text:
+                existing_scope = data.get("impact_scope", "") or ""
+                if inventory_text not in existing_scope:
+                    data["impact_scope"] = (
+                        f"{existing_scope}\n【数据盘点】{inventory_text}".strip()
+                        if existing_scope
+                        else f"【数据盘点】{inventory_text}"
+                    )
+
+        return data
 
 
 # ============================================================================

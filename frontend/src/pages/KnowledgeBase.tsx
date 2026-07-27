@@ -86,13 +86,13 @@ const GoLiveEditModal = memo(function GoLiveEditModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !saving && onClose()}>
-      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} onClick={() => !saving && onClose()}>
+      <div className="max-w-sm w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
-          <Calendar className="w-5 h-5 text-primary-500" />
+          <Calendar className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
           <div>
-            <h2 className="text-lg font-semibold text-slate-800">修改上线时间</h2>
-            <p className="text-xs text-slate-400 truncate max-w-[240px]">{entry.title}</p>
+            <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>修改上线时间</h2>
+            <p className="text-xs truncate max-w-[240px]" style={{ color: 'var(--foreground-tertiary)' }}>{entry.title}</p>
           </div>
         </div>
         <div className="space-y-3">
@@ -105,7 +105,7 @@ const GoLiveEditModal = memo(function GoLiveEditModal({
               className="input-field text-sm"
               autoFocus
             />
-            <p className="text-xs text-slate-400 mt-1">
+            <p className="text-xs mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
               用于知识库检索时按上线时间排序，同一功能多个版本时以靠后时间为准
             </p>
           </div>
@@ -262,11 +262,11 @@ export default function KnowledgeBase() {
     <div className="space-y-6">
       <div>
         <h1 className="page-title">知识库</h1>
-        <p className="text-sm text-slate-500 mt-1">已归档需求与测试用例管理 · 显示向量库与关系库双状态</p>
+        <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>已归档需求与测试用例管理 · 显示向量库与关系库双状态</p>
       </div>
 
       {modelStatus && !modelStatus.ready && (
-        <div className="p-3 rounded-xl bg-amber-50 text-amber-700 text-sm flex items-start gap-2">
+        <div className="p-3 text-sm flex items-start gap-2" style={{ borderRadius: 'calc(var(--radius) * 0.6)', background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }}>
           <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
           <div className="flex-1">
             <p className="font-medium">嵌入模型未就绪，已归档需求将无法向量化</p>
@@ -277,11 +277,11 @@ export default function KnowledgeBase() {
 
       {/* Toast 提示 */}
       {toast && (
-        <div className={`p-3 rounded-xl flex items-start gap-2 text-sm ${
-          toast.type === 'success' ? 'bg-success-50 text-success-700' :
-          toast.type === 'warning' ? 'bg-amber-50 text-amber-700' :
-          'bg-red-50 text-red-700'
-        }`}>
+        <div className="p-3 flex items-start gap-2 text-sm" style={{
+          borderRadius: 'calc(var(--radius) * 0.6)',
+          background: toast.type === 'success' ? 'var(--state-success-surface)' : toast.type === 'warning' ? 'var(--state-warning-surface)' : 'var(--state-error-surface)',
+          color: toast.type === 'success' ? 'var(--state-success)' : toast.type === 'warning' ? 'var(--state-warning)' : 'var(--state-error)',
+        }}>
           {toast.type === 'success' ? <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" /> :
            toast.type === 'warning' ? <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" /> :
            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
@@ -293,7 +293,7 @@ export default function KnowledgeBase() {
       <div className="card">
         <div className="flex items-center justify-between mb-4">
           <h2 className="section-title flex items-center gap-2">
-            <Database className="w-4 h-4 text-primary-500" /> 知识库条目
+            <Database className="w-4 h-4" style={{ color: 'var(--brand-500)' }} /> 知识库条目
           </h2>
           <div className="flex items-center gap-2">
             <button onClick={loadEntries} disabled={loading} className="btn-ghost text-xs">
@@ -307,8 +307,8 @@ export default function KnowledgeBase() {
 
         {/* 查询条件 */}
         <div className="flex items-center gap-3 mb-4 flex-wrap">
-          <Filter className="w-4 h-4 text-slate-400" />
-          <span className="text-sm text-slate-500">
+          <Filter className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
+          <span className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>
             {selectedProductId
               ? `产品：${products.find(p => p.id === selectedProductId)?.name || selectedProductId}`
               : '提示：请在顶部栏选择产品'}
@@ -328,7 +328,7 @@ export default function KnowledgeBase() {
             <option value="false">未向量化</option>
           </select>
           <div className="relative flex-1 min-w-[180px] max-w-xs">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
             <input
               type="text"
               value={searchKeyword}
@@ -337,18 +337,19 @@ export default function KnowledgeBase() {
               className="input-field text-sm pl-8 py-1.5"
             />
           </div>
-          {entries.length > 0 && <span className="text-xs text-slate-400">共 {entries.length} 条</span>}
+          {entries.length > 0 && <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>共 {entries.length} 条</span>}
         </div>
 
         {/* 模块筛选（多选 chips） */}
         {availableModules.length > 0 && (
           <div className="flex items-center gap-2 mb-4 flex-wrap">
-            <Layers className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
-            <span className="text-xs text-slate-500">模块筛选：</span>
+            <Layers className="w-3.5 h-3.5 flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>模块筛选：</span>
             {filterModules.length > 0 && (
               <button
                 onClick={() => setFilterModules([])}
-                className="px-2 py-0.5 text-[11px] rounded-full bg-slate-200 text-slate-600 hover:bg-slate-300"
+                className="px-2 py-0.5 text-[11px] rounded-full"
+                style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}
               >
                 全部
               </button>
@@ -359,35 +360,34 @@ export default function KnowledgeBase() {
                 <button
                   key={m.id}
                   onClick={() => toggleFilterModule(m.id)}
-                  className={`px-2 py-0.5 text-[11px] rounded-full transition-colors ${
-                    selected
-                      ? 'bg-primary-500 text-white'
-                      : 'bg-slate-100 text-slate-600 hover:bg-primary-50 hover:text-primary-600'
-                  }`}
+                  className="px-2 py-0.5 text-[11px] rounded-full transition-colors"
+                  style={selected
+                    ? { background: 'var(--brand-500)', color: '#ffffff' }
+                    : { background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}
                 >
                   {m.name}
                 </button>
               )
             })}
             {filterModules.length > 0 && (
-              <span className="text-[11px] text-primary-500">已选 {filterModules.length} 个</span>
+              <span className="text-[11px]" style={{ color: 'var(--brand-500)' }}>已选 {filterModules.length} 个</span>
             )}
           </div>
         )}
 
         {/* 图例 */}
-        <div className="flex items-center gap-4 mb-3 text-[11px] text-slate-400 flex-wrap">
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-emerald-400" /> 已归档</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-emerald-400" /> 已向量化</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-blue-400" /> 向量化中</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-red-400" /> 向量化失败</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-amber-400" /> 未向量化</span>
+        <div className="flex items-center gap-4 mb-3 text-[11px] flex-wrap" style={{ color: 'var(--foreground-tertiary)' }}>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full" style={{ background: 'var(--state-success)' }} /> 已归档</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full" style={{ background: 'var(--state-success)' }} /> 已向量化</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full" style={{ background: 'var(--brand-500)' }} /> 向量化中</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full" style={{ background: 'var(--state-error)' }} /> 向量化失败</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full" style={{ background: 'var(--state-warning)' }} /> 未向量化</span>
         </div>
 
         {loading ? (
           <div className="space-y-2">{[1,2,3].map(i => <div key={i} className="skeleton h-14" />)}</div>
         ) : entries.length === 0 ? (
-          <div className="text-center py-8 text-slate-400">
+          <div className="text-center py-8" style={{ color: 'var(--foreground-tertiary)' }}>
             <Database className="w-8 h-8 mx-auto mb-2 opacity-50" />
             <p className="text-sm">知识库暂无数据</p>
             <p className="text-xs mt-1">归档需求后数据将自动导入知识库</p>
@@ -395,33 +395,33 @@ export default function KnowledgeBase() {
         ) : (
           <div className="space-y-2">
             {entries.map(entry => (
-              <div key={entry.id} className="flex items-center justify-between p-3 bg-slate-50/50 rounded-xl hover:bg-slate-50 transition-colors">
+              <div key={entry.id} className="flex items-center justify-between p-3 transition-colors" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.6)' }}>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     {entry.type === 'requirement'
-                      ? <FileText className="w-4 h-4 text-primary-500 flex-shrink-0" />
+                      ? <FileText className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--brand-500)' }} />
                       : <TestTube className="w-4 h-4 text-accent-500 flex-shrink-0" />}
-                    <p className="text-sm font-medium text-slate-700 truncate">{entry.title || entry.id}</p>
+                    <p className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }}>{entry.title || entry.id}</p>
                     {/* 双库状态徽标 */}
                     {entry.type === 'requirement' ? (
                       <>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-emerald-50 text-emerald-600 flex items-center gap-0.5">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5" style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>
                           <CheckCircle2 className="w-2.5 h-2.5" /> 已归档
                         </span>
                         {entry.vectorization_status === 'processing' ? (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-blue-50 text-blue-600 flex items-center gap-0.5" title="Celery 任务进行中，写入 Milvus…">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }} title="Celery 任务进行中，写入 Milvus…">
                             <Loader2 className="w-2.5 h-2.5 animate-spin" /> 向量化中
                           </span>
                         ) : entry.vectorized ? (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-emerald-50 text-emerald-600 flex items-center gap-0.5">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5" style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>
                             <CheckCircle2 className="w-2.5 h-2.5" /> 已向量化
                           </span>
                         ) : entry.vectorization_status === 'failed' ? (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-red-50 text-red-600 flex items-center gap-0.5" title={entry.vectorization_error || '向量化任务失败（Celery 重试耗尽）'}>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5" style={{ background: 'var(--state-error-surface)', color: 'var(--state-error)' }} title={entry.vectorization_error || '向量化任务失败（Celery 重试耗尽）'}>
                             <XCircle className="w-2.5 h-2.5" /> 向量化失败
                           </span>
                         ) : (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-amber-50 text-amber-600 flex items-center gap-0.5" title="需求已归档但向量库中未找到向量，可能归档时写入失败">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5" style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }} title="需求已归档但向量库中未找到向量，可能归档时写入失败">
                             <AlertTriangle className="w-2.5 h-2.5" /> 未向量化
                           </span>
                         )}
@@ -433,7 +433,8 @@ export default function KnowledgeBase() {
                       <button
                         onClick={() => handleRevectorize(entry)}
                         disabled={revectorizingIds.has(entry.id)}
-                        className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:opacity-50 flex items-center gap-0.5"
+                        className="text-[10px] px-1.5 py-0.5 rounded font-medium disabled:opacity-50 flex items-center gap-0.5"
+                        style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}
                         title="重新派发向量化任务"
                       >
                         {revectorizingIds.has(entry.id) ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <RefreshCw className="w-2.5 h-2.5" />}
@@ -441,12 +442,12 @@ export default function KnowledgeBase() {
                       </button>
                     )}
                   </div>
-                  <p className="text-xs text-slate-400 mt-0.5 truncate flex items-center gap-1">
+                  <p className="text-xs mt-0.5 truncate flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}>
                     {entry.product_id && (products.find(p => p.id === entry.product_id)?.name || entry.product_id)}
                     {entry.summary ? ` · ${entry.summary}` : ''}
                   </p>
                   {entry.go_live_date && (
-                    <p className="text-xs text-primary-500 mt-0.5 flex items-center gap-0.5">
+                    <p className="text-xs mt-0.5 flex items-center gap-0.5" style={{ color: 'var(--brand-500)' }}>
                       <Calendar className="w-2.5 h-2.5" /> 上线时间: {formatDateTime(entry.go_live_date)}
                     </p>
                   )}
@@ -455,14 +456,16 @@ export default function KnowledgeBase() {
                   {entry.type === 'requirement' && (
                     <button
                       onClick={() => handleEditGoLive(entry)}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-primary-500 hover:bg-primary-50 transition-all"
+                      className="p-1.5 transition-all"
+                      style={{ borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-tertiary)' }}
                       title="修改上线时间"
                     >
                       <Calendar className="w-3.5 h-3.5" />
                     </button>
                   )}
                   <button onClick={() => handleDeleteEntry(entry)}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all"
+                    className="p-1.5 transition-all"
+                    style={{ borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-tertiary)' }}
                     title="从知识库删除">
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>

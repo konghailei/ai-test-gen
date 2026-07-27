@@ -470,88 +470,105 @@ export default function Requirements() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="page-title">需求管理</h1>
-          <p className="text-sm text-slate-500 mt-1">管理需求文档 — 在顶部栏选择产品后管理需求</p>
+          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>管理需求文档 — 在顶部栏选择产品后管理需求</p>
         </div>
         <button onClick={() => { setShowUpload(true); setSelProject('') }} className="btn-primary">
           <Upload className="w-4 h-4" /> 上传需求
         </button>
       </div>
 
-      {/* 查询条件栏（产品由顶部栏全局控制） */}
-      <div className="card py-3 px-5">
-        <div className="flex items-center gap-3 flex-wrap">
-          <Filter className="w-4 h-4 text-slate-400" />
-          <span className="text-sm text-slate-500">
-            {selectedProductId
-              ? `产品：${products.find(p => p.id === selectedProductId)?.name || selectedProductId}`
-              : '提示：请在顶部栏选择产品'}
-          </span>
-          <select value={filterProject} onChange={e => { setFilterProject(e.target.value); setPage(1) }}
-            className="select-field text-sm max-w-[160px]" disabled={!selectedProductId}>
-            <option value="">全部项目</option>
-            <option value="unassigned">(未绑定项目)</option>
-            {(projects[selectedProductId] || []).map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-          <select value={filterStatus} onChange={e => { setFilterStatus(e.target.value); setPage(1) }}
-            className="select-field text-sm max-w-[120px]">
-            <option value="">全部状态</option>
-            <option value="draft">待澄清</option>
-            <option value="analyzing">分析中</option>
-            <option value="pending_review">待确认</option>
-            <option value="confirmed">确认完成</option>
-            <option value="active">已就绪</option>
-            <option value="archived">已归档</option>
-            <option value="superseded">已替代</option>
-            <option value="deprecated">已废弃</option>
-          </select>
-          <select value={filterPriority} onChange={e => { setFilterPriority(e.target.value); setPage(1) }}
-            className="select-field text-sm max-w-[100px]">
-            <option value="">全部优先级</option>
-            <option value="P0">P0</option>
-            <option value="P1">P1</option>
-            <option value="P2">P2</option>
-            <option value="P3">P3</option>
-          </select>
-          <div className="relative flex-1 min-w-[180px] max-w-xs">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-            <input
-              type="text"
-              value={searchKeyword}
-              onChange={e => setSearchKeyword(e.target.value)}
-              placeholder="搜索需求标题..."
-              className="input-field text-sm pl-8 py-1.5"
-            />
-            {searchKeyword && (
-              <button onClick={() => setSearchKeyword('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-          <span className="text-xs text-slate-400">共 {total} 条</span>
+      {/* 查询条件栏（产品由顶部栏全局控制） — Apple 风格 */}
+      <div
+        className="flex items-center gap-3 flex-wrap"
+        style={{
+          background: 'var(--background)',
+          border: '1px solid var(--border)',
+          borderRadius: 'calc(var(--radius) * 0.75)',
+          padding: '12px 20px',
+          boxShadow: 'var(--shadow-apple-sm)',
+        }}
+      >
+        <Filter className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />
+        <span className="text-[13px] whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>
+          {selectedProductId
+            ? `产品：${products.find(p => p.id === selectedProductId)?.name || selectedProductId}`
+            : '提示：请在顶部栏选择产品'}
+        </span>
+        <select value={filterProject} onChange={e => { setFilterProject(e.target.value); setPage(1) }}
+          className="select-field text-[13px] max-w-[160px]" style={{ padding: '6px 36px 6px 12px' }} disabled={!selectedProductId}>
+          <option value="">全部项目</option>
+          <option value="unassigned">(未绑定项目)</option>
+          {(projects[selectedProductId] || []).map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <select value={filterStatus} onChange={e => { setFilterStatus(e.target.value); setPage(1) }}
+          className="select-field text-[13px] max-w-[120px]" style={{ padding: '6px 36px 6px 12px' }}>
+          <option value="">全部状态</option>
+          <option value="draft">待澄清</option>
+          <option value="analyzing">分析中</option>
+          <option value="pending_review">待确认</option>
+          <option value="confirmed">确认完成</option>
+          <option value="active">已就绪</option>
+          <option value="archived">已归档</option>
+          <option value="superseded">已替代</option>
+          <option value="deprecated">已废弃</option>
+        </select>
+        <select value={filterPriority} onChange={e => { setFilterPriority(e.target.value); setPage(1) }}
+          className="select-field text-[13px] max-w-[100px]" style={{ padding: '6px 36px 6px 12px' }}>
+          <option value="">全部优先级</option>
+          <option value="P0">P0</option>
+          <option value="P1">P1</option>
+          <option value="P2">P2</option>
+          <option value="P3">P3</option>
+        </select>
+        <div className="relative flex-1 min-w-[180px] max-w-[240px]">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
+          <input
+            type="text"
+            value={searchKeyword}
+            onChange={e => setSearchKeyword(e.target.value)}
+            placeholder="搜索需求标题..."
+            className="input-field text-[13px]"
+            style={{ padding: '6px 28px 6px 30px' }}
+          />
+          {searchKeyword && (
+            <button onClick={() => setSearchKeyword('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2"
+              style={{ color: 'var(--foreground-tertiary)' }}>
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
+        <span className="text-xs ml-auto whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>共 {total} 条</span>
       </div>
 
-      {/* Upload Modal */}
+      {/* Upload Modal — Apple 风格 */}
       {showUpload && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => {
-          if (!progress) setShowUpload(false)
-        }}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4 sticky top-0 bg-white pb-2 z-10">
-              <h2 className="text-lg font-semibold text-slate-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }}
+          onClick={() => { if (!progress) setShowUpload(false) }}>
+          <div
+            className="max-w-lg w-full max-h-[90vh] overflow-y-auto animate-slide-up"
+            style={{
+              background: 'var(--background)',
+              borderRadius: 'calc(var(--radius) * 1.1)',
+              boxShadow: 'var(--shadow-apple-xl)',
+              padding: 24,
+            }}
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4 sticky top-0 pb-2 z-10"
+              style={{ background: 'var(--background)' }}>
+              <h2 className="m-0" style={{ fontSize: 18, fontWeight: 600, color: 'var(--foreground)' }}>
                 {progress ? '正在上传需求' : uploadResult ? '请补充需求信息' : '上传需求'}
               </h2>
               {/* v2.24: 后台运行按钮 — 关闭弹窗并跳转到任务管理页面查看进度 */}
               {progress && !progress.error && (
                 <button
                   onClick={() => {
-                    // 停止本地轮询，任务进度由任务管理页面统一展示
                     if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
                     setFileUploading(false)
                     setShowUpload(false)
@@ -559,7 +576,8 @@ export default function Requirements() {
                     setUploadFiles([])
                     navigate('/tasks')
                   }}
-                  className="btn-secondary text-xs py-1.5 flex items-center gap-1.5"
+                  className="btn-secondary text-xs"
+                  style={{ padding: '6px 12px' }}
                   title="关闭弹窗，前往任务管理页面查看进度"
                 >
                   <Minimize2 className="w-3.5 h-3.5" /> 后台运行
@@ -567,7 +585,7 @@ export default function Requirements() {
               )}
             </div>
 
-            {/* ===== 上传中：阶段化进度条 ===== */}
+            {/* ===== 上传中：阶段化进度条 — Apple 风格 ===== */}
             {progress && (
               <div className="space-y-4 py-2">
                 {/* 阶段指示器 */}
@@ -578,35 +596,48 @@ export default function Requirements() {
                     const isError = progress.error && idx === progress.phase
                     return (
                       <div key={phase.key} className="flex flex-col items-center gap-1.5 flex-1">
-                        <div className={`w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300 ${
-                          isDone ? 'bg-emerald-50 text-emerald-600' :
-                          isError ? 'bg-red-100 text-red-500' :
-                          isCurrent ? 'bg-indigo-100 text-indigo-600 ring-4 ring-indigo-100/50' :
-                          'bg-slate-100 text-slate-300'
-                        }`}>
+                        <div className="w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300"
+                          style={{
+                            background: isDone ? 'var(--state-success-surface)' :
+                              isError ? 'var(--state-error-surface)' :
+                              isCurrent ? 'rgba(0, 122, 255, 0.12)' :
+                              'var(--background-muted)',
+                            color: isDone ? 'var(--state-success)' :
+                              isError ? 'var(--state-error)' :
+                              isCurrent ? 'var(--brand-500)' :
+                              'var(--foreground-quaternary)',
+                            boxShadow: isCurrent ? '0 0 0 4px rgba(0, 122, 255, 0.1)' : 'none',
+                          }}>
                           {isDone ? <CheckCircle2 className="w-5 h-5" /> :
                            isError ? <XCircle className="w-5 h-5" /> :
                            isCurrent ? <Loader2 className="w-5 h-5 animate-spin" /> :
                            <phase.icon className="w-5 h-5" />}
                         </div>
-                        <span className={`text-[10px] font-medium text-center leading-tight max-w-[64px] ${
-                          isCurrent ? 'text-indigo-600' : isDone ? 'text-emerald-600' : 'text-slate-400'
-                        }`}>{phase.label}</span>
+                        <span className="text-[10px] font-medium text-center leading-tight max-w-[64px]"
+                          style={{
+                            color: isCurrent ? 'var(--brand-500)' :
+                              isDone ? 'var(--state-success)' :
+                              'var(--foreground-tertiary)'
+                          }}>{phase.label}</span>
                       </div>
                     )
                   })}
                 </div>
 
                 {/* 连接线 */}
-                <div className="relative h-0.5 bg-slate-100 -mt-2 mx-6">
-                  <div className="absolute left-0 top-0 h-full bg-gradient-to-r from-indigo-500 to-emerald-500 transition-all duration-700 rounded-full"
-                    style={{ width: `${(progress.phase / (UPLOAD_PHASES.length - 1)) * 100}%` }} />
+                <div className="relative h-0.5 -mt-2 mx-6" style={{ background: 'var(--border)' }}>
+                  <div className="absolute left-0 top-0 h-full transition-all duration-700 rounded-full"
+                    style={{
+                      width: `${(progress.phase / (UPLOAD_PHASES.length - 1)) * 100}%`,
+                      background: 'linear-gradient(90deg, var(--brand-500), var(--state-success))',
+                    }} />
                 </div>
 
                 {/* 当前阶段状态消息 */}
                 <div className="text-center">
-                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm text-slate-600">
-                    <span className="text-xs text-slate-400 font-mono">
+                  <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm"
+                    style={{ color: 'var(--foreground-secondary)' }}>
+                    <span className="text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>
                       阶段 {progress.phase + 1}/{UPLOAD_PHASES.length}
                     </span>
                     <span>{progress.message}</span>
@@ -618,7 +649,7 @@ export default function Requirements() {
                       const elapsed = (t.end ? new Date(t.end).getTime() : Date.now()) - new Date(t.start).getTime()
                       const sec = Math.round(elapsed / 1000)
                       return (
-                        <span className="inline-flex items-center gap-0.5 text-xs text-slate-400">
+                        <span className="inline-flex items-center gap-0.5 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                           <Clock className="w-3 h-3" />
                           {sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`}
                         </span>
@@ -629,8 +660,8 @@ export default function Requirements() {
 
                 {/* v2.23: 已完成阶段的耗时明细 */}
                 {progress.timings && Object.keys(progress.timings).length > 0 && (
-                  <div className="bg-slate-50 rounded-lg p-3 space-y-1.5">
-                    <p className="text-xs font-medium text-slate-500 flex items-center gap-1">
+                  <div className="space-y-1.5 p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+                    <p className="text-xs font-medium flex items-center gap-1 m-0" style={{ color: 'var(--foreground-tertiary)' }}>
                       <Clock className="w-3 h-3" /> 阶段耗时明细
                     </p>
                     {UPLOAD_PHASES.map(phase => {
@@ -644,11 +675,12 @@ export default function Requirements() {
                       const timeStr = sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`
                       return (
                         <div key={phase.key} className="flex items-center justify-between text-xs">
-                          <span className={`flex items-center gap-1.5 ${isDone ? 'text-slate-500' : 'text-indigo-600 font-medium'}`}>
-                            {isDone ? <CheckCircle2 className="w-3 h-3 text-emerald-500" /> : <Loader2 className="w-3 h-3 animate-spin" />}
+                          <span className="flex items-center gap-1.5"
+                            style={{ color: isDone ? 'var(--foreground-tertiary)' : 'var(--brand-500)', fontWeight: isDone ? 400 : 500 }}>
+                            {isDone ? <CheckCircle2 className="w-3 h-3" style={{ color: 'var(--state-success)' }} /> : <Loader2 className="w-3 h-3 animate-spin" />}
                             {phase.label}
                           </span>
-                          <span className={`font-mono ${isDone ? 'text-slate-400' : 'text-indigo-600'}`}>
+                          <span className="font-mono" style={{ color: isDone ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }}>
                             {timeStr}
                           </span>
                         </div>
@@ -659,34 +691,33 @@ export default function Requirements() {
 
                 {/* 错误信息 / 降级警告 */}
                 {progress.error && (
-                  <div className={`p-4 border rounded-xl ${
-                    progress.message?.includes('降级')
-                      ? 'bg-amber-50 border-amber-200'
-                      : 'bg-red-50 border-red-200'
-                  }`}>
+                  <div className="p-4"
+                    style={{
+                      borderRadius: 'calc(var(--radius) * 0.6)',
+                      background: progress.message?.includes('降级') ? 'var(--state-warning-surface)' : 'var(--state-error-surface)',
+                      border: `1px solid ${progress.message?.includes('降级') ? '#ffe0b3' : 'rgba(255, 59, 48, 0.2)'}`,
+                    }}>
                     <div className="flex items-start gap-3">
                       {progress.message?.includes('降级')
-                        ? <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
-                        : <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                        ? <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: 'var(--state-warning)' }} />
+                        : <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: 'var(--state-error)' }} />
                       }
                       <div className="min-w-0">
-                        <p className={`text-sm font-semibold mb-1 ${
-                          progress.message?.includes('降级') ? 'text-amber-700' : 'text-red-700'
-                        }`}>
+                        <p className="text-sm font-semibold mb-1"
+                          style={{ color: progress.message?.includes('降级') ? 'var(--state-warning)' : 'var(--state-error)' }}>
                           {progress.message?.includes('降级') ? '分析完成（降级警告）' : (progress.message || '分析失败')}
                         </p>
-                        <pre className={`text-xs whitespace-pre-wrap leading-relaxed font-sans ${
-                          progress.message?.includes('降级') ? 'text-amber-600' : 'text-red-600'
-                        }`}>
+                        <pre className="text-xs whitespace-pre-wrap leading-relaxed font-sans m-0"
+                          style={{ color: progress.message?.includes('降级') ? 'var(--state-warning)' : 'var(--state-error)', opacity: 0.85 }}>
                           {progress.error}
                         </pre>
                       </div>
                     </div>
                     <div className="mt-3 flex gap-2">
-                      <button onClick={() => setProgress(null)} className="btn-secondary text-xs py-1.5">
+                      <button onClick={() => setProgress(null)} className="btn-secondary text-xs" style={{ padding: '6px 12px' }}>
                         返回修改
                       </button>
-                      <button onClick={handleMultiFileUpload} className="btn-primary text-xs py-1.5">
+                      <button onClick={handleMultiFileUpload} className="btn-primary text-xs" style={{ padding: '6px 12px' }}>
                         <RefreshCw className="w-3 h-3" /> 重试
                       </button>
                     </div>
@@ -695,13 +726,13 @@ export default function Requirements() {
               </div>
             )}
 
-            {/* ===== 非上传中：表单（仅在无问题需要回答时显示） ===== */}
+            {/* ===== 非上传中：表单 — Apple 风格 ===== */}
             {!progress && !uploadResult && (
               <>
                 {/* 选择项目和模块（产品已在顶部栏选中） */}
                 <div className="space-y-3 mb-4">
                   <div>
-                    <label className="label">需求名称 <span className="text-red-400">*</span></label>
+                    <label className="label">需求名称 <span style={{ color: 'var(--state-error)' }}>*</span></label>
                     <input
                       type="text"
                       value={reqTitle}
@@ -713,14 +744,20 @@ export default function Requirements() {
                   </div>
                   <div>
                     <label className="label">当前产品</label>
-                    <div className="text-sm font-medium text-slate-700 bg-slate-50 rounded-lg px-3 py-2">
+                    <div className="text-sm font-medium"
+                      style={{
+                        color: 'var(--foreground)',
+                        background: 'var(--background-muted)',
+                        borderRadius: 'calc(var(--radius) * 0.4)',
+                        padding: '8px 12px',
+                      }}>
                       {selectedProductId
                         ? products.find(p => p.id === selectedProductId)?.name || selectedProductId
                         : '请先在顶部栏选择产品'}
                     </div>
                   </div>
                   <div>
-                    <label className="label">所属项目/版本 <span className="text-red-400">*</span></label>
+                    <label className="label">所属项目/版本 <span style={{ color: 'var(--state-error)' }}>*</span></label>
                     <select value={selProject} onChange={e => setSelProject(e.target.value)}
                       className="select-field text-sm" disabled={!selectedProductId}>
                       <option value="">请选择项目...</option>
@@ -730,18 +767,24 @@ export default function Requirements() {
                     </select>
                   </div>
                   <div>
-                    <label className="label">关联模块 <span className="text-red-400">*</span></label>
+                    <label className="label">关联模块 <span style={{ color: 'var(--state-error)' }}>*</span></label>
                     <div className="flex flex-wrap gap-1.5">
                       {modules.length === 0 ? (
-                        <span className="text-xs text-slate-400 py-1">暂无模块数据，请在「产品与项目」中创建</span>
+                        <span className="text-xs py-1" style={{ color: 'var(--foreground-tertiary)' }}>暂无模块数据，请在「产品与项目」中创建</span>
                       ) : modules.map(m => (
                         <button key={m.id} onClick={() => {
                           setSelModules(prev => prev.includes(m.id) ? prev.filter(x => x !== m.id) : [...prev, m.id])
-                        }} className={`px-3 py-1 rounded-lg text-xs font-medium border transition-all ${
-                          selModules.includes(m.id)
-                            ? 'bg-primary-50 border-primary-300 text-primary-700'
-                            : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
-                        }`}>
+                        }}
+                          className="px-3 py-1 rounded-lg text-xs font-medium border transition-all"
+                          style={selModules.includes(m.id) ? {
+                            background: 'rgba(0, 122, 255, 0.1)',
+                            borderColor: 'var(--brand-500)',
+                            color: 'var(--brand-500)',
+                          } : {
+                            background: 'var(--background)',
+                            borderColor: 'var(--border)',
+                            color: 'var(--foreground-tertiary)',
+                          }}>
                           {m.name}
                         </button>
                       ))}
@@ -750,7 +793,8 @@ export default function Requirements() {
                 </div>
 
                 {/* 多文件上传 */}
-                <div className="mb-4 p-4 border-2 border-dashed border-slate-200 rounded-xl hover:border-primary-200 transition-colors">
+                <div className="mb-4 p-4 rounded-xl transition-colors"
+                  style={{ border: `2px dashed ${'var(--border)'}` }}>
                   <label className="label">上传需求文档（支持多选，.md / .docx / .txt）</label>
                   <input
                     type="file"
@@ -762,21 +806,23 @@ export default function Requirements() {
                         setUploadFiles(prev => [...prev, ...selected])
                       }
                     }}
-                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-medium file:bg-primary-50 file:text-primary-700 hover:file:bg-primary-100" />
+                    className="block w-full text-sm"
+                    style={{ color: 'var(--foreground-tertiary)' }} />
                 </div>
 
                 {/* 已选文件列表 */}
                 {uploadFiles.length > 0 && (
                   <div className="max-h-[180px] overflow-y-auto space-y-2 mb-4 pr-1">
-                    <p className="text-xs text-slate-400">已选择 {uploadFiles.length} 个文件：</p>
+                    <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>已选择 {uploadFiles.length} 个文件：</p>
                     {uploadFiles.map((f, i) => (
-                      <div key={i} className="flex items-center justify-between bg-slate-50 p-2.5 rounded-lg">
-                        <span className="text-xs text-slate-600 flex items-center gap-1.5">
-                          <FileUp className="w-3.5 h-3.5 text-slate-400" />
+                      <div key={i} className="flex items-center justify-between p-2.5"
+                        style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.35)' }}>
+                        <span className="text-xs flex items-center gap-1.5" style={{ color: 'var(--foreground-secondary)' }}>
+                          <FileUp className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
                           {f.name}
-                          <span className="text-slate-400">({(f.size / 1024).toFixed(1)} KB)</span>
+                          <span style={{ color: 'var(--foreground-tertiary)' }}>({(f.size / 1024).toFixed(1)} KB)</span>
                         </span>
-                        <button onClick={() => removeFile(i)} className="text-slate-400 hover:text-red-500 p-1" title="移除">
+                        <button onClick={() => removeFile(i)} className="p-1" style={{ color: 'var(--foreground-tertiary)' }} title="移除">
                           <XCircle className="w-4 h-4" />
                         </button>
                       </div>
@@ -794,12 +840,13 @@ export default function Requirements() {
               </>
             )}
 
-            {/* ===== 上传后：澄清问题面板 ===== */}
+            {/* ===== 上传后：澄清问题面板 — Apple 风格 ===== */}
             {uploadResult && (
               <div className="space-y-4">
-                <div className="flex items-center gap-2 py-2 border-b border-slate-100">
-                  <MessageCircle className="w-4 h-4 text-primary-500" />
-                  <span className="text-sm font-medium text-slate-700">
+                <div className="flex items-center gap-2 py-2"
+                  style={{ borderBottom: '1px solid var(--border)' }}>
+                  <MessageCircle className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+                  <span className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>
                     请回答以下问题以完善需求分析（共 {uploadResult.questions.length} 题）
                   </span>
                 </div>
@@ -812,20 +859,23 @@ export default function Requirements() {
                     const currentVal = uploadResult.answers[q.id] || ''
 
                     return (
-                      <div key={q.id} className={`p-4 rounded-xl border ${
-                        q.priority === 'critical' ? 'border-red-200 bg-red-50/30' :
-                        q.priority === 'important' ? 'border-amber-200 bg-amber-50/30' :
-                        'border-slate-100 bg-slate-50'
-                      }`}>
+                      <div key={q.id} className="p-4 rounded-xl border"
+                        style={{
+                          borderColor: q.priority === 'critical' ? 'rgba(255, 59, 48, 0.2)' :
+                            q.priority === 'important' ? 'rgba(255, 149, 0, 0.2)' :
+                            'var(--border)',
+                          background: q.priority === 'critical' ? 'rgba(255, 59, 48, 0.04)' :
+                            q.priority === 'important' ? 'rgba(255, 149, 0, 0.04)' :
+                            'var(--background-muted)',
+                        }}>
                         <div className="flex items-start gap-2 mb-2">
-                          <MessageCircle className={`w-4 h-4 mt-0.5 flex-shrink-0 ${
-                            q.priority === 'critical' ? 'text-red-500' :
-                            q.priority === 'important' ? 'text-amber-500' :
-                            'text-primary-500'
-                          }`} />
+                          <MessageCircle className="w-4 h-4 mt-0.5 flex-shrink-0"
+                            style={{ color: q.priority === 'critical' ? 'var(--state-error)' :
+                              q.priority === 'important' ? 'var(--state-warning)' :
+                              'var(--brand-500)' }} />
                           <div className="min-w-0">
-                            <p className="text-sm font-medium text-slate-700">{q.question}</p>
-                            <p className="text-xs text-slate-400 mt-0.5">{q.context}</p>
+                            <p className="text-sm font-medium m-0" style={{ color: 'var(--foreground)' }}>{q.question}</p>
+                            <p className="text-xs mt-0.5 m-0" style={{ color: 'var(--foreground-tertiary)' }}>{q.context}</p>
                           </div>
                         </div>
 
@@ -851,18 +901,22 @@ export default function Requirements() {
                                       updateClarifyAnswer(q.id, currentVal === opt ? '' : opt)
                                     }
                                   }}
-                                  className={`w-full text-left px-3 py-2 rounded-lg text-sm border transition-all ${
-                                    isSelected
-                                      ? 'bg-primary-50 border-primary-300 text-primary-700'
-                                      : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
-                                  }`}
-                                >
+                                  className="w-full text-left px-3 py-2 rounded-lg text-sm border transition-all"
+                                  style={isSelected ? {
+                                    background: 'rgba(0, 122, 255, 0.08)',
+                                    borderColor: 'var(--brand-500)',
+                                    color: 'var(--brand-500)',
+                                  } : {
+                                    background: 'var(--background)',
+                                    borderColor: 'var(--border)',
+                                    color: 'var(--foreground-secondary)',
+                                  }}>
                                   <span className="inline-flex items-center gap-2">
-                                    <span className={`w-4 h-4 rounded-${isMulti ? 'sm' : 'full'} border-2 flex items-center justify-center ${
-                                      isSelected
-                                        ? 'border-primary-500 bg-primary-500'
-                                        : 'border-slate-300'
-                                    }`}>
+                                    <span className={`w-4 h-4 ${isMulti ? 'rounded-sm' : 'rounded-full'} border-2 flex items-center justify-center`}
+                                      style={isSelected ? {
+                                        borderColor: 'var(--brand-500)',
+                                        background: 'var(--brand-500)',
+                                      } : { borderColor: 'var(--border)' }}>
                                       {isSelected && <CheckCircle2 className="w-3 h-3 text-white" />}
                                     </span>
                                     {opt}
@@ -896,7 +950,8 @@ export default function Requirements() {
                   })}
                 </div>
 
-                <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
+                <div className="flex items-center justify-end gap-3 pt-3"
+                  style={{ borderTop: '1px solid var(--border)' }}>
                   <button
                     onClick={() => { setUploadResult(null); setShowUpload(false); setUploadFiles([]) }}
                     className="btn-secondary"
@@ -912,32 +967,40 @@ export default function Requirements() {
                     提交并生成分析
                   </button>
                 </div>
-                <p className="text-xs text-slate-400">💡 回答后系统将重新生成更精确的需求分析结果</p>
+                <p className="text-xs m-0" style={{ color: 'var(--foreground-tertiary)' }}>回答后系统将重新生成更精确的需求分析结果</p>
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* ===== 影响分析确认面板（独立弹窗）===== */}
+      {/* ===== 影响分析确认面板 — Apple 风格 ===== */}
       {impactResult && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-6 animate-slide-up">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }}>
+          <div className="max-w-lg w-full max-h-[80vh] overflow-y-auto animate-slide-up"
+            style={{
+              background: 'var(--background)',
+              borderRadius: 'calc(var(--radius) * 1.1)',
+              boxShadow: 'var(--shadow-apple-xl)',
+              padding: 24,
+            }}>
             <div className="flex items-center gap-3 mb-5">
-              <Share2 className="w-5 h-5 text-violet-500" />
+              <Share2 className="w-5 h-5" style={{ color: '#af52de' }} />
               <div>
-                <h2 className="text-lg font-semibold text-slate-800">影响分析</h2>
-                <p className="text-xs text-slate-400">需求「{impactResult.req_title}」的变更影响范围</p>
+                <h2 className="m-0" style={{ fontSize: 18, fontWeight: 600, color: 'var(--foreground)' }}>影响分析</h2>
+                <p className="text-xs m-0 mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>需求「{impactResult.req_title}」的变更影响范围</p>
               </div>
             </div>
 
             {/* 直接涉及的模块 */}
             {impactResult.direct_modules.length > 0 && (
               <div className="mb-4">
-                <p className="text-xs font-medium text-slate-500 mb-2">直接涉及的模块</p>
+                <p className="text-xs font-medium mb-2 m-0" style={{ color: 'var(--foreground-tertiary)' }}>直接涉及的模块</p>
                 <div className="flex flex-wrap gap-1.5">
                   {impactResult.direct_modules.map(m => (
-                    <span key={m.id} className="px-2.5 py-1 bg-violet-50 text-violet-700 rounded-lg text-xs font-medium border border-violet-200">
+                    <span key={m.id} className="px-2.5 py-1 rounded-lg text-xs font-medium border"
+                      style={{ background: 'rgba(175, 82, 222, 0.08)', color: '#af52de', borderColor: 'rgba(175, 82, 222, 0.2)' }}>
                       {m.name}
                     </span>
                   ))}
@@ -948,26 +1011,30 @@ export default function Requirements() {
             {/* 间接影响的模块 — 深度感知样式 */}
             {impactResult.indirect_modules.length > 0 && (
               <div className="mb-4">
-                <p className="text-xs font-medium text-slate-500 mb-2">
+                <p className="text-xs font-medium mb-2 m-0" style={{ color: 'var(--foreground-tertiary)' }}>
                   间接受影响的模块 ({impactResult.indirect_modules.length})
                 </p>
                 <div className="space-y-2">
                   {impactResult.indirect_modules.map((m, i) => {
                     const isDirect = m.depth <= 1
                     return (
-                    <div key={i} className={`flex items-start gap-3 px-4 py-3 rounded-xl border ${
-                      isDirect
-                        ? 'bg-amber-50 border-amber-200'
-                        : 'bg-slate-50 border-slate-200'
-                    }`}>
-                      <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${
-                        isDirect ? 'bg-amber-400' : 'bg-slate-400'
-                      }`} />
+                    <div key={i} className="flex items-start gap-3 px-4 py-3 rounded-xl border"
+                      style={isDirect ? {
+                        background: 'var(--state-warning-surface)',
+                        borderColor: 'rgba(255, 149, 0, 0.2)',
+                      } : {
+                        background: 'var(--background-muted)',
+                        borderColor: 'var(--border)',
+                      }}>
+                      <div className="w-2 h-2 rounded-full mt-2 flex-shrink-0"
+                        style={{ background: isDirect ? 'var(--state-warning)' : 'var(--foreground-tertiary)' }} />
                       <div className="flex-1 min-w-0">
-                        <p className={`text-sm font-semibold ${isDirect ? 'text-amber-800' : 'text-slate-700'}`}>
+                        <p className="text-sm font-semibold m-0"
+                          style={{ color: isDirect ? 'var(--state-warning)' : 'var(--foreground-secondary)' }}>
                           {m.name}
                         </p>
-                        <p className={`text-xs mt-0.5 ${isDirect ? 'text-amber-600' : 'text-slate-500'}`}>
+                        <p className="text-xs mt-0.5 m-0"
+                          style={{ color: isDirect ? 'var(--state-warning)' : 'var(--foreground-tertiary)', opacity: 0.85 }}>
                           {m.reason}
                         </p>
                       </div>
@@ -980,33 +1047,36 @@ export default function Requirements() {
             {/* 受影响的功能点（基于 FP 依赖图谱 BFS 分析） */}
             {impactResult.affected_fps.length > 0 && (
               <div className="mb-4">
-                <p className="text-xs font-medium text-slate-500 mb-2">
+                <p className="text-xs font-medium mb-2 m-0" style={{ color: 'var(--foreground-tertiary)' }}>
                   受影响的功能点 ({impactResult.affected_fps.length})
-                  <span className="text-slate-400 font-normal ml-1">基于 FP 依赖图谱 BFS 分析</span>
+                  <span className="font-normal ml-1" style={{ color: 'var(--foreground-quaternary)' }}>基于 FP 依赖图谱 BFS 分析</span>
                 </p>
                 <div className="space-y-1.5">
                   {impactResult.affected_fps.map(fp => (
-                    <div key={fp.fp_id} className="px-4 py-3 bg-white rounded-xl border border-slate-200">
+                    <div key={fp.fp_id} className="px-4 py-3 rounded-xl border"
+                      style={{ background: 'var(--background)', borderColor: 'var(--border)' }}>
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center gap-2 min-w-0">
-                          <p className="text-sm font-medium text-slate-700 truncate">{fp.fp_name}</p>
+                          <p className="text-sm font-medium truncate m-0" style={{ color: 'var(--foreground)' }}>{fp.fp_name}</p>
                           {fp.fp_status === 'archived' && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 font-medium flex-shrink-0">已归档</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0"
+                              style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>已归档</span>
                           )}
                         </div>
-                        <span className="text-xs text-slate-400 flex-shrink-0">{fp.depth}跳</span>
+                        <span className="text-xs flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>{fp.depth}跳</span>
                       </div>
-                      <p className="text-xs text-slate-500">{fp.impact_reason}</p>
+                      <p className="text-xs m-0" style={{ color: 'var(--foreground-tertiary)' }}>{fp.impact_reason}</p>
                       {fp.module_name && (
-                        <span className="text-[10px] text-slate-400 mt-0.5 inline-block">模块: {fp.module_name}</span>
+                        <span className="text-[10px] mt-0.5 inline-block" style={{ color: 'var(--foreground-quaternary)' }}>模块: {fp.module_name}</span>
                       )}
                       {fp.kb_context && (
-                        <div className="mt-2 p-2 bg-blue-50/50 rounded border border-blue-100">
+                        <div className="mt-2 p-2 rounded border"
+                          style={{ background: 'rgba(0, 122, 255, 0.04)', borderColor: 'rgba(0, 122, 255, 0.15)' }}>
                           <div className="flex items-center gap-1 mb-0.5">
-                            <Database className="w-3 h-3 text-blue-500" />
-                            <span className="text-[10px] font-medium text-blue-700">知识库说明</span>
+                            <Database className="w-3 h-3" style={{ color: 'var(--brand-500)' }} />
+                            <span className="text-[10px] font-medium" style={{ color: 'var(--brand-500)' }}>知识库说明</span>
                           </div>
-                          <p className="text-[11px] text-slate-600 whitespace-pre-wrap line-clamp-3">{fp.kb_context}</p>
+                          <p className="text-[11px] whitespace-pre-wrap line-clamp-3 m-0" style={{ color: 'var(--foreground-secondary)' }}>{fp.kb_context}</p>
                         </div>
                       )}
                     </div>
@@ -1018,13 +1088,14 @@ export default function Requirements() {
             {/* 无影响 */}
             {impactResult.indirect_modules.length === 0 && impactResult.affected_fps.length === 0 && (
               <div className="text-center py-6">
-                <CheckCircle2 className="w-10 h-10 mx-auto mb-3 text-emerald-400" />
-                <p className="text-sm font-medium text-emerald-600">未发现间接影响</p>
-                <p className="text-xs text-slate-400 mt-1">该需求变更不会影响其他模块或功能点</p>
+                <CheckCircle2 className="w-10 h-10 mx-auto mb-3" style={{ color: 'var(--state-success)' }} />
+                <p className="text-sm font-medium m-0" style={{ color: 'var(--state-success)' }}>未发现间接影响</p>
+                <p className="text-xs mt-1 m-0" style={{ color: 'var(--foreground-tertiary)' }}>该需求变更不会影响其他模块或功能点</p>
               </div>
             )}
 
-            <p className="text-xs text-slate-400 mt-4 pt-4 border-t border-slate-100">
+            <p className="text-xs mt-4 pt-4 m-0"
+              style={{ color: 'var(--foreground-tertiary)', borderTop: '1px solid var(--border)' }}>
               以上为基于模块+FP 依赖图谱的自动分析结果，仅供参考
             </p>
             <div className="flex justify-end gap-3 mt-4">
@@ -1033,7 +1104,7 @@ export default function Requirements() {
                 忽略并查看需求
               </button>
               <button onClick={() => { finishUpload(impactResult.req_id) }}
-                className="btn-primary text-sm flex items-center gap-1.5">
+                className="btn-primary text-sm">
                 <CheckCircle2 className="w-4 h-4" />
                 确认并查看需求
               </button>
@@ -1042,72 +1113,86 @@ export default function Requirements() {
         </div>
       )}
 
-      {/* 需求表格 */}
-      <div className="card p-0 overflow-hidden">
+      {/* 需求表格 — Apple 风格 */}
+      <div className="overflow-hidden"
+        style={{
+          background: 'var(--background)',
+          border: '1px solid var(--border)',
+          borderRadius: 'calc(var(--radius) * 0.75)',
+          boxShadow: 'var(--shadow-apple-sm)',
+        }}>
         {loading ? (
           <div className="p-6 space-y-4">{[1,2,3,4,5].map(i => <div key={i} className="skeleton h-14" />)}</div>
         ) : reqs.length === 0 ? (
           <div className="text-center py-16">
-            <FileText className="w-12 h-12 mx-auto mb-3 text-slate-300" />
-            <p className="text-slate-500 font-medium">{selectedProductId ? '该产品下暂无需求' : '暂无需求'}</p>
-            <p className="text-sm text-slate-400 mt-1">选择产品或上传第一个需求</p>
+            <FileText className="w-12 h-12 mx-auto mb-3" style={{ color: 'var(--foreground-quaternary)' }} />
+            <p className="font-medium m-0" style={{ color: 'var(--foreground-secondary)' }}>{selectedProductId ? '该产品下暂无需求' : '暂无需求'}</p>
+            <p className="text-sm mt-1 m-0" style={{ color: 'var(--foreground-tertiary)' }}>选择产品或上传第一个需求</p>
           </div>
         ) : (
           <table className="w-full">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/50">
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">ID</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">标题</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">模块</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">来源格式</th>
-                <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">产品</th>
-                <th className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">优先级</th>
-                <th className="text-center text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">状态</th>
-                <th className="text-right text-xs font-semibold text-slate-500 uppercase tracking-wider px-5 py-3.5">创建时间</th>
+              <tr style={{ background: 'var(--background-muted)' }}>
+                <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-5 py-3.5" style={{ color: 'var(--foreground-tertiary)' }}>ID</th>
+                <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-5 py-3.5" style={{ color: 'var(--foreground-tertiary)' }}>标题</th>
+                <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-5 py-3.5" style={{ color: 'var(--foreground-tertiary)' }}>模块</th>
+                <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-5 py-3.5" style={{ color: 'var(--foreground-tertiary)' }}>来源格式</th>
+                <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-5 py-3.5" style={{ color: 'var(--foreground-tertiary)' }}>产品</th>
+                <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-5 py-3.5" style={{ color: 'var(--foreground-tertiary)' }}>优先级</th>
+                <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-5 py-3.5" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
+                <th className="text-right text-[11px] font-semibold uppercase tracking-wider px-5 py-3.5" style={{ color: 'var(--foreground-tertiary)' }}>创建时间</th>
                 <th className="text-right px-5 py-3.5 w-24"></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-50">
+            <tbody>
               {reqs.map(r => (
-                <tr key={r.id} className="hover:bg-slate-50/50 transition-colors cursor-pointer" onClick={() => navigate(`/requirements/${r.id}`)}>
-                  <td className="px-5 py-3.5"><span className="text-xs font-mono text-slate-400">{r.id}</span></td>
-                  <td className="px-5 py-3.5"><p className="text-sm font-medium text-slate-700 truncate max-w-[200px]">{r.title}</p></td>
+                <tr key={r.id} className="transition-colors cursor-pointer"
+                  style={{ borderTop: '1px solid var(--border)' }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'var(--background-muted)' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+                  onClick={() => navigate(`/requirements/${r.id}`)}>
+                  <td className="px-5 py-3.5"><span className="text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>{r.id}</span></td>
+                  <td className="px-5 py-3.5"><p className="text-sm font-medium truncate max-w-[200px] m-0" style={{ color: 'var(--foreground)' }}>{r.title}</p></td>
                   <td className="px-5 py-3.5">
                     <div className="flex flex-wrap gap-1 max-w-[160px]">
                       {Array.isArray(r.modules) && r.modules.length > 0
                         ? (r.modules as string[]).map((mid: string) => (
-                            <span key={mid} className="text-[10px] px-1.5 py-0.5 bg-slate-100 text-slate-500 rounded font-mono truncate max-w-[80px]" title={mid}>
+                            <span key={mid} className="text-[10px] px-1.5 py-0.5 rounded font-mono truncate max-w-[80px]"
+                              style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }} title={mid}>
                               {modules.find(m => m.id === mid)?.name || mid}
                             </span>
                           ))
-                        : <span className="text-xs text-slate-300">—</span>
+                        : <span className="text-xs" style={{ color: 'var(--foreground-quaternary)' }}>—</span>
                       }
                     </div>
                   </td>
                   <td className="px-5 py-3.5">
-                    <span className="inline-flex items-center gap-1 text-xs text-slate-500">
-                      {r.source_type === 'markdown' ? <FileCode className="w-3.5 h-3.5 text-blue-500" /> :
-                       r.source_type === 'docx' ? <FileType className="w-3.5 h-3.5 text-orange-500" /> :
-                       <FileText className="w-3.5 h-3.5 text-slate-400" />}
+                    <span className="inline-flex items-center gap-1 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+                      {r.source_type === 'markdown' ? <FileCode className="w-3.5 h-3.5" style={{ color: 'var(--brand-500)' }} /> :
+                       r.source_type === 'docx' ? <FileType className="w-3.5 h-3.5" style={{ color: 'var(--state-warning)' }} /> :
+                       <FileText className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />}
                       {sourceTypeLabel(r.source_type)}
                     </span>
                   </td>
-                  <td className="px-5 py-3.5"><span className="text-xs text-slate-400">{(products.find(p => p.id === r.product_id)?.name) || r.product_id}</span></td>
+                  <td className="px-5 py-3.5"><span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{(products.find(p => p.id === r.product_id)?.name) || r.product_id}</span></td>
                   <td className="px-5 py-3.5 text-center"><span className={priorityBadge(r.priority)}>{r.priority}</span></td>
                   <td className="px-5 py-3.5 text-center">
-                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-                      r.status === 'draft' ? 'bg-yellow-50 text-yellow-700 ring-1 ring-yellow-500/30' :
-                      r.status === 'active' ? 'bg-emerald-50 text-emerald-700' :
-                      r.status === 'archived' ? 'bg-slate-100 text-slate-600' :
-                      r.status === 'superseded' ? 'bg-amber-50 text-amber-700' :
-                      r.status === 'deprecated' ? 'bg-red-50 text-red-600' :
-                      'bg-slate-100 text-slate-500'
-                    }`}>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium"
+                      style={(() => {
+                        switch (r.status) {
+                          case 'draft': return { background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }
+                          case 'active': return { background: 'var(--state-success-surface)', color: 'var(--state-success)' }
+                          case 'archived': return { background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }
+                          case 'superseded': return { background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }
+                          case 'deprecated': return { background: 'var(--state-error-surface)', color: 'var(--state-error)' }
+                          default: return { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }
+                        }
+                      })()}>
                       {STATUS_LABELS[r.status] || r.status}
                       {r.status === 'draft' && <MessageCircle className="w-3 h-3 ml-1 animate-pulse" />}
                     </span>
                   </td>
-                  <td className="px-5 py-3.5 text-right"><span className="text-xs text-slate-400">{formatDate(r.created_at)}</span></td>
+                  <td className="px-5 py-3.5 text-right"><span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{formatDate(r.created_at)}</span></td>
                   <td className="px-5 py-3.5 text-right">
                     <div className="flex items-center justify-end gap-1">
                       <button onClick={e => { e.stopPropagation(); navigate(`/requirements/${r.id}`) }} className="btn-ghost p-1.5" title="查看详情">
@@ -1116,7 +1201,10 @@ export default function Requirements() {
                       <button
                         onClick={e => handleExportXmind(e, r)}
                         disabled={exportingId === r.id}
-                        className="p-1.5 rounded-lg transition-colors text-slate-400 hover:text-violet-500 hover:bg-violet-50 disabled:opacity-50"
+                        className="p-1.5 rounded-lg transition-colors disabled:opacity-50"
+                        style={{ color: 'var(--foreground-tertiary)' }}
+                        onMouseEnter={e => { if (!exportingId) { e.currentTarget.style.background = 'rgba(175, 82, 222, 0.08)'; e.currentTarget.style.color = '#af52de' } }}
+                        onMouseLeave={e => { if (!exportingId) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--foreground-tertiary)' } }}
                         title="导出 XMind 思维导图"
                       >
                         {exportingId === r.id
@@ -1126,12 +1214,13 @@ export default function Requirements() {
                       </button>
                       <button
                         onClick={e => handleDelete(e, r)}
-                        disabled={deletingId === r.id}
-                        className={`p-1.5 rounded-lg transition-colors ${
-                          r.status === 'archived'
-                            ? 'text-slate-300 cursor-not-allowed'
-                            : 'text-slate-400 hover:text-red-500 hover:bg-red-50'
-                        }`}
+                        disabled={deletingId === r.id || r.status === 'archived'}
+                        className="p-1.5 rounded-lg transition-colors"
+                        style={r.status === 'archived'
+                          ? { color: 'var(--foreground-quaternary)', cursor: 'not-allowed', opacity: 0.4 }
+                          : { color: 'var(--foreground-tertiary)' }}
+                        onMouseEnter={e => { if (r.status !== 'archived' && !deletingId) { e.currentTarget.style.background = 'var(--state-error-surface)'; e.currentTarget.style.color = 'var(--state-error)' } }}
+                        onMouseLeave={e => { if (r.status !== 'archived' && !deletingId) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--foreground-tertiary)' } }}
                         title={r.status === 'archived' ? '已归档需求不可删除' : '删除需求'}
                       >
                         {deletingId === r.id
@@ -1147,58 +1236,70 @@ export default function Requirements() {
           </table>
         )}
         {totalPages > 1 && (
-          <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100 bg-slate-50/30">
-            <span className="text-xs text-slate-400">共 {total} 条</span>
+          <div className="flex items-center justify-between px-5 py-3"
+            style={{ borderTop: '1px solid var(--border)', background: 'var(--background-muted)' }}>
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>共 {total} 条</span>
             <div className="flex items-center gap-1">
               <button disabled={page <= 1} onClick={() => setPage(page - 1)} className="btn-ghost text-xs py-1 disabled:opacity-30">上一页</button>
-              <span className="text-xs text-slate-500 px-2">{page}/{totalPages}</span>
+              <span className="text-xs px-2" style={{ color: 'var(--foreground-secondary)' }}>{page}/{totalPages}</span>
               <button disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="btn-ghost text-xs py-1 disabled:opacity-30">下一页</button>
             </div>
           </div>
         )}
       </div>
 
-      {/* 删除确认弹窗 */}
+      {/* 删除确认弹窗 — Apple 风格 */}
       {deleteModal && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setDeleteModal(null)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }}
+          onClick={() => setDeleteModal(null)}>
+          <div className="max-w-lg w-full animate-slide-up"
+            style={{
+              background: 'var(--background)',
+              borderRadius: 'calc(var(--radius) * 1.1)',
+              boxShadow: 'var(--shadow-apple-xl)',
+              padding: 24,
+            }}
+            onClick={e => e.stopPropagation()}>
             <div className="flex items-start gap-3 mb-4">
-              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
-                <AlertTriangle className="w-5 h-5 text-red-600" />
+              <div className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0"
+                style={{ background: 'var(--state-error-surface)' }}>
+                <AlertTriangle className="w-5 h-5" style={{ color: 'var(--state-error)' }} />
               </div>
               <div>
-                <h2 className="text-lg font-semibold text-slate-800">确认删除需求</h2>
-                <p className="text-sm text-slate-500 mt-0.5">
-                  「{deleteModal.title}」将被<strong className="text-red-600">永久删除</strong>，以下关联数据也将一并清除：
+                <h2 className="m-0" style={{ fontSize: 18, fontWeight: 600, color: 'var(--foreground)' }}>确认删除需求</h2>
+                <p className="text-sm mt-0.5 m-0" style={{ color: 'var(--foreground-tertiary)' }}>
+                  「{deleteModal.title}」将被<strong style={{ color: 'var(--state-error)' }}>永久删除</strong>，以下关联数据也将一并清除：
                 </p>
               </div>
             </div>
 
             {/* 依赖清单 */}
-            <div className="mb-4 p-3 bg-slate-50 rounded-xl space-y-1.5 text-sm">
+            <div className="mb-4 p-3 space-y-1.5 text-sm"
+              style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
               {deleteModal.deps.test_cases > 0 && (
-                <div className="flex justify-between"><span className="text-slate-500">测试用例</span><span className="font-medium text-slate-700">{deleteModal.deps.test_cases} 条</span></div>
+                <div className="flex justify-between"><span style={{ color: 'var(--foreground-tertiary)' }}>测试用例</span><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{deleteModal.deps.test_cases} 条</span></div>
               )}
               {deleteModal.deps.functional_points > 0 && (
-                <div className="flex justify-between"><span className="text-slate-500">功能点 + 依赖关系</span><span className="font-medium text-slate-700">{deleteModal.deps.functional_points} 个</span></div>
+                <div className="flex justify-between"><span style={{ color: 'var(--foreground-tertiary)' }}>功能点 + 依赖关系</span><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{deleteModal.deps.functional_points} 个</span></div>
               )}
               {deleteModal.deps.generation_batches > 0 && (
-                <div className="flex justify-between"><span className="text-slate-500">生成批次记录</span><span className="font-medium text-slate-700">{deleteModal.deps.generation_batches} 条</span></div>
+                <div className="flex justify-between"><span style={{ color: 'var(--foreground-tertiary)' }}>生成批次记录</span><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{deleteModal.deps.generation_batches} 条</span></div>
               )}
               {deleteModal.deps.req_dependencies > 0 && (
-                <div className="flex justify-between"><span className="text-slate-500">需求间依赖关系</span><span className="font-medium text-slate-700">{deleteModal.deps.req_dependencies} 条</span></div>
+                <div className="flex justify-between"><span style={{ color: 'var(--foreground-tertiary)' }}>需求间依赖关系</span><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{deleteModal.deps.req_dependencies} 条</span></div>
               )}
               {deleteModal.deps.analysis_tasks > 0 && (
-                <div className="flex justify-between"><span className="text-slate-500">异步分析任务记录</span><span className="font-medium text-slate-700">{deleteModal.deps.analysis_tasks} 条</span></div>
+                <div className="flex justify-between"><span style={{ color: 'var(--foreground-tertiary)' }}>异步分析任务记录</span><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{deleteModal.deps.analysis_tasks} 条</span></div>
               )}
               {deleteModal.deps.traceability > 0 && (
-                <div className="flex justify-between"><span className="text-slate-500">需求-用例追溯记录</span><span className="font-medium text-slate-700">{deleteModal.deps.traceability} 条</span></div>
+                <div className="flex justify-between"><span style={{ color: 'var(--foreground-tertiary)' }}>需求-用例追溯记录</span><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{deleteModal.deps.traceability} 条</span></div>
               )}
               {deleteModal.deps.superseded_refs > 0 && (
-                <div className="flex justify-between"><span className="text-slate-500">其他需求的替代引用</span><span className="font-medium text-slate-700">{deleteModal.deps.superseded_refs} 处（将置空）</span></div>
+                <div className="flex justify-between"><span style={{ color: 'var(--foreground-tertiary)' }}>其他需求的替代引用</span><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{deleteModal.deps.superseded_refs} 处（将置空）</span></div>
               )}
               {Object.values(deleteModal.deps).every((v: any) => v === 0) && (
-                <p className="text-slate-400 text-center py-2">未检测到关联数据</p>
+                <p className="text-center py-2 m-0" style={{ color: 'var(--foreground-tertiary)' }}>未检测到关联数据</p>
               )}
             </div>
 
@@ -1209,7 +1310,7 @@ export default function Requirements() {
               <button
                 onClick={() => doDelete(deleteModal.id)}
                 disabled={!!deletingId}
-                className="btn-danger bg-red-600 hover:bg-red-700 text-white px-5 py-2 rounded-xl text-sm font-medium flex items-center gap-2 disabled:opacity-50"
+                className="btn-danger"
               >
                 {deletingId === deleteModal.id ? (
                   <><Loader2 className="w-4 h-4 animate-spin" /> 删除中...</>

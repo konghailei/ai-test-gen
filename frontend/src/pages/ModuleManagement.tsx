@@ -16,11 +16,11 @@ function EditModal({
   const [n, setN] = useState(name)
   const [d, setD] = useState(description)
   return (
-    <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !saving && onClose()}>
-      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} onClick={() => !saving && onClose()}>
+      <div className="max-w-md w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
-          <Edit3 className="w-5 h-5 text-primary-500" />
-          <h2 className="text-lg font-semibold text-slate-800">编辑模块</h2>
+          <Edit3 className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+          <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>编辑模块</h2>
         </div>
         <div className="space-y-3">
           <div>
@@ -51,8 +51,8 @@ function AddForm({ onAdd, onCancel, adding }: {
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
   return (
-    <div className="flex items-start gap-2 mb-4 p-3 bg-slate-50 rounded-xl">
-      <span className="badge bg-primary-100 text-primary-600 text-xs shrink-0 mt-1">模块</span>
+    <div className="flex items-start gap-2 mb-4 p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.6)' }}>
+      <span className="badge text-xs shrink-0 mt-1" style={{ background: 'rgba(0, 122, 255, 0.12)', color: 'var(--brand-500)' }}>模块</span>
       <div className="flex-1 space-y-2">
         <input value={name} onChange={e => setName(e.target.value)} className="input-field text-sm py-1.5" placeholder="模块名称" autoFocus />
         <input value={desc} onChange={e => setDesc(e.target.value)} className="input-field text-sm py-1.5" placeholder="描述（可选）" />

@@ -205,22 +205,22 @@ export default function Settings() {
     <div className="space-y-6">
       <div>
         <h1 className="page-title">系统设置</h1>
-        <p className="text-sm text-slate-500 mt-1">LLM 供应商配置与系统信息</p>
+        <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>LLM 供应商配置与系统信息</p>
       </div>
 
       {/* LLM 供应商配置 */}
       <div className="card space-y-5">
         <div className="flex items-center justify-between">
           <h2 className="section-title flex items-center gap-2">
-            <Key className="w-4 h-4 text-primary-500" /> LLM 供应商
+            <Key className="w-4 h-4" style={{ color: 'var(--brand-500)' }} /> LLM 供应商
           </h2>
           <div className="flex items-center gap-2">
             {!editing && hasAnyKey && (
-              <span className="badge bg-success-50 text-success-600 flex items-center gap-1">
+              <span className="badge flex items-center gap-1" style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>
                 <CheckCircle2 className="w-3 h-3" /> 已配置
               </span>
             )}
-            <span className="text-xs text-slate-400">{providers.length} 个</span>
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{providers.length} 个</span>
           </div>
         </div>
 
@@ -228,64 +228,64 @@ export default function Settings() {
         {!editing && (
           <div className="space-y-3">
             {providers.length === 0 ? (
-              <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+              <div className="border p-4 flex items-start gap-3" style={{ background: 'var(--state-warning-surface)', borderColor: 'var(--state-warning)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
+                <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" style={{ color: 'var(--state-warning)' }} />
                 <div>
-                  <p className="text-sm font-medium text-amber-800">LLM 未配置</p>
-                  <p className="text-xs text-amber-600/80 mt-0.5">请配置 API Key 后，系统才能调用大语言模型解析需求和生成测试用例。</p>
+                  <p className="text-sm font-medium" style={{ color: 'var(--state-warning)' }}>LLM 未配置</p>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--state-warning)' }}>请配置 API Key 后，系统才能调用大语言模型解析需求和生成测试用例。</p>
                 </div>
               </div>
             ) : (
               providers.map((p, idx) => (
-                <div key={idx} className={`p-4 rounded-xl ${p.is_primary ? 'bg-primary-50/50 border border-primary-100' : 'bg-slate-50/50 border border-slate-100'}`}>
+                <div key={idx} className="p-4 border" style={p.is_primary
+                  ? { background: 'rgba(0, 122, 255, 0.06)', borderColor: 'rgba(0, 122, 255, 0.2)', borderRadius: 'calc(var(--radius) * 0.75)' }
+                  : { background: 'var(--background-muted)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-slate-700">{p.provider_label || p.provider}</span>
-                      {p.is_primary && <span className="badge bg-primary-100 text-primary-700 text-[10px]">主供应商</span>}
+                      <span className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>{p.provider_label || p.provider}</span>
+                      {p.is_primary && <span className="badge text-[10px]" style={{ background: 'rgba(0, 122, 255, 0.12)', color: 'var(--brand-500)' }}>主供应商</span>}
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3 text-xs">
-                    <div><span className="text-slate-400">标识</span><br /><span className="text-slate-600 font-medium">{p.provider}</span></div>
-                    <div><span className="text-slate-400">模型</span><br /><span className="text-slate-600 font-medium">{p.model || '-'}</span></div>
-                    <div className="col-span-2"><span className="text-slate-400">API 地址</span><br /><span className="text-slate-600 font-medium truncate block">{p.base_url || '-'}</span></div>
+                    <div><span style={{ color: 'var(--foreground-tertiary)' }}>标识</span><br /><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{p.provider}</span></div>
+                    <div><span style={{ color: 'var(--foreground-tertiary)' }}>模型</span><br /><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{p.model || '-'}</span></div>
+                    <div className="col-span-2"><span style={{ color: 'var(--foreground-tertiary)' }}>API 地址</span><br /><span className="font-medium truncate block" style={{ color: 'var(--foreground-secondary)' }}>{p.base_url || '-'}</span></div>
                     <div className="col-span-2">
-                      <span className="text-slate-400">API Key</span><br />
-                      <span className="text-slate-600 font-medium font-mono text-[11px]">
+                      <span style={{ color: 'var(--foreground-tertiary)' }}>API Key</span><br />
+                      <span className="font-medium font-mono text-[11px]" style={{ color: 'var(--foreground-secondary)' }}>
                         {p.api_key ? (showKeys[p.provider] ? p.api_key : _maskKey(p.api_key)) : '未配置'}
                       </span>
                       {p.api_key && (
-                        <button onClick={() => setShowKeys(prev => ({ ...prev, [p.provider]: !prev[p.provider] }))} className="ml-2 text-slate-400 hover:text-slate-600 inline-flex">
+                        <button onClick={() => setShowKeys(prev => ({ ...prev, [p.provider]: !prev[p.provider] }))} className="ml-2 inline-flex hover:text-[var(--foreground-secondary)]" style={{ color: 'var(--foreground-tertiary)' }}>
                           {showKeys[p.provider] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
                         </button>
                       )}
                     </div>
                     <div className="col-span-2 flex items-center gap-2 pt-1">
-                      <span className="text-slate-400">思考模式</span>
+                      <span style={{ color: 'var(--foreground-tertiary)' }}>思考模式</span>
                       {p.enable_thinking ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600 text-[10px] font-medium">
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>
                           <Sparkles className="w-3 h-3" /> 已启用
                         </span>
                       ) : (
-                        <span className="text-slate-500 text-[11px]">未启用</span>
+                        <span className="text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>未启用</span>
                       )}
                       {p.enable_thinking && p.thinking_params && (
-                        <span className="text-[10px] text-slate-400 truncate ml-2" title={p.thinking_params}>
+                        <span className="text-[10px] truncate ml-2" style={{ color: 'var(--foreground-tertiary)' }} title={p.thinking_params}>
                           自定义参数已配置
                         </span>
                       )}
                     </div>
                   </div>
                   {testResults[p.provider] && (
-                    <div className={`mt-3 p-3 rounded-xl text-xs leading-relaxed whitespace-pre-line ${
-                      testResults[p.provider].success
-                        ? 'bg-success-50 text-success-700 border border-success-200'
-                        : 'bg-red-50 text-red-700 border border-red-200'
-                    }`}>
+                    <div className="mt-3 p-3 text-xs leading-relaxed whitespace-pre-line border" style={testResults[p.provider].success
+                      ? { background: 'var(--state-success-surface)', color: 'var(--state-success)', borderColor: 'var(--state-success)', borderRadius: 'calc(var(--radius) * 0.75)' }
+                      : { background: 'var(--state-error-surface)', color: 'var(--state-error)', borderColor: 'var(--state-error)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
                       <div className="flex items-start gap-2">
                         {testResults[p.provider].success ? (
-                          <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0 text-success-500" />
+                          <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: 'var(--state-success)' }} />
                         ) : (
-                          <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0 text-red-500" />
+                          <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: 'var(--state-error)' }} />
                         )}
                         <div>
                           <p className="font-semibold mb-0.5">
@@ -315,21 +315,23 @@ export default function Settings() {
         {editing && (
           <div className="space-y-6">
             {providers.map((p, idx) => (
-              <div key={idx} className={`p-4 rounded-xl border ${p.is_primary ? 'border-primary-200 bg-primary-50/30' : 'border-slate-200 bg-slate-50/30'}`}>
+              <div key={idx} className="p-4 border" style={p.is_primary
+                ? { borderColor: 'rgba(0, 122, 255, 0.2)', background: 'rgba(0, 122, 255, 0.04)', borderRadius: 'calc(var(--radius) * 0.75)' }
+                : { borderColor: 'var(--border)', background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
                 {/* 表头 */}
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-slate-600"># {idx + 1}</span>
-                    {p.is_primary && <span className="badge bg-primary-100 text-primary-700 text-[10px]">主供应商</span>}
+                    <span className="text-sm font-medium" style={{ color: 'var(--foreground-secondary)' }}># {idx + 1}</span>
+                    {p.is_primary && <span className="badge text-[10px]" style={{ background: 'rgba(0, 122, 255, 0.12)', color: 'var(--brand-500)' }}>主供应商</span>}
                   </div>
                   <div className="flex items-center gap-1">
                     {!p.is_primary && (
-                      <button onClick={() => setPrimary(idx)} className="text-amber-500 hover:text-amber-600 p-1" title="设为主供应商">
+                      <button onClick={() => setPrimary(idx)} className="p-1" title="设为主供应商" style={{ color: 'var(--state-warning)' }}>
                         <Star className="w-4 h-4" />
                       </button>
                     )}
                     {providers.length > 1 && (
-                      <button onClick={() => removeProvider(idx)} className="text-red-400 hover:text-red-600 p-1" title="删除">
+                      <button onClick={() => removeProvider(idx)} className="p-1" title="删除" style={{ color: 'var(--state-error)' }}>
                         <Trash2 className="w-4 h-4" />
                       </button>
                     )}
@@ -339,28 +341,26 @@ export default function Settings() {
                 {/* 内置供应商选择（快捷入口） */}
                 {config?.builtin_providers && (
                   <div className="mb-3">
-                    <label className="label text-xs text-slate-400 mb-1">选择内置供应商预设（自动填充）</label>
+                    <label className="label text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>选择内置供应商预设（自动填充）</label>
                     <div className="flex flex-wrap gap-1.5">
                       {Object.entries(config.builtin_providers).map(([key, preset]) => (
                         <button
                           key={key}
                           onClick={() => applyPreset(idx, key)}
-                          className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                            p.provider === key
-                              ? 'bg-primary-100 border-primary-300 text-primary-700'
-                              : 'bg-white border-slate-200 text-slate-500 hover:border-primary-200 hover:text-primary-600'
-                          }`}
+                          className="text-xs px-2.5 py-1 border transition-colors"
+                          style={p.provider === key
+                            ? { background: 'rgba(0, 122, 255, 0.12)', borderColor: 'rgba(0, 122, 255, 0.3)', color: 'var(--brand-500)', borderRadius: 'calc(var(--radius) * 0.5)' }
+                            : { background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.5)' }}
                         >
                           {preset.label}
                         </button>
                       ))}
                       <button
                         onClick={() => { updateField(idx, 'provider', 'custom'); updateField(idx, 'provider_label', '自定义'); }}
-                        className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                          p.provider === 'custom' || (!config.builtin_providers[p.provider])
-                            ? 'bg-slate-200 border-slate-300 text-slate-700'
-                            : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
-                        }`}
+                        className="text-xs px-2.5 py-1 border transition-colors"
+                        style={(p.provider === 'custom' || (!config.builtin_providers[p.provider]))
+                          ? { background: 'var(--background-muted)', borderColor: 'var(--input)', color: 'var(--foreground-secondary)', borderRadius: 'calc(var(--radius) * 0.5)' }
+                          : { background: 'var(--background)', borderColor: 'var(--border)', color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.5)' }}
                       >
                         自定义
                       </button>
@@ -397,7 +397,7 @@ export default function Settings() {
                         value={p.api_key} onChange={e => updateField(idx, 'api_key', e.target.value)}
                         className="input-field pr-10 text-sm font-mono" placeholder="sk-..." />
                       <button onClick={() => setShowKeys(prev => ({ ...prev, [p.provider]: !prev[p.provider] }))}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                        className="absolute right-3 top-1/2 -translate-y-1/2 hover:text-[var(--foreground-secondary)]" style={{ color: 'var(--foreground-tertiary)' }}>
                         {showKeys[p.provider] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>
                     </div>
@@ -405,13 +405,13 @@ export default function Settings() {
                 </div>
 
                 {/* v2.36: 思考模式开关 */}
-                <div className="mt-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                <div className="mt-3 p-3 border" style={{ background: 'var(--background-muted)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-indigo-500" />
+                      <Sparkles className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
                       <div>
-                        <label className="text-sm font-medium text-slate-700">思考模式</label>
-                        <p className="text-xs text-slate-400 mt-0.5">
+                        <label className="text-sm font-medium" style={{ color: 'var(--foreground-secondary)' }}>思考模式</label>
+                        <p className="text-xs mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
                           启用深度推理（仅对支持思考的模型生效，如 Hy3 / GLM-4.5 / GLM-5 / Qwen3 / DeepSeek-R1 / Claude 3.5+）
                         </p>
                       </div>
@@ -419,24 +419,21 @@ export default function Settings() {
                     <button
                       type="button"
                       onClick={() => updateField(idx, 'enable_thinking', !p.enable_thinking)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                        p.enable_thinking ? 'bg-primary-600' : 'bg-slate-300'
-                      }`}
+                      className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors"
+                      style={{ background: p.enable_thinking ? 'var(--brand-500)' : 'var(--input)' }}
                       aria-pressed={p.enable_thinking}
                     >
-                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                        p.enable_thinking ? 'translate-x-6' : 'translate-x-1'
-                      }`} />
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${p.enable_thinking ? 'translate-x-6' : 'translate-x-1'}`} />
                     </button>
                   </div>
 
                   {/* v2.37: 自定义思考参数（仅思考模式开启时显示） */}
                   {p.enable_thinking && (
-                    <div className="mt-3 pt-3 border-t border-slate-200">
-                      <label className="text-xs font-medium text-slate-600 flex items-center gap-1">
+                    <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--border)' }}>
+                      <label className="text-xs font-medium flex items-center gap-1" style={{ color: 'var(--foreground-secondary)' }}>
                         <Code className="w-3 h-3" />
                         自定义思考参数
-                        <span className="text-slate-400 font-normal">（可选，留空则使用内置规则）</span>
+                        <span className="font-normal" style={{ color: 'var(--foreground-tertiary)' }}>（可选，留空则使用内置规则）</span>
                       </label>
                       <textarea
                         value={p.thinking_params || ''}
@@ -446,13 +443,13 @@ export default function Settings() {
                         placeholder='{"thinking": {"type": "enabled"}} 或 {"enable_thinking": true}'
                       />
                       <div className="mt-1.5 flex items-start gap-1.5">
-                        <AlertCircle className="w-3 h-3 text-slate-400 mt-0.5 flex-shrink-0" />
-                        <div className="text-[11px] text-slate-400 leading-relaxed">
+                        <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />
+                        <div className="text-[11px] leading-relaxed" style={{ color: 'var(--foreground-tertiary)' }}>
                           <p>JSON 格式，优先级高于内置规则。常见示例：</p>
-                          <p>· 腾讯混元/GLM/DeepSeek-V4：<code className="text-indigo-500">{'{"thinking":{"type":"enabled"}}'}</code></p>
-                          <p>· Qwen3：<code className="text-indigo-500">{'{"enable_thinking":true}'}</code></p>
-                          <p>· Claude：<code className="text-indigo-500">{'{"thinking":{"type":"enabled","budget_tokens":10000}}'}</code></p>
-                          <p>· OpenAI o 系列：<code className="text-indigo-500">{'{"reasoning_effort":"high"}'}</code></p>
+                          <p>· 腾讯混元/GLM/DeepSeek-V4：<code style={{ color: 'var(--brand-500)' }}>{'{"thinking":{"type":"enabled"}}'}</code></p>
+                          <p>· Qwen3：<code style={{ color: 'var(--brand-500)' }}>{'{"enable_thinking":true}'}</code></p>
+                          <p>· Claude：<code style={{ color: 'var(--brand-500)' }}>{'{"thinking":{"type":"enabled","budget_tokens":10000}}'}</code></p>
+                          <p>· OpenAI o 系列：<code style={{ color: 'var(--brand-500)' }}>{'{"reasoning_effort":"high"}'}</code></p>
                         </div>
                       </div>
                     </div>
@@ -462,7 +459,7 @@ export default function Settings() {
             ))}
 
             {/* 添加供应商 */}
-            <button onClick={addProvider} className="btn-secondary w-full border-dashed border-2 py-3 text-slate-400 hover:text-primary-600 hover:border-primary-300">
+            <button onClick={addProvider} className="btn-secondary w-full border-dashed border-2 py-3 hover:text-[var(--brand-500)]" style={{ color: 'var(--foreground-tertiary)' }}>
               <Plus className="w-4 h-4" /> 添加供应商
             </button>
 
@@ -475,7 +472,7 @@ export default function Settings() {
               <button onClick={() => { setEditing(false); loadSettings() }} className="btn-secondary">取消</button>
             </div>
 
-            <p className="text-xs text-slate-400 mt-2">
+            <p className="text-xs mt-2" style={{ color: 'var(--foreground-tertiary)' }}>
               💡 API Key 使用 Fernet 加密后存储，前端展示已脱敏。首次保存后 Key 不可见，如需修改请重新输入。
             </p>
           </div>
@@ -486,7 +483,7 @@ export default function Settings() {
       <div className="card space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="section-title flex items-center gap-2">
-            <Shield className="w-4 h-4 text-slate-500" /> 账户安全
+            <Shield className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} /> 账户安全
           </h2>
           {!passwordFormOpen && (
             <button onClick={() => { setPasswordFormOpen(true); setPasswordMsg(null); setPasswordForm({ current: '', new: '', confirm: '' }) }} className="btn-secondary text-xs py-1.5">
@@ -506,7 +503,7 @@ export default function Settings() {
                   onChange={e => setPasswordForm(prev => ({ ...prev, current: e.target.value }))}
                   className="input-field pr-10 text-sm" placeholder="输入当前密码" />
                 <button onClick={() => setShowCurrentPwd(!showCurrentPwd)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                  className="absolute right-3 top-1/2 -translate-y-1/2 hover:text-[var(--foreground-secondary)]" style={{ color: 'var(--foreground-tertiary)' }}>
                   {showCurrentPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
@@ -521,7 +518,7 @@ export default function Settings() {
                   onChange={e => setPasswordForm(prev => ({ ...prev, new: e.target.value }))}
                   className="input-field pr-10 text-sm" placeholder="输入新密码（至少 4 位）" />
                 <button onClick={() => setShowNewPwd(!showNewPwd)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                  className="absolute right-3 top-1/2 -translate-y-1/2 hover:text-[var(--foreground-secondary)]" style={{ color: 'var(--foreground-tertiary)' }}>
                   {showNewPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
@@ -538,15 +535,13 @@ export default function Settings() {
 
             {/* 反馈消息 */}
             {passwordMsg && (
-              <div className={`p-3 rounded-xl text-sm flex items-start gap-2 ${
-                passwordMsg.ok
-                  ? 'bg-success-50 text-success-700 border border-success-200'
-                  : 'bg-red-50 text-red-700 border border-red-200'
-              }`}>
+              <div className="p-3 text-sm flex items-start gap-2 border" style={passwordMsg.ok
+                ? { background: 'var(--state-success-surface)', color: 'var(--state-success)', borderColor: 'var(--state-success)', borderRadius: 'calc(var(--radius) * 0.75)' }
+                : { background: 'var(--state-error-surface)', color: 'var(--state-error)', borderColor: 'var(--state-error)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
                 {passwordMsg.ok ? (
-                  <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0 text-success-500" />
+                  <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: 'var(--state-success)' }} />
                 ) : (
-                  <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0 text-red-500" />
+                  <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: 'var(--state-error)' }} />
                 )}
                 <span>{passwordMsg.text}</span>
               </div>
@@ -567,16 +562,16 @@ export default function Settings() {
       {/* KB 专属 LLM 配置 */}
       <div className="card">
         <h2 className="section-title flex items-center gap-2 mb-4">
-          <Database className="w-4 h-4 text-primary-500" /> 知识库 LLM
+          <Database className="w-4 h-4" style={{ color: 'var(--brand-500)' }} /> 知识库 LLM
         </h2>
-        <p className="text-xs text-slate-400 mb-4">
+        <p className="text-xs mb-4" style={{ color: 'var(--foreground-tertiary)' }}>
           知识库问答（/ask）和需求澄清（ClarifyAgent）使用独立 LLM，可选指定供应商优化成本与性能。
         </p>
         {kbLlmProviders.length === 0 ? (
-          <p className="text-xs text-slate-400">暂无可用 LLM 供应商，请先在「LLM 供应商」中配置 API Key。</p>
+          <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>暂无可用 LLM 供应商，请先在「LLM 供应商」中配置 API Key。</p>
         ) : (
           <div className="flex items-center gap-3">
-            <span className="text-sm text-slate-600">当前：</span>
+            <span className="text-sm" style={{ color: 'var(--foreground-secondary)' }}>当前：</span>
             <select
               value={kbLlmProvider}
               onChange={e => {
@@ -596,7 +591,7 @@ export default function Settings() {
                 </option>
               ))}
             </select>
-            {kbLlmLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
+            {kbLlmLoading && <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'var(--foreground-tertiary)' }} />}
           </div>
         )}
       </div>
@@ -604,16 +599,16 @@ export default function Settings() {
       {/* 多模态 LLM 配置（v2.18: 图片/流程图识别专用） */}
       <div className="card">
         <h2 className="section-title flex items-center gap-2 mb-4">
-          <Image className="w-4 h-4 text-purple-500" /> 多模态 LLM
+          <Image className="w-4 h-4" style={{ color: '#af52de' }} /> 多模态 LLM
         </h2>
-        <p className="text-xs text-slate-400 mb-4">
+        <p className="text-xs mb-4" style={{ color: 'var(--foreground-tertiary)' }}>
           需求文档中的图片、流程图、架构图等多模态内容识别专用 LLM。文字解析仍使用主 LLM，图片内容交给多模态模型。多模态模型也可作为主模型使用。
         </p>
         {visionLlmProviders.length === 0 ? (
-          <p className="text-xs text-slate-400">暂无可用 LLM 供应商，请先在「LLM 供应商」中配置 API Key。</p>
+          <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>暂无可用 LLM 供应商，请先在「LLM 供应商」中配置 API Key。</p>
         ) : (
           <div className="flex items-center gap-3">
-            <span className="text-sm text-slate-600">当前：</span>
+            <span className="text-sm" style={{ color: 'var(--foreground-secondary)' }}>当前：</span>
             <select
               value={visionLlmProvider}
               onChange={e => {
@@ -633,7 +628,7 @@ export default function Settings() {
                 </option>
               ))}
             </select>
-            {visionLlmLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400" />}
+            {visionLlmLoading && <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'var(--foreground-tertiary)' }} />}
           </div>
         )}
       </div>
@@ -641,7 +636,7 @@ export default function Settings() {
       {/* 系统信息 */}
       <div className="card">
         <h2 className="section-title flex items-center gap-2 mb-4">
-          <Server className="w-4 h-4 text-slate-500" /> 系统信息
+          <Server className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} /> 系统信息
         </h2>
         <div className="grid grid-cols-2 gap-4">
           {[
@@ -650,9 +645,9 @@ export default function Settings() {
             ['LLM 状态', healthStatus?.llm_configured ? '已配置' : '未配置'],
             ['知识库模式', healthStatus?.cold_start_mode ? '冷启动' : '正常'],
           ].map(([label, value]) => (
-            <div key={label} className="flex items-center justify-between p-3 bg-slate-50/50 rounded-xl">
-              <span className="text-sm text-slate-500">{label}</span>
-              <span className="text-sm font-medium text-slate-700">{value}</span>
+            <div key={label} className="flex items-center justify-between p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
+              <span className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>{label}</span>
+              <span className="text-sm font-medium" style={{ color: 'var(--foreground-secondary)' }}>{value}</span>
             </div>
           ))}
         </div>

@@ -30,29 +30,35 @@ const REVIEW_STATUS_STYLES: Record<string, { label: string; stroke: string; dash
 function ModuleNode({ data, selected }: any) {
   return (
     <div className={[
-      'relative px-4 py-3 bg-white rounded-2xl border-2 shadow-md min-w-[140px] transition-all duration-200 group',
+      'relative px-4 py-3 border-2 min-w-[140px] transition-all duration-200 group',
       selected
-        ? 'border-primary-400 shadow-primary-100 shadow-lg ring-2 ring-primary-100'
-        : 'border-slate-200 hover:border-slate-300 hover:shadow-lg',
-    ].join(' ')}>
+        ? 'shadow-lg ring-2'
+        : 'hover:shadow-lg',
+    ].join(' ')} style={{
+      background: 'var(--background)',
+      borderRadius: 'calc(var(--radius) * 1.1)',
+      boxShadow: selected ? 'var(--shadow-apple-md)' : 'var(--shadow-apple-sm)',
+      borderColor: selected ? 'var(--brand-400)' : 'var(--border)',
+      ...(selected ? { '--tw-ring-color': 'rgba(0, 122, 255, 0.1)' } as React.CSSProperties : {}),
+    }}>
       <Handle type="target" position={Position.Left}
-        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-primary-400 !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
       <Handle type="source" position={Position.Right}
-        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-primary-400 !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
       <Handle type="target" position={Position.Top} id="top"
-        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-primary-400 !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
       <Handle type="source" position={Position.Bottom} id="bottom"
-        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-primary-400 !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
       <div className="flex items-center gap-2 mb-1">
-        <div className="w-8 h-8 rounded-lg bg-primary-50 flex items-center justify-center flex-shrink-0">
-          <Puzzle className="w-4 h-4 text-primary-500" />
+        <div className="w-8 h-8 flex items-center justify-center flex-shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 122, 255, 0.08)' }}>
+          <Puzzle className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
         </div>
-        <span className="text-sm font-semibold text-slate-800 truncate max-w-[140px]">
+        <span className="text-sm font-semibold truncate max-w-[140px]" style={{ color: 'var(--foreground)' }}>
           {data.label}
         </span>
       </div>
       {data.description && (
-        <p className="text-[11px] text-slate-400 leading-relaxed line-clamp-2 pl-10">
+        <p className="text-[11px] leading-relaxed line-clamp-2 pl-10" style={{ color: 'var(--foreground-tertiary)' }}>
           {data.description}
         </p>
       )}
@@ -79,67 +85,58 @@ function FPNode({ data, selected }: any) {
   const hasPendingReview = data.hasPendingReview === true
   return (
     <div className={[
-      'relative px-4 py-3 rounded-2xl border-2 shadow-md min-w-[140px] transition-all duration-200 group',
-      isArchived
-        ? 'bg-slate-50 border-slate-300 opacity-80'
-        : hasPendingReview
-          ? 'bg-amber-50'
-          : 'bg-white',
+      'relative px-4 py-3 border-2 min-w-[140px] transition-all duration-200 group',
       selected
-        ? 'border-indigo-400 shadow-indigo-100 shadow-lg ring-2 ring-indigo-100'
+        ? 'shadow-lg ring-2'
         : hasPendingReview
-          ? 'border-amber-400 shadow-amber-100 shadow-lg animate-pulse'
-          : isArchived
-            ? 'border-slate-300'
-            : 'border-slate-200 hover:border-slate-300 hover:shadow-lg',
-    ].join(' ')}>
+          ? 'shadow-lg animate-pulse'
+          : 'hover:shadow-lg',
+    ].join(' ')} style={{
+      borderRadius: 'calc(var(--radius) * 1.1)',
+      boxShadow: selected || hasPendingReview ? 'var(--shadow-apple-md)' : 'var(--shadow-apple-sm)',
+      background: isArchived ? 'var(--background-muted)' : hasPendingReview ? 'var(--state-warning-surface)' : 'var(--background)',
+      borderColor: selected ? 'var(--brand-400)' : hasPendingReview ? 'var(--state-warning)' : isArchived ? 'var(--input)' : 'var(--border)',
+      opacity: isArchived ? 0.8 : 1,
+      ...(selected ? { '--tw-ring-color': 'rgba(0, 122, 255, 0.1)' } as React.CSSProperties : {}),
+    }}>
       {isArchived && (
-        <span className="absolute -top-2 -right-2 text-[9px] px-1.5 py-0.5 rounded-full bg-slate-300 text-slate-500 font-medium">
+        <span className="absolute -top-2 -right-2 text-[9px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: 'var(--input)', color: 'var(--foreground-tertiary)' }}>
           已归档
         </span>
       )}
       {hasPendingReview && (
-        <span className="absolute -top-2 -right-2 text-[9px] px-1.5 py-0.5 rounded-full bg-amber-500 text-white font-medium flex items-center gap-0.5">
+        <span className="absolute -top-2 -right-2 text-[9px] px-1.5 py-0.5 rounded-full text-white font-medium flex items-center gap-0.5" style={{ background: 'var(--state-warning)' }}>
           <Clock className="w-2.5 h-2.5" /> 待审核
         </span>
       )}
       <Handle type="target" position={Position.Left}
-        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
       <Handle type="source" position={Position.Right}
-        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
       <Handle type="target" position={Position.Top} id="top"
-        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
       <Handle type="source" position={Position.Bottom} id="bottom"
-        className="!w-3 !h-3 !bg-slate-300 !border-2 !border-white hover:!bg-indigo-400 !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
       <div className="flex items-center gap-2 mb-1">
-        <div className={[
-          'w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0',
-          isArchived ? 'bg-slate-200' : 'bg-indigo-50',
-        ].join(' ')}>
-          <Boxes className={['w-4 h-4', isArchived ? 'text-slate-400' : 'text-indigo-500'].join(' ')} />
+        <div className="w-8 h-8 flex items-center justify-center flex-shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.08)' }}>
+          <Boxes className="w-4 h-4" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }} />
         </div>
-        <span className={[
-          'text-sm font-semibold truncate max-w-[120px]',
-          isArchived ? 'text-slate-400' : 'text-slate-800',
-        ].join(' ')}>
+        <span className="text-sm font-semibold truncate max-w-[120px]" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--foreground)' }}>
           {data.label}
         </span>
       </div>
       <div className="flex items-center gap-1.5 pl-10">
-        <span className={`text-[10px] px-1.5 py-0.5 rounded ${isArchived ? 'bg-slate-100 text-slate-400' : fpStyle.bg + ' ' + fpStyle.text} font-medium`}>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${isArchived ? '' : fpStyle.bg + ' ' + fpStyle.text} font-medium`} style={isArchived ? { background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' } : undefined}>
           {fpStyle.label}
         </span>
         {data.priority && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-medium">
+          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
             {data.priority}
           </span>
         )}
       </div>
       {data.reqTitle && (
-        <p className={[
-          'text-[11px] leading-relaxed line-clamp-1 pl-10 mt-0.5',
-          isArchived ? 'text-slate-300' : 'text-slate-400',
-        ].join(' ')}>
+        <p className="text-[11px] leading-relaxed line-clamp-1 pl-10 mt-0.5" style={{ color: isArchived ? 'var(--foreground-quaternary)' : 'var(--foreground-tertiary)' }}>
           {data.reqTitle}
         </p>
       )}
@@ -235,29 +232,32 @@ function ModulePicker({
   )
 
   return (
-    <div className="fixed inset-0 z-[60] bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }}
       onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full max-h-[70vh] flex flex-col"
+      <div className="max-w-md w-full max-h-[70vh] flex flex-col"
+        style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }}
         onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
           <div className="flex items-center gap-2">
-            <Puzzle className="w-5 h-5 text-primary-500" />
-            <h2 className="text-base font-semibold text-slate-800">选择模块</h2>
+            <Puzzle className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+            <h2 className="text-base font-semibold" style={{ color: 'var(--foreground)' }}>选择模块</h2>
           </div>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-slate-100">
-            <X className="w-4 h-4 text-slate-400" />
+          <button onClick={onClose} className="p-1" style={{ borderRadius: 'calc(var(--radius) * 0.5)' }}>
+            <X className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
           </button>
         </div>
 
         {/* Search */}
         <div className="px-5 py-3">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:border-primary-400 focus:ring-1 focus:ring-primary-100"
+              className="w-full pl-9 pr-3 py-2 text-sm border focus:outline-none"
+              style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.6)' }}
               placeholder="搜索模块名称..."
               autoFocus
             />
@@ -267,7 +267,7 @@ function ModulePicker({
         {/* Module List */}
         <div className="flex-1 overflow-y-auto px-3 pb-3">
           {filtered.length === 0 ? (
-            <p className="text-sm text-slate-400 text-center py-8">
+            <p className="text-sm text-center py-8" style={{ color: 'var(--foreground-tertiary)' }}>
               {search ? '无匹配模块' : '所有模块已添加到图谱'}
             </p>
           ) : (
@@ -276,18 +276,19 @@ function ModulePicker({
                 <button
                   key={mod.id}
                   onClick={() => onPick(mod)}
-                  className="w-full text-left px-4 py-3 rounded-xl hover:bg-primary-50 border border-transparent hover:border-primary-200 transition-all group"
+                  className="w-full text-left px-4 py-3 transition-all group"
+                  style={{ borderRadius: 'calc(var(--radius) * 0.6)' }}
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-lg bg-slate-100 group-hover:bg-primary-100 flex items-center justify-center flex-shrink-0 transition-colors">
-                      <Puzzle className="w-4 h-4 text-slate-400 group-hover:text-primary-500" />
+                    <div className="w-9 h-9 flex items-center justify-center flex-shrink-0 transition-colors" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--background-muted)' }}>
+                      <Puzzle className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-slate-700 group-hover:text-primary-700">
+                      <p className="text-sm font-medium" style={{ color: 'var(--foreground-secondary)' }}>
                         {mod.name}
                       </p>
                       {mod.description && (
-                        <p className="text-xs text-slate-400 truncate mt-0.5">{mod.description}</p>
+                        <p className="text-xs truncate mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>{mod.description}</p>
                       )}
                     </div>
                   </div>
@@ -348,18 +349,20 @@ function ImpactDescriptionModal({
   }, [reqId, fpId, description, testFocus, onClose])
 
   return (
-    <div className="fixed inset-0 z-[60] bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }}
       onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] flex flex-col"
+      <div className="max-w-2xl w-full max-h-[85vh] flex flex-col"
+        style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }}
         onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
           <div className="flex items-center gap-2">
-            <GitBranch className="w-5 h-5 text-indigo-500" />
-            <h3 className="text-base font-semibold text-slate-800">影响功能说明</h3>
-            <span className="text-xs px-2 py-0.5 rounded bg-indigo-50 text-indigo-600">{fpName}</span>
+            <GitBranch className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+            <h3 className="text-base font-semibold" style={{ color: 'var(--foreground)' }}>影响功能说明</h3>
+            <span className="text-xs px-2 py-0.5" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>{fpName}</span>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+          <button onClick={onClose} style={{ color: 'var(--foreground-tertiary)' }}>
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -367,16 +370,16 @@ function ImpactDescriptionModal({
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {error && (
-            <div className="px-3 py-2 rounded-lg bg-red-50 text-red-600 text-sm">{error}</div>
+            <div className="px-3 py-2 text-sm" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--state-error-surface)', color: 'var(--state-error)' }}>{error}</div>
           )}
 
           {!data && !loading && (
             <div className="text-center py-8">
-              <p className="text-sm text-slate-500 mb-4">
+              <p className="text-sm mb-4" style={{ color: 'var(--foreground-tertiary)' }}>
                 点击下方按钮，基于功能点依赖图谱和模块依赖图谱自动生成影响说明
               </p>
               <button onClick={generate}
-                className="px-4 py-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 text-sm font-medium">
+                className="px-4 py-2 text-white text-sm font-medium" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--brand-500)' }}>
                 生成影响说明
               </button>
             </div>
@@ -384,8 +387,8 @@ function ImpactDescriptionModal({
 
           {loading && (
             <div className="flex items-center justify-center py-8">
-              <Loader2 className="w-6 h-6 text-indigo-500 animate-spin" />
-              <span className="ml-2 text-sm text-slate-500">正在分析依赖图谱...</span>
+              <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
+              <span className="ml-2 text-sm" style={{ color: 'var(--foreground-tertiary)' }}>正在分析依赖图谱...</span>
             </div>
           )}
 
@@ -394,20 +397,20 @@ function ImpactDescriptionModal({
               {/* 受影响 FP */}
               {data.affected_fps.length > 0 && (
                 <div>
-                  <h4 className="text-sm font-semibold text-slate-700 mb-2">
+                  <h4 className="text-sm font-semibold mb-2" style={{ color: 'var(--foreground-secondary)' }}>
                     受影响的功能点（{data.affected_fps.length}）
                   </h4>
                   <div className="space-y-1.5">
                     {data.affected_fps.map((fp, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs px-3 py-1.5 bg-slate-50 rounded">
-                        <span className="font-medium text-slate-700">{fp.fp_name}</span>
-                        <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-600">
+                      <div key={i} className="flex items-center gap-2 text-xs px-3 py-1.5" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
+                        <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{fp.fp_name}</span>
+                        <span className="px-1.5 py-0.5" style={{ borderRadius: 'calc(var(--radius) * 0.25)', background: 'rgba(0, 122, 255, 0.12)', color: 'var(--brand-500)' }}>
                           {fp.relation_cn || fp.relation_type}
                         </span>
                         {fp.req_title && (
-                          <span className="text-slate-400 truncate">← {fp.req_title}</span>
+                          <span className="truncate" style={{ color: 'var(--foreground-tertiary)' }}>← {fp.req_title}</span>
                         )}
-                        <span className="ml-auto text-slate-400">{fp.depth}跳</span>
+                        <span className="ml-auto" style={{ color: 'var(--foreground-tertiary)' }}>{fp.depth}跳</span>
                       </div>
                     ))}
                   </div>
@@ -417,14 +420,14 @@ function ImpactDescriptionModal({
               {/* 受影响模块 */}
               {data.affected_modules.length > 0 && (
                 <div>
-                  <h4 className="text-sm font-semibold text-slate-700 mb-2">
+                  <h4 className="text-sm font-semibold mb-2" style={{ color: 'var(--foreground-secondary)' }}>
                     受影响的模块（{data.affected_modules.length}）
                   </h4>
                   <div className="flex flex-wrap gap-1.5">
                     {data.affected_modules.map((m, i) => (
-                      <span key={i} className="text-xs px-2 py-1 bg-cyan-50 text-cyan-700 rounded">
+                      <span key={i} className="text-xs px-2 py-1" style={{ borderRadius: 'calc(var(--radius) * 0.25)', background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>
                         {m.module_name}
-                        <span className="ml-1 text-cyan-400">({m.reason})</span>
+                        <span className="ml-1" style={{ color: 'var(--brand-400)' }}>({m.reason})</span>
                       </span>
                     ))}
                   </div>
@@ -435,27 +438,29 @@ function ImpactDescriptionModal({
 
               {/* 可编辑的影响说明 */}
               <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
-                  影响说明 {data.is_auto_generated && <span className="text-xs text-slate-400 font-normal">（自动生成，可编辑）</span>}
+                <label className="block text-sm font-semibold mb-1.5" style={{ color: 'var(--foreground-secondary)' }}>
+                  影响说明 {data.is_auto_generated && <span className="text-xs font-normal" style={{ color: 'var(--foreground-tertiary)' }}>（自动生成，可编辑）</span>}
                 </label>
                 <textarea
                   value={description}
                   onChange={e => setDescription(e.target.value)}
                   rows={5}
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:border-indigo-400 focus:ring-1 focus:ring-indigo-100 resize-none"
+                  className="w-full px-3 py-2 text-sm border resize-none focus:outline-none"
+                  style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}
                   placeholder="描述本次功能点变更的影响范围..."
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                <label className="block text-sm font-semibold mb-1.5" style={{ color: 'var(--foreground-secondary)' }}>
                   测试关注点
                 </label>
                 <textarea
                   value={testFocus}
                   onChange={e => setTestFocus(e.target.value)}
                   rows={3}
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:border-indigo-400 focus:ring-1 focus:ring-indigo-100 resize-none"
+                  className="w-full px-3 py-2 text-sm border resize-none focus:outline-none"
+                  style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}
                   placeholder="列出测试用例生成时应重点关注的回归场景..."
                 />
               </div>
@@ -465,18 +470,18 @@ function ImpactDescriptionModal({
 
         {/* Footer */}
         {data && (
-          <div className="flex items-center justify-between px-5 py-3 border-t border-slate-100">
+          <div className="flex items-center justify-between px-5 py-3" style={{ borderTop: '1px solid var(--border)' }}>
             <button onClick={generate} disabled={loading}
-              className="text-xs text-slate-500 hover:text-indigo-600 disabled:opacity-50">
+              className="text-xs disabled:opacity-50" style={{ color: 'var(--foreground-tertiary)' }}>
               {loading ? '重新生成中...' : '重新生成'}
             </button>
             <div className="flex gap-2">
               <button onClick={onClose}
-                className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">
+                className="px-3 py-1.5 text-sm" style={{ color: 'var(--foreground-secondary)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
                 取消
               </button>
               <button onClick={save} disabled={saving || !description.trim()}
-                className="px-4 py-1.5 text-sm bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 disabled:opacity-50">
+                className="px-4 py-1.5 text-sm text-white disabled:opacity-50" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--brand-500)' }}>
                 {saving ? '保存中...' : '保存'}
               </button>
             </div>
@@ -510,29 +515,31 @@ function DependencyHistoryPanel({
   const filtered = actionFilter ? items.filter(i => i.action === actionFilter) : items
 
   return (
-    <div className="absolute top-0 right-0 bottom-0 w-96 bg-white border-l border-slate-200 shadow-xl flex flex-col z-30">
+    <div className="absolute top-0 right-0 bottom-0 w-96 flex flex-col z-30" style={{ background: 'var(--background)', borderLeft: '1px solid var(--border)', boxShadow: 'var(--shadow-apple-xl)' }}>
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+      <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
         <div className="flex items-center gap-2">
-          <History className="w-4 h-4 text-indigo-500" />
-          <h3 className="text-sm font-semibold text-slate-800">依赖变动历史</h3>
-          <span className="text-xs text-slate-400">({items.length})</span>
+          <History className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+          <h3 className="text-sm font-semibold" style={{ color: 'var(--foreground)' }}>依赖变动历史</h3>
+          <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>({items.length})</span>
         </div>
-        <button onClick={onClose} className="p-1 rounded-lg hover:bg-slate-100">
-          <X className="w-4 h-4 text-slate-400" />
+        <button onClick={onClose} className="p-1" style={{ borderRadius: 'calc(var(--radius) * 0.5)' }}>
+          <X className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
         </button>
       </div>
 
       {/* Filter */}
-      <div className="px-4 py-2 border-b border-slate-100 flex items-center gap-1.5 flex-wrap">
-        <span className="text-[11px] text-slate-500">操作类型:</span>
+      <div className="px-4 py-2 flex items-center gap-1.5 flex-wrap" style={{ borderBottom: '1px solid var(--border)' }}>
+        <span className="text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>操作类型:</span>
         <button onClick={() => setActionFilter('')}
-          className={`text-[11px] px-2 py-0.5 rounded ${!actionFilter ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+          className="text-[11px] px-2 py-0.5"
+          style={!actionFilter ? { background: 'var(--foreground)', color: 'var(--background)', borderRadius: 'calc(var(--radius) * 0.25)' } : { background: 'var(--background-muted)', color: 'var(--foreground-secondary)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
           全部
         </button>
         {Object.entries(ACTION_LABELS).map(([key, val]) => (
           <button key={key} onClick={() => setActionFilter(actionFilter === key ? '' : key)}
-            className={`text-[11px] px-2 py-0.5 rounded ${actionFilter === key ? 'bg-slate-700 text-white' : `${val.bg} ${val.text} hover:opacity-80`}`}>
+            className={`text-[11px] px-2 py-0.5 ${actionFilter === key ? '' : `${val.bg} ${val.text} hover:opacity-80`}`}
+            style={actionFilter === key ? { background: 'var(--foreground)', color: 'var(--background)', borderRadius: 'calc(var(--radius) * 0.25)' } : { borderRadius: 'calc(var(--radius) * 0.25)' }}>
             {val.label}
           </button>
         ))}
@@ -542,45 +549,45 @@ function DependencyHistoryPanel({
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 text-indigo-500 animate-spin" />
+            <Loader2 className="w-5 h-5 animate-spin" style={{ color: 'var(--brand-500)' }} />
           </div>
         ) : filtered.length === 0 ? (
-          <p className="text-sm text-slate-400 text-center py-8">暂无历史记录</p>
+          <p className="text-sm text-center py-8" style={{ color: 'var(--foreground-tertiary)' }}>暂无历史记录</p>
         ) : (
           filtered.map(h => {
             const action = ACTION_LABELS[h.action] || { label: h.action, bg: 'bg-slate-100', text: 'text-slate-700' }
             return (
-              <div key={h.id} className="p-2.5 bg-slate-50 rounded-lg border border-slate-100 text-xs">
+              <div key={h.id} className="p-2.5 text-xs" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)', border: '1px solid var(--border)' }}>
                 <div className="flex items-center gap-1.5 mb-1.5">
-                  <span className={`px-1.5 py-0.5 rounded font-medium ${action.bg} ${action.text}`}>
+                  <span className={`px-1.5 py-0.5 rounded font-medium ${action.bg} ${action.text}`} style={{ borderRadius: 'calc(var(--radius) * 0.25)' }}>
                     {action.label}
                   </span>
-                  <span className="text-slate-400">{new Date(h.created_at).toLocaleString('zh-CN')}</span>
-                  {h.changed_by && <span className="text-slate-400 ml-auto">by {h.changed_by}</span>}
+                  <span style={{ color: 'var(--foreground-tertiary)' }}>{new Date(h.created_at).toLocaleString('zh-CN')}</span>
+                  {h.changed_by && <span className="ml-auto" style={{ color: 'var(--foreground-tertiary)' }}>by {h.changed_by}</span>}
                 </div>
-                <div className="text-slate-700">
+                <div style={{ color: 'var(--foreground-secondary)' }}>
                   <span className="font-medium">{h.source_name}</span>
-                  <span className="mx-1 text-slate-400">→</span>
+                  <span className="mx-1" style={{ color: 'var(--foreground-tertiary)' }}>→</span>
                   <span className="font-medium">{h.target_name}</span>
-                  <span className="ml-1.5 text-slate-400">[{h.relation_type}]</span>
+                  <span className="ml-1.5" style={{ color: 'var(--foreground-tertiary)' }}>[{h.relation_type}]</span>
                 </div>
                 {(h.old_review_status || h.new_review_status) && (
-                  <div className="mt-1 text-[11px] text-slate-500">
+                  <div className="mt-1 text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>
                     状态变更：
-                    <span className="text-slate-600">{h.old_review_status || '—'}</span>
+                    <span style={{ color: 'var(--foreground-secondary)' }}>{h.old_review_status || '—'}</span>
                     <span className="mx-1">→</span>
-                    <span className="text-slate-600">{h.new_review_status || '—'}</span>
+                    <span style={{ color: 'var(--foreground-secondary)' }}>{h.new_review_status || '—'}</span>
                   </div>
                 )}
                 {h.change_reason && (
-                  <p className="mt-1 text-[11px] text-slate-500 italic">原因：{h.change_reason}</p>
+                  <p className="mt-1 text-[11px] italic" style={{ color: 'var(--foreground-tertiary)' }}>原因：{h.change_reason}</p>
                 )}
                 {h.related_req_id && (
-                  <p className="mt-1 text-[11px] text-slate-400">关联需求：{h.related_req_id}</p>
+                  <p className="mt-1 text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>关联需求：{h.related_req_id}</p>
                 )}
                 {h.dependency_id && h.action !== 'deleted' && (
                   <button onClick={() => onReviewJump(h.dependency_id)}
-                    className="mt-1.5 text-[11px] text-indigo-500 hover:text-indigo-700">
+                    className="mt-1.5 text-[11px]" style={{ color: 'var(--brand-500)' }}>
                     查看此依赖 →
                   </button>
                 )}
@@ -631,74 +638,81 @@ function ReviewDependencyModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[70] bg-black/30 backdrop-blur-sm flex items-center justify-center p-4"
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+      style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }}
       onClick={onClose}>
-      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full"
+      <div className="max-w-md w-full"
+        style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }}
         onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
           <div className="flex items-center gap-2">
-            <CheckCircle className="w-5 h-5 text-indigo-500" />
-            <h3 className="text-base font-semibold text-slate-800">审核依赖关系</h3>
+            <CheckCircle className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+            <h3 className="text-base font-semibold" style={{ color: 'var(--foreground)' }}>审核依赖关系</h3>
           </div>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-slate-100">
-            <X className="w-4 h-4 text-slate-400" />
+          <button onClick={onClose} className="p-1" style={{ borderRadius: 'calc(var(--radius) * 0.5)' }}>
+            <X className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
           </button>
         </div>
 
         <div className="px-5 py-4 space-y-3">
-          {error && <div className="px-3 py-2 rounded-lg bg-red-50 text-red-600 text-sm">{error}</div>}
+          {error && <div className="px-3 py-2 text-sm" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--state-error-surface)', color: 'var(--state-error)' }}>{error}</div>}
 
-          <div className="p-3 bg-slate-50 rounded-lg text-sm">
-            <div className="text-slate-500 text-xs mb-1">依赖关系</div>
-            <div className="text-slate-700">
+          <div className="p-3 text-sm" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+            <div className="text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>依赖关系</div>
+            <div style={{ color: 'var(--foreground-secondary)' }}>
               <span className="font-medium">{sourceName}</span>
-              <span className="mx-1.5 text-slate-400">→</span>
+              <span className="mx-1.5" style={{ color: 'var(--foreground-tertiary)' }}>→</span>
               <span className="font-medium">{targetName}</span>
             </div>
-            <div className="mt-1 text-[11px] text-slate-400">
+            <div className="mt-1 text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>
               当前状态：<span className="font-medium">{REVIEW_STATUS_STYLES[currentStatus]?.label || currentStatus}</span>
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">审核操作</label>
+            <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--foreground-secondary)' }}>审核操作</label>
             <div className="flex gap-2">
               <button onClick={() => setAction('approve')}
-                className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border-2 transition-colors ${
-                  action === 'approve' ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600 hover:border-slate-300'
-                }`}>
+                className="flex-1 px-3 py-2 text-sm font-medium border-2 transition-colors"
+                style={action === 'approve'
+                  ? { borderColor: 'var(--state-success)', background: 'var(--state-success-surface)', color: 'var(--state-success)', borderRadius: 'calc(var(--radius) * 0.5)' }
+                  : { borderColor: 'var(--border)', color: 'var(--foreground-secondary)', borderRadius: 'calc(var(--radius) * 0.5)' }
+                }>
                 <CheckCircle className="w-4 h-4 inline mr-1" /> 审核通过
               </button>
               <button onClick={() => setAction('reject')}
-                className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border-2 transition-colors ${
-                  action === 'reject' ? 'border-red-500 bg-red-50 text-red-700' : 'border-slate-200 text-slate-600 hover:border-slate-300'
-                }`}>
+                className="flex-1 px-3 py-2 text-sm font-medium border-2 transition-colors"
+                style={action === 'reject'
+                  ? { borderColor: 'var(--state-error)', background: 'var(--state-error-surface)', color: 'var(--state-error)', borderRadius: 'calc(var(--radius) * 0.5)' }
+                  : { borderColor: 'var(--border)', color: 'var(--foreground-secondary)', borderRadius: 'calc(var(--radius) * 0.5)' }
+                }>
                 <XCircle className="w-4 h-4 inline mr-1" /> 驳回
               </button>
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">
-              审核原因 {action === 'reject' && <span className="text-red-500">*</span>}
+            <label className="block text-sm font-medium mb-1.5" style={{ color: 'var(--foreground-secondary)' }}>
+              审核原因 {action === 'reject' && <span style={{ color: 'var(--state-error)' }}>*</span>}
             </label>
             <textarea
               value={reason}
               onChange={e => setReason(e.target.value)}
               rows={3}
-              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:border-indigo-400 focus:ring-1 focus:ring-indigo-100 resize-none"
+              className="w-full px-3 py-2 text-sm border resize-none focus:outline-none"
+              style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}
               placeholder={action === 'reject' ? '请填写驳回原因（必填）' : '可填写审核说明（选填）'}
             />
           </div>
         </div>
 
-        <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-100">
+        <div className="flex justify-end gap-2 px-5 py-3" style={{ borderTop: '1px solid var(--border)' }}>
           <button onClick={onClose}
-            className="px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">
+            className="px-3 py-1.5 text-sm" style={{ color: 'var(--foreground-secondary)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
             取消
           </button>
           <button onClick={submit} disabled={submitting}
-            className="px-4 py-1.5 text-sm bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 disabled:opacity-50">
+            className="px-4 py-1.5 text-sm text-white disabled:opacity-50" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--brand-500)' }}>
             {submitting ? '提交中...' : '确认'}
           </button>
         </div>
@@ -1198,52 +1212,57 @@ export default function DependencyGraph() {
   // Render
   // ==========================================================================
   return (
-    <div className={`flex flex-col ${fullscreen ? 'fixed inset-0 z-50 bg-white' : 'h-[calc(100vh-5rem)]'}`}>
+    <div className={`flex flex-col ${fullscreen ? 'fixed inset-0 z-50' : 'h-[calc(100vh-5rem)]'}`} style={fullscreen ? { background: 'var(--background)' } : undefined}>
       {/* Top Toolbar */}
-      <div className="flex items-center gap-3 px-5 py-2.5 border-b border-slate-200 bg-white shrink-0">
-        <GitBranch className="w-5 h-5 text-primary-500" />
-        <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5">
+      <div className="flex items-center gap-3 px-5 py-2.5 shrink-0" style={{ borderBottom: '1px solid var(--border)', background: 'var(--background)' }}>
+        <GitBranch className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+        <div className="flex items-center gap-1 p-0.5" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
           <button onClick={() => switchGraphType('modules')}
-            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-              graphType === 'modules' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-            }`}>
+            className="px-3 py-1 text-xs font-medium transition-colors"
+            style={graphType === 'modules'
+              ? { background: 'var(--background)', color: 'var(--foreground)', borderRadius: 'calc(var(--radius) * 0.25)', boxShadow: 'var(--shadow-apple-sm)' }
+              : { color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
             模块依赖
           </button>
           <button onClick={() => switchGraphType('fp')}
-            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
-              graphType === 'fp' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'
-            }`}>
+            className="px-3 py-1 text-xs font-medium transition-colors"
+            style={graphType === 'fp'
+              ? { background: 'var(--background)', color: 'var(--foreground)', borderRadius: 'calc(var(--radius) * 0.25)', boxShadow: 'var(--shadow-apple-sm)' }
+              : { color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
             功能点依赖
           </button>
         </div>
-        {productName && <span className="text-xs text-slate-400">· {productName}</span>}
+        {productName && <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>· {productName}</span>}
 
         {/* v2.3: FP 图谱筛选器 — 模块 + 审核状态 */}
         {selectedProductId && graphType === 'fp' && (
           <>
             <div className="flex items-center gap-1.5">
-              <Filter className="w-3.5 h-3.5 text-slate-400" />
+              <Filter className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
               <select value={moduleFilter} onChange={e => setModuleFilter(e.target.value)}
-                className="text-xs px-2 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 focus:outline-none focus:border-primary-400 max-w-[140px]">
+                className="text-xs px-2 py-1 border focus:outline-none max-w-[140px]"
+                style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--background)', color: 'var(--foreground-secondary)' }}>
                 <option value="">全部模块（全局总览）</option>
                 {graphModules.map(m => (
                   <option key={m.id} value={m.id}>{m.name}</option>
                 ))}
               </select>
               <select value={reviewStatusFilter} onChange={e => setReviewStatusFilter(e.target.value)}
-                className="text-xs px-2 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 focus:outline-none focus:border-primary-400">
+                className="text-xs px-2 py-1 border focus:outline-none"
+                style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--background)', color: 'var(--foreground-secondary)' }}>
                 <option value="">全部状态</option>
                 <option value="pending">仅待审核</option>
                 <option value="approved">仅已审核</option>
                 <option value="rejected">仅已驳回</option>
               </select>
             </div>
-            <div className="w-px h-5 bg-slate-200" />
+            <div className="w-px h-5" style={{ background: 'var(--border)' }} />
             <button onClick={toggleHistory}
-              className={`btn-ghost text-xs flex items-center gap-1 ${historyOpen ? 'bg-indigo-50 text-indigo-700' : ''}`}>
+              className="btn-ghost text-xs flex items-center gap-1"
+              style={historyOpen ? { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' } : undefined}>
               <History className="w-3.5 h-3.5" /> 变动历史
             </button>
-            <div className="w-px h-5 bg-slate-200" />
+            <div className="w-px h-5" style={{ background: 'var(--border)' }} />
           </>
         )}
 
@@ -1257,7 +1276,8 @@ export default function DependencyGraph() {
               <div
                 draggable
                 onDragStart={(e) => { e.dataTransfer.setData('application/reactflow', 'module'); e.dataTransfer.effectAllowed = 'move' }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-grab active:cursor-grabbing select-none bg-primary-50 border-primary-200 text-primary-600 hover:bg-primary-100 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium cursor-grab active:cursor-grabbing select-none transition-colors"
+                style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 122, 255, 0.08)', borderColor: 'rgba(0, 122, 255, 0.2)', color: 'var(--brand-500)' }}
                 title="拖拽到画布添加模块"
               >
                 <GripVertical className="w-3 h-3 opacity-40" />
@@ -1268,7 +1288,8 @@ export default function DependencyGraph() {
               <div
                 draggable
                 onDragStart={(e) => { e.dataTransfer.setData('application/reactflow', 'connection'); e.dataTransfer.effectAllowed = 'move' }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium cursor-grab active:cursor-grabbing select-none bg-cyan-50 border-cyan-200 text-cyan-600 hover:bg-cyan-100 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium cursor-grab active:cursor-grabbing select-none transition-colors"
+                style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 199, 190, 0.08)', borderColor: 'rgba(0, 199, 190, 0.2)', color: '#00c7be' }}
                 title="拖拽到画布后，从节点拖出连线"
               >
                 <GripVertical className="w-3 h-3 opacity-40" />
@@ -1276,18 +1297,21 @@ export default function DependencyGraph() {
                 <span>连线</span>
               </div>
             </div>
-            <div className="w-px h-5 bg-slate-200" />
+            <div className="w-px h-5" style={{ background: 'var(--border)' }} />
           </>
         )}
 
         {/* Edge type selector — 按模式显示不同选项 */}
         {selectedProductId && (
           <>
-            <span className="text-[11px] text-slate-400">连线类型:</span>
+            <span className="text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>连线类型:</span>
             {edgeTypeOptions.map(([key, val]) => (
               <button key={key} onClick={() => setEdgeType(key)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${edgeType === key ? 'border-slate-300 text-slate-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'}`}
-                style={edgeType === key ? { background: `${val.stroke}1a`, borderColor: val.stroke, color: val.stroke } : {}}>
+                className="px-2.5 py-1 text-xs font-medium border transition-colors"
+                style={edgeType === key
+                  ? { background: `${val.stroke}1a`, borderColor: val.stroke, color: val.stroke, borderRadius: 'calc(var(--radius) * 0.5)' }
+                  : { borderColor: 'var(--border)', color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.5)' }
+                }>
                 {graphType === 'fp' && (key === 'invariants' || key === 'lifecycle_scenarios') ? `↔ ${val.label}` : `→ ${val.label}`}
               </button>
             ))}
@@ -1298,7 +1322,7 @@ export default function DependencyGraph() {
         {selectedProductId && graphType === 'fp' && (
           <div className="flex items-center gap-2 ml-2">
             {Object.entries(REVIEW_STATUS_STYLES).map(([key, val]) => (
-              <div key={key} className="flex items-center gap-1 text-[10px] text-slate-500">
+              <div key={key} className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--foreground-tertiary)' }}>
                 <div className={`w-4 h-0.5 ${val.dashed ? 'border-t-2 border-dashed' : ''}`}
                   style={{ borderColor: val.stroke, background: val.dashed ? 'transparent' : val.stroke }} />
                 <span>{val.label}</span>
@@ -1307,7 +1331,7 @@ export default function DependencyGraph() {
           </div>
         )}
 
-        <div className="w-px h-5 bg-slate-200" />
+        <div className="w-px h-5" style={{ background: 'var(--border)' }} />
         <button onClick={() => graphType === 'fp' ? loadFPGraph() : loadGraph()} disabled={loading} className="btn-ghost text-xs">
           <Loader2 className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
         </button>
@@ -1319,13 +1343,13 @@ export default function DependencyGraph() {
       {/* Main Content */}
       <div className="flex flex-1 min-h-0">
         {/* Left Sidebar — Legend & Stats only */}
-        <div className="w-48 border-r border-slate-200 bg-slate-50/50 flex flex-col shrink-0 p-3">
+        <div className="w-48 flex flex-col shrink-0 p-3" style={{ borderRight: '1px solid var(--border)', background: 'var(--background-muted)' }}>
           {!selectedProductId ? (
-            <p className="text-xs text-slate-400 text-center py-8">请先在顶部栏选择产品</p>
+            <p className="text-xs text-center py-8" style={{ color: 'var(--foreground-tertiary)' }}>请先在顶部栏选择产品</p>
           ) : (
             <>
-              <p className="text-[10px] text-slate-400 uppercase tracking-wider font-medium mb-3">图谱信息</p>
-              <div className="space-y-2 text-xs text-slate-600">
+              <p className="text-[10px] uppercase tracking-wider font-medium mb-3" style={{ color: 'var(--foreground-tertiary)' }}>图谱信息</p>
+              <div className="space-y-2 text-xs" style={{ color: 'var(--foreground-secondary)' }}>
                 <div className="flex justify-between">
                   <span>{graphType === 'fp' ? '功能点节点' : '模块节点'}</span>
                   <span className="font-medium">{nodes.length}</span>
@@ -1342,20 +1366,20 @@ export default function DependencyGraph() {
                 )}
               </div>
 
-              <div className="mt-4 pt-3 border-t border-slate-200">
-                <p className="text-[10px] text-slate-400 uppercase tracking-wider font-medium mb-2">图例</p>
+              <div className="mt-4 pt-3" style={{ borderTop: '1px solid var(--border)' }}>
+                <p className="text-[10px] uppercase tracking-wider font-medium mb-2" style={{ color: 'var(--foreground-tertiary)' }}>图例</p>
                 <div className="space-y-1.5">
                   {Object.entries(currentEdgeStyles).map(([key, val]) => (
                     <div key={key} className="flex items-center gap-2 text-[11px]">
                       <div className="w-5 h-0.5 rounded-full" style={{ background: val.stroke }} />
-                      <span className="text-slate-600">{val.label}</span>
+                      <span style={{ color: 'var(--foreground-secondary)' }}>{val.label}</span>
                     </div>
                   ))}
                 </div>
               </div>
 
-              <div className="mt-auto pt-3 border-t border-slate-200">
-                <p className="text-[10px] text-slate-400 leading-relaxed">
+              <div className="mt-auto pt-3" style={{ borderTop: '1px solid var(--border)' }}>
+                <p className="text-[10px] leading-relaxed" style={{ color: 'var(--foreground-tertiary)' }}>
                   {graphType === 'fp'
                     ? '双击节点生成影响说明 · 拖拽节点手柄连线 · 右键删除/交换方向 · 位置不持久化'
                     : '从工具栏拖拽模块到画布 · 拖拽节点手柄连线 · 双击节点切换模块'}
@@ -1366,7 +1390,7 @@ export default function DependencyGraph() {
         </div>
 
         {/* Graph Canvas */}
-        <div className="flex-1 relative bg-slate-50"
+        <div className="flex-1 relative" style={{ background: 'var(--background-muted)' }}
           onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' }}
           onDrop={(e) => {
             if (graphType === 'fp') return  // FP 模式不支持拖放添加
@@ -1376,11 +1400,11 @@ export default function DependencyGraph() {
           }}
         >
           {loading ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-white/60 z-10">
-              <Loader2 className="w-8 h-8 animate-spin text-primary-400" />
+            <div className="absolute inset-0 flex items-center justify-center z-10" style={{ background: 'rgba(255, 255, 255, 0.6)' }}>
+              <Loader2 className="w-8 h-8 animate-spin" style={{ color: 'var(--brand-400)' }} />
             </div>
           ) : !selectedProductId ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+            <div className="absolute inset-0 flex flex-col items-center justify-center" style={{ color: 'var(--foreground-tertiary)' }}>
               <GitBranch className="w-12 h-12 mb-3 opacity-30" />
               <p className="text-sm font-medium">请先在顶部栏选择产品</p>
             </div>
@@ -1405,16 +1429,16 @@ export default function DependencyGraph() {
                 defaultEdgeOptions={{ type: 'smoothstep', animated: true }}
               >
                 <Background color="#e2e8f0" gap={20} size={1} />
-                <Controls showInteractive={false} className="!rounded-xl !shadow-md !border-slate-200" />
+                <Controls showInteractive={false} className="!rounded-xl !shadow-md !border-[var(--border)]" />
                 <MiniMap nodeStrokeColor="#818cf8" nodeColor="#eef2ff" nodeBorderRadius={12}
                   maskColor="rgba(0,0,0,0.05)" style={{ bottom: 12, right: 12 }}
-                  className="!rounded-xl !shadow-md !border-slate-200" />
+                  className="!rounded-xl !shadow-md !border-[var(--border)]" />
 
                 {nodes.length === 0 && (
                   <Panel position="top-center">
-                    <div className="bg-white/90 backdrop-blur px-4 py-3 rounded-2xl shadow-lg border border-slate-200 text-center">
-                      <p className="text-sm font-medium text-slate-600 mb-1">画布为空</p>
-                      <p className="text-xs text-slate-400">
+                    <div className="px-4 py-3 text-center" style={{ background: 'rgba(255, 255, 255, 0.9)', backdropFilter: 'blur(4px)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-md)', border: '1px solid var(--border)' }}>
+                      <p className="text-sm font-medium mb-1" style={{ color: 'var(--foreground-secondary)' }}>画布为空</p>
+                      <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                         {graphType === 'fp'
                           ? '当前产品下暂无功能点，请先在需求详情中拆分功能点'
                           : '从工具栏拖拽「模块」到画布添加，拖拽节点间的手柄创建连线'}
@@ -1425,11 +1449,11 @@ export default function DependencyGraph() {
 
                 {selectedEdge && (
                   <Panel position="bottom-center">
-                    <div className="bg-white/95 backdrop-blur px-4 py-2.5 rounded-2xl shadow-lg border border-slate-200 flex items-center gap-3">
+                    <div className="px-4 py-2.5 flex items-center gap-3" style={{ background: 'rgba(255, 255, 255, 0.95)', backdropFilter: 'blur(4px)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-md)', border: '1px solid var(--border)' }}>
                       <div className="flex items-center gap-1.5 text-xs">
                         <span className="w-2 h-2 rounded-full"
                           style={{ background: currentEdgeStyles[(selectedEdge.data as any)?.eType]?.stroke || '#818cf8' }} />
-                        <span className="text-slate-600 font-medium">{selectedEdge.label}</span>
+                        <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{selectedEdge.label}</span>
                       </div>
                       {/* v2.3: 审核状态徽章 */}
                       {graphType === 'fp' && (selectedEdge.data as any)?.reviewStatus && (
@@ -1437,16 +1461,16 @@ export default function DependencyGraph() {
                           {REVIEW_STATUS_STYLES[(selectedEdge.data as any).reviewStatus]?.label}
                         </span>
                       )}
-                      <div className="w-px h-4 bg-slate-200" />
+                      <div className="w-px h-4" style={{ background: 'var(--border)' }} />
                       {/* v2.3: 审核按钮 — 仅 pending 状态显示 */}
                       {graphType === 'fp' && (selectedEdge.data as any)?.reviewStatus === 'pending' && (
                         <button onClick={() => openReviewModal(selectedEdge)}
-                          className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 transition-colors">
+                          className="flex items-center gap-1 text-xs transition-colors" style={{ color: 'var(--brand-500)' }}>
                           <CheckCircle className="w-3 h-3" /> 审核
                         </button>
                       )}
                       <button onClick={() => deleteEdge(selectedEdge.id)}
-                        className="flex items-center gap-1 text-xs text-red-500 hover:text-red-700 transition-colors">
+                        className="flex items-center gap-1 text-xs transition-colors" style={{ color: 'var(--state-error)' }}>
                         <Unlink className="w-3 h-3" /> 删除连线
                       </button>
                     </div>
@@ -1454,7 +1478,7 @@ export default function DependencyGraph() {
                 )}
 
                 <Panel position="bottom-right">
-                  <p className="text-[10px] text-slate-300">
+                  <p className="text-[10px]" style={{ color: 'var(--foreground-quaternary)' }}>
                     {graphType === 'fp' ? '右键删除/交换方向' : 'Shift+框选 · Del 移除 · 右键菜单'}
                   </p>
                 </Panel>
@@ -1466,17 +1490,17 @@ export default function DependencyGraph() {
 
       {/* Context Menu */}
       {ctxMenu && (
-        <div className="fixed z-[100] bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 min-w-[150px]"
-          style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+        <div className="fixed z-[100] py-1.5 min-w-[150px]"
+          style={{ left: ctxMenu.x, top: ctxMenu.y, background: 'var(--background)', borderRadius: 'calc(var(--radius) * 0.6)', boxShadow: 'var(--shadow-apple-xl)', border: '1px solid var(--border)' }}>
           {ctxMenu.nodeId && graphType === 'modules' && (
             <>
               <button onClick={contextEdit}
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--foreground-secondary)' }}>
                 <Edit3 className="w-3.5 h-3.5" /> 切换模块
               </button>
-              <div className="border-t border-slate-100 my-1" />
+              <div className="my-1" style={{ borderTop: '1px solid var(--border)' }} />
               <button onClick={contextRemove}
-                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50">
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--state-error)' }}>
                 <Trash2 className="w-3.5 h-3.5" /> 从图谱移除
               </button>
             </>
@@ -1493,22 +1517,22 @@ export default function DependencyGraph() {
                       if (edge) openReviewModal(edge)
                       setCtxMenu(null)
                     }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-indigo-600 hover:bg-indigo-50">
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--brand-500)' }}>
                       <CheckCircle className="w-3.5 h-3.5" /> 审核依赖
                     </button>
-                    <div className="border-t border-slate-100 my-1" />
+                    <div className="my-1" style={{ borderTop: '1px solid var(--border)' }} />
                   </>
                 )
               }
               return null
             })()}
             <button onClick={swapEdge}
-              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-primary-600 hover:bg-primary-50">
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--brand-500)' }}>
               <ArrowLeftRight className="w-3.5 h-3.5" /> 交换方向
             </button>
-            <div className="border-t border-slate-100 my-1" />
+            <div className="my-1" style={{ borderTop: '1px solid var(--border)' }} />
             <button onClick={contextRemove}
-              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50">
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm" style={{ color: 'var(--state-error)' }}>
               <Unlink className="w-3.5 h-3.5" /> 删除连线
             </button>
           </>)}
