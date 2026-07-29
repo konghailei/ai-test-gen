@@ -1,7 +1,7 @@
 # 00 — 系统架构总览
 
 > AI 驱动需求解析 → 需求澄清 → 测试用例自动生成 系统完整架构设计  
-> 版本: v2.1 | 日期: 2026-07-21
+> 版本: v2.2 | 日期: 2026-07-29
 
 ---
 
@@ -603,30 +603,31 @@ FastAPI StreamingResponse → 实时推送进度
 | 领域 | 架构设计要求 | 实际代码 | 差距 |
 |------|-------------|---------|------|
 | **MatchAgent / KB 检索** | 向量检索 Top-K + 需求模式匹配 → GenAgent | 已移除（v3.1） | Phase 2 核心能力丢失；跨需求的历史用例无法复用 |
-| **知识库增强生成** | "每次生成的用例经人工确认后自动回写知识库 → 越用越准" | GenAgent 不再读取 KB，仅 ClarifyAgent 做基线补全 | 闭环积累被削弱——生成阶段不消费 KB 中已积累的高质量用例 |
+| **知识库增强生成** | "每次生成的用例经人工确认后自动回写知识库 → 越用越准" | v2.2 恢复轻量 KB 检索（消费同产品 approved 用例），但生成期召回为"最新 N 条"而非语义相似，闭环在生成阶段未完全闭合 | 部分实现——语义召回待增强（见 docs/11 §5.3） |
 | **断路器/重试框架** | L2 编排层有完整断路器 | `llm_client.py` 有指数退避，但编排层无显式断路状态机 | 差距较小，当前规模够用 |
-| **DLQ 死信队列** | 数据层 DLQ + 幂等守卫 | 未实现 | Phase 2 标记为"需实现"，当前规模可接受 |
-| **一致性检查** | "多次生成方差 < 10%" | GenAgent 无一致性检查 | 架构设计有要求但未实现 |
-| **覆盖率矩阵** | "需求→用例覆盖映射" | FormatEngine 无此输出 | Phase 2 标记项，未实现 |
+| **DLQ 死信队列** | 数据层 DLQ + 幂等守卫 | ✅ v2.2 已实现（`core/dlq.py`，Redis List，静默降级） | Phase 2 标记项已落地 |
+| **一致性检查** | 用例数方差 + 类型分布 Jaccard + 语义相似度三维度 | ✅ v2.2 已实现（`orchestrator.py` 对比历史 generate_cases 任务） | 架构要求已落地 |
+| **覆盖率矩阵** | FP 覆盖率矩阵（total/covered/rate/uncovered） | ✅ v2.2 已实现（`orchestrator.py` done 事件 fp_coverage） | Phase 2 标记项已落地 |
 
 ### 11.3 实施路线图状态
 
 | Phase | 设计状态 | 实际完成度 | 备注 |
 |-------|---------|-----------|------|
 | Phase 1 (MVP) | ReqAgent + QualityGate + GenAgent + Review | ✅ 100% | 全部就位 |
-| Phase 2 (增强) | ClarifyAgent + ImpactAnalysis + 多类型 + 追溯 | ✅ ~85% | ClarifyAgent/ImpactAnalysis 就位；MatchAgent 移除；覆盖率矩阵/一致性检查未实现 |
+| Phase 2 (增强) | ClarifyAgent + ImpactAnalysis + 多类型 + 追溯 + 一致性/覆盖率/DLQ | ✅ ~95% | ClarifyAgent/ImpactAnalysis 就位；MatchAgent 移除；v2.2 已实现一致性检查/FP覆盖率/DLQ；生成期 KB 语义召回待增强 |
 | Phase 3 (成熟) | KB Milvus + Batch + CI/CD | ❌ 0% | 未启动 |
 
 ### 11.4 建议的后续优化
 
 | 优先级 | 事项 | 理由 |
 |--------|------|------|
-| P0 | 补充 GenAgent 一致性检查 | 架构设计要求"多次生成方差<10%"，当前位置空白 |
-| P1 | 覆盖率矩阵输出（需求→用例映射） | Phase 2 标记项，增强生成用例的可信度展示 |
-| P1 | 恢复轻量 KB 检索（非 MatchAgent 完整版） | 当前 GenAgent 零外部参考，积累的高质量用例完全未利用 |
-| P2 | 实现 DLQ 死信队列 | 提高数据写入可靠性——当前 Celery 失败静默降级，无重试队列 |
+| ✅ P0 | GenAgent 一致性检查 | v2.2 已实现（用例数/类型 Jaccard/语义相似度三维度对比历史任务） |
+| ✅ P1 | 覆盖率矩阵输出（FP 覆盖率） | v2.2 已实现（orchestrator `fp_coverage`） |
+| ✅ P1 | 恢复轻量 KB 检索 | v2.2 已实现（v3.2 轻量检索），但生成期召回为"最新 N 条"非语义 |
+| ✅ P2 | 实现 DLQ 死信队列 | v2.2 已实现（core/dlq.py） |
+| P0 | 生成期 KB 语义召回 | 改用语义相似检索（Milvus `search_similar_cases`），闭合生成闭环（见 docs/11 §6） |
 | P2 | 完整性检查（SRR → UTCF 字段级追溯） | 每个用例标注"基于 SRR 哪个字段生成"，当前只有 related_fp 粗粒度追溯 |
 
 ---
 
-> **文档同步状态**：本文（00-architecture-overview.md）已与代码 v2.0.0+ 同步。doc-08-functional-points.md 需要单独更新（interaction_srr + FP 去重跳 LLM + FP 复制到新需求）。doc-03-case-generation-flow.md 需要更新（移除 MatchAgent + Few-shot 示例 + related_fp 追溯）。
+> **文档同步状态**：本文（00-architecture-overview.md）已与代码 v2.2.0 同步（含 §11 v2.0/v2.2 演进对比）。doc-08-functional-points.md 已同步（interaction_srr + FP 去重跳 LLM + FP 复制到新需求）。doc-03-case-generation-flow.md 需更新（移除 MatchAgent + Few-shot 示例 + related_fp 追溯）。最新对标分析见 docs/11。

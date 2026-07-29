@@ -257,6 +257,7 @@ LLM 一次性产出两份 SRR
 | **UI** | 「补充重新生成」按钮放开到所有非归档状态 | `RequirementDetail.tsx` |
 | **版本** | 历史版本修复 Object 显示（safeStr 兜底） | `VersionHistoryPanel.tsx` |
 | **版本** | 历史版本可直接切换使用（restore 端点 + 「使用此版本」按钮）| `requirements.py`, `VersionHistoryPanel.tsx`, `client.ts` |
+| **已知差距** | 生成期 KB 语义召回待增强：GenAgent 轻量 KB 当前为"同产品最新 N 条"，未调用 Milvus 语义召回（详见 docs/11 §5.3） | `gen_agent.py` |
 
 ---
 
