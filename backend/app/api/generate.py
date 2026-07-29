@@ -178,11 +178,34 @@ async def generate_test_cases(req: GenerateRequest):
                 stage = event.get("stage", "")
                 progress = event.get("progress", 0)
                 if stage == "done":
+                    # v2.0：保存完整统计信息到 result_json，供下次生成时一致性检查使用
+                    # 字段对齐 orchestrator._gen_node 读取：case_count / type_dist / case_titles
+                    done_cases = event.get("cases") or []
+                    type_dist: dict[str, int] = {}
+                    case_titles: list[str] = []
+                    for c in done_cases:
+                        t = c.get("type", "unknown")
+                        type_dist[t] = type_dist.get(t, 0) + 1
+                        title = c.get("title", "")
+                        if title:
+                            case_titles.append(title)
                     await _update_gen_task(
                         status="completed", phase="done", progress=100,
                         message="用例生成完成",
                         completed_at=datetime.now(timezone.utc),
-                        result_json={"case_count": event.get("case_count", 0)},
+                        result_json={
+                            "case_count": len(done_cases),
+                            "type_dist": type_dist,
+                            "case_titles": case_titles,
+                            # 同时保存审核与一致性摘要，便于任务管理页展示
+                            "review_passed": event.get("review_report", {}).get("passed_cases", 0),
+                            "review_blocked": event.get("review_report", {}).get("blocked_cases", 0),
+                            "avg_confidence": event.get("review_report", {}).get("avg_confidence", 0.0),
+                            "consistency_inconsistent": (
+                                event.get("consistency_check", {}) or {}
+                            ).get("is_inconsistent", False),
+                            "duration_ms": event.get("duration_ms", 0),
+                        },
                     )
                 elif stage == "error":
                     await _update_gen_task(

@@ -2,12 +2,92 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Building2, Plus, Trash2, Edit3, Loader2, Check, ChevronRight,
-  LogOut, User as UserIcon
+  LogOut, User as UserIcon, AlertTriangle, X
 } from 'lucide-react'
 import { products as prodApi } from '../api/client'
 import { useAuth } from '../auth'
 import { useProduct } from '../store/ProductContext'
 import type { Product } from '../types'
+
+/** 删除确认弹窗 — 必须输入产品名称才能删除，防止误删 */
+function DeleteConfirmModal({
+  product, onConfirm, onClose, deleting
+}: {
+  product: Product
+  onConfirm: (inputName: string) => Promise<void>
+  onClose: () => void
+  deleting: boolean
+}) {
+  const [inputName, setInputName] = useState('')
+  const [error, setError] = useState('')
+  const match = inputName.trim() === product.name
+
+  const handleConfirm = async () => {
+    if (!inputName.trim()) { setError('请输入产品名称'); return }
+    if (!match) { setError(`输入与产品名称「${product.name}」不匹配`); return }
+    setError('')
+    await onConfirm(inputName.trim())
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => !deleting && onClose()}>
+      <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+            <AlertTriangle className="w-5 h-5 text-red-600" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold text-slate-800">删除产品</h2>
+            <p className="text-xs text-red-600 mt-0.5">此操作不可恢复，将级联删除该产品下所有项目/模块/需求/用例</p>
+          </div>
+        </div>
+
+        <div className="bg-red-50 border border-red-100 rounded-lg p-3 mb-4">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-slate-800">{product.name}</span>
+            <span className="text-[10px] font-mono text-slate-400">{product.id}</span>
+          </div>
+        </div>
+
+        <div>
+          <label className="label">
+            请输入产品名称 <span className="text-red-500 font-mono">「{product.name}」</span> 以确认删除
+          </label>
+          <input
+            value={inputName}
+            onChange={e => { setInputName(e.target.value); setError('') }}
+            className="input-field text-sm"
+            placeholder={`请输入：${product.name}`}
+            autoFocus
+            disabled={deleting}
+            onKeyDown={e => { if (e.key === 'Enter' && match && !deleting) handleConfirm() }}
+          />
+          {error && <p className="text-xs text-red-600 mt-1.5">{error}</p>}
+          {!error && !match && inputName && (
+            <p className="text-xs text-amber-600 mt-1.5">名称不匹配，请仔细核对</p>
+          )}
+          {!error && match && (
+            <p className="text-xs text-emerald-600 mt-1.5">✓ 名称匹配，可以删除</p>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-3 mt-5">
+          <button onClick={onClose} className="btn-secondary" disabled={deleting}>
+            <X className="w-4 h-4" /> 取消
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={!match || deleting}
+            className="btn-primary bg-red-600 hover:bg-red-700 disabled:bg-red-300"
+          >
+            {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+            确认删除
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export default function ProductSelector() {
   const { user, logout } = useAuth()
@@ -23,6 +103,8 @@ export default function ProductSelector() {
   const [editId, setEditId] = useState<string | null>(null)
   const [editName, setEditName] = useState('')
   const [editDesc, setEditDesc] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState<Product | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const isAdmin = (user?.permissions || []).includes('admin')
 
   const load = async () => {
@@ -72,10 +154,18 @@ export default function ProductSelector() {
     setSaving(false)
   }
 
-  const handleDelete = async (p: Product) => {
-    if (!confirm(`确认删除产品「${p.name}」？此操作不可恢复。`)) return
-    try { await prodApi.delete(p.id); await load() }
-    catch (e: any) { alert('删除失败: ' + (e?.message || '')) }
+  const handleDelete = async (inputName: string) => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    try {
+      await prodApi.delete(deleteTarget.id, inputName)
+      setDeleteTarget(null)
+      await load()
+    } catch (e: any) {
+      alert('删除失败: ' + (e?.message || '未知错误'))
+    } finally {
+      setDeleting(false)
+    }
   }
 
   return (
@@ -146,7 +236,7 @@ export default function ProductSelector() {
                               className="btn-ghost p-1.5 text-slate-300 hover:text-slate-600">
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>
-                            <button onClick={(e) => { e.stopPropagation(); handleDelete(p) }}
+                            <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(p) }}
                               className="btn-ghost p-1.5 text-slate-300 hover:text-red-500">
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -188,6 +278,16 @@ export default function ProductSelector() {
           )}
         </div>
       </div>
+
+      {/* 删除确认弹窗 — 必须输入产品名称才能删除 */}
+      {deleteTarget && (
+        <DeleteConfirmModal
+          product={deleteTarget}
+          onConfirm={handleDelete}
+          onClose={() => { if (!deleting) setDeleteTarget(null) }}
+          deleting={deleting}
+        />
+      )}
     </div>
   )
 }

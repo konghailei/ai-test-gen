@@ -14,6 +14,8 @@ const CASE_TYPES = ['functional', 'boundary', 'exception', 'security', 'performa
 const PRIORITIES = ['P0', 'P1', 'P2', 'P3']
 
 export default function CaseEditDialog({ caseData, onClose, onSaved }: Props) {
+  // 新增模式：caseData.id 为空字符串表示新建用例，调用 create 而非 update
+  const isCreate = !caseData.id
   const [title, setTitle] = useState(caseData.title || '')
   const [type, setType] = useState(caseData.type || 'functional')
   const [priority, setPriority] = useState(caseData.priority || 'P1')
@@ -81,18 +83,49 @@ export default function CaseEditDialog({ caseData, onClose, onSaved }: Props) {
         expected,
         assertions: assertions.filter(a => a.target.trim()),
       }
-      await tcApi.update(caseData.id, payload)
-      onSaved({
-        ...caseData,
-        title: payload.title,
-        type: payload.type,
-        priority: payload.priority,
-        description: payload.description,
-        preconditions: payload.preconditions,
-        steps: payload.steps,
-        status: 'reviewed',
-        case_json: { ...(caseData.case_json || {}), ...payload },
-      })
+      if (isCreate) {
+        // 新增模式：调用 create API，必须传 req_id
+        const created = await tcApi.create({
+          req_id: caseData.req_id,
+          product_id: caseData.product_id || undefined,
+          title: payload.title,
+          type: payload.type,
+          priority: payload.priority,
+          description: payload.description,
+          preconditions: payload.preconditions,
+          steps: payload.steps,
+          expected: payload.expected,
+          assertions: payload.assertions,
+        })
+        onSaved({
+          ...caseData,
+          id: created.id,
+          req_id: created.req_id,
+          product_id: created.product_id,
+          title: created.title,
+          type: created.type,
+          priority: created.priority,
+          status: created.status,
+          description: payload.description,
+          preconditions: payload.preconditions,
+          steps: payload.steps,
+          case_json: { ...payload, source: 'manual' },
+        })
+      } else {
+        // 编辑模式：调用 update API
+        await tcApi.update(caseData.id, payload)
+        onSaved({
+          ...caseData,
+          title: payload.title,
+          type: payload.type,
+          priority: payload.priority,
+          description: payload.description,
+          preconditions: payload.preconditions,
+          steps: payload.steps,
+          status: 'reviewed',
+          case_json: { ...(caseData.case_json || {}), ...payload },
+        })
+      }
     } catch (e: any) {
       setError(e.message || '保存失败')
     } finally {
@@ -106,8 +139,11 @@ export default function CaseEditDialog({ caseData, onClose, onSaved }: Props) {
         {/* 头部 */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
           <div className="flex items-center gap-2">
-            <h3 className="text-base font-semibold text-slate-800">编辑用例</h3>
-            <span className="text-xs font-mono text-slate-400">{caseData.id}</span>
+            <h3 className="text-base font-semibold text-slate-800">{isCreate ? '新增用例' : '编辑用例'}</h3>
+            <span className="text-xs font-mono text-slate-400">{caseData.id || '新建'}</span>
+            {isCreate && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-100">关联需求 {caseData.req_id}</span>
+            )}
           </div>
           <button onClick={onClose} className="btn-ghost p-1 text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
         </div>
@@ -233,7 +269,7 @@ export default function CaseEditDialog({ caseData, onClose, onSaved }: Props) {
           <button onClick={handleSave} disabled={saving}
             className="btn-primary text-sm flex items-center gap-2 disabled:opacity-50">
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            保存
+            {isCreate ? '创建' : '保存'}
           </button>
         </div>
       </div>

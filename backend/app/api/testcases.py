@@ -25,13 +25,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, get_current_user, require_admin, require_write
 from app.db.database import get_session
-from app.db.models import TestCase, Traceability
-from app.models.api_schemas import ApiResponse, FeedbackRequest, TestCaseUpdateRequest
+from app.db.models import TestCase, Traceability, ErrorCase
+from app.db.milvus_store import vector_store
+from app.models.api_schemas import ApiResponse, FeedbackRequest, TestCaseCreateRequest, TestCaseUpdateRequest
 from app.utils.logger import logger
 
 
@@ -115,10 +117,46 @@ async def list_testcases(
     result = await session.execute(stmt)
     rows = result.scalars().all()
 
+    # 批量查询功能点名称（fp_id → fp_name 映射），避免前端显示 fp_id
+    from app.db.models import FunctionalPoint, Requirement as ReqModel, Project
+    fp_ids = set()
+    req_ids = set()
+    for r in rows:
+        fp_id = _extract_fp(r.case_json)
+        if fp_id and fp_id != "业务场景":
+            fp_ids.add(fp_id)
+        req_ids.add(r.req_id)
+    fp_name_map: dict[str, str] = {}
+    req_title_map: dict[str, str] = {}
+    req_project_map: dict[str, str] = {}  # req_id → project_id
+    if fp_ids:
+        fp_rows = await session.execute(
+            select(FunctionalPoint.id, FunctionalPoint.name).where(FunctionalPoint.id.in_(fp_ids))
+        )
+        fp_name_map = {fid: fname for fid, fname in fp_rows.all()}
+    if req_ids:
+        req_rows = await session.execute(
+            select(ReqModel.id, ReqModel.title, ReqModel.project_id).where(ReqModel.id.in_(req_ids))
+        )
+        for rid, rtitle, pid in req_rows.all():
+            req_title_map[rid] = rtitle
+            if pid:
+                req_project_map[rid] = pid
+    # 批量查询项目名称（project_id → project_name 映射）
+    project_name_map: dict[str, str] = {}
+    project_ids = set(req_project_map.values())
+    if project_ids:
+        proj_rows = await session.execute(
+            select(Project.id, Project.name).where(Project.id.in_(project_ids))
+        )
+        project_name_map = {pid: pname for pid, pname in proj_rows.all()}
+
     items = [
         {
             "id": r.id,
             "req_id": r.req_id,
+            "req_title": req_title_map.get(r.req_id, r.req_id),
+            "project_name": project_name_map.get(req_project_map.get(r.req_id, ""), ""),
             "product_id": r.product_id,
             "title": r.title,
             "type": r.type,
@@ -126,7 +164,7 @@ async def list_testcases(
             "status": r.status,
             "confidence": r.confidence,
             "gen_batch_id": r.gen_batch_id,
-            "functional_point": _extract_fp(r.case_json),
+            "functional_point": fp_name_map.get(_extract_fp(r.case_json), _extract_fp(r.case_json)),
             "description": (r.case_json or {}).get("description", ""),
             "preconditions": (r.case_json or {}).get("preconditions", []),
             "steps": (r.case_json or {}).get("steps", []),
@@ -201,6 +239,81 @@ async def get_testcase(
 # 3. 编辑用例
 # ============================================================================
 
+@router.post("", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def create_testcase(
+    req: TestCaseCreateRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """人工新增测试用例。
+
+    必须关联到具体需求（req_id）；若未传 product_id，则从需求记录自动推导。
+    生成 ID 格式：TC-{REQ后缀}-{时间戳后6位}，避免与 AI 生成用例冲突。
+    """
+    import time
+    from app.db.models import Requirement
+
+    # 1) 校验需求存在
+    req_row = await session.get(Requirement, req.req_id)
+    if req_row is None:
+        raise HTTPException(status_code=404, detail=f"需求 {req.req_id} 不存在，无法创建用例")
+
+    # 2) 推导 product_id
+    product_id = req.product_id or req_row.product_id or ""
+
+    # 3) 生成用例 ID
+    req_suffix = req.req_id.split("-")[-1] if "-" in req.req_id else req.req_id[:6]
+    ts_suffix = int(time.time()) % 1000000
+    case_id = f"TC-{req_suffix}-{ts_suffix}"
+
+    # 4) 构造 case_json
+    case_json = {
+        "title": req.title,
+        "type": req.type,
+        "priority": req.priority,
+        "description": req.description,
+        "preconditions": req.preconditions or [],
+        "steps": req.steps or [],
+        "expected": req.expected,
+        "assertions": req.assertions or [],
+        "source": "manual",
+    }
+
+    # 5) 写入
+    record = TestCase(
+        id=case_id,
+        req_id=req.req_id,
+        product_id=product_id,
+        title=req.title,
+        type=req.type,
+        priority=req.priority,
+        status="draft",
+        confidence=0.0,
+        case_json=case_json,
+        source="manual",
+    )
+    session.add(record)
+    await session.commit()
+
+    logger.info(
+        "[API/testcases] 用例已创建: case_id={}, req_id={}, title={}",
+        case_id, req.req_id, req.title[:50],
+    )
+
+    return ApiResponse(
+        success=True,
+        message="用例已创建",
+        data={
+            "id": case_id,
+            "req_id": req.req_id,
+            "product_id": product_id,
+            "title": record.title,
+            "type": record.type,
+            "priority": record.priority,
+            "status": record.status,
+        },
+    )
+
+
 @router.put("/{case_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def update_testcase(
     case_id: str,
@@ -240,6 +353,9 @@ async def update_testcase(
     if req.priority is not None:
         record.priority = req.priority
         updated_fields.append("priority")
+    if req.req_id is not None:
+        record.req_id = req.req_id
+        updated_fields.append("req_id")
 
     # 更新 case_json 中的内容字段
     case_json = dict(record.case_json or {})
@@ -252,6 +368,12 @@ async def update_testcase(
             case_json[field] = value
             updated_fields.append(field)
 
+    # 更新 functional_point（存储在 case_json 中）
+    if req.functional_point is not None:
+        case_json["related_fp"] = req.functional_point
+        case_json["functional_point"] = req.functional_point
+        updated_fields.append("functional_point")
+
     # 同步 title/type/priority 到 case_json
     if req.title is not None:
         case_json["title"] = req.title
@@ -261,7 +383,11 @@ async def update_testcase(
         case_json["priority"] = req.priority
 
     record.case_json = case_json
-    record.status = "reviewed"  # 人工编辑后标记为已审核
+    # 仅当内容字段变更时才标记为已审核；拖拽移动（仅 functional_point/req_id）不改状态
+    content_fields = {"title", "type", "priority", "description", "preconditions",
+                      "steps", "expected", "test_data", "assertions"}
+    if set(updated_fields) & content_fields:
+        record.status = "reviewed"
     await session.commit()
 
     logger.info(
@@ -302,9 +428,20 @@ async def batch_delete_by_requirement(
     await session.execute(
         sa_delete(Traceability).where(Traceability.test_case_id.in_(tc_ids_subquery))
     )
+    # 级联删除 error_cases 表中引用这些用例的记录（外键 RESTRICT，必须先删）
+    await session.execute(
+        sa_delete(ErrorCase).where(ErrorCase.original_case_id.in_(tc_ids_subquery))
+    )
     # 再删用例
     result = await session.execute(sa_delete(TestCase).where(TestCase.req_id == req_id))
     await session.commit()
+
+    # 同步删除 Milvus 向量（失败不阻断主流程）
+    try:
+        import asyncio
+        await asyncio.to_thread(vector_store.delete_cases_by_req_id, req_id)
+    except Exception as e:
+        logger.warning("[API/testcases] Milvus 向量批量删除失败（不阻断）: req_id={}, err={}", req_id, str(e)[:120])
 
     logger.info("[API/testcases] 批量删除: req_id={}, deleted={}", req_id, result.rowcount)
     return ApiResponse(success=True, data={"deleted_count": result.rowcount})
@@ -341,8 +478,17 @@ async def delete_testcase(
     # 先删追溯记录
     from sqlalchemy import delete as _del
     await session.execute(_del(Traceability).where(Traceability.test_case_id == case_id))
+    # 级联删除 error_cases 表中引用该用例的记录（外键 RESTRICT，必须先删）
+    await session.execute(_del(ErrorCase).where(ErrorCase.original_case_id == case_id))
     await session.delete(record)
     await session.commit()
+
+    # 同步删除 Milvus 向量（失败不阻断主流程）
+    try:
+        import asyncio
+        await asyncio.to_thread(vector_store.delete_test_case, case_id)
+    except Exception as e:
+        logger.warning("[API/testcases] Milvus 向量删除失败（不阻断）: case_id={}, err={}", case_id, str(e)[:120])
 
     logger.info("[API/testcases] 用例已删除: case_id={}", case_id)
 
@@ -354,7 +500,74 @@ async def delete_testcase(
 
 
 # ============================================================================
-# 5. 反馈回流
+# 5. 批量审核（一键审核目录下所有用例）— 必须在 /{case_id}/feedback 之前
+# ============================================================================
+
+class BatchFeedbackRequest(BaseModel):
+    """批量审核请求。"""
+    case_ids: list[str] = Field(..., min_length=1, description="用例 ID 列表")
+    accepted: bool = Field(True, description="True=批量通过，False=批量驳回")
+    comments: str = Field("", description="审核意见")
+
+
+@router.post("/batch/feedback", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def batch_feedback(
+    req: BatchFeedbackRequest,
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """批量审核用例。
+
+    对指定的多个用例执行批量审核（通过/驳回），更新 status 与 feedback 字段。
+
+    Args:
+        req: 批量审核请求（case_ids + accepted + comments）
+        user: 当前用户
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: data 含 updated_count / new_status
+    """
+    new_status = "approved" if req.accepted else "rejected"
+    feedback_data = {
+        "accepted": req.accepted,
+        "comments": req.comments or ("批量审核通过" if req.accepted else "批量审核驳回"),
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+        "batch": True,
+    }
+
+    stmt = select(TestCase).where(TestCase.id.in_(req.case_ids))
+    result = await session.execute(stmt)
+    records = result.scalars().all()
+
+    updated_count = 0
+    for record in records:
+        record.status = new_status
+        record.feedback = feedback_data
+        record.reviewed_by = user.username
+        record.reviewed_at = datetime.now(timezone.utc)
+        updated_count += 1
+
+    await session.commit()
+
+    logger.info(
+        "[API/testcases] 批量审核: count={}, accepted={}, by={}",
+        updated_count, req.accepted, user.username,
+    )
+
+    return ApiResponse(
+        success=True,
+        message=f"已批量{'通过' if req.accepted else '驳回'} {updated_count} 个用例",
+        data={
+            "updated_count": updated_count,
+            "new_status": new_status,
+            "accepted": req.accepted,
+        },
+    )
+
+
+# ============================================================================
+# 6. 反馈回流（单条）
 # ============================================================================
 
 @router.post("/{case_id}/feedback", response_model=ApiResponse, dependencies=[Depends(require_write)])

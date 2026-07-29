@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { TestTube, Trash2, Loader2, Play, Sparkles, Filter, Download, ChevronDown, ChevronRight, ListChecks, AlertTriangle, FileText, Search, X, Network, List, CheckCircle, XCircle, Edit3 } from 'lucide-react'
+import { TestTube, Trash2, Loader2, Play, Sparkles, Filter, Download, ChevronDown, ChevronRight, ListChecks, AlertTriangle, FileText, Search, X, Network, List, CheckCircle, CheckCircle2, XCircle, Edit3, Eye, Layers } from 'lucide-react'
 import { testCases as tcApi, requirements as reqApi, generateCases, exportCases, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { TestCase, Requirement, Project, SSEEvent } from '../types'
@@ -9,17 +9,46 @@ import { caseTypeLabel } from '../utils/labels'
 import CaseEditDialog from '../components/CaseEditDialog'
 import XMindEditor from '../components/XMindEditor'
 
-const PAGE_SIZE = 20
+const REQUIREMENTS_PER_PAGE = 20
 type ViewMode = 'list' | 'xmind'
 
-function groupByFP(cases: TestCase[]) {
-  const map: Record<string, TestCase[]> = {}
+/** 两层分组：需求 → 功能点 → 用例（与 XMind 视图结构对齐） */
+function groupByReqFp(cases: TestCase[], reqs: Requirement[], projects: Project[] = [], filterProjName = '') {
+  const reqMap = new Map<string, Map<string, TestCase[]>>()
   for (const c of cases) {
-    const key = c.functional_point || c.req_id || '未分类'
-    if (!map[key]) map[key] = []
-    map[key].push(c)
+    const reqId = c.req_id || '未分类'
+    const fp = c.functional_point?.trim() || '业务场景'
+    if (!reqMap.has(reqId)) reqMap.set(reqId, new Map())
+    const fpMap = reqMap.get(reqId)!
+    if (!fpMap.has(fp)) fpMap.set(fp, [])
+    fpMap.get(fp)!.push(c)
   }
-  return Object.entries(map).sort(([a], [b]) => a.localeCompare(b))
+  return Array.from(reqMap.entries()).map(([reqId, fpMap]) => {
+    const req = reqs.find(r => r.id === reqId)
+    const reqTitle = req?.title
+      || cases.find(c => c.req_id === reqId)?.req_title
+      || reqId
+    // 项目名前缀（跨项目时区分，避免混淆）
+    // 优先用用例自身的 project_name（后端已解析）；其次从 projects 列表查找；最后用 filterProjName 兜底
+    const caseProjName = cases.find(c => c.req_id === reqId)?.project_name
+    const projName = caseProjName
+      || projects.find(p => p.id === req?.project_id)?.name
+      || (req?.project_id ? filterProjName : '')
+    const reqLabel = projName ? `${projName} - ${reqTitle}` : reqTitle
+    return {
+      reqId,
+      reqTitle,
+      reqLabel,
+      fps: Array.from(fpMap.entries()).map(([fp, cs]) => ({
+        fp,
+        cases: cs.sort((a, b) => a.id.localeCompare(b.id)),
+      })).sort((a, b) => {
+        if (a.fp === '业务场景') return -1
+        if (b.fp === '业务场景') return 1
+        return a.fp.localeCompare(b.fp)
+      }),
+    }
+  }).sort((a, b) => a.reqTitle.localeCompare(b.reqTitle))
 }
 
 export default function TestCases() {
@@ -35,6 +64,9 @@ export default function TestCases() {
   const [filterReq, setFilterReq] = useState('')
   const [filterSearch, setFilterSearch] = useState('')
   const [reqs, setReqs] = useState<Requirement[]>([])
+  // reqs 的 ref，避免 loadCases 闭包捕获旧的 reqs
+  const reqsRef = useRef<Requirement[]>([])
+  useEffect(() => { reqsRef.current = reqs }, [reqs])
   const [projects, setProjects] = useState<Project[]>([])
   // 项目搜索下拉
   const [projectSearch, setProjectSearch] = useState('')
@@ -42,13 +74,15 @@ export default function TestCases() {
   const projectDropdownRef = useRef<HTMLDivElement>(null)
   const selectedProject = projects.find(p => p.id === filterProject)
 
-  // 折叠
+  // 折叠：需求级 + 功能点级 + 用例级
+  const [expandedReqs, setExpandedReqs] = useState<Set<string>>(new Set())
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [expandedCases, setExpandedCases] = useState<Set<string>>(new Set())
 
   // 导出
   const [exporting, setExporting] = useState(false)
   const [xmindFormat, setXmindFormat] = useState<'xmind' | 'xmind8'>('xmind')
+  const [exportDetails, setExportDetails] = useState(true)
 
   // 生成
   const [showGenerate, setShowGenerate] = useState(false)
@@ -70,9 +104,6 @@ export default function TestCases() {
 
   // 视图模式：list / xmind
   const [viewMode, setViewMode] = useState<ViewMode>('list')
-  // XMind 视图下加载全部用例（不分页）
-  const [allCases, setAllCases] = useState<TestCase[]>([])
-  const [allCasesLoading, setAllCasesLoading] = useState(false)
   // 编辑对话框
   const [editingCase, setEditingCase] = useState<TestCase | null>(null)
 
@@ -105,32 +136,11 @@ export default function TestCases() {
     load()
   }, [selectedProductId, filterProject])
 
-  const loadCases = () => {
+  // 加载全部用例（循环分页拉取后端数据，前端按需求分页）
+  // 列表视图和 XMind 视图共用，确保导出不受分页限制
+  const loadCases = async () => {
     setLoading(true)
-    tcApi.list(
-      filterReq || undefined,
-      filterProject || undefined,
-      filterSearch || undefined,
-      page, PAGE_SIZE,
-      selectedProductId || undefined,
-    ).then(r => {
-      setCases(r.items || [])
-      setTotal(r.total || 0)
-      setExpandedGroups(new Set(groupByFP(r.items || []).map(([k]) => k)))
-    }).catch(() => {}).finally(() => setLoading(false))
-  }
-
-  useEffect(() => { loadCases() }, [page, filterReq, filterProject, filterSearch, selectedProductId])
-
-  // 切换到 XMind 视图时加载全部用例
-  useEffect(() => {
-    if (viewMode === 'xmind') loadAllCases()
-  }, [viewMode, filterReq, filterProject, filterSearch, selectedProductId])
-
-  const loadAllCases = async () => {
-    setAllCasesLoading(true)
     try {
-      // 后端限制 page_size <= 100，循环分页加载全部用例
       const all: TestCase[] = []
       let p = 1
       const pageSize = 100
@@ -148,10 +158,42 @@ export default function TestCases() {
         if (items.length < pageSize || all.length >= (r.total || 0)) break
         p++
       }
-      setAllCases(all)
-    } catch { setAllCases([]) }
-    finally { setAllCasesLoading(false) }
+      setCases(all)
+      setTotal(all.length)
+
+      // 补充加载缺失的需求信息（确保需求名称而非 ID）
+      const knownReqIds = new Set(reqsRef.current.map(r => r.id))
+      const missingReqIds = Array.from(new Set(all.map(c => c.req_id).filter(id => id && !knownReqIds.has(id))))
+      if (missingReqIds.length > 0) {
+        try {
+          const fetched = await Promise.all(
+            missingReqIds.slice(0, 50).map(id =>
+              reqApi.get(id).then((d: any) => ({ id: d.id, title: d.title, project_id: d.project_id } as Requirement)).catch(() => null)
+            )
+          )
+          const found = fetched.filter((r: any): r is Requirement => r !== null)
+          if (found.length > 0) {
+            setReqs(prev => {
+              const existing = new Set(prev.map(r => r.id))
+              const toAdd = found.filter(r => !existing.has(r.id))
+              return toAdd.length > 0 ? [...prev, ...toAdd] : prev
+            })
+          }
+        } catch { /* 补充加载失败不阻断 */ }
+      }
+
+      // 默认展开当前页的需求和功能点分组
+      const groups = groupByReqFp(all, reqsRef.current, projects, selectedProject?.name || '')
+      const pageStart = (page - 1) * REQUIREMENTS_PER_PAGE
+      const pageGroups = groups.slice(pageStart, pageStart + REQUIREMENTS_PER_PAGE)
+      setExpandedReqs(new Set(pageGroups.map(g => g.reqId)))
+      setExpandedGroups(new Set(pageGroups.flatMap(g => g.fps.map(f => `${g.reqId}::${f.fp}`))))
+    } catch { setCases([]) }
+    finally { setLoading(false) }
   }
+
+  // 筛选条件变化时重新加载并重置到第一页（page 变化由前端分页处理，不触发后端请求）
+  useEffect(() => { setPage(1); loadCases() }, [filterReq, filterProject, filterSearch, selectedProductId])
 
   // 关闭下拉（点击外部）
   useEffect(() => {
@@ -165,6 +207,7 @@ export default function TestCases() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
+  const toggleReq = (key: string) => setExpandedReqs(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
   const toggleGroup = (key: string) => setExpandedGroups(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n })
   const toggleCase = (id: string) => setExpandedCases(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
 
@@ -173,19 +216,13 @@ export default function TestCases() {
     if (!confirm('确认删除此用例？此操作不可撤销。')) return
     try {
       await tcApi.delete(caseId)
-      // 列表视图刷新
       loadCases()
-      // XMind 视图本地同步移除
-      setAllCases(prev => prev.filter(c => c.id !== caseId))
     } catch (e: any) { alert('删除失败: ' + e.message) }
   }
 
-  // 编辑用例：保存后两个视图同步更新
+  // 编辑用例：保存后刷新
   const handleEditSave = (updated: TestCase) => {
     setEditingCase(null)
-    // XMind 视图本地同步
-    setAllCases(prev => prev.map(c => c.id === updated.id ? updated : c))
-    // 列表视图刷新
     loadCases()
   }
 
@@ -193,7 +230,6 @@ export default function TestCases() {
   const handleApprove = async (caseId: string) => {
     try {
       await tcApi.feedback(caseId, true, '审核通过')
-      setAllCases(prev => prev.map(c => c.id === caseId ? { ...c, status: 'approved' } : c))
       loadCases()
     } catch (e: any) { alert('审核失败: ' + e.message) }
   }
@@ -203,20 +239,20 @@ export default function TestCases() {
     const reason = prompt('请输入驳回原因（可选）：', '') ?? ''
     try {
       await tcApi.feedback(caseId, false, reason || '审核驳回')
-      setAllCases(prev => prev.map(c => c.id === caseId ? { ...c, status: 'rejected' } : c))
       loadCases()
     } catch (e: any) { alert('驳回失败: ' + e.message) }
   }
 
-  // 新增用例：列表视图下提示切换需求；XMind 视图下直接打开空表单（如果未选需求则提示）
+  // 新增用例：必须先选择需求（关联到具体需求），打开空表单对话框
   const handleAddNew = () => {
     if (!filterReq) {
       alert('请先在筛选栏选择一个需求，新增用例需关联到具体需求')
       return
     }
     const newCase: TestCase = {
-      id: '',  // 后端创建时生成（当前后端无 POST 端点，此处用编辑模式打开已有用例的快捷方式提示）
+      id: '',  // 空字符串表示新增模式，CaseEditDialog 会调用 create API
       req_id: filterReq,
+      product_id: selectedProductId || undefined,
       title: '',
       type: 'functional',
       priority: 'P1',
@@ -228,8 +264,41 @@ export default function TestCases() {
       steps: [{ step: 1, action: '', expected: '' }],
       created_at: new Date().toISOString(),
     }
-    alert('暂不支持直接新增用例，请通过「生成用例」按钮由 AI 生成，或在已有用例上点击编辑按钮进行修改')
-    void newCase
+    setEditingCase(newCase)
+  }
+
+  // XMind 视图：在指定需求/功能点下新增用例
+  const handleAddCaseAtLevel = (reqId: string, fp: string) => {
+    const newCase: TestCase = {
+      id: '',
+      req_id: reqId,
+      product_id: selectedProductId || undefined,
+      title: '',
+      type: 'functional',
+      priority: 'P1',
+      status: 'draft',
+      confidence: 0,
+      functional_point: fp,
+      description: '',
+      preconditions: [],
+      steps: [{ step: 1, action: '', expected: '' }],
+      created_at: new Date().toISOString(),
+    }
+    setEditingCase(newCase)
+  }
+
+  // XMind 视图：拖拽移动用例到新的需求/功能点
+  const handleMoveCase = async (caseId: string, newReqId: string, newFp: string) => {
+    const updateData: Record<string, unknown> = { req_id: newReqId }
+    if (newFp !== undefined) updateData.functional_point = newFp
+    await tcApi.update(caseId, updateData)
+    loadCases()
+  }
+
+  // XMind 视图：批量审核（一键审核）
+  const handleBatchApprove = async (caseIds: string[], accepted: boolean) => {
+    await tcApi.batchFeedback(caseIds, accepted)
+    loadCases()
   }
 
   // 批量删除：按当前筛选条件 + 项目
@@ -249,7 +318,7 @@ export default function TestCases() {
       if (filterReq) {
         await tcApi.deleteByRequirement(filterReq)
       } else {
-        // 按项目逐个删除
+        // 按项目逐个删除（cases 已含全部用例，不受分页限制）
         const ids = cases.map(c => c.id)
         for (const id of ids) { await tcApi.delete(id).catch(() => {}) }
       }
@@ -258,16 +327,17 @@ export default function TestCases() {
     finally { setBatchDeleting(false) }
   }
 
-  // 导出：按当前筛选条件 + 必须选项目
+  // 导出：导出当前筛选条件下的全部用例（不受分页限制）
   const handleExportXMind = async () => {
-    if (!filterProject) { alert('请先选择项目再导出'); return }
     if (cases.length === 0) { alert('当前筛选条件下没有可导出的用例'); return }
     setExporting(true)
     try {
-      const blob = await exportCases.download(xmindFormat, cases.map(c => c.id), selectedProject?.name || filterProject)
+      // 导出文件名优先级：项目名 > 需求ID > "所有用例"
+      const exportName = selectedProject?.name || filterProject || filterReq || '所有用例'
+      const blob = await exportCases.download(xmindFormat, cases.map(c => c.id), exportName, exportDetails)
       const url = URL.createObjectURL(blob)
       const suffix = xmindFormat === 'xmind8' ? '-xmind8' : ''
-      const a = document.createElement('a'); a.href = url; a.download = `testcases-${selectedProject?.name || filterProject}${suffix}.xmind`; a.click()
+      const a = document.createElement('a'); a.href = url; a.download = `testcases-${exportName}${suffix}.xmind`; a.click()
       URL.revokeObjectURL(url)
     } catch (e: any) { alert('导出失败: ' + e.message) }
     finally { setExporting(false) }
@@ -291,8 +361,14 @@ export default function TestCases() {
     !projectSearch || p.name.toLowerCase().includes(projectSearch.toLowerCase()) || p.id.includes(projectSearch)
   )
 
-  const groups = groupByFP(cases)
-  const totalPages = Math.ceil(total / PAGE_SIZE)
+  const reqGroups = groupByReqFp(cases, reqs, projects, selectedProject?.name || '')
+  // 按需求分页：每页 REQUIREMENTS_PER_PAGE 个需求
+  const totalReqCount = reqGroups.length
+  const totalPages = Math.max(1, Math.ceil(totalReqCount / REQUIREMENTS_PER_PAGE))
+  const pageStart = (page - 1) * REQUIREMENTS_PER_PAGE
+  const pagedReqGroups = reqGroups.slice(pageStart, pageStart + REQUIREMENTS_PER_PAGE)
+  // 翻页时回到顶部
+  useEffect(() => { if (page > 1) window.scrollTo({ top: 0, behavior: 'smooth' }) }, [page])
 
   return (
     <div className="space-y-6">
@@ -300,7 +376,7 @@ export default function TestCases() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="page-title">测试用例</h1>
-          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>{total} 个用例，{groups.length} 个功能点</p>
+          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>{total} 个用例，{totalReqCount} 个需求，{reqGroups.reduce((s, g) => s + g.fps.length, 0)} 个功能点</p>
         </div>
         <div className="flex items-center gap-2">
           {/* 视图切换 */}
@@ -346,29 +422,71 @@ export default function TestCases() {
               批量删除
             </button>
           )}
-          <div className="flex items-center">
-            <button onClick={handleExportXMind} disabled={exporting || !filterProject || cases.length === 0}
-              className="btn-secondary flex items-center gap-2 disabled:opacity-50 rounded-r-none border-r-0">
+          {/* 导出 XMind：参照需求页面的导出按钮风格，统一为下拉触发式 */}
+          <div className="relative group">
+            <button
+              onClick={handleExportXMind}
+              disabled={exporting || cases.length === 0}
+              className="btn-secondary flex items-center gap-2 disabled:opacity-50"
+              title="导出 XMind 思维导图"
+            >
               {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              {xmindFormat === 'xmind8' ? '导出 XMind 8' : '导出 XMind'}
+              <span>{xmindFormat === 'xmind8' ? '导出 XMind 8' : '导出 XMind'}</span>
+              <ChevronDown className="w-3 h-3 opacity-60" />
             </button>
-            <div className="relative group">
-              <button disabled={exporting || !filterProject || cases.length === 0}
-                className="btn-secondary rounded-l-none px-3 disabled:opacity-50">
-                <ChevronDown className="w-4 h-4" />
+            {/* 悬停下拉切换格式 — 宽度匹配按钮（absolute + left-0 + right-0 + min-w 保持齐整） */}
+            <div
+              className="absolute right-0 top-full mt-1 z-20 hidden group-hover:block"
+              style={{
+                background: 'var(--background)',
+                border: '1px solid var(--border)',
+                borderRadius: 'calc(var(--radius) * 0.5)',
+                boxShadow: 'var(--shadow-apple-lg)',
+                width: 'max-content',
+                minWidth: '200px',
+              }}
+            >
+              <button
+                onClick={() => setXmindFormat('xmind')}
+                className="w-full text-left px-3 py-2 text-xs hover:bg-[var(--background-muted)] transition-colors"
+                style={xmindFormat === 'xmind'
+                  ? { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)', fontWeight: 500 }
+                  : { color: 'var(--foreground-secondary)' }}
+              >
+                <span className="flex items-center justify-between gap-2">
+                  <span>XMind 2020+ / Zen（JSON）</span>
+                  {xmindFormat === 'xmind' && <CheckCircle2 className="w-3 h-3" />}
+                </span>
               </button>
-              <div className="absolute right-0 top-full mt-1 z-20 hidden group-hover:block min-w-[160px]" style={{ background: 'var(--background)', border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.5)', boxShadow: 'var(--shadow-apple-lg)' }}>
-                <button onClick={() => setXmindFormat('xmind')}
-                  className={`w-full text-left px-3 py-2 text-xs hover:bg-[var(--background-muted)] ${xmindFormat === 'xmind' ? 'font-medium' : ''}`}
-                  style={xmindFormat === 'xmind' ? { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' } : { color: 'var(--foreground-secondary)' }}>
-                  XMind 2020+ / Zen（JSON）
-                </button>
-                <button onClick={() => setXmindFormat('xmind8')}
-                  className={`w-full text-left px-3 py-2 text-xs hover:bg-[var(--background-muted)] ${xmindFormat === 'xmind8' ? 'font-medium' : ''}`}
-                  style={xmindFormat === 'xmind8' ? { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' } : { color: 'var(--foreground-secondary)' }}>
-                  XMind 8（XML）
-                </button>
-              </div>
+              <button
+                onClick={() => setXmindFormat('xmind8')}
+                className="w-full text-left px-3 py-2 text-xs hover:bg-[var(--background-muted)] transition-colors"
+                style={xmindFormat === 'xmind8'
+                  ? { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)', fontWeight: 500 }
+                  : { color: 'var(--foreground-secondary)' }}
+              >
+                <span className="flex items-center justify-between gap-2">
+                  <span>XMind 8（XML）</span>
+                  {xmindFormat === 'xmind8' && <CheckCircle2 className="w-3 h-3" />}
+                </span>
+              </button>
+              {/* 分隔线 */}
+              <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+              {/* 导出详细步骤开关 */}
+              <label
+                className="flex items-center gap-2 px-3 py-2 text-xs cursor-pointer hover:bg-[var(--background-muted)] transition-colors"
+                style={{ color: 'var(--foreground-secondary)' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={exportDetails}
+                  onChange={e => { e.stopPropagation(); setExportDetails(e.target.checked) }}
+                  className="w-3.5 h-3.5"
+                  style={{ accentColor: 'var(--brand-500)' }}
+                />
+                <span>导出详细步骤</span>
+                <span style={{ color: 'var(--foreground-tertiary)' }}>({exportDetails ? '含步骤和前置条件' : '仅用例标题'})</span>
+              </label>
             </div>
           </div>
         </div>
@@ -509,60 +627,86 @@ export default function TestCases() {
           </div>
         ) : (
           <div>
-            {groups.map(([fpKey, fpCases]) => {
-              const isExpanded = expandedGroups.has(fpKey)
-              const reqLabel = reqs.find(r => r.id === fpCases[0]?.req_id)?.title || fpCases[0]?.req_id || ''
-              const headerLabel = fpCases[0]?.functional_point ? fpKey : `${fpKey} ${reqLabel}`
+            {pagedReqGroups.map(({ reqId, reqLabel, fps }) => {
+              const reqExpanded = expandedReqs.has(reqId)
+              const reqCaseCount = fps.reduce((s, f) => s + f.cases.length, 0)
               return (
-                <div key={fpKey} style={{ borderBottom: '1px solid var(--border)' }} className="last:border-b-0">
-                  <button onClick={() => toggleGroup(fpKey)}
+                <div key={reqId} style={{ borderBottom: '1px solid var(--border)' }} className="last:border-b-0">
+                  {/* 第一级：需求（项目名 - 需求标题） */}
+                  <button onClick={() => toggleReq(reqId)}
                     className="w-full flex items-center gap-2 px-5 py-3 hover:bg-[var(--background-muted)] transition-colors text-left"
                     style={{ background: 'rgba(242, 242, 247, 0.5)' }}>
-                    {isExpanded ? <ChevronDown className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} /> : <ChevronRight className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />}
-                    <FileText className="w-4 h-4" style={{ color: 'var(--brand-400)' }} />
-                    <span className="text-sm font-semibold" style={{ color: 'var(--foreground)' }}>{headerLabel}</span>
-                    <span className="badge text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>{fpCases.length} 个用例</span>
+                    {reqExpanded ? <ChevronDown className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} /> : <ChevronRight className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />}
+                    <FileText className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+                    <span className="text-sm font-semibold truncate" style={{ color: 'var(--foreground)' }}>{reqLabel}</span>
+                    <span className="badge text-xs" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>{reqCaseCount}</span>
                   </button>
-                  {isExpanded && (
+                  {/* 第二级：功能点 */}
+                  {reqExpanded && (
                     <div>
-                      {fpCases.map(c => {
-                        const caseExpanded = expandedCases.has(c.id)
+                      {fps.map(({ fp, cases: fpCases }) => {
+                        const fpKey = `${reqId}::${fp}`
+                        const fpExpanded = expandedGroups.has(fpKey)
                         return (
-                          <div key={c.id} style={{ borderTop: '1px solid rgba(242, 242, 247, 0.7)' }} className="first:border-t-0">
-                            <div className="flex items-center px-5 py-3 hover:bg-[rgba(242,242,247,0.4)] transition-colors cursor-pointer" onClick={() => toggleCase(c.id)}>
-                              <div className="flex-1 flex items-center gap-3 min-w-0">
-                                {caseExpanded ? <ChevronDown className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--foreground-tertiary)' }} /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />}
-                                <span className="text-xs font-mono shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>{c.id}</span>
-                                <span className="text-sm font-medium truncate" style={{ color: 'var(--foreground)' }}>{c.title}</span>
-                              </div>
-                              <div className="flex items-center gap-2 shrink-0 ml-3">
-                                <span className="badge text-xs" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>{caseTypeLabel(c.type)}</span>
-                                <span className={priorityBadge(c.priority)}>{c.priority}</span>
-                                <span className={statusBadge(c.status)}>{CASE_STATUS_LABELS[c.status] || c.status}</span>
-                                <span className={`text-xs font-mono font-medium ${confidenceColor(c.confidence)}`}>{(c.confidence * 100).toFixed(0)}%</span>
-                                {/* 审核按钮 */}
-                                {c.status !== 'approved' && (
-                                  <button onClick={e => { e.stopPropagation(); handleApprove(c.id) }} className="btn-ghost p-1 hover:text-[var(--state-success)]" style={{ color: 'var(--foreground-tertiary)' }} title="审核通过">
-                                    <CheckCircle className="w-3.5 h-3.5" />
-                                  </button>
-                                )}
-                                {c.status !== 'rejected' && (
-                                  <button onClick={e => { e.stopPropagation(); handleReject(c.id) }} className="btn-ghost p-1 hover:text-[var(--state-error)]" style={{ color: 'var(--foreground-tertiary)' }} title="驳回">
-                                    <XCircle className="w-3.5 h-3.5" />
-                                  </button>
-                                )}
-                                {/* 编辑按钮 */}
-                                <button onClick={e => { e.stopPropagation(); setEditingCase(c) }} className="btn-ghost p-1 hover:text-[var(--brand-500)]" style={{ color: 'var(--foreground-tertiary)' }} title="编辑">
-                                  <Edit3 className="w-3.5 h-3.5" />
-                                </button>
-                                <button onClick={e => { e.stopPropagation(); handleDelete(c.id) }} className="btn-ghost p-1 hover:text-[var(--state-error)]" style={{ color: 'var(--foreground-tertiary)' }} title="删除"><Trash2 className="w-3.5 h-3.5" /></button>
-                              </div>
-                            </div>
-                            {caseExpanded && (
-                              <div className="px-5 pb-4 pl-14 space-y-3" style={{ background: 'rgba(242, 242, 247, 0.25)' }}>
-                                {c.description && <div><p className="text-xs font-semibold mb-1 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}><FileText className="w-3 h-3" /> 描述</p><p className="text-sm" style={{ color: 'var(--foreground-secondary)' }}>{c.description}</p></div>}
-                                {c.preconditions && c.preconditions.length > 0 && <div><p className="text-xs font-semibold mb-1 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}><AlertTriangle className="w-3 h-3" /> 前置条件</p><ul className="list-disc list-inside space-y-0.5">{c.preconditions.map((p, i) => <li key={i} className="text-sm" style={{ color: 'var(--foreground-secondary)' }}>{p}</li>)}</ul></div>}
-                                {c.steps && c.steps.length > 0 && <div><p className="text-xs font-semibold mb-1 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}><ListChecks className="w-3 h-3" /> 测试步骤</p><table className="w-full text-sm"><thead><tr className="text-left text-xs" style={{ color: 'var(--foreground-tertiary)', borderBottom: '1px solid var(--border)' }}><th className="py-1 w-12">#</th><th className="py-1">操作</th><th className="py-1">预期</th></tr></thead><tbody>{c.steps.map((s, i) => <tr key={i} style={{ borderBottom: '1px solid rgba(242, 242, 247, 0.7)' }}><td className="py-1.5" style={{ color: 'var(--foreground-tertiary)' }}>{s.step || i + 1}</td><td className="py-1.5" style={{ color: 'var(--foreground)' }}>{s.action}</td><td className="py-1.5" style={{ color: 'var(--foreground-tertiary)' }}>{s.expected}</td></tr>)}</tbody></table></div>}
+                          <div key={fpKey} style={{ borderLeft: '2px solid var(--border)' }} className="ml-5">
+                            <button onClick={() => toggleGroup(fpKey)}
+                              className="w-full flex items-center gap-2 px-4 py-2 hover:bg-[var(--background-muted)] transition-colors text-left"
+                              style={{ background: 'rgba(242, 242, 247, 0.3)' }}>
+                              {fpExpanded ? <ChevronDown className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} /> : <ChevronRight className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />}
+                              <Layers className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
+                              <span className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }}>{fp}</span>
+                              <span className="badge text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>{fpCases.length}</span>
+                            </button>
+                            {/* 第三级：用例行 */}
+                            {fpExpanded && (
+                              <div>
+                                {fpCases.map(c => {
+                                  const caseExpanded = expandedCases.has(c.id)
+                                  return (
+                                    <div key={c.id} style={{ borderTop: '1px solid rgba(242, 242, 247, 0.7)' }} className="first:border-t-0">
+                                      <div className="group flex items-center px-4 py-2.5 hover:bg-[rgba(242,242,247,0.4)] transition-colors cursor-pointer" onClick={() => toggleCase(c.id)}>
+                                        <div className="flex-1 flex items-center gap-2.5 min-w-0">
+                                          {caseExpanded ? <ChevronDown className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--foreground-tertiary)' }} /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />}
+                                          <span className="text-[11px] font-mono shrink-0 opacity-50" style={{ color: 'var(--foreground-tertiary)' }}>{c.id.split('-').pop()}</span>
+                                          <span className="text-sm truncate" style={{ color: 'var(--foreground)' }}>{c.title}</span>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 shrink-0 ml-3">
+                                          <span className="badge text-[11px]" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>{caseTypeLabel(c.type)}</span>
+                                          <span className={`${priorityBadge(c.priority)} text-[11px]`}>{c.priority}</span>
+                                          <span className={`${statusBadge(c.status)} text-[11px]`}>{CASE_STATUS_LABELS[c.status] || c.status}</span>
+                                          <span className={`text-[11px] font-mono font-medium ${confidenceColor(c.confidence)}`}>{(c.confidence * 100).toFixed(0)}%</span>
+                                          {/* 操作按钮：hover 时显示 */}
+                                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <button onClick={e => { e.stopPropagation(); toggleCase(c.id) }} className="btn-ghost p-1 hover:text-[var(--brand-500)]" style={{ color: caseExpanded ? 'var(--brand-500)' : 'var(--foreground-tertiary)' }} title={caseExpanded ? '收起详情' : '查看详情'}>
+                                              <Eye className="w-3.5 h-3.5" />
+                                            </button>
+                                            {c.status !== 'approved' && (
+                                              <button onClick={e => { e.stopPropagation(); handleApprove(c.id) }} className="btn-ghost p-1 hover:text-[var(--state-success)]" style={{ color: 'var(--foreground-tertiary)' }} title="审核通过">
+                                                <CheckCircle className="w-3.5 h-3.5" />
+                                              </button>
+                                            )}
+                                            {c.status !== 'rejected' && (
+                                              <button onClick={e => { e.stopPropagation(); handleReject(c.id) }} className="btn-ghost p-1 hover:text-[var(--state-error)]" style={{ color: 'var(--foreground-tertiary)' }} title="驳回">
+                                                <XCircle className="w-3.5 h-3.5" />
+                                              </button>
+                                            )}
+                                            <button onClick={e => { e.stopPropagation(); setEditingCase(c) }} className="btn-ghost p-1 hover:text-[var(--brand-500)]" style={{ color: 'var(--foreground-tertiary)' }} title="编辑">
+                                              <Edit3 className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button onClick={e => { e.stopPropagation(); handleDelete(c.id) }} className="btn-ghost p-1 hover:text-[var(--state-error)]" style={{ color: 'var(--foreground-tertiary)' }} title="删除"><Trash2 className="w-3.5 h-3.5" /></button>
+                                          </div>
+                                        </div>
+                                      </div>
+                                      {caseExpanded && (
+                                        <div className="px-4 pb-4 pl-10 space-y-3" style={{ background: 'rgba(242, 242, 247, 0.25)' }}>
+                                          {c.description && <div><p className="text-xs font-semibold mb-1 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}><FileText className="w-3 h-3" /> 描述</p><p className="text-sm" style={{ color: 'var(--foreground-secondary)' }}>{c.description}</p></div>}
+                                          {c.preconditions && c.preconditions.length > 0 && <div><p className="text-xs font-semibold mb-1 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}><AlertTriangle className="w-3 h-3" /> 前置条件</p><ul className="list-disc list-inside space-y-0.5">{c.preconditions.map((p, i) => <li key={i} className="text-sm" style={{ color: 'var(--foreground-secondary)' }}>{p}</li>)}</ul></div>}
+                                          {c.steps && c.steps.length > 0 && <div><p className="text-xs font-semibold mb-1 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}><ListChecks className="w-3 h-3" /> 测试步骤</p><table className="w-full text-sm"><thead><tr className="text-left text-xs" style={{ color: 'var(--foreground-tertiary)', borderBottom: '1px solid var(--border)' }}><th className="py-1 w-12">#</th><th className="py-1">操作</th><th className="py-1">预期</th></tr></thead><tbody>{c.steps.map((s, i) => <tr key={i} style={{ borderBottom: '1px solid rgba(242, 242, 247, 0.7)' }}><td className="py-1.5" style={{ color: 'var(--foreground-tertiary)' }}>{s.step || i + 1}</td><td className="py-1.5" style={{ color: 'var(--foreground)' }}>{s.action}</td><td className="py-1.5" style={{ color: 'var(--foreground-tertiary)' }}>{s.expected}</td></tr>)}</tbody></table></div>}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )
+                                })}
                               </div>
                             )}
                           </div>
@@ -574,7 +718,7 @@ export default function TestCases() {
               )
             })}
             <div className="flex items-center justify-between px-5 py-3" style={{ borderTop: '1px solid var(--border)', background: 'rgba(242, 242, 247, 0.4)' }}>
-              <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>共 {total} 条，每页 {PAGE_SIZE} 条</span>
+              <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>共 {totalReqCount} 个需求 / {total} 个用例，每页 {REQUIREMENTS_PER_PAGE} 个需求</span>
               <div className="flex items-center gap-2">
                 <button disabled={page <= 1} onClick={() => setPage(1)} className="btn-ghost text-xs py-1 disabled:opacity-30">« 首页</button>
                 <button disabled={page <= 1} onClick={() => setPage(page - 1)} className="btn-ghost text-xs py-1 disabled:opacity-30">‹ 上页</button>
@@ -591,11 +735,11 @@ export default function TestCases() {
       {/* XMind 编辑器视图 */}
       {viewMode === 'xmind' && (
         <>
-          {allCasesLoading ? (
+          {loading ? (
             <div className="card p-6 space-y-4">{[1,2,3,4,5].map(i => <div key={i} className="skeleton h-14" />)}</div>
           ) : (
             <XMindEditor
-              cases={allCases}
+              cases={cases}
               reqs={reqs}
               selectedProjectName={selectedProject?.name || filterProject || '所有用例'}
               onEdit={(c) => setEditingCase(c)}
@@ -603,6 +747,9 @@ export default function TestCases() {
               onApprove={handleApprove}
               onReject={handleReject}
               onAddNew={handleAddNew}
+              onAddCaseAtLevel={handleAddCaseAtLevel}
+              onMoveCase={handleMoveCase}
+              onBatchApprove={handleBatchApprove}
             />
           )}
         </>

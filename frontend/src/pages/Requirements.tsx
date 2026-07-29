@@ -22,6 +22,7 @@ type UploadProgress = {
   progress: number      // 真实进度 0-100（v2.14 来自后端任务轮询）
   taskId?: string       // v2.23: 关联的任务 ID（用于最小化后继续轮询）
   timings?: Record<string, PhaseTiming>  // v2.23: 阶段耗时数据
+  serverNow?: string    // v2.36: 服务器当前时间（UTC ISO），避免客户端时钟偏差
 }
 
 export default function Requirements() {
@@ -207,6 +208,8 @@ export default function Requirements() {
         // 映射后端 phase 到前端 UPLOAD_PHASES 索引
         const phaseIdx = PHASE_MAP[task.phase] ?? 0
         const timings = task.phase_timings || {}
+        // v2.36: 使用服务器时间计算耗时，避免客户端时钟偏差导致负数
+        const serverNow = task.server_now
 
         if (task.status === 'running' || task.status === 'pending') {
           setProgress({
@@ -216,6 +219,7 @@ export default function Requirements() {
             progress: task.progress,
             taskId,
             timings,
+            serverNow,
           })
         } else if (task.status === 'completed') {
           // 任务完成
@@ -234,13 +238,14 @@ export default function Requirements() {
               progress: 100,
               taskId,
               timings,
+              serverNow,
             })
             await sleep(3000) // 让用户看到警告 3 秒
           }
 
           if (questions.length > 0) {
             // 有未回答问题：显示澄清面板
-            setProgress({ phase: 2, message: '检测到需要补充的内容，请确认以下问题', error: null, progress: 100, taskId, timings })
+            setProgress({ phase: 2, message: '检测到需要补充的内容，请确认以下问题', error: null, progress: 100, taskId, timings, serverNow })
             await sleep(800)
             setProgress(null)
             const initAnswers: Record<string, string> = {}
@@ -260,6 +265,7 @@ export default function Requirements() {
             progress: task.progress,
             taskId,
             timings,
+            serverNow,
           })
         } else if (task.status === 'interrupted') {
           if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
@@ -271,6 +277,7 @@ export default function Requirements() {
             progress: task.progress,
             taskId,
             timings,
+            serverNow,
           })
         }
       } catch (e: any) {
@@ -646,8 +653,10 @@ export default function Requirements() {
                       const currentPhaseKey = UPLOAD_PHASES[progress.phase]?.key
                       const t = currentPhaseKey ? progress.timings[currentPhaseKey] : undefined
                       if (!t?.start) return null
-                      const elapsed = (t.end ? new Date(t.end).getTime() : Date.now()) - new Date(t.start).getTime()
-                      const sec = Math.round(elapsed / 1000)
+                      // v2.36: 优先使用服务器时间，避免客户端时钟偏差导致负数
+                      const nowMs = progress.serverNow ? new Date(progress.serverNow).getTime() : Date.now()
+                      const elapsed = (t.end ? new Date(t.end).getTime() : nowMs) - new Date(t.start).getTime()
+                      const sec = Math.max(0, Math.round(elapsed / 1000))
                       return (
                         <span className="inline-flex items-center gap-0.5 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                           <Clock className="w-3 h-3" />
@@ -668,10 +677,12 @@ export default function Requirements() {
                       const t = progress.timings?.[phase.key]
                       if (!t?.start) return null
                       const isDone = !!t.end
+                      // v2.36: 进行中的阶段优先使用服务器时间，避免客户端时钟偏差导致负数
+                      const nowMs = progress.serverNow ? new Date(progress.serverNow).getTime() : Date.now()
                       const elapsed = t.end
                         ? t.duration_ms || (new Date(t.end).getTime() - new Date(t.start).getTime())
-                        : Date.now() - new Date(t.start).getTime()
-                      const sec = Math.round(elapsed / 1000)
+                        : nowMs - new Date(t.start).getTime()
+                      const sec = Math.max(0, Math.round(elapsed / 1000))
                       const timeStr = sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${sec % 60}s`
                       return (
                         <div key={phase.key} className="flex items-center justify-between text-xs">

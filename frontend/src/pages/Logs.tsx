@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react'
+﻿import { useState, useEffect, useCallback } from 'react'
 import {
-  Loader2, ChevronLeft, ChevronRight, X, CheckCircle2, XCircle,
-  Cpu, FileText, Activity, Eye,
+  Loader2, ChevronLeft, ChevronRight, X,
+  Cpu, FileText, Eye, ScrollText,
 } from 'lucide-react'
 import { logs as logsApi } from '../api/client'
 import type { LLMCallLogItem, LLMCallLogDetail, OperationLogItem } from '../types'
@@ -9,12 +9,12 @@ import type { LLMCallLogItem, LLMCallLogDetail, OperationLogItem } from '../type
 type Tab = 'llm' | 'operation'
 
 const AGENT_LABELS: Record<string, string> = {
-  req_agent: '需求分析',
-  fp_agent: '功能点拆分',
-  clarify_agent: '需求澄清',
-  gen_agent: '用例生成',
-  review_agent: '用例评审',
-  impact_agent: '影响分析',
+  req_agent: 'ReqAgent',
+  fp_agent: 'FPExpertAgent',
+  clarify_agent: 'ClarifyAgent',
+  gen_agent: 'GenAgent',
+  review_agent: 'ReviewAgent',
+  impact_agent: 'ImpactAgent',
 }
 
 const ACTION_LABELS: Record<string, string> = {
@@ -45,16 +45,28 @@ function formatTime(iso: string): string {
 function formatDuration(ms: number): string {
   if (!ms) return '-'
   if (ms < 1000) return `${ms}ms`
-  return `${(ms / 1000).toFixed(2)}s`
+  return `${(ms / 1000).toFixed(1)}s`
 }
 
-function formatTokens(tokens: Record<string, number> | number | null): string {
+/** 拆分 token_usage 为输入/输出 token 数值 */
+function splitTokens(tokens: Record<string, number> | null | undefined): { input: number; output: number } {
+  if (!tokens) return { input: 0, output: 0 }
+  const input = tokens.prompt_tokens || tokens.input_tokens || 0
+  const output = tokens.completion_tokens || tokens.output_tokens || 0
+  return { input, output }
+}
+
+function formatTokenNum(n: number): string {
+  if (!n) return '-'
+  if (n < 1000) return `${n}`
+  return `${(n / 1000).toFixed(1)}k`
+}
+
+function formatTokensTotal(tokens: Record<string, number> | null | undefined): string {
   if (!tokens) return '-'
-  // 兼容 dict 形式 {prompt_tokens, completion_tokens, total_tokens}
-  const total = typeof tokens === 'number' ? tokens : (tokens.total_tokens || (tokens.prompt_tokens || 0) + (tokens.completion_tokens || 0))
-  if (!total) return '-'
-  if (total < 1000) return `${total}`
-  return `${(total / 1000).toFixed(1)}k`
+  const total = tokens.total_tokens
+    || (splitTokens(tokens).input + splitTokens(tokens).output)
+  return formatTokenNum(total)
 }
 
 function formatDetail(detail: Record<string, unknown> | string | null | undefined): string {
@@ -93,7 +105,7 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
         {/* 头部 */}
         <div className="flex items-center justify-between px-6 py-4 border-b" style={{ borderColor: 'var(--border)' }}>
           <div className="flex items-center gap-3">
-            <Cpu className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+            <Cpu className="w-5 h-5" style={{ color: 'var(--state-warning)' }} />
             <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>LLM 调用详情 #{logId}</h2>
             {detail && (
               <div className="flex items-center gap-2 text-xs">
@@ -103,9 +115,9 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
                 <span className="px-2 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>{detail.provider}</span>
                 <span className="px-2 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>{detail.model}</span>
                 {detail.success ? (
-                  <span className="px-2 py-0.5 rounded" style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>成功</span>
+                  <span className="pill pill-success">成功</span>
                 ) : (
-                  <span className="px-2 py-0.5 rounded" style={{ background: 'var(--state-error-surface)', color: 'var(--state-error)' }}>失败</span>
+                  <span className="pill pill-destructive">失败</span>
                 )}
               </div>
             )}
@@ -117,7 +129,7 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
 
         {loading ? (
           <div className="flex-1 flex items-center justify-center py-12">
-            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
+            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--state-warning)' }} />
           </div>
         ) : !detail ? (
           <div className="flex-1 flex items-center justify-center py-12" style={{ color: 'var(--foreground-tertiary)' }}>加载失败</div>
@@ -135,7 +147,7 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
               </div>
               <div>
                 <span style={{ color: 'var(--foreground-tertiary)' }}>Token：</span>
-                <span style={{ color: 'var(--foreground-secondary)' }}>{formatTokens(detail.token_usage)}</span>
+                <span style={{ color: 'var(--foreground-secondary)' }}>{formatTokensTotal(detail.token_usage)}</span>
               </div>
               <div>
                 <span style={{ color: 'var(--foreground-tertiary)' }}>温度：</span>
@@ -179,7 +191,7 @@ function LlmLogDetailModal({ logId, onClose }: { logId: number; onClose: () => v
                     onClick={() => setActiveSection(t.key)}
                     className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${!hasContent ? 'opacity-40 cursor-not-allowed' : ''}`}
                     style={activeSection === t.key
-                      ? { borderColor: 'var(--brand-500)', color: 'var(--brand-500)' }
+                      ? { borderColor: 'var(--state-warning)', color: 'var(--state-warning)' }
                       : { borderColor: 'transparent', color: 'var(--foreground-tertiary)' }}
                     disabled={!hasContent}
                   >
@@ -236,9 +248,10 @@ function LlmLogsTab() {
 
   // 筛选
   const [agentName, setAgentName] = useState('')
-  const [taskId, setTaskId] = useState('')
-  const [reqId, setReqId] = useState('')
+  const [modelFilter, setModelFilter] = useState('')
   const [successFilter, setSuccessFilter] = useState<'all' | 'success' | 'failed'>('all')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -246,9 +259,10 @@ function LlmLogsTab() {
       const res = await logsApi.listLlmLogs({
         page, page_size: pageSize,
         agent_name: agentName || undefined,
-        task_id: taskId || undefined,
-        req_id: reqId || undefined,
+        model: modelFilter || undefined,
         success: successFilter === 'all' ? undefined : successFilter === 'success',
+        start_date: startDate || undefined,
+        end_date: endDate || undefined,
       })
       setItems(res.items || [])
       setTotal(res.total || 0)
@@ -256,120 +270,176 @@ function LlmLogsTab() {
       setItems([]); setTotal(0)
     }
     setLoading(false)
-  }, [page, pageSize, agentName, taskId, reqId, successFilter])
+  }, [page, pageSize, agentName, modelFilter, successFilter, startDate, endDate])
 
   useEffect(() => { load() }, [load])
 
   const totalPages = Math.ceil(total / pageSize) || 1
+  const rangeStart = total === 0 ? 0 : (page - 1) * pageSize + 1
+  const rangeEnd = Math.min(page * pageSize, total)
 
   return (
-    <div className="space-y-3">
-      {/* 筛选 */}
-      <div className="flex flex-wrap items-center gap-2 p-3 border" style={{ background: 'var(--background)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
-        <select
-          value={agentName}
-          onChange={e => { setAgentName(e.target.value); setPage(1) }}
-          className="input-field text-xs py-1.5 w-36"
-        >
-          <option value="">全部 Agent</option>
-          {Object.entries(AGENT_LABELS).map(([k, v]) => (
-            <option key={k} value={k}>{v}</option>
-          ))}
-        </select>
-        <input
-          value={taskId}
-          onChange={e => { setTaskId(e.target.value); setPage(1) }}
-          placeholder="任务 ID"
-          className="input-field text-xs py-1.5 w-40"
-        />
-        <input
-          value={reqId}
-          onChange={e => { setReqId(e.target.value); setPage(1) }}
-          placeholder="需求 ID"
-          className="input-field text-xs py-1.5 w-40"
-        />
-        <select
-          value={successFilter}
-          onChange={e => { setSuccessFilter(e.target.value as any); setPage(1) }}
-          className="input-field text-xs py-1.5 w-28"
-        >
-          <option value="all">全部状态</option>
-          <option value="success">仅成功</option>
-          <option value="failed">仅失败</option>
-        </select>
+    <div className="space-y-6">
+      {/* 筛选栏 — 白色卡片 */}
+      <div
+        className="flex flex-wrap items-center gap-3"
+        style={{
+          background: 'var(--background)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
+          padding: '16px 20px',
+        }}
+      >
+        {/* Agent 筛选 */}
+        <div className="flex items-center gap-2">
+          <select
+            value={agentName}
+            onChange={e => { setAgentName(e.target.value); setPage(1) }}
+            className="input-field text-xs py-2 w-40"
+            aria-label="Agent 筛选"
+          >
+            <option value="">全部 Agent</option>
+            {Object.entries(AGENT_LABELS).map(([k, v]) => (
+              <option key={k} value={k}>{v}</option>
+            ))}
+          </select>
+        </div>
+        {/* 模型筛选 */}
+        <div className="flex items-center gap-2">
+          <input
+            value={modelFilter}
+            onChange={e => { setModelFilter(e.target.value); setPage(1) }}
+            placeholder="模型名称"
+            className="input-field text-xs py-2 w-40"
+            aria-label="模型筛选"
+          />
+        </div>
+        {/* 状态筛选 */}
+        <div className="flex items-center gap-2">
+          <select
+            value={successFilter}
+            onChange={e => { setSuccessFilter(e.target.value as any); setPage(1) }}
+            className="input-field text-xs py-2 w-28"
+            aria-label="状态筛选"
+          >
+            <option value="all">全部</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+          </select>
+        </div>
+        {/* 日期范围 */}
+        <div className="flex items-center gap-2">
+          <input
+            type="date"
+            value={startDate}
+            onChange={e => { setStartDate(e.target.value); setPage(1) }}
+            className="input-field text-xs py-2 w-36"
+            aria-label="开始日期"
+          />
+          <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>至</span>
+          <input
+            type="date"
+            value={endDate}
+            onChange={e => { setEndDate(e.target.value); setPage(1) }}
+            className="input-field text-xs py-2 w-36"
+            aria-label="结束日期"
+          />
+        </div>
         <button
-          onClick={() => { setAgentName(''); setTaskId(''); setReqId(''); setSuccessFilter('all'); setPage(1) }}
-          className="px-3 py-1.5 text-xs hover:text-[var(--foreground)]"
+          onClick={() => {
+            setAgentName('')
+            setModelFilter('')
+            setSuccessFilter('all')
+            setStartDate('')
+            setEndDate('')
+            setPage(1)
+          }}
+          className="px-3 py-2 text-xs hover:text-[var(--foreground)]"
           style={{ color: 'var(--foreground-tertiary)' }}
         >
           重置
         </button>
-        <span className="ml-auto text-xs" style={{ color: 'var(--foreground-tertiary)' }}>共 {total} 条</span>
       </div>
 
-      {/* 表格 */}
-      <div className="overflow-hidden border" style={{ background: 'var(--background)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
+      {/* LLM 日志表格 */}
+      <div
+        className="overflow-hidden"
+        style={{
+          background: 'var(--background)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
+        }}
+      >
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
+            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--state-warning)' }} />
           </div>
         ) : items.length === 0 ? (
           <div className="py-12 text-center text-sm" style={{ color: 'var(--foreground-tertiary)' }}>暂无 LLM 调用日志</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
-                <tr>
-                  <th className="text-left px-3 py-2.5 font-medium">ID</th>
-                  <th className="text-left px-3 py-2.5 font-medium">Agent</th>
-                  <th className="text-left px-3 py-2.5 font-medium">模型</th>
-                  <th className="text-left px-3 py-2.5 font-medium">任务/需求</th>
-                  <th className="text-left px-3 py-2.5 font-medium">耗时</th>
-                  <th className="text-left px-3 py-2.5 font-medium">Token</th>
-                  <th className="text-left px-3 py-2.5 font-medium">状态</th>
-                  <th className="text-left px-3 py-2.5 font-medium">时间</th>
-                  <th className="text-right px-3 py-2.5 font-medium">操作</th>
+            <table className="w-full text-sm" style={{ borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: 'var(--background-muted)' }}>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>时间</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>Agent</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>模型</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>输入Token</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>输出Token</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>耗时</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>操作</th>
                 </tr>
               </thead>
               <tbody>
-                {items.map(log => (
-                  <tr key={log.id} className="border-t hover:bg-[var(--background-muted)]" style={{ borderColor: 'var(--border)' }}>
-                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>#{log.id}</td>
-                    <td className="px-3 py-2">
-                      <span className="px-2 py-0.5 rounded text-xs" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>
+                {items.map(log => {
+                  const { input, output } = splitTokens(log.token_usage)
+                  return (
+                    <tr
+                      key={log.id}
+                      className="hover:bg-[var(--background-muted)] transition-colors"
+                      style={{ borderBottom: '1px solid var(--border)' }}
+                    >
+                      <td className="px-5 py-3 text-xs whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)', fontVariantNumeric: 'tabular-nums' }}>
+                        {formatTime(log.created_at)}
+                      </td>
+                      <td className="px-5 py-3 text-xs font-medium whitespace-nowrap" style={{ color: 'var(--foreground)' }}>
                         {AGENT_LABELS[log.agent_name] || log.agent_name}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{log.model}</td>
-                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
-                      {log.task_id && <div className="font-mono truncate max-w-[120px]" title={log.task_id}>{log.task_id}</div>}
-                      {log.req_id && <div className="font-mono truncate max-w-[120px]" style={{ color: 'var(--foreground-quaternary)' }} title={log.req_id}>{log.req_id}</div>}
-                    </td>
-                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{formatDuration(log.duration_ms)}</td>
-                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>{formatTokens(log.token_usage)}</td>
-                    <td className="px-3 py-2">
-                      {log.success ? (
-                        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--state-success)' }}>
-                          <CheckCircle2 className="w-3.5 h-3.5" /> 成功
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--state-error)' }} title={log.error_message || ''}>
-                          <XCircle className="w-3.5 h-3.5" /> 失败
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-xs whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>{formatTime(log.created_at)}</td>
-                    <td className="px-3 py-2 text-right">
-                      <button
-                        onClick={() => setDetailId(log.id)}
-                        className="px-2 py-1 text-xs rounded inline-flex items-center gap-1 hover:bg-[rgba(0,122,255,0.08)]"
-                        style={{ color: 'var(--brand-500)' }}
-                      >
-                        <Eye className="w-3.5 h-3.5" /> 详情
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="px-5 py-3 text-xs whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>
+                        {log.model || '-'}
+                      </td>
+                      <td className="px-5 py-3 text-xs whitespace-nowrap" style={{ color: 'var(--foreground)', fontVariantNumeric: 'tabular-nums' }}>
+                        {formatTokenNum(input)}
+                      </td>
+                      <td className="px-5 py-3 text-xs whitespace-nowrap" style={{ color: 'var(--foreground)', fontVariantNumeric: 'tabular-nums' }}>
+                        {formatTokenNum(output)}
+                      </td>
+                      <td className="px-5 py-3 text-xs whitespace-nowrap" style={{ color: 'var(--foreground)', fontVariantNumeric: 'tabular-nums' }}>
+                        {formatDuration(log.duration_ms)}
+                      </td>
+                      <td className="px-5 py-3">
+                        {log.success ? (
+                          <span className="pill pill-success">成功</span>
+                        ) : (
+                          <span className="pill pill-destructive" title={log.error_message || ''}>失败</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3">
+                        <button
+                          onClick={() => setDetailId(log.id)}
+                          className="view-btn"
+                          type="button"
+                          aria-label="查看"
+                          title="查看"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>查看</span>
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -377,26 +447,38 @@ function LlmLogsTab() {
 
         {/* 分页 */}
         {!loading && items.length > 0 && (
-          <div className="flex items-center justify-between px-3 py-2 border-t text-xs" style={{ borderColor: 'var(--border)' }}>
-            <span style={{ color: 'var(--foreground-tertiary)' }}>
-              第 {page} / {totalPages} 页
+          <div
+            className="flex items-center justify-between px-5 py-4"
+            style={{ borderTop: '1px solid var(--border)' }}
+          >
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+              共 {total} 条记录，第 {rangeStart}-{rangeEnd} 条
             </span>
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page <= 1}
-                className="p-1.5 rounded disabled:opacity-40 hover:bg-[var(--background-muted)]"
-                style={{ color: 'var(--foreground-tertiary)' }}
+                className="pagination-btn"
+                type="button"
+                aria-label="上一页"
               >
-                <ChevronLeft className="w-4 h-4" />
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+              <button
+                className="pagination-btn pagination-btn-active"
+                type="button"
+                data-active="true"
+              >
+                {page}
               </button>
               <button
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages}
-                className="p-1.5 rounded disabled:opacity-40 hover:bg-[var(--background-muted)]"
-                style={{ color: 'var(--foreground-tertiary)' }}
+                className="pagination-btn"
+                type="button"
+                aria-label="下一页"
               >
-                <ChevronRight className="w-4 h-4" />
+                <ChevronRight className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
@@ -426,6 +508,8 @@ function OperationLogsTab() {
   const [action, setAction] = useState('')
   const [targetType, setTargetType] = useState('')
   const [successFilter, setSuccessFilter] = useState<'all' | 'success' | 'failed'>('all')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -436,6 +520,8 @@ function OperationLogsTab() {
         action: action || undefined,
         target_type: targetType || undefined,
         success: successFilter === 'all' ? undefined : successFilter === 'success',
+        start_date: startDate || undefined,
+        end_date: endDate || undefined,
       })
       setItems(res.items || [])
       setTotal(res.total || 0)
@@ -443,26 +529,36 @@ function OperationLogsTab() {
       setItems([]); setTotal(0)
     }
     setLoading(false)
-  }, [page, pageSize, username, action, targetType, successFilter])
+  }, [page, pageSize, username, action, targetType, successFilter, startDate, endDate])
 
   useEffect(() => { load() }, [load])
 
   const totalPages = Math.ceil(total / pageSize) || 1
+  const rangeStart = total === 0 ? 0 : (page - 1) * pageSize + 1
+  const rangeEnd = Math.min(page * pageSize, total)
 
   return (
-    <div className="space-y-3">
-      {/* 筛选 */}
-      <div className="flex flex-wrap items-center gap-2 p-3 border" style={{ background: 'var(--background)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
+    <div className="space-y-6">
+      {/* 筛选栏 */}
+      <div
+        className="flex flex-wrap items-center gap-3"
+        style={{
+          background: 'var(--background)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
+          padding: '16px 20px',
+        }}
+      >
         <input
           value={username}
           onChange={e => { setUsername(e.target.value); setPage(1) }}
           placeholder="用户名"
-          className="input-field text-xs py-1.5 w-36"
+          className="input-field text-xs py-2 w-36"
         />
         <select
           value={action}
           onChange={e => { setAction(e.target.value); setPage(1) }}
-          className="input-field text-xs py-1.5 w-40"
+          className="input-field text-xs py-2 w-40"
         >
           <option value="">全部操作</option>
           {Object.entries(ACTION_LABELS).map(([k, v]) => (
@@ -473,78 +569,117 @@ function OperationLogsTab() {
           value={targetType}
           onChange={e => { setTargetType(e.target.value); setPage(1) }}
           placeholder="目标类型"
-          className="input-field text-xs py-1.5 w-32"
+          className="input-field text-xs py-2 w-32"
         />
         <select
           value={successFilter}
           onChange={e => { setSuccessFilter(e.target.value as any); setPage(1) }}
-          className="input-field text-xs py-1.5 w-28"
+          className="input-field text-xs py-2 w-28"
         >
-          <option value="all">全部状态</option>
-          <option value="success">仅成功</option>
-          <option value="failed">仅失败</option>
+          <option value="all">全部</option>
+          <option value="success">成功</option>
+          <option value="failed">失败</option>
         </select>
+        <div className="flex items-center gap-2">
+          <input
+            type="date"
+            value={startDate}
+            onChange={e => { setStartDate(e.target.value); setPage(1) }}
+            className="input-field text-xs py-2 w-36"
+            aria-label="开始日期"
+          />
+          <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>至</span>
+          <input
+            type="date"
+            value={endDate}
+            onChange={e => { setEndDate(e.target.value); setPage(1) }}
+            className="input-field text-xs py-2 w-36"
+            aria-label="结束日期"
+          />
+        </div>
         <button
-          onClick={() => { setUsername(''); setAction(''); setTargetType(''); setSuccessFilter('all'); setPage(1) }}
-          className="px-3 py-1.5 text-xs hover:text-[var(--foreground)]"
+          onClick={() => {
+            setUsername('')
+            setAction('')
+            setTargetType('')
+            setSuccessFilter('all')
+            setStartDate('')
+            setEndDate('')
+            setPage(1)
+          }}
+          className="px-3 py-2 text-xs hover:text-[var(--foreground)]"
           style={{ color: 'var(--foreground-tertiary)' }}
         >
           重置
         </button>
-        <span className="ml-auto text-xs" style={{ color: 'var(--foreground-tertiary)' }}>共 {total} 条</span>
       </div>
 
-      {/* 表格 */}
-      <div className="overflow-hidden border" style={{ background: 'var(--background)', borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.75)' }}>
+      {/* 操作日志表格 */}
+      <div
+        className="overflow-hidden"
+        style={{
+          background: 'var(--background)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
+        }}
+      >
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
+            <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--state-warning)' }} />
           </div>
         ) : items.length === 0 ? (
           <div className="py-12 text-center text-sm" style={{ color: 'var(--foreground-tertiary)' }}>暂无操作日志</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
-                <tr>
-                  <th className="text-left px-3 py-2.5 font-medium">ID</th>
-                  <th className="text-left px-3 py-2.5 font-medium">用户</th>
-                  <th className="text-left px-3 py-2.5 font-medium">操作</th>
-                  <th className="text-left px-3 py-2.5 font-medium">目标</th>
-                  <th className="text-left px-3 py-2.5 font-medium">详情</th>
-                  <th className="text-left px-3 py-2.5 font-medium">IP</th>
-                  <th className="text-left px-3 py-2.5 font-medium">状态</th>
-                  <th className="text-left px-3 py-2.5 font-medium">时间</th>
+            <table className="w-full text-sm" style={{ borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: 'var(--background-muted)' }}>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>时间</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>用户</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>操作</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>目标</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>详情</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>IP</th>
+                  <th className="text-left px-5 py-3 text-xs font-medium uppercase tracking-wide whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
                 </tr>
               </thead>
               <tbody>
                 {items.map(log => (
-                  <tr key={log.id} className="border-t hover:bg-[var(--background-muted)]" style={{ borderColor: 'var(--border)' }}>
-                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>#{log.id}</td>
-                    <td className="px-3 py-2 text-xs font-medium" style={{ color: 'var(--foreground-secondary)' }}>{log.username}</td>
-                    <td className="px-3 py-2">
-                      <span className="px-2 py-0.5 rounded text-xs" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>
+                  <tr
+                    key={log.id}
+                    className="hover:bg-[var(--background-muted)] transition-colors"
+                    style={{ borderBottom: '1px solid var(--border)' }}
+                  >
+                    <td className="px-5 py-3 text-xs whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)', fontVariantNumeric: 'tabular-nums' }}>
+                      {formatTime(log.created_at)}
+                    </td>
+                    <td className="px-5 py-3 text-xs font-medium" style={{ color: 'var(--foreground)' }}>
+                      {log.username || '-'}
+                    </td>
+                    <td className="px-5 py-3">
+                      <span className="pill pill-neutral">
                         {ACTION_LABELS[log.action] || log.action}
                       </span>
                     </td>
-                    <td className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+                    <td className="px-5 py-3 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                       <div>{log.target_type || '-'}</div>
-                      {log.target_id && <div className="font-mono truncate max-w-[120px]" style={{ color: 'var(--foreground-quaternary)' }} title={log.target_id}>{log.target_id}</div>}
-                    </td>
-                    <td className="px-3 py-2 text-xs max-w-xs truncate" style={{ color: 'var(--foreground-tertiary)' }} title={formatDetail(log.detail)}>{formatDetail(log.detail)}</td>
-                    <td className="px-3 py-2 text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>{log.ip_address || '-'}</td>
-                    <td className="px-3 py-2">
-                      {log.success ? (
-                        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--state-success)' }}>
-                          <CheckCircle2 className="w-3.5 h-3.5" /> 成功
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1 text-xs" style={{ color: 'var(--state-error)' }} title={log.error_message || ''}>
-                          <XCircle className="w-3.5 h-3.5" /> 失败
-                        </span>
+                      {log.target_id && (
+                        <div className="font-mono truncate max-w-[120px]" title={log.target_id}>{log.target_id}</div>
                       )}
                     </td>
-                    <td className="px-3 py-2 text-xs whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>{formatTime(log.created_at)}</td>
+                    <td className="px-5 py-3 text-xs max-w-xs truncate" style={{ color: 'var(--foreground-tertiary)' }} title={formatDetail(log.detail)}>
+                      {formatDetail(log.detail)}
+                    </td>
+                    <td className="px-5 py-3 text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>
+                      {log.ip_address || '-'}
+                    </td>
+                    <td className="px-5 py-3">
+                      {log.success ? (
+                        <span className="pill pill-success">成功</span>
+                      ) : (
+                        <span className="pill pill-destructive" title={log.error_message || ''}>失败</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -554,26 +689,38 @@ function OperationLogsTab() {
 
         {/* 分页 */}
         {!loading && items.length > 0 && (
-          <div className="flex items-center justify-between px-3 py-2 border-t text-xs" style={{ borderColor: 'var(--border)' }}>
-            <span style={{ color: 'var(--foreground-tertiary)' }}>
-              第 {page} / {totalPages} 页
+          <div
+            className="flex items-center justify-between px-5 py-4"
+            style={{ borderTop: '1px solid var(--border)' }}
+          >
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+              共 {total} 条记录，第 {rangeStart}-{rangeEnd} 条
             </span>
             <div className="flex items-center gap-1">
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page <= 1}
-                className="p-1.5 rounded disabled:opacity-40 hover:bg-[var(--background-muted)]"
-                style={{ color: 'var(--foreground-tertiary)' }}
+                className="pagination-btn"
+                type="button"
+                aria-label="上一页"
               >
-                <ChevronLeft className="w-4 h-4" />
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+              <button
+                className="pagination-btn pagination-btn-active"
+                type="button"
+                data-active="true"
+              >
+                {page}
               </button>
               <button
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page >= totalPages}
-                className="p-1.5 rounded disabled:opacity-40 hover:bg-[var(--background-muted)]"
-                style={{ color: 'var(--foreground-tertiary)' }}
+                className="pagination-btn"
+                type="button"
+                aria-label="下一页"
               >
-                <ChevronRight className="w-4 h-4" />
+                <ChevronRight className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
@@ -590,40 +737,61 @@ export default function Logs() {
   const [tab, setTab] = useState<Tab>('llm')
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--foreground)' }}>
-            <Activity className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
-            日志查看
-          </h1>
-          <p className="text-xs mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
-            查看大模型调用日志和用户操作日志，便于验证 AI 返回结果是否正确
-          </p>
-        </div>
+    <div className="space-y-6">
+      {/* 页面标题 */}
+      <div>
+        <h1
+          className="flex items-center gap-2"
+          style={{
+            margin: 0,
+            fontSize: 28,
+            fontWeight: 600,
+            color: 'var(--foreground)',
+            lineHeight: 1.2,
+            letterSpacing: '-0.02em',
+          }}
+        >
+          <ScrollText className="w-6 h-6" style={{ color: 'var(--state-warning)' }} />
+          日志查看
+        </h1>
+        <p
+          className="text-sm mt-1.5"
+          style={{ color: 'var(--foreground-tertiary)', margin: '6px 0 0 0', fontWeight: 400 }}
+        >
+          LLM 调用日志与系统操作审计
+        </p>
       </div>
 
       {/* Tab 切换 */}
-      <div className="flex items-center gap-1 border-b" style={{ borderColor: 'var(--input)' }}>
+      <div
+        className="flex items-center gap-1"
+        style={{ borderBottom: '1px solid var(--border)' }}
+      >
         <button
           onClick={() => setTab('llm')}
-          className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors"
+          className="flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors"
           style={tab === 'llm'
-            ? { borderColor: 'var(--brand-500)', color: 'var(--brand-500)' }
-            : { borderColor: 'transparent', color: 'var(--foreground-tertiary)' }}
+            ? { borderColor: 'var(--state-warning)', color: 'var(--state-warning)', marginBottom: -1 }
+            : { borderColor: 'transparent', color: 'var(--foreground-tertiary)', marginBottom: -1 }}
+          type="button"
+          role="tab"
+          aria-selected={tab === 'llm'}
         >
           <Cpu className="w-4 h-4" />
-          LLM 调用日志
+          LLM 日志
         </button>
         <button
           onClick={() => setTab('operation')}
-          className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium border-b-2 transition-colors"
+          className="flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors"
           style={tab === 'operation'
-            ? { borderColor: 'var(--brand-500)', color: 'var(--brand-500)' }
-            : { borderColor: 'transparent', color: 'var(--foreground-tertiary)' }}
+            ? { borderColor: 'var(--state-warning)', color: 'var(--state-warning)', marginBottom: -1 }
+            : { borderColor: 'transparent', color: 'var(--foreground-tertiary)', marginBottom: -1 }}
+          type="button"
+          role="tab"
+          aria-selected={tab === 'operation'}
         >
           <FileText className="w-4 h-4" />
-          用户操作日志
+          操作日志
         </button>
       </div>
 

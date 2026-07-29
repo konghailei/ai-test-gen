@@ -1213,30 +1213,32 @@ export default function DependencyGraph() {
   // ==========================================================================
   return (
     <div className={`flex flex-col ${fullscreen ? 'fixed inset-0 z-50' : 'h-[calc(100vh-5rem)]'}`} style={fullscreen ? { background: 'var(--background)' } : undefined}>
-      {/* Top Toolbar */}
-      <div className="flex items-center gap-3 px-5 py-2.5 shrink-0" style={{ borderBottom: '1px solid var(--border)', background: 'var(--background)' }}>
-        <GitBranch className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
-        <div className="flex items-center gap-1 p-0.5" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
-          <button onClick={() => switchGraphType('modules')}
-            className="px-3 py-1 text-xs font-medium transition-colors"
-            style={graphType === 'modules'
-              ? { background: 'var(--background)', color: 'var(--foreground)', borderRadius: 'calc(var(--radius) * 0.25)', boxShadow: 'var(--shadow-apple-sm)' }
-              : { color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
-            模块依赖
-          </button>
-          <button onClick={() => switchGraphType('fp')}
-            className="px-3 py-1 text-xs font-medium transition-colors"
-            style={graphType === 'fp'
-              ? { background: 'var(--background)', color: 'var(--foreground)', borderRadius: 'calc(var(--radius) * 0.25)', boxShadow: 'var(--shadow-apple-sm)' }
-              : { color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
-            功能点依赖
-          </button>
+      {/* Top Toolbar — flex-wrap 自动多行，避免工具拥挤 */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 py-2.5 shrink-0" style={{ borderBottom: '1px solid var(--border)', background: 'var(--background)' }}>
+        <div className="flex items-center gap-2 shrink-0">
+          <GitBranch className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+          <div className="flex items-center gap-1 p-0.5" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+            <button onClick={() => switchGraphType('modules')}
+              className="px-3 py-1 text-xs font-medium transition-colors"
+              style={graphType === 'modules'
+                ? { background: 'var(--background)', color: 'var(--foreground)', borderRadius: 'calc(var(--radius) * 0.25)', boxShadow: 'var(--shadow-apple-sm)' }
+                : { color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
+              模块依赖
+            </button>
+            <button onClick={() => switchGraphType('fp')}
+              className="px-3 py-1 text-xs font-medium transition-colors"
+              style={graphType === 'fp'
+                ? { background: 'var(--background)', color: 'var(--foreground)', borderRadius: 'calc(var(--radius) * 0.25)', boxShadow: 'var(--shadow-apple-sm)' }
+                : { color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
+              功能点依赖
+            </button>
+          </div>
+          {productName && <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>· {productName}</span>}
         </div>
-        {productName && <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>· {productName}</span>}
 
         {/* v2.3: FP 图谱筛选器 — 模块 + 审核状态 */}
         {selectedProductId && graphType === 'fp' && (
-          <>
+          <div className="flex items-center gap-1.5 shrink-0">
             <div className="flex items-center gap-1.5">
               <Filter className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
               <select value={moduleFilter} onChange={e => setModuleFilter(e.target.value)}
@@ -1262,48 +1264,42 @@ export default function DependencyGraph() {
               style={historyOpen ? { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' } : undefined}>
               <History className="w-3.5 h-3.5" /> 变动历史
             </button>
-            <div className="w-px h-5" style={{ background: 'var(--border)' }} />
-          </>
+          </div>
         )}
-
-        <div className="flex-1" />
 
         {/* Draggable toolbar items — 仅模块模式显示 */}
         {selectedProductId && graphType === 'modules' && (
-          <>
-            <div className="flex items-center gap-1.5 px-2">
-              {/* Module drag item */}
-              <div
-                draggable
-                onDragStart={(e) => { e.dataTransfer.setData('application/reactflow', 'module'); e.dataTransfer.effectAllowed = 'move' }}
-                className="flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium cursor-grab active:cursor-grabbing select-none transition-colors"
-                style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 122, 255, 0.08)', borderColor: 'rgba(0, 122, 255, 0.2)', color: 'var(--brand-500)' }}
-                title="拖拽到画布添加模块"
-              >
-                <GripVertical className="w-3 h-3 opacity-40" />
-                <Puzzle className="w-3.5 h-3.5" />
-                <span>模块</span>
-              </div>
-              {/* Connection drag item */}
-              <div
-                draggable
-                onDragStart={(e) => { e.dataTransfer.setData('application/reactflow', 'connection'); e.dataTransfer.effectAllowed = 'move' }}
-                className="flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium cursor-grab active:cursor-grabbing select-none transition-colors"
-                style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 199, 190, 0.08)', borderColor: 'rgba(0, 199, 190, 0.2)', color: '#00c7be' }}
-                title="拖拽到画布后，从节点拖出连线"
-              >
-                <GripVertical className="w-3 h-3 opacity-40" />
-                <Link2 className="w-3.5 h-3.5" />
-                <span>连线</span>
-              </div>
+          <div className="flex items-center gap-1.5 px-2 shrink-0">
+            {/* Module drag item */}
+            <div
+              draggable
+              onDragStart={(e) => { e.dataTransfer.setData('application/reactflow', 'module'); e.dataTransfer.effectAllowed = 'move' }}
+              className="flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium cursor-grab active:cursor-grabbing select-none transition-colors"
+              style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 122, 255, 0.08)', borderColor: 'rgba(0, 122, 255, 0.2)', color: 'var(--brand-500)' }}
+              title="拖拽到画布添加模块"
+            >
+              <GripVertical className="w-3 h-3 opacity-40" />
+              <Puzzle className="w-3.5 h-3.5" />
+              <span>模块</span>
             </div>
-            <div className="w-px h-5" style={{ background: 'var(--border)' }} />
-          </>
+            {/* Connection drag item */}
+            <div
+              draggable
+              onDragStart={(e) => { e.dataTransfer.setData('application/reactflow', 'connection'); e.dataTransfer.effectAllowed = 'move' }}
+              className="flex items-center gap-1.5 px-3 py-1.5 border text-xs font-medium cursor-grab active:cursor-grabbing select-none transition-colors"
+              style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 199, 190, 0.08)', borderColor: 'rgba(0, 199, 190, 0.2)', color: '#00c7be' }}
+              title="拖拽到画布后，从节点拖出连线"
+            >
+              <GripVertical className="w-3 h-3 opacity-40" />
+              <Link2 className="w-3.5 h-3.5" />
+              <span>连线</span>
+            </div>
+          </div>
         )}
 
         {/* Edge type selector — 按模式显示不同选项 */}
         {selectedProductId && (
-          <>
+          <div className="flex items-center gap-1.5 shrink-0">
             <span className="text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>连线类型:</span>
             {edgeTypeOptions.map(([key, val]) => (
               <button key={key} onClick={() => setEdgeType(key)}
@@ -1315,12 +1311,12 @@ export default function DependencyGraph() {
                 {graphType === 'fp' && (key === 'invariants' || key === 'lifecycle_scenarios') ? `↔ ${val.label}` : `→ ${val.label}`}
               </button>
             ))}
-          </>
+          </div>
         )}
 
         {/* v2.3: 审核状态图例 — FP 模式下显示 */}
         {selectedProductId && graphType === 'fp' && (
-          <div className="flex items-center gap-2 ml-2">
+          <div className="flex items-center gap-2 shrink-0">
             {Object.entries(REVIEW_STATUS_STYLES).map(([key, val]) => (
               <div key={key} className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--foreground-tertiary)' }}>
                 <div className={`w-4 h-0.5 ${val.dashed ? 'border-t-2 border-dashed' : ''}`}
@@ -1331,13 +1327,15 @@ export default function DependencyGraph() {
           </div>
         )}
 
-        <div className="w-px h-5" style={{ background: 'var(--border)' }} />
-        <button onClick={() => graphType === 'fp' ? loadFPGraph() : loadGraph()} disabled={loading} className="btn-ghost text-xs">
-          <Loader2 className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
-        </button>
-        <button onClick={toggleFullscreen} className="btn-ghost text-xs" title={fullscreen ? '退出全屏 (Esc)' : '全屏'}>
-          {fullscreen ? <Minimize className="w-3.5 h-3.5" /> : <Maximize className="w-3.5 h-3.5" />}
-        </button>
+        {/* 右侧操作组：刷新 + 全屏 — ml-auto 推到行尾，宽度不够时自动换到下一行 */}
+        <div className="flex items-center gap-2 ml-auto shrink-0">
+          <button onClick={() => graphType === 'fp' ? loadFPGraph() : loadGraph()} disabled={loading} className="btn-ghost text-xs">
+            <Loader2 className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
+          </button>
+          <button onClick={toggleFullscreen} className="btn-ghost text-xs" title={fullscreen ? '退出全屏 (Esc)' : '全屏'}>
+            {fullscreen ? <Minimize className="w-3.5 h-3.5" /> : <Maximize className="w-3.5 h-3.5" />}
+          </button>
+        </div>
       </div>
 
       {/* Main Content */}

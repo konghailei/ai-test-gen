@@ -250,3 +250,96 @@
 /* 无滚动条工具类 */
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ============================================================
+ * Logs 页面样式 — Apple Design Library
+ * 用于 /admin/logs 路由下的 LLM 日志与操作日志页面
+ * ============================================================ */
+
+/* ── Pill / 状态胶囊 ── */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.pill-success {
+  background: color-mix(in srgb, var(--state-success) 15%, transparent);
+  color: var(--state-success);
+}
+.pill-destructive {
+  background: color-mix(in srgb, var(--state-error) 12%, transparent);
+  color: var(--state-error);
+}
+.pill-neutral {
+  background: var(--background-muted);
+  color: var(--foreground-secondary);
+}
+
+/* ── 查看按钮（行内小型操作按钮） ── */
+.view-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 0.4);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+.view-btn:hover {
+  background: var(--background-muted);
+  border-color: var(--foreground-tertiary);
+}
+.view-btn svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* ── 分页按钮 ── */
+.pagination-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 0.4);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+.pagination-btn:hover:not(:disabled):not(.pagination-btn-active) {
+  background: var(--background-muted);
+  border-color: var(--foreground-tertiary);
+}
+.pagination-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.pagination-btn.pagination-btn-active {
+  background: var(--brand-500);
+  color: var(--background);
+  border-color: var(--brand-500);
+  font-weight: 500;
+}
+.pagination-btn svg {
+  width: 14px;
+  height: 14px;
+}

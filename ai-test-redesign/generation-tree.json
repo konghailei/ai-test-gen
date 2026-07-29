@@ -1,0 +1,47 @@
+{
+  "root": {
+    "nodeId": "gen-project-shell",
+    "kind": "project-shell",
+    "pageIds": ["page-dashboard", "page-requirements", "page-login"],
+    "output": "partials/project-shell.html",
+    "sharedRegions": ["sidebar", "top-header", "content-wrapper"],
+    "privateRegions": [],
+    "mutableSlots": ["activeNavItem", "pageTitle"],
+    "status": "generated",
+    "children": [
+      {
+        "nodeId": "gen-page-dashboard",
+        "kind": "page-leaf",
+        "pageIds": ["page-dashboard"],
+        "output": "pages/dashboard.html",
+        "sharedRegions": [],
+        "privateRegions": ["dashboard content area: stat cards, chart, recent requirements table"],
+        "mutableSlots": ["activeNavItem", "pageTitle"],
+        "status": "generated",
+        "children": []
+      },
+      {
+        "nodeId": "gen-page-requirements",
+        "kind": "page-leaf",
+        "pageIds": ["page-requirements"],
+        "output": "pages/requirements.html",
+        "sharedRegions": [],
+        "privateRegions": ["requirements content area: toolbar, filter tabs, requirements table, pagination"],
+        "mutableSlots": ["activeNavItem", "pageTitle"],
+        "status": "generated",
+        "children": []
+      },
+      {
+        "nodeId": "gen-page-login",
+        "kind": "page-leaf",
+        "pageIds": ["page-login"],
+        "output": "pages/login.html",
+        "sharedRegions": [],
+        "privateRegions": ["entire login page: brand lockup, login form, footer"],
+        "mutableSlots": [],
+        "status": "generated",
+        "children": []
+      }
+    ]
+  }
+}

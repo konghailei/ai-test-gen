@@ -142,7 +142,6 @@ class ReqAgent:
             "data_constraints": list,
             "acceptance_criteria": list,
             "api_definitions": list,
-            "additional_details": str,
         }
         logger.info("[ReqAgent] 调用 LLM (refine): temperature=0.5, max_tokens=unlimited")
         srr = await self._llm.call_json(
@@ -245,7 +244,6 @@ class ReqAgent:
             "data_constraints": list,
             "acceptance_criteria": list,  # v2.1 新增字段
             "api_definitions": list,      # v2.1 新增字段
-            "additional_details": str,    # v2.1 新增兜底字段
         }
         logger.info("[ReqAgent] 调用 LLM: temperature=0.5, max_tokens=unlimited, schema_keys={}", list(schema_hint.keys()))
         srr = await self._llm.call_json(
@@ -287,7 +285,7 @@ class ReqAgent:
                      "preconditions={}, flows.steps={}, alternate_flows={}, "
                      "cross_fp_flows={}, shared_rules={}, "
                      "non_functional={}, relationships={}, test_points_hint={}, "
-                     "legacy_data_impact={}, additional_details_len={}",
+                     "legacy_data_impact={}",
                      req_id, srr["requirement"].get("priority", ""),
                      srr["requirement"].get("modules", []),
                      len(srr.get("preconditions", [])),
@@ -298,8 +296,7 @@ class ReqAgent:
                      len(nf if isinstance(nf, dict) else {}),
                      len(srr.get("relationships", [])),
                      len(srr.get("test_points_hint", [])),
-                     "yes" if srr.get("legacy_data_impact") else "no",
-                     len(srr.get("additional_details", "")))
+                     "yes" if srr.get("legacy_data_impact") else "no")
 
         # 4. Schema 宽松校验（v2.1：容错模式，不因非关键字段阻断）
         self._validate_lenient(srr)
@@ -369,7 +366,6 @@ class ReqAgent:
             - product_id 优先用调用方传入的值
             - priority 缺失则补 "P2"（默认）
             - modules 缺失则补空列表
-            - additional_details 缺失原文则自动兜底（v2.1）
         """
         srr.setdefault("srr_version", "1.0")
 
@@ -450,18 +446,23 @@ class ReqAgent:
 
         # v2.32/v2.34: 兼容旧 LLM 输出——若 LLM 仍输出了 boundary_conditions /
         # data_constraints / acceptance_criteria / business_rules，迁移到对应位置
-        # - boundary_conditions / data_constraints / acceptance_criteria → additional_details
+        # v2.40: 移除 additional_details 兜底字段，所有内容归入标准字段
         # - business_rules → cross_fp_interactions.shared_business_rules（去重）
+        # - boundary_conditions → cross_fp_interactions.global_constraints
+        # - data_constraints / acceptance_criteria → assumptions（标注类型）
         _legacy_bc = srr.pop("boundary_conditions", None) or []
         _legacy_dc = srr.pop("data_constraints", None) or []
         _legacy_ac = srr.pop("acceptance_criteria", None) or []
         _legacy_br = srr.pop("business_rules", None) or []
+        # 同时清理可能残留的 additional_details（LLM 误输出时直接丢弃）
+        srr.pop("additional_details", None)
         if _legacy_bc or _legacy_dc or _legacy_ac or _legacy_br:
             logger.info(
-                "[ReqAgent] v2.34 兼容处理：LLM 仍输出已移除的顶层字段 "
+                "[ReqAgent] v2.40 兼容处理：LLM 仍输出已移除的顶层字段 "
                 "(boundary_conditions={}, data_constraints={}, acceptance_criteria={}, business_rules={})，"
-                "business_rules 合并到 cross_fp_interactions.shared_business_rules，"
-                "其余合并到 additional_details",
+                "business_rules → shared_business_rules，"
+                "boundary_conditions → global_constraints，"
+                "data_constraints/acceptance_criteria → assumptions",
                 len(_legacy_bc) if isinstance(_legacy_bc, list) else 0,
                 len(_legacy_dc) if isinstance(_legacy_dc, list) else 0,
                 len(_legacy_ac) if isinstance(_legacy_ac, list) else 0,
@@ -499,30 +500,51 @@ class ReqAgent:
                         added += 1
                 if added > 0:
                     logger.info(
-                        "[ReqAgent] v2.34 business_rules → shared_business_rules 迁移完成: 新增 {} 条（去重后）",
+                        "[ReqAgent] v2.40 business_rules → shared_business_rules 迁移完成: 新增 {} 条（去重后）",
                         added,
                     )
-            # 2. boundary/data_constraints/acceptance_criteria 迁移到 additional_details
-            extras: list[str] = []
-            if isinstance(_legacy_bc, list):
-                extras.extend(f"[边界] {item}" for item in _legacy_bc if isinstance(item, (str, dict)))
+            # 2. boundary_conditions 迁移到 cross_fp_interactions.global_constraints
+            if isinstance(_legacy_bc, list) and _legacy_bc:
+                cfi = srr.get("cross_fp_interactions") or {}
+                gc = cfi.setdefault("global_constraints", [])
+                existing_gc = set(gc)
+                added_bc = 0
+                for item in _legacy_bc:
+                    txt = item.get("condition", "") if isinstance(item, dict) else str(item)
+                    if txt and txt not in existing_gc:
+                        gc.append(txt)
+                        existing_gc.add(txt)
+                        added_bc += 1
+                if added_bc > 0:
+                    logger.info(
+                        "[ReqAgent] v2.40 boundary_conditions → global_constraints 迁移完成: 新增 {} 条",
+                        added_bc,
+                    )
+            # 3. data_constraints / acceptance_criteria 迁移到 assumptions
+            extras: list[dict] = []
             if isinstance(_legacy_dc, list):
-                extras.extend(f"[数据约束] {item}" for item in _legacy_dc if isinstance(item, (str, dict)))
+                for item in _legacy_dc:
+                    txt = str(item) if not isinstance(item, dict) else item.get("description") or item.get("constraint") or str(item)
+                    if txt:
+                        extras.append({"content": f"[数据约束] {txt}", "type": "constraint"})
             if isinstance(_legacy_ac, list):
-                extras.extend(f"[验收] {item}" for item in _legacy_ac if isinstance(item, (str, dict)))
+                for item in _legacy_ac:
+                    txt = item.get("description", "") if isinstance(item, dict) else str(item)
+                    if txt:
+                        extras.append({"content": f"[验收] {txt}", "type": "constraint"})
             if extras:
-                existing_add = srr.get("additional_details", "") or ""
-                srr["additional_details"] = (existing_add + "\n\n" + "\n".join(extras)).strip()
+                assumptions = srr.setdefault("assumptions", [])
+                assumptions.extend(extras)
+                logger.info(
+                    "[ReqAgent] v2.40 data_constraints/acceptance_criteria → assumptions 迁移完成: 新增 {} 条",
+                    len(extras),
+                )
 
         # v2.1：保存原始需求文本（供追溯和审查完整性）
         if raw_requirement:
             srr.setdefault("_raw_text", raw_requirement)
 
-        # v2.1：additional_details 兜底（LLM 未输出时自动填入原文摘要）
-        srr.setdefault("additional_details", "")
-        if not srr.get("additional_details") and raw_requirement:
-            # 如果 LLM 没有输出 additional_details，截取原文前 500 字作为兜底
-            srr["additional_details"] = raw_requirement[:500]
+        # v2.40：已移除 additional_details 字段，不再兜底
 
         # v2.1：字段类型归一化（防止 LLM 输出 Schema 之外的 Literal 值）
         self._normalize_literal_fields(srr)

@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Outlet, useNavigate } from 'react-router-dom'
+import { useState, useEffect, useRef } from 'react'
+import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import Sidebar from './Sidebar'
 import { health, requirements as reqApi } from '../api/client'
 import { useAuth } from '../auth'
@@ -10,6 +10,7 @@ export default function Layout() {
   const { user, isLoggedIn, logout } = useAuth()
   const { selectedProductName, products, selectedProductId, setSelectedProduct, refreshProducts, loading: productsLoading } = useProduct()
   const navigate = useNavigate()
+  const location = useLocation()
   const [collapsed, setCollapsed] = useState(false)
   const [status, setStatus] = useState({ version: '', llm_configured: false, kb_empty: false })
   const [showUserMenu, setShowUserMenu] = useState(false)
@@ -74,6 +75,29 @@ export default function Layout() {
     navigate('/login', { replace: true })
   }
 
+  // 路由变化时关闭所有下拉菜单，避免透明遮罩层（fixed inset-0 z-10）残留拦截点击
+  useEffect(() => {
+    setShowUserMenu(false)
+    setShowProductMenu(false)
+  }, [location.pathname])
+
+  // 点击外部关闭下拉菜单（替代 fixed inset-0 透明遮罩层，避免遮挡侧边栏导航）
+  const productMenuRef = useRef<HTMLDivElement>(null)
+  const userMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (productMenuRef.current && !productMenuRef.current.contains(target)) {
+        setShowProductMenu(false)
+      }
+      if (userMenuRef.current && !userMenuRef.current.contains(target)) {
+        setShowUserMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
   if (!isLoggedIn) return null
 
   const sidebarWidth = collapsed ? 64 : 240
@@ -107,7 +131,7 @@ export default function Layout() {
           </button>
 
           {/* 产品选择器 */}
-          <div className="relative">
+          <div className="relative" ref={productMenuRef}>
             <button
               onClick={() => setShowProductMenu(!showProductMenu)}
               className="flex items-center gap-2 transition-all"
@@ -145,7 +169,6 @@ export default function Layout() {
 
             {showProductMenu && (
               <>
-                <div className="fixed inset-0 z-10" onClick={() => setShowProductMenu(false)} />
                 <div
                   className="absolute left-0 top-full z-20 animate-scale-in"
                   style={{
@@ -309,7 +332,7 @@ export default function Layout() {
             </button>
 
             {/* 用户区 */}
-            <div className="relative">
+            <div className="relative" ref={userMenuRef}>
               <button
                 onClick={() => setShowUserMenu(!showUserMenu)}
                 className="flex items-center gap-2 transition-colors"
@@ -336,7 +359,6 @@ export default function Layout() {
 
               {showUserMenu && (
                 <>
-                  <div className="fixed inset-0 z-10" onClick={() => setShowUserMenu(false)} />
                   <div
                     className="absolute right-0 top-full z-20 animate-scale-in"
                     style={{

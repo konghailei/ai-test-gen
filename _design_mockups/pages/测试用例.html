@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测试用例</title>
+    <style id="theme-vars">
+/*
+ * Pinguo design tokens
+ * Brand: Pinguo
+ * Domain: Consumer imaging product
+ * Style: Restrained, elegant, Apple-inspired
+ * Theme mode: light-dark
+ * Source language: zh
+ * Output language: en
+ *
+ * Color architecture (two layers):
+ *   1. Primitive palette - six categories. brand / background / text / icon
+ *      are each a 10-step scale (50 lightest to 900 darkest). state-success and
+ *      state-error are functional colors anchored on Apple system colors.
+ *      Anchors follow Apple Human Interface Guidelines system colors
+ *      (System Blue #007AFF, System Green #34C759, System Red #FF3B30,
+ *      system grays / label / background colors).
+ *   2. Semantic tokens - :root (light) and .dark map roles onto primitives.
+ *      Components and UI kits must only consume the semantic tokens below.
+ */
+
+/* @group-priority: brand, background, text, icon, state-success, state-error */
+
+:root {
+
+  /* solo-design consumption aliases: explicit prefix for fill-html-head.mjs */
+  --apple-background: var(--background, #ffffff);
+  --apple-foreground: var(--foreground, #0f172a);
+  --apple-card: var(--card, var(--background));
+  --apple-card-foreground: var(--card-foreground, var(--foreground));
+  --apple-popover: var(--popover, var(--card));
+  --apple-popover-foreground: var(--popover-foreground, var(--card-foreground, var(--foreground)));
+  --apple-primary: var(--primary, #111827);
+  --apple-primary-foreground: var(--primary-foreground, #ffffff);
+  --apple-secondary: var(--secondary, var(--muted, var(--card)));
+  --apple-secondary-foreground: var(--secondary-foreground, var(--foreground));
+  --apple-muted: var(--muted, var(--card));
+  --apple-muted-foreground: var(--muted-foreground, var(--foreground));
+  --apple-accent: var(--accent, var(--secondary, var(--muted, var(--card))));
+  --apple-accent-foreground: var(--accent-foreground, var(--foreground));
+  --apple-destructive: var(--destructive, #ef4444);
+  --apple-destructive-foreground: var(--destructive-foreground, #ffffff);
+  --apple-border: var(--border, currentColor);
+  --apple-input: var(--input, var(--border));
+  --apple-ring: var(--ring, var(--primary));
+  --apple-chart-1: var(--chart-1, var(--primary));
+  --apple-chart-2: var(--chart-2, var(--secondary, var(--primary)));
+  --apple-chart-3: var(--chart-3, var(--accent, var(--primary)));
+  --apple-chart-4: var(--chart-4, var(--muted-foreground, var(--foreground)));
+  --apple-chart-5: var(--chart-5, var(--foreground));
+  --apple-sidebar: var(--sidebar, var(--background));
+  --apple-sidebar-foreground: var(--sidebar-foreground, var(--foreground));
+  --apple-sidebar-primary: var(--sidebar-primary, var(--primary));
+  --apple-sidebar-primary-foreground: var(--sidebar-primary-foreground, var(--primary-foreground));
+  --apple-sidebar-accent: var(--sidebar-accent, var(--accent, var(--muted, var(--card))));
+  --apple-sidebar-accent-foreground: var(--sidebar-accent-foreground, var(--accent-foreground, var(--foreground)));
+
+  /* solo-design consumption aliases: radius scale for fill-html-head.mjs */
+  --apple-radius-sm: calc(var(--radius, 1.2rem) * 0.5);
+  --apple-radius-md: var(--radius, 1.2rem);
+  --apple-radius-lg: calc(var(--radius, 1.2rem) * 1.5);
+
+/* ===== PRIMITIVE PALETTE ===== */
+
+  /* brand */
+  --brand-50: #e8f2ff;
+  --brand-100: #cfe5ff;
+  --brand-200: #9fcbff;
+  --brand-300: #66abff;
+  --brand-400: #2e8dff;
+  --brand-500: #007aff; /* @primary */
+  --brand-600: #0064d6;
+  --brand-700: #004fad;
+  --brand-800: #003b82;
+  --brand-900: #00275a;
+
+  /* background */
+  --background-50: #ffffff;
+  --background-100: #f7f7fa;
+  --background-200: #f2f2f7;
+  --background-300: #e5e5ea;
+  --background-400: #d1d1d6;
+  --background-500: #aeaeb2;
+  --background-600: #8e8e93;
+  --background-700: #3a3a3c;
+  --background-800: #1c1c1e;
+  --background-900: #000000;
+
+  /* text */
+  --text-50: #f5f5f7;
+  --text-100: #e3e3e8;
+  --text-200: #c7c7cc;
+  --text-300: #aeaeb2;
+  --text-400: #8e8e93;
+  --text-500: #6e6e73;
+  --text-600: #48484a;
+  --text-700: #3c3c43;
+  --text-800: #1d1d1f;
+  --text-900: #000000;
+
+  /* icon */
+  --icon-50: #f5f5f7;
+  --icon-100: #e5e5ea;
+  --icon-200: #d1d1d6;
+  --icon-300: #c7c7cc;
+  --icon-400: #aeaeb2;
+  --icon-500: #8e8e93;
+  --icon-600: #6e6e73;
+  --icon-700: #48484a;
+  --icon-800: #2c2c2e;
+  --icon-900: #1d1d1f;
+
+  /* state-success */
+  --state-success: #34c759;
+  --state-success-dark: #30d158;
+  --state-success-surface: #e9f9ee;
+  --state-success-foreground: #ffffff;
+
+  /* state-error */
+  --state-error: #ff3b30;
+  --state-error-dark: #ff453a;
+  --state-error-surface: #ffecea;
+  --state-error-foreground: #ffffff;
+
+  /* ===== SEMANTIC ROLES ===== */
+
+  --background: var(--background-50);
+  --foreground: var(--text-800);
+  --card: var(--background-50);
+  --card-foreground: var(--text-800);
+  --popover: var(--background-50);
+  --popover-foreground: var(--text-900);
+
+  --primary: var(--brand-500);
+  --primary-foreground: var(--background-50);
+  --secondary: var(--background-200);
+  --secondary-foreground: var(--text-800);
+  --muted: var(--background-200);
+  --muted-foreground: var(--text-400);
+  --accent: var(--background-100);
+  --accent-foreground: var(--text-800);
+  --destructive: var(--state-error);
+  --destructive-foreground: var(--state-error-foreground);
+  --success: var(--state-success);
+  --success-foreground: var(--state-success-foreground);
+  --border: var(--background-300);
+  --input: var(--background-400);
+  --ring: var(--brand-500);
+
+  --icon: var(--icon-900);
+  --icon-muted: var(--icon-500);
+
+  --chart-1: var(--state-success);
+  --chart-2: var(--brand-500);
+  --chart-3: #ff9500;
+  --chart-4: #5856d6;
+  --chart-5: #af52de;
+
+  --sidebar: var(--background-200);
+  --sidebar-foreground: var(--text-800);
+  --sidebar-primary: var(--brand-500);
+  --sidebar-primary-foreground: var(--background-50);
+  --sidebar-accent: var(--background-300);
+  --sidebar-accent-foreground: var(--text-800);
+  --sidebar-border: var(--background-300);
+  --sidebar-ring: var(--brand-500);
+
+  --font-sans: DM Sans, ui-sans-serif, sans-serif, system-ui;
+  --font-serif: DM Sans, ui-sans-serif, sans-serif, system-ui;
+  --font-mono: JetBrains Mono, monospace;
+  --tracking-normal: 0em;
+
+  --radius: 1.2rem;
+
+  --shadow-2xs: 0 1px 2px -1px rgba(0, 0, 0, 0.04);
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05), 0 1px 3px -1px rgba(0, 0, 0, 0.05);
+  --shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.06), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  --shadow-lg: 0 8px 24px -8px rgba(0, 0, 0, 0.08), 0 4px 8px -4px rgba(0, 0, 0, 0.05);
+  --shadow-xl: 0 16px 40px -10px rgba(0, 0, 0, 0.10), 0 8px 16px -8px rgba(0, 0, 0, 0.06);
+  --shadow-2xl: 0 24px 64px -12px rgba(0, 0, 0, 0.12);
+
+  --spacing: 0.24rem;
+}
+
+.dark {
+  --background: var(--background-900);
+  --foreground: var(--text-50);
+  --card: var(--background-800);
+  --card-foreground: var(--text-50);
+  --popover: var(--background-700);
+  --popover-foreground: var(--text-50);
+
+  --primary: var(--brand-400);
+  --primary-foreground: var(--background-900);
+  --secondary: var(--background-800);
+  --secondary-foreground: var(--text-50);
+  --muted: var(--background-800);
+  --muted-foreground: var(--text-400);
+  --accent: var(--background-700);
+  --accent-foreground: var(--text-50);
+  --destructive: var(--state-error-dark);
+  --destructive-foreground: var(--state-error-foreground);
+  --success: var(--state-success-dark);
+  --success-foreground: var(--state-success-foreground);
+  --border: var(--background-700);
+  --input: var(--background-700);
+  --ring: var(--brand-400);
+
+  --icon: var(--icon-50);
+  --icon-muted: var(--icon-500);
+
+  --chart-1: var(--state-success-dark);
+  --chart-2: var(--brand-400);
+  --chart-3: #ff9f0a;
+  --chart-4: #5e5ce6;
+  --chart-5: #bf5af2;
+
+  --sidebar: var(--background-800);
+  --sidebar-foreground: var(--text-50);
+  --sidebar-primary: var(--brand-400);
+  --sidebar-primary-foreground: var(--background-900);
+  --sidebar-accent: var(--background-700);
+  --sidebar-accent-foreground: var(--text-50);
+  --sidebar-border: var(--background-700);
+  --sidebar-ring: var(--brand-400);
+
+  --shadow-2xs: 0 1px 2px -1px rgba(0, 0, 0, 0.30);
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.30);
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.36), 0 1px 3px -1px rgba(0, 0, 0, 0.36);
+  --shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.40), 0 1px 2px -1px rgba(0, 0, 0, 0.36);
+  --shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.44), 0 2px 4px -2px rgba(0, 0, 0, 0.36);
+  --shadow-lg: 0 8px 24px -8px rgba(0, 0, 0, 0.50), 0 4px 8px -4px rgba(0, 0, 0, 0.40);
+  --shadow-xl: 0 16px 40px -10px rgba(0, 0, 0, 0.55), 0 8px 16px -8px rgba(0, 0, 0, 0.44);
+  --shadow-2xl: 0 24px 64px -12px rgba(0, 0, 0, 0.60);
+}
+
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--apple-background);
+    --color-foreground: var(--apple-foreground);
+    --color-card: var(--apple-card);
+    --color-card-foreground: var(--apple-card-foreground);
+    --color-popover: var(--apple-popover);
+    --color-popover-foreground: var(--apple-popover-foreground);
+    --color-primary: var(--apple-primary);
+    --color-primary-foreground: var(--apple-primary-foreground);
+    --color-secondary: var(--apple-secondary);
+    --color-secondary-foreground: var(--apple-secondary-foreground);
+    --color-muted: var(--apple-muted);
+    --color-muted-foreground: var(--apple-muted-foreground);
+    --color-accent: var(--apple-accent);
+    --color-accent-foreground: var(--apple-accent-foreground);
+    --color-destructive: var(--apple-destructive);
+    --color-destructive-foreground: var(--apple-destructive-foreground);
+    --color-border: var(--apple-border);
+    --color-input: var(--apple-input);
+    --color-ring: var(--apple-ring);
+    --color-chart-1: var(--apple-chart-1);
+    --color-chart-2: var(--apple-chart-2);
+    --color-chart-3: var(--apple-chart-3);
+    --color-chart-4: var(--apple-chart-4);
+    --color-chart-5: var(--apple-chart-5);
+    --color-sidebar: var(--apple-sidebar);
+    --color-sidebar-foreground: var(--apple-sidebar-foreground);
+    --color-sidebar-primary: var(--apple-sidebar-primary);
+    --color-sidebar-primary-foreground: var(--apple-sidebar-primary-foreground);
+    --color-sidebar-accent: var(--apple-sidebar-accent);
+    --color-sidebar-accent-foreground: var(--apple-sidebar-accent-foreground);
+    --radius-sm: var(--apple-radius-sm);
+    --radius-md: var(--apple-radius-md);
+    --radius-lg: var(--apple-radius-lg);
+  }
+  @layer base {
+    body { background: var(--apple-background); color: var(--apple-foreground); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--apple-background); }
+      .text-background { color: var(--apple-background); }
+      .border-background { border-color: var(--apple-background); }
+      .ring-background { --tw-ring-color: var(--apple-background); }
+      .bg-foreground { background-color: var(--apple-foreground); }
+      .text-foreground { color: var(--apple-foreground); }
+      .border-foreground { border-color: var(--apple-foreground); }
+      .ring-foreground { --tw-ring-color: var(--apple-foreground); }
+      .bg-card { background-color: var(--apple-card); }
+      .text-card { color: var(--apple-card); }
+      .border-card { border-color: var(--apple-card); }
+      .ring-card { --tw-ring-color: var(--apple-card); }
+      .bg-card-foreground { background-color: var(--apple-card-foreground); }
+      .text-card-foreground { color: var(--apple-card-foreground); }
+      .border-card-foreground { border-color: var(--apple-card-foreground); }
+      .ring-card-foreground { --tw-ring-color: var(--apple-card-foreground); }
+      .bg-popover { background-color: var(--apple-popover); }
+      .text-popover { color: var(--apple-popover); }
+      .border-popover { border-color: var(--apple-popover); }
+      .ring-popover { --tw-ring-color: var(--apple-popover); }
+      .bg-popover-foreground { background-color: var(--apple-popover-foreground); }
+      .text-popover-foreground { color: var(--apple-popover-foreground); }
+      .border-popover-foreground { border-color: var(--apple-popover-foreground); }
+      .ring-popover-foreground { --tw-ring-color: var(--apple-popover-foreground); }
+      .bg-primary { background-color: var(--apple-primary); }
+      .text-primary { color: var(--apple-primary); }
+      .border-primary { border-color: var(--apple-primary); }
+      .ring-primary { --tw-ring-color: var(--apple-primary); }
+      .bg-primary-foreground { background-color: var(--apple-primary-foreground); }
+      .text-primary-foreground { color: var(--apple-primary-foreground); }
+      .border-primary-foreground { border-color: var(--apple-primary-foreground); }
+      .ring-primary-foreground { --tw-ring-color: var(--apple-primary-foreground); }
+      .bg-secondary { background-color: var(--apple-secondary); }
+      .text-secondary { color: var(--apple-secondary); }
+      .border-secondary { border-color: var(--apple-secondary); }
+      .ring-secondary { --tw-ring-color: var(--apple-secondary); }
+      .bg-secondary-foreground { background-color: var(--apple-secondary-foreground); }
+      .text-secondary-foreground { color: var(--apple-secondary-foreground); }
+      .border-secondary-foreground { border-color: var(--apple-secondary-foreground); }
+      .ring-secondary-foreground { --tw-ring-color: var(--apple-secondary-foreground); }
+      .bg-muted { background-color: var(--apple-muted); }
+      .text-muted { color: var(--apple-muted); }
+      .border-muted { border-color: var(--apple-muted); }
+      .ring-muted { --tw-ring-color: var(--apple-muted); }
+      .bg-muted-foreground { background-color: var(--apple-muted-foreground); }
+      .text-muted-foreground { color: var(--apple-muted-foreground); }
+      .border-muted-foreground { border-color: var(--apple-muted-foreground); }
+      .ring-muted-foreground { --tw-ring-color: var(--apple-muted-foreground); }
+      .bg-accent { background-color: var(--apple-accent); }
+      .text-accent { color: var(--apple-accent); }
+      .border-accent { border-color: var(--apple-accent); }
+      .ring-accent { --tw-ring-color: var(--apple-accent); }
+      .bg-accent-foreground { background-color: var(--apple-accent-foreground); }
+      .text-accent-foreground { color: var(--apple-accent-foreground); }
+      .border-accent-foreground { border-color: var(--apple-accent-foreground); }
+      .ring-accent-foreground { --tw-ring-color: var(--apple-accent-foreground); }
+      .bg-destructive { background-color: var(--apple-destructive); }
+      .text-destructive { color: var(--apple-destructive); }
+      .border-destructive { border-color: var(--apple-destructive); }
+      .ring-destructive { --tw-ring-color: var(--apple-destructive); }
+      .bg-destructive-foreground { background-color: var(--apple-destructive-foreground); }
+      .text-destructive-foreground { color: var(--apple-destructive-foreground); }
+      .border-destructive-foreground { border-color: var(--apple-destructive-foreground); }
+      .ring-destructive-foreground { --tw-ring-color: var(--apple-destructive-foreground); }
+      .bg-border { background-color: var(--apple-border); }
+      .text-border { color: var(--apple-border); }
+      .border-border { border-color: var(--apple-border); }
+      .ring-border { --tw-ring-color: var(--apple-border); }
+      .bg-input { background-color: var(--apple-input); }
+      .text-input { color: var(--apple-input); }
+      .border-input { border-color: var(--apple-input); }
+      .ring-input { --tw-ring-color: var(--apple-input); }
+      .bg-ring { background-color: var(--apple-ring); }
+      .text-ring { color: var(--apple-ring); }
+      .border-ring { border-color: var(--apple-ring); }
+      .ring-ring { --tw-ring-color: var(--apple-ring); }
+      .bg-chart-1 { background-color: var(--apple-chart-1); }
+      .text-chart-1 { color: var(--apple-chart-1); }
+      .border-chart-1 { border-color: var(--apple-chart-1); }
+      .ring-chart-1 { --tw-ring-color: var(--apple-chart-1); }
+      .bg-chart-2 { background-color: var(--apple-chart-2); }
+      .text-chart-2 { color: var(--apple-chart-2); }
+      .border-chart-2 { border-color: var(--apple-chart-2); }
+      .ring-chart-2 { --tw-ring-color: var(--apple-chart-2); }
+      .bg-chart-3 { background-color: var(--apple-chart-3); }
+      .text-chart-3 { color: var(--apple-chart-3); }
+      .border-chart-3 { border-color: var(--apple-chart-3); }
+      .ring-chart-3 { --tw-ring-color: var(--apple-chart-3); }
+      .bg-chart-4 { background-color: var(--apple-chart-4); }
+      .text-chart-4 { color: var(--apple-chart-4); }
+      .border-chart-4 { border-color: var(--apple-chart-4); }
+      .ring-chart-4 { --tw-ring-color: var(--apple-chart-4); }
+      .bg-chart-5 { background-color: var(--apple-chart-5); }
+      .text-chart-5 { color: var(--apple-chart-5); }
+      .border-chart-5 { border-color: var(--apple-chart-5); }
+      .ring-chart-5 { --tw-ring-color: var(--apple-chart-5); }
+      .bg-sidebar { background-color: var(--apple-sidebar); }
+      .text-sidebar { color: var(--apple-sidebar); }
+      .border-sidebar { border-color: var(--apple-sidebar); }
+      .ring-sidebar { --tw-ring-color: var(--apple-sidebar); }
+      .bg-sidebar-foreground { background-color: var(--apple-sidebar-foreground); }
+      .text-sidebar-foreground { color: var(--apple-sidebar-foreground); }
+      .border-sidebar-foreground { border-color: var(--apple-sidebar-foreground); }
+      .ring-sidebar-foreground { --tw-ring-color: var(--apple-sidebar-foreground); }
+      .bg-sidebar-primary { background-color: var(--apple-sidebar-primary); }
+      .text-sidebar-primary { color: var(--apple-sidebar-primary); }
+      .border-sidebar-primary { border-color: var(--apple-sidebar-primary); }
+      .ring-sidebar-primary { --tw-ring-color: var(--apple-sidebar-primary); }
+      .bg-sidebar-primary-foreground { background-color: var(--apple-sidebar-primary-foreground); }
+      .text-sidebar-primary-foreground { color: var(--apple-sidebar-primary-foreground); }
+      .border-sidebar-primary-foreground { border-color: var(--apple-sidebar-primary-foreground); }
+      .ring-sidebar-primary-foreground { --tw-ring-color: var(--apple-sidebar-primary-foreground); }
+      .bg-sidebar-accent { background-color: var(--apple-sidebar-accent); }
+      .text-sidebar-accent { color: var(--apple-sidebar-accent); }
+      .border-sidebar-accent { border-color: var(--apple-sidebar-accent); }
+      .ring-sidebar-accent { --tw-ring-color: var(--apple-sidebar-accent); }
+      .bg-sidebar-accent-foreground { background-color: var(--apple-sidebar-accent-foreground); }
+      .text-sidebar-accent-foreground { color: var(--apple-sidebar-accent-foreground); }
+      .border-sidebar-accent-foreground { border-color: var(--apple-sidebar-accent-foreground); }
+      .ring-sidebar-accent-foreground { --tw-ring-color: var(--apple-sidebar-accent-foreground); }
+    </style>
+    <style>
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      [data-icon] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        background-color: currentColor;
+      }
+    </style>
+</head>
+<body class="font-sans antialiased">
+    <style>
+.app-shell { display: flex; height: 100vh; overflow: hidden; font-family: var(--font-sans); color: var(--foreground); background: var(--background); }
+.sidebar { width: 240px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; overflow-y: auto; }
+.sidebar-header { display: flex; align-items: center; gap: 10px; height: 64px; padding: 0 16px; flex-shrink: 0; }
+.sidebar-logo-icon { width: 22px; height: 22px; color: var(--primary); flex-shrink: 0; }
+.sidebar-logo-text { font-size: 15px; font-weight: 600; color: var(--sidebar-foreground); white-space: nowrap; letter-spacing: -0.01em; }
+.sidebar-nav { flex: 1; padding: 8px 12px; display: flex; flex-direction: column; gap: 2px; }
+.nav-item { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px; border-radius: calc(var(--radius) * 0.5); color: var(--sidebar-foreground); text-decoration: none; font-size: 13px; font-weight: 400; white-space: nowrap; transition: background-color 0.18s ease, color 0.18s ease; }
+.nav-item svg { width: 18px; height: 18px; flex-shrink: 0; }
+.nav-item:hover { background: var(--sidebar-accent); color: var(--sidebar-accent-foreground); }
+.nav-item[data-active="true"] { background: var(--sidebar-primary); color: var(--sidebar-primary-foreground); font-weight: 500; }
+.nav-item[data-active="true"]:hover { background: var(--sidebar-primary); color: var(--sidebar-primary-foreground); }
+.main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+.top-header { height: 64px; flex-shrink: 0; background: var(--background); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 32px; gap: 16px; }
+/* ── Product Switcher ── */
+.product-switcher { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 14px; border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.6); background: var(--background); cursor: pointer; transition: border-color 0.18s ease, box-shadow 0.18s ease; }
+.product-switcher:hover, .product-switcher:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring); outline: none; }
+.product-switcher > svg { width: 16px; height: 16px; color: var(--primary); flex-shrink: 0; }
+.product-switcher-name { font-size: 14px; font-weight: 600; color: var(--foreground); white-space: nowrap; }
+.product-switcher-arrow { width: 14px; height: 14px; color: var(--muted-foreground); flex-shrink: 0; }
+/* ── System Info ── */
+.system-info { display: flex; align-items: center; gap: 10px; margin-left: 8px; flex-shrink: 0; }
+.system-status { display: flex; align-items: center; gap: 6px; padding: 0 10px; height: 32px; border-radius: calc(var(--radius) * 0.5); background: var(--state-success-surface); }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--state-success); flex-shrink: 0; }
+.status-label { font-size: 12px; font-weight: 500; color: var(--state-success); white-space: nowrap; }
+.version-tag { display: flex; align-items: center; height: 28px; padding: 0 10px; border-radius: calc(var(--radius) * 0.4); background: var(--secondary); font-size: 12px; font-weight: 600; color: var(--muted-foreground); font-family: var(--font-mono); white-space: nowrap; }
+.header-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; flex-shrink: 0; }
+.notification-btn { position: relative; display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border: 0; border-radius: calc(var(--radius) * 0.5); background: transparent; color: var(--foreground); cursor: pointer; transition: background-color 0.18s ease; }
+.notification-btn:hover { background: var(--accent); }
+.notification-btn svg { width: 20px; height: 20px; }
+.notification-dot { position: absolute; top: 8px; right: 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--destructive); border: 2px solid var(--background); }
+.user-area { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 8px 4px 4px; border-radius: calc(var(--radius) * 0.5); transition: background-color 0.18s ease; }
+.user-area:hover { background: var(--accent); }
+.user-avatar { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); font-size: 13px; font-weight: 600; flex-shrink: 0; }
+.user-name { font-size: 13px; color: var(--foreground); white-space: nowrap; }
+.user-area svg { width: 16px; height: 16px; color: var(--muted-foreground); flex-shrink: 0; }
+.content-wrapper { flex: 1; overflow-y: auto; background: var(--muted); padding: 32px; min-height: 0; }
+.page-title-bar { margin-bottom: 24px; }
+.page-title { margin: 0; font-size: 28px; font-weight: 600; color: var(--foreground); line-height: 1.2; letter-spacing: -0.02em; }
+.page-content { min-height: 0; }
+</style>
+
+    <style>
+:root { --warning: var(--chart-3); --warning-foreground: var(--text-900); }
+.toolbar-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.toolbar-left { flex: 1; min-width: 200px; max-width: 360px; }
+.toolbar-center { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.toolbar-right { display: flex; align-items: center; gap: 12px; margin-left: auto; flex-shrink: 0; }
+.toolbar-search { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.5); background: var(--background); transition: border-color 0.18s ease, box-shadow 0.18s ease; }
+.toolbar-search:focus-within { border-color: var(--ring); box-shadow: 0 0 0 1px var(--ring); }
+.toolbar-search svg { width: 16px; height: 16px; color: var(--muted-foreground); flex-shrink: 0; }
+.toolbar-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--foreground); font-family: var(--font-sans); font-size: 13px; }
+.toolbar-search input::placeholder { color: var(--muted-foreground); }
+.filter-select { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.5); background: var(--background); font-size: 13px; color: var(--foreground); cursor: pointer; white-space: nowrap; transition: border-color 0.18s ease; }
+.filter-select:hover { border-color: var(--ring); }
+.filter-select svg { width: 14px; height: 14px; color: var(--muted-foreground); flex-shrink: 0; }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 16px; border-radius: calc(var(--radius) * 0.5); font-size: 13px; font-weight: 500; font-family: var(--font-sans); white-space: nowrap; cursor: pointer; transition: background-color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease; border: 1px solid transparent; }
+.btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.btn-outline { background: var(--card); border-color: var(--border); color: var(--foreground); }
+.btn-outline:hover { background: var(--accent); }
+.btn-primary { background: var(--primary); color: var(--primary-foreground); }
+.btn-primary:hover { opacity: 0.9; }
+.view-bar { display: flex; align-items: center; justify-content: space-between; margin-top: 24px; margin-bottom: 16px; gap: 16px; flex-wrap: wrap; }
+.view-tabs { display: inline-flex; align-items: center; gap: 4px; padding: 4px; background: var(--muted); border-radius: calc(var(--radius) * 0.6); }
+.view-tab { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: calc(var(--radius) * 0.5); font-size: 13px; font-weight: 500; font-family: var(--font-sans); color: var(--muted-foreground); cursor: pointer; transition: background-color 0.18s ease, color 0.18s ease; border: 0; background: transparent; white-space: nowrap; }
+.view-tab:hover { color: var(--foreground); }
+.view-tab[data-active="true"] { background: var(--card); color: var(--foreground); box-shadow: var(--shadow-sm); }
+.view-tab svg { width: 16px; height: 16px; }
+.view-stats { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted-foreground); white-space: nowrap; }
+.stat-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.stat-item strong { font-weight: 600; color: var(--foreground); }
+.stat-item.stat-pass strong { color: var(--success); }
+.stat-item.stat-pending strong { color: var(--warning); }
+.stat-item.stat-fail strong { color: var(--destructive); }
+.stat-divider { width: 1px; height: 12px; background: var(--border); flex-shrink: 0; }
+.case-groups { display: flex; flex-direction: column; gap: 16px; }
+.case-group { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.group-header { display: flex; align-items: center; gap: 12px; padding: 16px 20px; cursor: pointer; transition: background-color 0.18s ease; }
+.group-header:hover { background: var(--accent); }
+.group-arrow { width: 16px; height: 16px; color: var(--muted-foreground); flex-shrink: 0; transition: transform 0.18s ease; }
+.case-group[data-expanded="true"] > .group-header .group-arrow { transform: rotate(90deg); }
+.group-title { font-size: 15px; font-weight: 600; color: var(--foreground); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-count { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 500; background: var(--secondary); color: var(--secondary-foreground); flex-shrink: 0; white-space: nowrap; }
+.group-content { border-top: 1px solid var(--border); padding: 8px; }
+.case-group[data-expanded="false"] .group-content { display: none; }
+.case-card { margin-bottom: 4px; }
+.case-card:last-child { margin-bottom: 0; }
+.case-card-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; border-radius: calc(var(--radius) * 0.5); transition: background-color 0.18s ease; }
+.case-card-header:hover { background: var(--accent); }
+.case-arrow { width: 16px; height: 16px; color: var(--muted-foreground); flex-shrink: 0; transition: transform 0.18s ease; }
+.case-card[data-expanded="true"] > .case-card-header .case-arrow { transform: rotate(90deg); }
+.case-id { font-family: var(--font-mono); font-size: 12px; color: var(--muted-foreground); flex-shrink: 0; white-space: nowrap; }
+.case-title { font-size: 14px; font-weight: 500; color: var(--foreground); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.case-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
+.priority-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 20px; padding: 0 6px; border-radius: calc(var(--radius) * 0.3); font-size: 11px; font-weight: 600; font-family: var(--font-mono); white-space: nowrap; flex-shrink: 0; }
+.priority-p0 { background: var(--destructive); color: var(--destructive-foreground); }
+.priority-p1 { background: var(--primary); color: var(--primary-foreground); }
+.priority-p2 { background: var(--secondary); color: var(--secondary-foreground); }
+.type-tag { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: calc(var(--radius) * 0.3); font-size: 12px; font-weight: 400; background: var(--accent); color: var(--muted-foreground); white-space: nowrap; flex-shrink: 0; }
+.status-badge { display: inline-flex; align-items: center; height: 22px; padding: 0 10px; border-radius: 9999px; font-size: 12px; font-weight: 500; white-space: nowrap; flex-shrink: 0; }
+.status-pass { background: var(--success); color: var(--success-foreground); }
+.status-pending { background: var(--warning); color: var(--warning-foreground); }
+.status-fail { background: var(--destructive); color: var(--destructive-foreground); }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 0; border-radius: calc(var(--radius) * 0.4); background: transparent; color: var(--muted-foreground); cursor: pointer; transition: background-color 0.18s ease, color 0.18s ease; }
+.icon-btn:hover { background: var(--accent); color: var(--foreground); }
+.icon-btn svg { width: 16px; height: 16px; }
+.case-details { margin: 4px 8px 8px; padding: 16px 20px; background: var(--muted); border-radius: calc(var(--radius) * 0.5); }
+.case-card:not([data-expanded="true"]) .case-details { display: none; }
+.detail-row { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.detail-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.detail-row:first-child { padding-top: 0; }
+.detail-label { font-size: 12px; font-weight: 600; color: var(--muted-foreground); white-space: nowrap; width: 64px; flex-shrink: 0; padding-top: 2px; }
+.detail-text { font-size: 13px; color: var(--foreground); line-height: 1.6; flex: 1; min-width: 0; }
+.detail-steps { margin: 0; padding: 0; list-style: none; counter-reset: step; flex: 1; min-width: 0; }
+.detail-steps li { position: relative; padding-left: 28px; padding-bottom: 8px; font-size: 13px; color: var(--foreground); line-height: 1.6; counter-increment: step; }
+.detail-steps li:last-child { padding-bottom: 0; }
+.detail-steps li::before { content: counter(step); position: absolute; left: 0; top: 1px; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); font-size: 11px; font-weight: 600; font-family: var(--font-mono); }
+.pagination { display: flex; align-items: center; justify-content: center; gap: 4px; margin-top: 24px; }
+.page-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; height: 36px; padding: 0 8px; border-radius: calc(var(--radius) * 0.5); font-size: 13px; font-weight: 500; font-family: var(--font-sans); color: var(--foreground); cursor: pointer; transition: background-color 0.18s ease; border: 0; background: transparent; white-space: nowrap; }
+.page-btn:hover:not(:disabled):not([data-active="true"]) { background: var(--accent); }
+.page-btn[data-active="true"] { background: var(--primary); color: var(--primary-foreground); }
+.page-btn:disabled { color: var(--muted-foreground); cursor: not-allowed; }
+.page-btn svg { width: 16px; height: 16px; }
+</style>
+
+    <div class="app-shell" data-viewport-mode="app-shell">
+        <aside class="sidebar" data-region="sidebar">
+            <div class="sidebar-header">
+                <i data-lucide="sparkles" class="sidebar-logo-icon"></i>
+                <span class="sidebar-logo-text">AI 测试生成</span>
+            </div>
+            <nav class="sidebar-nav">
+                <a class="nav-item" data-nav-key="dashboard" data-dom-id="nav-dashboard" data-active="false" href="#">
+                    <i data-lucide="layout-dashboard"></i>
+                    <span>仪表盘</span>
+                </a>
+                <a class="nav-item" data-nav-key="project-management" data-dom-id="nav-project-management" data-active="false" href="#">
+                    <i data-lucide="folder-kanban"></i>
+                    <span>项目管理</span>
+                </a>
+                <a class="nav-item" data-nav-key="module-management" data-dom-id="nav-module-management" data-active="false" href="#">
+                    <i data-lucide="layers"></i>
+                    <span>模块管理</span>
+                </a>
+                <a class="nav-item" data-nav-key="requirements" data-dom-id="nav-requirements" data-active="false" href="#">
+                    <i data-lucide="file-text"></i>
+                    <span>需求管理</span>
+                </a>
+                <a class="nav-item" data-nav-key="test-cases" data-dom-id="nav-test-cases" data-active="true" href="#">
+                    <i data-lucide="check-square"></i>
+                    <span>测试用例</span>
+                </a>
+                <a class="nav-item" data-nav-key="dependency-graph" data-dom-id="nav-dependency-graph" data-active="false" href="#">
+                    <i data-lucide="git-branch"></i>
+                    <span>依赖图谱</span>
+                </a>
+                <a class="nav-item" data-nav-key="knowledge-base" data-dom-id="nav-knowledge-base" data-active="false" href="#">
+                    <i data-lucide="book-open"></i>
+                    <span>知识库</span>
+                </a>
+                <a class="nav-item" data-nav-key="knowledge-qa" data-dom-id="nav-knowledge-qa" data-active="false" href="#">
+                    <i data-lucide="message-circle"></i>
+                    <span>知识问答</span>
+                </a>
+                <div class="nav-divider" style="height:1px;background:var(--border);margin:8px 16px;"></div>
+                <a class="nav-item" data-nav-key="admin-entry" data-dom-id="nav-admin-entry" data-active="false" href="#">
+                    <i data-lucide="shield"></i>
+                    <span>管理后台</span>
+                </a>
+            </nav>
+        </aside>
+
+        <div class="main-area">
+            <header class="top-header" data-region="top-header">
+                <!-- 产品切换 -->
+                <div class="product-switcher" data-dom-id="product-switcher" role="button" tabindex="0" aria-label="切换产品" title="切换产品">
+                <i data-lucide="layers"></i>
+                <span class="product-switcher-name">全部产品</span>
+                <i data-lucide="chevron-down" class="product-switcher-arrow"></i>
+                </div>
+                <!-- 系统状态与版本 -->
+                <div class="system-info">
+                <div class="system-status" title="系统运行状态">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span class="status-label">运行正常</span>
+                </div>
+                <div class="version-tag" title="系统版本">v2.3</div>
+                </div>
+                <div class="header-actions">
+                    <button class="notification-btn" aria-label="通知">
+                        <i data-lucide="bell"></i>
+                        <span class="notification-dot"></span>
+                    </button>
+                    <div class="user-area">
+                        <div class="user-avatar">测</div>
+                        <span class="user-name">测试工程师</span>
+                        <i data-lucide="chevron-down"></i>
+                    </div>
+                </div>
+            </header>
+
+            <main class="content-wrapper overflow-y-auto" data-region="content-wrapper" data-scroll-region="primary">
+                <div class="page-title-bar" data-slot="pageTitle"></div>
+                <style>
+                .tc-header-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+                .tc-header-left { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+                .tc-header-title { font-size: 22px; font-weight: 700; color: var(--foreground); line-height: 1.2; margin: 0; }
+                .tc-header-subtitle { font-size: 14px; color: var(--muted-foreground); line-height: 1.5; margin: 0; }
+                .tc-btn-group { display: flex; align-items: center; gap: 8px; }
+                .tc-btn-primary { display: inline-flex; align-items: center; gap: 6px; background: var(--primary); color: var(--primary-foreground); padding: 8px 16px; border-radius: 10px; border: 0; font-size: 14px; font-weight: 500; cursor: pointer; transition: opacity 0.18s ease; }
+                .tc-btn-primary:hover { opacity: 0.88; }
+                .tc-btn-primary svg { width: 16px; height: 16px; }
+                .tc-btn-secondary { display: inline-flex; align-items: center; gap: 6px; background: var(--card); color: var(--foreground); border: 1px solid var(--border); padding: 8px 16px; border-radius: 10px; font-size: 14px; font-weight: 500; cursor: pointer; transition: background-color 0.18s ease; }
+                .tc-btn-secondary:hover { background: var(--accent); }
+                .tc-btn-secondary svg { width: 16px; height: 16px; }
+                .tc-toolbar { display: flex; align-items: center; justify-content: flex-end; margin-bottom: 16px; }
+                .tc-view-switch { display: inline-flex; align-items: center; gap: 4px; background: var(--accent); border-radius: 10px; padding: 4px; }
+                .tc-view-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 8px; font-size: 14px; border: 0; background: transparent; color: var(--muted-foreground); cursor: pointer; transition: background-color 0.18s ease, color 0.18s ease; }
+                .tc-view-btn:hover { color: var(--foreground); }
+                .tc-view-btn svg { width: 16px; height: 16px; }
+                .tc-view-btn-active { background: var(--primary); color: var(--primary-foreground); }
+                .tc-view-btn-active:hover { color: var(--primary-foreground); }
+                .tc-filter-bar { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 12px 20px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+                .tc-select { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--input); border-radius: 10px; padding: 6px 12px; font-size: 14px; background: var(--card); color: var(--foreground); cursor: pointer; white-space: nowrap; }
+                .tc-select svg { width: 14px; height: 14px; color: var(--muted-foreground); }
+                .tc-search { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--input); border-radius: 10px; padding: 6px 12px; background: var(--card); flex: 1; min-width: 220px; }
+                .tc-search svg { width: 16px; height: 16px; color: var(--muted-foreground); flex-shrink: 0; }
+                .tc-search input { border: 0; outline: 0; background: transparent; font-size: 14px; color: var(--foreground); width: 100%; }
+                .tc-search input::placeholder { color: var(--muted-foreground); }
+                .tc-count { margin-left: auto; font-size: 14px; color: var(--muted-foreground); white-space: nowrap; }
+                .tc-count strong { color: var(--foreground); font-weight: 600; }
+                .tc-group-card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; box-shadow: var(--shadow-sm); margin-bottom: 16px; }
+                .tc-group-header { display: flex; align-items: center; gap: 8px; padding: 14px 16px; cursor: pointer; transition: background-color 0.18s ease; }
+                .tc-group-header:hover { background: var(--accent); }
+                .tc-group-header > svg { width: 16px; height: 16px; color: var(--muted-foreground); flex-shrink: 0; }
+                .tc-group-name { font-size: 15px; font-weight: 600; color: var(--foreground); }
+                .tc-group-count { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 500; background: var(--accent); color: var(--muted-foreground); white-space: nowrap; }
+                .tc-case-list { border-top: 1px solid var(--border); }
+                .tc-case-row { display: flex; align-items: center; gap: 12px; padding: 12px 16px 12px 48px; cursor: pointer; transition: background-color 0.18s ease; border-bottom: 1px solid var(--border); }
+                .tc-case-row:last-child { border-bottom: 0; }
+                .tc-case-row:hover { background: var(--accent); }
+                .tc-case-row > svg.tc-chev { width: 16px; height: 16px; color: var(--muted-foreground); flex-shrink: 0; }
+                .tc-case-row.tc-is-open { border-bottom: 0; }
+                .tc-case-id { font-family: var(--font-mono); font-size: 12px; color: var(--muted-foreground); flex-shrink: 0; white-space: nowrap; }
+                .tc-case-title { font-size: 14px; font-weight: 500; color: var(--foreground); flex: 1; min-width: 120px; }
+                .tc-pill { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 9999px; font-size: 12px; font-weight: 500; white-space: nowrap; flex-shrink: 0; }
+                .tc-pill-blue { background: color-mix(in srgb, var(--chart-2) 15%, transparent); color: var(--chart-2); }
+                .tc-pill-red { background: color-mix(in srgb, var(--destructive) 15%, transparent); color: var(--destructive); }
+                .tc-pill-amber { background: color-mix(in srgb, var(--chart-3) 15%, transparent); color: var(--chart-3); }
+                .tc-pill-green { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+                .tc-pill-gray { background: var(--accent); color: var(--muted-foreground); }
+                .tc-confidence { font-size: 13px; font-weight: 600; font-family: var(--font-mono); flex-shrink: 0; min-width: 46px; text-align: right; }
+                .tc-conf-high { color: var(--success); }
+                .tc-conf-mid { color: var(--chart-2); }
+                .tc-conf-low { color: var(--chart-3); }
+                .tc-case-actions { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; }
+                .tc-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent; color: var(--muted-foreground); cursor: pointer; transition: background-color 0.18s ease, color 0.18s ease; }
+                .tc-icon-btn:hover { background: var(--accent); color: var(--foreground); }
+                .tc-icon-btn svg { width: 16px; height: 16px; }
+                .tc-detail-panel { padding: 16px 16px 16px 48px; background: var(--accent); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+                .tc-detail-grid { display: grid; grid-template-columns: 80px 1fr; gap: 10px 16px; align-items: start; }
+                .tc-detail-label { font-size: 12px; font-weight: 600; color: var(--muted-foreground); padding-top: 2px; }
+                .tc-detail-text { font-size: 13px; color: var(--foreground); line-height: 1.6; }
+                .tc-detail-steps { margin: 0; padding: 0; list-style: none; counter-reset: step; }
+                .tc-detail-steps li { position: relative; padding-left: 26px; padding-bottom: 6px; font-size: 13px; color: var(--foreground); line-height: 1.6; counter-increment: step; }
+                .tc-detail-steps li:last-child { padding-bottom: 0; }
+                .tc-detail-steps li::before { content: counter(step); position: absolute; left: 0; top: 1px; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); font-size: 11px; font-weight: 600; font-family: var(--font-mono); }
+                .tc-modal-overlay { position: fixed; inset: 0; z-index: 50; display: none; align-items: center; justify-content: center; padding: 16px; background: color-mix(in srgb, var(--background-900) 30%, transparent); }
+.tc-modal-overlay[data-visible="true"] { display: flex; }
+                .tc-modal { background: var(--card); border-radius: 16px; box-shadow: var(--shadow-xl); max-width: 28rem; width: 100%; padding: 24px; }
+                .tc-modal-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+                .tc-modal-icon { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 12px; background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); flex-shrink: 0; }
+                .tc-modal-icon svg { width: 20px; height: 20px; }
+                .tc-modal-title { font-size: 18px; font-weight: 600; color: var(--foreground); margin: 0 0 4px; }
+                .tc-modal-desc { font-size: 13px; color: var(--muted-foreground); line-height: 1.5; margin: 0; }
+                .tc-field-label { display: block; font-size: 13px; font-weight: 600; color: var(--foreground); margin-bottom: 8px; }
+                .tc-combobox { display: flex; align-items: center; gap: 8px; border: 1px solid var(--input); border-radius: 10px; padding: 10px 12px; background: var(--card); transition: border-color 0.18s ease; }
+                .tc-combobox:focus-within { border-color: var(--primary); }
+                .tc-combobox svg { width: 16px; height: 16px; color: var(--muted-foreground); flex-shrink: 0; }
+                .tc-combobox input { border: 0; outline: 0; background: transparent; font-size: 14px; color: var(--foreground); width: 100%; }
+                .tc-combobox input::placeholder { color: var(--muted-foreground); }
+                .tc-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+                </style>
+                <div class="page-content" data-slot="pageContent">
+
+                    <div class="tc-header-row">
+                        <div class="tc-header-left">
+                            <h2 class="tc-header-title">测试用例</h2>
+                            <p class="tc-header-subtitle">管理 AI 生成的测试用例 — 支持按功能点分组查看与 XMind 思维导图</p>
+                        </div>
+                        <div class="tc-btn-group">
+                            <button class="tc-btn-secondary" type="button">
+                                <i data-lucide="download"></i>
+                                <span>导出用例</span>
+                            </button>
+                            <button class="tc-btn-primary" type="button">
+                                <i data-lucide="sparkles"></i>
+                                <span>生成用例</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="tc-toolbar">
+                        <div class="tc-view-switch" role="tablist" aria-label="视图模式">
+                            <button class="tc-view-btn tc-view-btn-active" type="button" role="tab" aria-selected="true">
+                                <i data-lucide="list"></i>
+                                <span>列表视图</span>
+                            </button>
+                            <button class="tc-view-btn" type="button" role="tab" aria-selected="false">
+                                <i data-lucide="network"></i>
+                                <span>XMind 视图</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="tc-filter-bar">
+                        <div class="tc-select">
+                            <span>全部项目</span>
+                            <i data-lucide="chevron-down"></i>
+                        </div>
+                        <div class="tc-select">
+                            <span>全部需求</span>
+                            <i data-lucide="chevron-down"></i>
+                        </div>
+                        <div class="tc-search">
+                            <i data-lucide="search"></i>
+                            <input type="text" placeholder="搜索用例标题..." aria-label="搜索用例标题">
+                        </div>
+                        <span class="tc-count">共 <strong>6</strong> 条</span>
+                    </div>
+
+                    <div class="tc-group-card">
+                        <div class="tc-group-header">
+                            <i data-lucide="chevron-down"></i>
+                            <span class="tc-group-name">用户登录认证</span>
+                            <span class="tc-group-count">3 条用例</span>
+                        </div>
+                        <div class="tc-case-list">
+                            <div class="tc-case-row">
+                                <i data-lucide="chevron-right" class="tc-chev"></i>
+                                <span class="tc-case-id">TC-001</span>
+                                <span class="tc-case-title">正常用户名密码登录</span>
+                                <span class="tc-pill tc-pill-blue">功能测试</span>
+                                <span class="tc-pill tc-pill-red">P0</span>
+                                <span class="tc-pill tc-pill-green">已通过</span>
+                                <span class="tc-confidence tc-conf-high">95%</span>
+                                <div class="tc-case-actions">
+                                    <button class="tc-icon-btn" aria-label="编辑"><i data-lucide="edit-3"></i></button>
+                                    <button class="tc-icon-btn" aria-label="删除"><i data-lucide="trash-2"></i></button>
+                                </div>
+                            </div>
+                            <div class="tc-case-row">
+                                <i data-lucide="chevron-right" class="tc-chev"></i>
+                                <span class="tc-case-id">TC-002</span>
+                                <span class="tc-case-title">错误密码登录锁定</span>
+                                <span class="tc-pill tc-pill-red">异常测试</span>
+                                <span class="tc-pill tc-pill-amber">P1</span>
+                                <span class="tc-pill tc-pill-blue">待审核</span>
+                                <span class="tc-confidence tc-conf-high">88%</span>
+                                <div class="tc-case-actions">
+                                    <button class="tc-icon-btn" aria-label="编辑"><i data-lucide="edit-3"></i></button>
+                                    <button class="tc-icon-btn" aria-label="删除"><i data-lucide="trash-2"></i></button>
+                                </div>
+                            </div>
+                            <div class="tc-case-row">
+                                <i data-lucide="chevron-right" class="tc-chev"></i>
+                                <span class="tc-case-id">TC-003</span>
+                                <span class="tc-case-title">密码长度边界测试</span>
+                                <span class="tc-pill tc-pill-amber">边界测试</span>
+                                <span class="tc-pill tc-pill-blue">P2</span>
+                                <span class="tc-pill tc-pill-gray">草稿</span>
+                                <span class="tc-confidence tc-conf-mid">76%</span>
+                                <div class="tc-case-actions">
+                                    <button class="tc-icon-btn" aria-label="编辑"><i data-lucide="edit-3"></i></button>
+                                    <button class="tc-icon-btn" aria-label="删除"><i data-lucide="trash-2"></i></button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tc-group-card">
+                        <div class="tc-group-header">
+                            <i data-lucide="chevron-down"></i>
+                            <span class="tc-group-name">支付接口</span>
+                            <span class="tc-group-count">2 条用例</span>
+                        </div>
+                        <div class="tc-case-list">
+                            <div class="tc-case-row tc-is-open">
+                                <i data-lucide="chevron-down" class="tc-chev"></i>
+                                <span class="tc-case-id">TC-004</span>
+                                <span class="tc-case-title">正常支付流程</span>
+                                <span class="tc-pill tc-pill-blue">功能测试</span>
+                                <span class="tc-pill tc-pill-red">P0</span>
+                                <span class="tc-pill tc-pill-green">已通过</span>
+                                <span class="tc-confidence tc-conf-high">92%</span>
+                                <div class="tc-case-actions">
+                                    <button class="tc-icon-btn" aria-label="编辑"><i data-lucide="edit-3"></i></button>
+                                    <button class="tc-icon-btn" aria-label="删除"><i data-lucide="trash-2"></i></button>
+                                </div>
+                            </div>
+                            <div class="tc-detail-panel">
+                                <div class="tc-detail-grid">
+                                    <span class="tc-detail-label">前置条件</span>
+                                    <span class="tc-detail-text">用户已登录，账户余额充足</span>
+                                    <span class="tc-detail-label">测试步骤</span>
+                                    <ol class="tc-detail-steps">
+                                        <li>进入支付页面</li>
+                                        <li>输入金额 100 元</li>
+                                        <li>选择支付方式</li>
+                                        <li>确认支付</li>
+                                    </ol>
+                                    <span class="tc-detail-label">预期结果</span>
+                                    <span class="tc-detail-text">支付成功，跳转支付结果页，余额扣减 100 元</span>
+                                    <span class="tc-detail-label">测试数据</span>
+                                    <span class="tc-detail-text">金额 = 100，支付方式 = 微信</span>
+                                </div>
+                            </div>
+                            <div class="tc-case-row">
+                                <i data-lucide="chevron-right" class="tc-chev"></i>
+                                <span class="tc-case-id">TC-005</span>
+                                <span class="tc-case-title">支付超时处理</span>
+                                <span class="tc-pill tc-pill-red">异常测试</span>
+                                <span class="tc-pill tc-pill-amber">P1</span>
+                                <span class="tc-pill tc-pill-red">已驳回</span>
+                                <span class="tc-confidence tc-conf-mid">65%</span>
+                                <div class="tc-case-actions">
+                                    <button class="tc-icon-btn" aria-label="编辑"><i data-lucide="edit-3"></i></button>
+                                    <button class="tc-icon-btn" aria-label="删除"><i data-lucide="trash-2"></i></button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tc-group-card">
+                        <div class="tc-group-header">
+                            <i data-lucide="chevron-right"></i>
+                            <span class="tc-group-name">数据导出</span>
+                            <span class="tc-group-count">5 条用例</span>
+                        </div>
+                    </div>
+
+                    <div class="tc-modal-overlay">
+                        <div class="tc-modal" role="dialog" aria-modal="true" aria-labelledby="tc-modal-title">
+                            <div class="tc-modal-header">
+                                <span class="tc-modal-icon"><i data-lucide="sparkles"></i></span>
+                                <div>
+                                    <h3 class="tc-modal-title" id="tc-modal-title">生成测试用例</h3>
+                                    <p class="tc-modal-desc">系统将基于需求 SRR 自动生成测试用例</p>
+                                </div>
+                            </div>
+                            <label class="tc-field-label" for="tc-req-select">选择需求</label>
+                            <div class="tc-combobox">
+                                <i data-lucide="search"></i>
+                                <input id="tc-req-select" type="text" placeholder="搜索并选择需求...">
+                            </div>
+                            <div class="tc-modal-actions">
+                                <button class="tc-btn-secondary" type="button">取消</button>
+                                <button class="tc-btn-primary" type="button">
+                                    <i data-lucide="sparkles"></i>
+                                    <span>开始生成</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>lucide.createIcons();</script>
+</body>
+</html>

@@ -510,14 +510,50 @@ class MilvusVectorStore:
         return parsed
 
     def delete_requirement(self, req_id: str) -> None:
-        """删除需求向量。"""
+        """删除需求向量。
+
+        v2.51 修复：必须 flush 才能让 delete 在 query/num_entities 中生效，
+        否则 BOUNDED 一致性下查询仍会返回已删除的记录（导致删除产品后向量遗留）。
+        """
         self._ensure_connected()
         collection = self._get_collection("requirements")
         collection.delete(f'id == "{_safe_id(req_id, "req_id")}"')
+        collection.flush()
 
     def delete_requirement_from_kb(self, req_id: str) -> None:
         """从知识库删除需求（与 delete_requirement 同）。"""
         self.delete_requirement(req_id)
+
+    def delete_requirement_by_product(self, product_id: str) -> int:
+        """按 product_id 批量删除需求向量。
+
+        用于删除产品时一次性清理该产品所有需求向量，比循环单条删除更高效。
+        返回删除的记录数（基于查询统计，非 Milvus 内部删除标记数）。
+
+        Args:
+            product_id: 产品 ID
+
+        Returns:
+            实际删除的向量数
+        """
+        self._ensure_connected()
+        collection = self._get_collection("requirements")
+        safe_pid = _safe_id(product_id, "product_id")
+        # 1) 查询该 product_id 下所有向量 id
+        results = collection.query(
+            expr=f'metadata["product_id"] == "{safe_pid}"',
+            output_fields=["id"],
+            limit=16384,
+        )
+        if not results:
+            return 0
+        ids = [r["id"] for r in results]
+        # 2) 批量 delete（Milvus expr 字面量须用双引号）
+        ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
+        collection.delete(f'id in [{ids_expr}]')
+        collection.flush()
+        logger.info("[Milvus] 按 product_id 批量删除需求向量: product={}, count={}", product_id, len(ids))
+        return len(ids)
 
     def update_requirement_metadata(self, req_id: str, metadata_updates: dict) -> None:
         """更新需求向量的元数据（如 go_live_date 变更）。
@@ -651,14 +687,44 @@ class MilvusVectorStore:
         return parsed
 
     def delete_test_case(self, case_id: str) -> None:
-        """删除用例向量。"""
+        """删除用例向量。
+
+        v2.51 修复：必须 flush 才能让 delete 在 query/num_entities 中生效。
+        """
         self._ensure_connected()
         collection = self._get_collection("test_cases")
         collection.delete(f'id == "{_safe_id(case_id, "case_id")}"')
+        collection.flush()
 
     def delete_test_case_from_kb(self, case_id: str) -> None:
         """从知识库删除用例。"""
         self.delete_test_case(case_id)
+
+    def delete_test_case_by_product(self, product_id: str) -> int:
+        """按 product_id 批量删除用例向量。
+
+        Args:
+            product_id: 产品 ID
+
+        Returns:
+            实际删除的向量数
+        """
+        self._ensure_connected()
+        collection = self._get_collection("test_cases")
+        safe_pid = _safe_id(product_id, "product_id")
+        results = collection.query(
+            expr=f'metadata["product_id"] == "{safe_pid}"',
+            output_fields=["id"],
+            limit=16384,
+        )
+        if not results:
+            return 0
+        ids = [r["id"] for r in results]
+        ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
+        collection.delete(f'id in [{ids_expr}]')
+        collection.flush()
+        logger.info("[Milvus] 按 product_id 批量删除用例向量: product={}, count={}", product_id, len(ids))
+        return len(ids)
 
     def delete_cases_by_req_id(self, req_id: str) -> None:
         """按 req_id 批量删除用例向量（优化 2：重新生成前清理旧用例）。
@@ -864,7 +930,8 @@ class MilvusVectorStore:
         直接存入 Milvus metadata 会触发 (code=1100) 报错。
 
         方案：只保留 KB 补全 / ClarifyAgent 实际用到的结构化字段，
-        移除 _raw_text、additional_details、dependencies 等仅用于人工阅读的大字段。
+        移除 _raw_text、dependencies 等仅用于人工阅读的大字段。
+        （v2.40 起 additional_details 字段已移除，无需特别处理）
 
         实测：REQ-1784008720572-8967 从 309KB → 29KB（保留全部有用信息）。
         """
@@ -909,9 +976,7 @@ class MilvusVectorStore:
         boundary = srr_json.get("boundary_conditions", [])
         if boundary:
             parts.append(f"边界条件: {'; '.join(str(b) for b in boundary[:10])}")
-        additional = srr_json.get("additional_details", "")
-        if additional:
-            parts.append(f"补充细节: {additional[:500]}")
+        # v2.40: additional_details 字段已移除，不再纳入检索文本
         return "\n".join(parts)
 
 

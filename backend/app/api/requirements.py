@@ -1670,7 +1670,12 @@ async def list_tasks(
         d["req_title"] = req_titles.get(r.req_id or "", "")
         items.append(d)
 
-    return ApiResponse(success=True, message="ok", data={"items": items, "total": total})
+    # v2.36: 携带服务器当前时间，避免前端计算耗时出现负数
+    return ApiResponse(success=True, message="ok", data={
+        "items": items,
+        "total": total,
+        "server_now": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 @router.get("/tasks/{task_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
@@ -1684,6 +1689,9 @@ async def get_task(
         raise HTTPException(status_code=404, detail="任务不存在")
 
     d = task.to_dict()
+    # v2.36: 携带服务器当前时间，避免前端用 Date.now() 计算耗时
+    # 时因客户端时钟与服务器不同步导致负数
+    d["server_now"] = datetime.now(timezone.utc).isoformat()
     # 关联需求标题
     if task.req_id:
         req = await session.get(Requirement, task.req_id)
@@ -1712,7 +1720,10 @@ async def get_task_by_req(
     if not task:
         return ApiResponse(success=True, message="无关联任务", data=None)
 
-    return ApiResponse(success=True, message="ok", data=task.to_dict())
+    d = task.to_dict()
+    # v2.36: 携带服务器当前时间，避免前端计算耗时出现负数
+    d["server_now"] = datetime.now(timezone.utc).isoformat()
+    return ApiResponse(success=True, message="ok", data=d)
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=ApiResponse, dependencies=[Depends(require_write)])
@@ -2258,7 +2269,7 @@ async def _run_clarify_reparse(
 
     流程：
         1. phase=parse: req_agent.parse() 重新生成 SRR（含降级处理）
-        2. 持久化 SRR + 保留 KB 日志 + 迁移 _baseline_context / additional_details
+        2. 持久化 SRR + 保留 KB 日志 + 迁移 _baseline_context
         3. FP 重提取（使用 original_raw 而非 enhanced_raw，确保与需求分析时一致）
         4. status=completed
     """
@@ -2321,15 +2332,10 @@ async def _run_clarify_reparse(
             final_data["_kb_query_logs"] = original_kb_logs
         # 保留澄清历史
         final_data["_clarify_history"] = clarify_history
-        # 合并旧 SRR 的 KB 基线补全内容
-        for field in ("_baseline_context", "additional_details"):
-            old_val = old_srr.get(field)
-            if old_val:
-                if field == "additional_details":
-                    existing = final_data.get("additional_details", "")
-                    final_data["additional_details"] = str(old_val) + "\n" + str(existing)
-                else:
-                    final_data[field] = old_val
+        # 合并旧 SRR 的 KB 基线补全内容（v2.40: 移除 additional_details，仅保留 _baseline_context）
+        old_baseline = old_srr.get("_baseline_context")
+        if old_baseline:
+            final_data["_baseline_context"] = old_baseline
 
         # v2.18: 合并 interaction_srr 到总 SRR（统一所有流程的 interaction_srr 处理）
         if captured_interaction_srr:
@@ -2553,14 +2559,10 @@ async def finalize_requirement(
         final_data["_clarify_history"] = existing_history
     # 合并旧 SRR 的 KB 基线补全内容
     old_srr = dict(record.srr_json or {})
-    for field in ("_baseline_context", "additional_details"):
-        old_val = old_srr.get(field)
-        if old_val:
-            if field == "additional_details":
-                existing = final_data.get("additional_details", "")
-                final_data["additional_details"] = str(old_val) + "\n" + str(existing)
-            else:
-                final_data[field] = old_val
+    # v2.40: 移除 additional_details，仅保留 _baseline_context
+    old_baseline = old_srr.get("_baseline_context")
+    if old_baseline:
+        final_data["_baseline_context"] = old_baseline
     final_data.pop("_clarify_state", None)
     final_data.pop("clarify_answers", None)
     final_data.pop("_field_sources", None)
@@ -3086,15 +3088,10 @@ async def _run_regenerate_reparse(
 
         # 保留澄清历史
         final_data["_clarify_history"] = clarify_history
-        # 迁移 KB 基线补全内容
-        for field in ("_baseline_context", "additional_details"):
-            old_val = old_srr.get(field)
-            if old_val:
-                if field == "additional_details":
-                    existing = final_data.get("additional_details", "")
-                    final_data["additional_details"] = str(old_val) + "\n" + str(existing)
-                else:
-                    final_data[field] = old_val
+        # 迁移 KB 基线补全内容（v2.40: 移除 additional_details，仅保留 _baseline_context）
+        old_baseline = old_srr.get("_baseline_context")
+        if old_baseline:
+            final_data["_baseline_context"] = old_baseline
 
         # v2.32: 合并 interaction_srr 到 cross_fp_interactions（与需求分析流程一致）
         if captured_interaction_srr:
@@ -4113,6 +4110,7 @@ async def _load_active_requirement(req_id: str, session: AsyncSession) -> Requir
 async def confirm_requirement(
     req_id: str,
     session: AsyncSession = Depends(get_session),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """确认需求完成——标记为 confirmed（确认完成），允许生成测试用例。
 

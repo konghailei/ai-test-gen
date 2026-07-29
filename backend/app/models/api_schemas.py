@@ -127,6 +127,22 @@ class TestCaseUpdateRequest(BaseModel):
     expected: str | None = None
     test_data: dict | None = None
     assertions: list[dict] | None = None
+    functional_point: str | None = None
+    req_id: str | None = None
+
+
+class TestCaseCreateRequest(BaseModel):
+    """用例新增请求（人工创建）。"""
+    req_id: str = Field(..., min_length=1, max_length=64, description="关联需求 ID（必填）")
+    product_id: str | None = Field(default=None, max_length=64, description="产品 ID（可选，留空则从需求自动推导）")
+    title: str = Field(..., min_length=1, max_length=255, description="用例标题")
+    type: str = Field(default="functional", max_length=32, description="用例类型")
+    priority: str = Field(default="P1", max_length=8, description="优先级 P0-P3")
+    description: str = Field(default="", max_length=4000, description="用例描述")
+    preconditions: list[str] | None = Field(default=None, description="前置条件列表")
+    steps: list[dict] | None = Field(default=None, description="测试步骤列表")
+    expected: str = Field(default="", max_length=2000, description="整体预期结果")
+    assertions: list[dict] | None = Field(default=None, description="断言列表")
 
 
 class ExportRequest(BaseModel):
@@ -139,6 +155,9 @@ class ExportRequest(BaseModel):
     )
     project_name: str = Field(
         default="", max_length=255, description="项目名称（XMind 导出时作为根标题）"
+    )
+    include_details: bool = Field(
+        default=True, description="是否导出用例详细步骤和前置条件（XMind 格式适用，False 时用例仅保留标题）"
     )
 
 

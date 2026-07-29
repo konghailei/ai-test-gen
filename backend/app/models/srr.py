@@ -601,9 +601,6 @@ class SRR(BaseModel):
     assumptions: list[Assumption] = Field(
         default_factory=list, description="假设与约束列表"
     )
-    additional_details: str = Field(
-        default="", description="兜底字段：无法映射到标准字段的原文内容"
-    )
     field_conflicts: list[FieldConflict] = Field(
         default_factory=list, description="字段冲突列表（KB 补全时产生）"
     )

@@ -527,7 +527,29 @@ class ReviewAgent:
                             session.add(record)
 
                         else:
-                            # 低置信度：记录到 error_cases
+                            # 低置信度：先写入 test_cases（status=draft 未审核）以满足
+                            # error_cases.original_case_id 的外键约束，再记录到 error_cases
+                            record = TestCaseModel(
+                                id=case_id,
+                                req_id=req_id,
+                                product_id=product_id,
+                                module=modules[0] if modules else "",
+                                modules=modules,
+                                title=title,
+                                type=case_type,
+                                priority=case.get("priority", "P1"),
+                                status="draft",
+                                case_json=case,
+                                source="ai_generated",
+                                confidence=confidence,
+                                gen_batch_id=batch_id,
+                            )
+                            session.add(record)
+                            # v2.0 修复：手动 flush 确保 test_cases 的 INSERT 先执行，
+                            # 否则 SQLAlchemy 异步 session flush 时可能不按 ForeignKey
+                            # 依赖顺序执行，导致 error_cases 先插入触发外键约束失败
+                            await session.flush()
+
                             error_id = gen_error_id()
                             error_record = ErrorCase(
                                 error_id=error_id,

@@ -11,6 +11,7 @@
 │  Phase 1: 预处理 + 影响分析                                          │
 │  需求输入(已通过QualityGate) → SRR 向量化                            │
 │  ↓ 新增：检测优化需求 → 检索原始需求 → 影响范围分析                  │
+│  ↓ v3.0：FP 影响分析 + 需求级影响分析（双图谱 BFS）                  │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
@@ -21,10 +22,11 @@
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
-│  Phase 2: 知识检索                                               │
+│  Phase 2: 知识检索 (v3.1 已移除独立 retrieve 节点，SRR 足够详细)     │
 │  SRR Embedding → 向量检索 + 关键词匹配 + 需求模式匹配            │
 │  → Top-K 匹配结果 (相似需求 + 关联用例 + 测试模式)              │
 │  🔒 L2: 向量DB断路器 (故障率>20% → 降级关键词匹配)              │
+│  ⭐ v2.0 优化：多跳强制检索（第一跳语义 + 第二跳合成查询）        │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
@@ -35,8 +37,12 @@
 │  └───┬────┘ └───┬────┘ └───┬────┘ └───┬────┘                   │
 │      └──────────┴──────────┴──────────┘                          │
 │  用例合并 + 去重 + 追溯标注                                      │
+│  ⭐ v1.4：FP 定向生成（按功能点拆分，标注 related_fp）            │
+│  ⭐ v2.0 优化：迭代闭环生成（CoverUp 模式，最多 3 轮自修复）     │
+│  ⭐ v2.0 优化：覆盖率引导（coverage 缺口注入 prompt）            │
 │  🔒 L2: LLM断路器 + 重试(全抖动) + 多提供商故障转移             │
 │  🔒 L3: LLM-as-Judge(5%采样) + 输出Schema校验                  │
+│  ⚠️ v2.0 修正：向量库写入延后至 Phase 6（避免未审核用例污染 KB） │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
@@ -45,6 +51,8 @@
 │  + 追溯性验证 (每个用例必须有需求依据)                          │
 │  + 一致性检查 (多次生成方差<10%)                                 │
 │  + 影响覆盖验证 (优化需求: 验证所有影响范围都有对应用例)        │
+│  ⭐ v2.0 优化：LLM 等价用例检测（Meta ACH 模式，替代纯相似度）  │
+│  ⭐ v2.0 优化：4 维去重（精确→语义→子集→LLM 等价判定）          │
 │  → 高置信度自动入库 / 低置信度人工审核                          │
 └──────────────────────────┬──────────────────────────────────────┘
                            │
@@ -56,12 +64,22 @@
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
-│  Phase 6: 回流存储                                               │
+│  Phase 6: 回流存储 (v2.0 修正：仅写入 approved 用例到向量库)     │
 │  向量DB + PG 双写 + 需求模式库更新 + 追溯矩阵持久化             │
 │  + 版本链更新 (新需求.supersedes = 旧需求ID)                    │
+│  + weight 自动更新（执行反馈回路，§7.2.1）                      │
 │  🔒 L4: 死信队列 (写入失败时)                                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+> **v3.1 架构变更说明**：移除独立 `retrieve` 节点，SRR 已足够详细无需 KB 检索阶段。Few-shot 检索下沉到 GenAgent 内部（轻量检索同模块 approved 用例 Top-3）。
+
+> **v2.0 优化要点**（基于 CoverUp / Meta ACH / 天猫 / 字节 SmartUnit 等业界案例）：
+> - **迭代闭环**：GenAgent → ReviewAgent → 若有 blocker → issues 回灌 prompt → 重生成（最多 3 轮）
+> - **覆盖率引导**：覆盖率缺口序列化进 prompt，引导 LLM 补充缺失用例
+> - **LLM 等价检测**：替代纯 Embedding 相似度，提升去重准确率
+> - **知识库分库**：业务背景/基线用例/资损场景/踩坑点 4 类分库
+> - **向量库写入时序修正**：仅 approved 用例写入向量库，避免污染 Few-shot 检索
 
 ---
 
@@ -434,6 +452,90 @@ def build_genagent_prompt(srr: dict, impact_result: dict, few_shot_cases: list) 
 | **输出** | 全新用例集 | 用例操作指令（update/add/delete/keep）|
 | **回归测试** | 不需要 | 必须，确保未破坏已有功能 |
 
+### 1.5.1 FP 级影响分析（v3.0 增强，已实现）
+
+> **背景**：模块级影响分析粒度较粗，无法精确定位"哪个功能点受影响"。v3.0 引入 FP（功能点）级影响分析，基于 FPDependency 图谱反向 BFS，识别功能点间的依赖链。
+
+**双图谱 BFS 架构**：
+
+```
+模块依赖图（ModuleDependency）          FP 依赖图（FPDependency）
+   ┌──────┐  depends_on                   ┌──────┐  depends_on
+   │ auth │ ───────────┐                  │ FP-1 │ ───────────┐
+   └──────┘             ▼                 └──────┘             ▼
+   ┌──────┐        ┌──────┐              ┌──────┐        ┌──────┐
+   │session│        │ user │              │ FP-2 │        │ FP-3 │
+   └──────┘        └──────┘              └──────┘        └──────┘
+```
+
+**核心方法**：
+
+```python
+async def _bfs_fp_reverse(self, fp_id: str, session) -> dict:
+    """反向 BFS FPDependency 图谱，找到所有受影响的 FP。
+    
+    遍历规则：
+    - 从 fp_id 出发，反向遍历（谁依赖我 → 我变更影响谁）
+    - 支持 5 种关系类型：depends_on / related_to / shared_data / shared_ui / shared_api
+    - 仅遍历 review_status='approved' 的依赖边（避免未审核依赖污染分析）
+    - 最大遍历深度：3 跳
+    
+    Returns:
+        dict: {direct_fps, indirect_fps, all_affected_fps}
+    """
+```
+
+**输出字段扩展**：
+
+ImpactAnalysisAgent.analyze() 返回值在原基础上新增：
+- `cross_module_analysis`: 跨模块依赖链 `[{"from": "auth", "to": "session", "strength": "strong"}]`
+- `per_module_impact`: 按模块分组的影响范围 `{"auth": {"direct_reqs": [], "indirect_reqs": [], "test_cases": []}}`
+
+### 1.5.2 需求级影响分析（v1.7 增强，已实现）
+
+> **背景**：除了优化需求的 diff 影响分析，还需支持需求维度的全景影响分析，用于需求变更前的评估。
+
+**analyze_requirement_impact 方法**：
+
+```python
+async def analyze_requirement_impact(self, req_id: str) -> dict:
+    """需求级全量影响分析（不限于优化需求）。
+    
+    流程：
+    1. 模块 BFS：找到所有受影响模块
+    2. FP 反向 BFS：找到所有受影响功能点
+    3. KB 查询：已归档 FP（status='archived'）
+    4. 用例数统计：按 case_json.related_fp 名称匹配
+    
+    Returns:
+        dict: {
+            "requirement": {...},           # 原始需求信息
+            "module_impact": {...},         # 模块级影响
+            "affected_fps": [...],          # 受影响功能点列表
+            "total_affected": int,          # 总影响数
+            "case_count": int               # 关联用例数
+        }
+    """
+```
+
+**与优化需求影响分析的区别**：
+
+| 维度 | 优化需求影响分析（analyze） | 需求级影响分析（analyze_requirement_impact） |
+|------|---------------------------|---------------------------------------------|
+| 触发条件 | SRR 含 optimization_context | 任意需求，手动触发 |
+| 输入 | SRR JSON | req_id |
+| 输出 | case_operations + regression_scope | affected_fps + case_count |
+| 用途 | 指导 GenAgent 生成 | 需求变更前评估 |
+
+### 1.5.3 成本控制策略（待补齐）
+
+> **当前状态**：代码已实现 BFS 深度=3，但缺节点数阈值检查、超时机制、PG recursive CTE 降级路径。
+
+**待补齐项**（对应 §1.5 文档设计）：
+- `MAX_GRAPH_NODES=5000`：图谱节点数超阈值 → 切换 PG recursive CTE
+- `TIMEOUT_SECONDS=5.0`：单次分析超时 → 截断 indirect 列表 + 标记 `truncated=True`
+- 大图谱降级：返回空 indirect + warning，由 ReviewAgent 触发人工补充
+
 ---
 
 ## 2. GenAgent 核心设计
@@ -448,6 +550,81 @@ def build_genagent_prompt(srr: dict, impact_result: dict, few_shot_cases: list) 
 | **安全测试** | OWASP 检查清单 | SQL注入/XSS/越权/脱敏 | 低 |
 | **性能测试** | 负载模型推断 | SRR.non_functional 转换 | 低 |
 | **组合测试** | Pairwise/正交表 | 参数交互组合 | 中 |
+
+### 2.1.1 FP 定向生成机制（v1.4 增强，已实现）
+
+> **背景**：原方案基于完整 SRR 整体生成用例，难以保证每个功能点都被覆盖。v1.4 引入 FP（功能点）定向生成，按功能点拆分生成用例，并在用例中标注 `related_fp` 字段，建立 test_case↔functional_point 追溯关系。
+
+**FP 定向生成流程**：
+
+```
+1. orchestrator 从 DB 加载 FunctionalPoint 列表
+2. 传入 GenAgent.generate() 的 functional_points 参数
+3. prompt 注入 FP 上下文：
+   - fp_brief: 每个 FP 的 {id, name, fp_type, summary, preconditions,
+              happy_path_steps, alternate_flows, boundary_conditions,
+              business_rules, data_constraints, acceptance_criteria,
+              test_hints, atomicity_check}
+   - shared_rules: 跨 FP 共享业务规则（来自总 SRR 的
+                   cross_fp_interactions.shared_business_rules）
+4. LLM 按 FP 定向生成用例，每个用例标注 related_fp 字段
+5. orchestrator 计算 FP 覆盖率矩阵
+```
+
+**FP 覆盖率矩阵**：
+
+```python
+def _calc_fp_coverage(self, functional_points: list, cases: list) -> dict:
+    """计算 FP 覆盖率矩阵
+    
+    Returns:
+        {
+            "total_fps": int,
+            "covered_fps": int,
+            "coverage_rate": float,       # covered_fps / total_fps
+            "uncovered": [{"fp_id": "...", "fp_name": "..."}]
+        }
+    """
+```
+
+**FP 覆盖要求**（注入 prompt）：
+- 每个功能点（FP）至少生成 1 个测试用例，覆盖其 happy_path_steps 中的每个步骤
+- 若 alternate_flows 非空：每个异常分支生成 1 个用例
+- 若 boundary_conditions 非空：每个边界条件生成 1 个边界值用例
+- 若 data_constraints 中有 required=true 的字段：补充必填校验用例
+- 若 business_rules 中有 type=security/validation/workflow 的规则：生成对应类型的用例
+- 若 shared_rules 中某条规则 applied_fps 涉及 ≥2 个 FP：生成跨 FP 集成用例
+
+### 2.1.2 迭代闭环生成（v2.0 优化，借鉴 CoverUp）
+
+> **背景**：原方案 GenAgent 单次生成，ReviewAgent 一次性校验，无反馈修正。CoverUp（FSE'25）实测表明，覆盖率引导的迭代闭环可将用例通过率提升 25%+。
+>
+> **参考案例**：[CoverUp (arXiv:2403.16218)](https://arxiv.org/abs/2403.16218) — 覆盖率引导 + LLM 迭代提示 + Tool Function
+
+**迭代闭环流程**：
+
+```
+GenAgent 生成 N 个用例
+    ↓
+ReviewAgent 审核
+    ↓
+若有 blocker 或 coverage 缺口
+    ↓
+把 issues + coverage 缺口回灌 prompt
+    ↓
+GenAgent 重生成（仅补充缺失部分）
+    ↓
+最多 3 轮，每轮检测 coverage 是否提升
+    ↓
+无提升则停止（避免无效重试）
+```
+
+**关键设计**：
+- 每轮记录 coverage 变化，无提升则提前终止
+- 重生成仅针对缺失部分，非全量重生成（降低 token 成本）
+- LLM 可调用 `get_more_context(fp_id)` Tool Function 主动拉取更多 SRR 上下文
+
+> 详细设计见 §6.8 迭代闭环生成设计。
 
 ### 2.2 Few-shot Prompt 模板
 
@@ -488,7 +665,11 @@ def build_genagent_prompt(srr: dict, impact_result: dict, few_shot_cases: list) 
 
 ```python
 def deduplicate_cases(cases: list[dict]) -> list[dict]:
-    """三级去重: 精确匹配 → 语义去重 → 子集检测"""
+    """四级去重: 精确匹配 → 语义去重 → 子集检测 → LLM 等价判定
+    
+    v2.0 优化：新增 Level 4 LLM 等价判定（借鉴 Meta ACH 等价突变检测）
+    参考：Meta ACH (arXiv:2501.12862) — LLM 等价突变检测精确度 0.95
+    """
     # 1. 精确去重: 同 title + 同 steps
     seen = set()
     unique = []
@@ -497,10 +678,41 @@ def deduplicate_cases(cases: list[dict]) -> list[dict]:
         if key not in seen:
             seen.add(key)
             unique.append(c)
+    
     # 2. 语义去重: Embedding 余弦相似度 > 0.95 合并
+    unique = _semantic_dedup(unique, threshold=0.95)
+    
     # 3. 子集去重: case_a.steps 是 case_b.steps 子集 → 保留 case_b
+    unique = _subset_dedup(unique)
+    
+    # 4. LLM 等价判定（v2.0 新增）: 对疑似重复但 Embedding 相似度 0.85-0.95 的对，
+    #    调用 LLM 判定是否语义等价（替代纯相似度阈值）
+    unique = _llm_equivalence_dedup(unique, similarity_range=(0.85, 0.95))
+    
     return unique
+
+
+def _llm_equivalence_dedup(cases: list[dict], similarity_range: tuple) -> list[dict]:
+    """LLM 等价用例检测（v2.0 新增，借鉴 Meta ACH 等价突变检测）
+    
+    针对 Embedding 相似度在 0.85-0.95 之间的"疑似重复"对，
+    调用 LLM 判定是否语义等价，避免：
+    - 相似度<0.95 但实际等价的用例漏判
+    - 相似度>0.85 但实际不等价的用例误判
+    
+    成本控制：
+    - 仅对疑似对调用 LLM（约占总对数 5-10%）
+    - 批量判定（一次 LLM 调用处理 N 对）
+    - 结果缓存（同 FP 内的判定结果复用）
+    """
+    # 1. 计算所有对的 Embedding 相似度
+    # 2. 筛选 similarity_range 内的疑似对
+    # 3. 批量调用 LLM 判定等价性
+    # 4. LLM 判定为等价的对，保留置信度更高的
+    pass
 ```
+
+> **当前实现状态**：仅 Level 1 精确去重（对 few_shot_cases 按 title 去重），Level 2/3/4 待实现。
 
 ---
 
@@ -791,6 +1003,82 @@ def review_with_mutation(self, test_cases: list, mutation_result: dict) -> dict:
 | 超时降级 | 单变异体 > 30s → 标记 timeout，跳过 | 避免死循环变异阻塞流水线 |
 | 增量变异 | 仅对本次代码变更涉及的文件跑变异 | 配合 git diff |
 
+### 5.4 LLM-as-Judge 质量评估（v2.0 优化，借鉴 RAGAS）
+
+> **背景**：ReviewAgent 的 6 维度审核是"自审"（生成方审核生成方），缺少独立的质量评估信号。业界（RAGAS / DeepEval / Promptfoo）已收敛到"LLM-as-Judge"模式——用独立 LLM 实例对生成结果打分。
+>
+> **参考案例**：
+> - [RAGAS](https://github.com/explodinggradients/ragas) — Faithfulness + AnswerRelevancy 双指标
+> - [DeepEval](https://github.com/confident-ai/deepeval) — pytest 风格 LLM 测试
+> - [Promptfoo](https://github.com/promptfoo/promptfoo) — YAML 定义 prompt 测试用例
+
+#### 5.4.1 评估维度
+
+| 维度 | 定义 | 评分范围 | 阈值 |
+|------|------|---------|------|
+| **Faithfulness** | 用例是否忠于 SRR 需求描述（无凭空发明） | 0.0-1.0 | ≥ 0.8 |
+| **Relevancy** | 用例与需求的相关性（非冗余用例） | 0.0-1.0 | ≥ 0.7 |
+| **Executability** | 用例可执行性（步骤+预期完整） | 0.0-1.0 | ≥ 0.8 |
+| **Traceability** | 用例追溯性（有明确需求依据） | 0.0-1.0 | ≥ 0.9 |
+
+#### 5.4.2 采样策略
+
+```python
+def sample_for_judge(test_cases: list[dict], sample_rate: float = 0.05) -> list[dict]:
+    """5% 采样用例集，送 LLM-as-Judge 评估
+    
+    采样策略：
+    - 优先采样低置信度用例（confidence < 0.7）
+    - 优先采样 P0/P1 优先级用例
+    - 随机采样剩余用例
+    """
+    # 1. 按置信度排序，取底部 20%
+    # 2. 按优先级排序，取 P0/P1 全部
+    # 3. 剩余用例随机采样至 sample_rate 比例
+    pass
+```
+
+#### 5.4.3 Judge LLM 调用
+
+```python
+async def llm_as_judge(test_cases: list[dict], srr: dict) -> dict:
+    """独立 LLM 实例对采样用例打分
+    
+    Returns:
+        {
+            "avg_faithfulness": float,
+            "avg_relevancy": float,
+            "avg_executability": float,
+            "avg_traceability": float,
+            "overall_score": float,          # 加权综合分
+            "low_score_cases": [...],        # 评分 < 0.7 的用例
+            "should_alert": bool             # overall_score < 0.7 触发告警
+        }
+    """
+    # 1. 构建评估 prompt（含 SRR 原文 + 采样用例）
+    # 2. 调用独立 LLM 实例（与 GenAgent/ReviewAgent 不同的模型，避免同源偏差）
+    # 3. 解析评分结果
+    # 4. overall_score < 0.7 → 触发告警，写入 DLQ
+    pass
+```
+
+#### 5.4.4 与断路器集成
+
+LLM-as-Judge 的 `overall_score` 作为断路器（§6.2）的质量触发条件：
+- `overall_score < 0.7` → 断路器触发，标记质量退化
+- 连续 3 次 `overall_score < 0.7` → 断路器 OPEN，停止生成
+
+#### 5.4.5 成本控制
+
+| 策略 | 配置 | 说明 |
+|------|------|------|
+| 采样率 | 5% | 仅采样部分用例，控制 LLM 调用成本 |
+| 批量评估 | 一次调用评估 N 个用例 | 减少调用次数 |
+| 缓存 | 相同 SRR + 相同用例 → 缓存评分 | 避免重复评估 |
+| 触发频率 | 每批次生成后触发 1 次 | 非实时，离线评估 |
+
+> **当前实现状态**：未实现，待 P1 级补齐。
+
 ---
 
 ## 6. 稳定性保障措施
@@ -1077,6 +1365,625 @@ class DeadlockDetector:
 | 死锁检测周期 | `deadlock_scan_interval` | 30s | 后台扫描 |
 | 任务卡住阈值 | `stuck_task_threshold` | 60s | 超过则主动终止 |
 
+### 6.8 迭代闭环生成设计（v2.0 优化，借鉴 CoverUp）
+
+> **背景**：原方案 GenAgent 单次生成 → ReviewAgent 一次性校验，无反馈修正。业界（CoverUp / TestPilot / Meta ACH）已收敛到"生成-执行-反馈-修正"闭环模式。
+>
+> **参考案例**：
+> - [CoverUp (arXiv:2403.16218)](https://arxiv.org/abs/2403.16218) — 覆盖率引导 + LLM 迭代提示 + Tool Function，line+branch 覆盖率 47% → 89%
+> - [TestPilot](https://gitcode.com/gh_mirrors/tes/testpilot) — 双阶段生成 + 闭环反馈 + RetryWithError，通过率 65% → 92%
+> - [Meta ACH (arXiv:2501.12862)](https://arxiv.org/abs/2501.12862) — mutant 未被杀死 → LLM 重生成
+
+#### 6.8.1 闭环架构
+
+```
+┌─────────────┐
+│  GenAgent   │ ◀────────────────────────┐
+│  生成 N 用例 │                          │
+└──────┬──────┘                          │
+       │                                 │
+       ▼                                 │
+┌─────────────┐                    ┌─────┴──────┐
+│ ReviewAgent │                    │  闭环控制器 │
+│   审核      │ ── issues ───────▶ │  LoopCtrl  │
+└──────┬──────┘                    └─────┬──────┘
+       │                                 │
+       ▼                                 │
+┌─────────────┐                          │
+│ Coverage    │ ── coverage 缺口 ───────▶│
+│ 计算器      │                          │
+└─────────────┘                          │
+                                          │
+   ┌──────────────────────────────────────┘
+   │ 若有 blocker 或 coverage 提升
+   ▼
+┌─────────────────────────────────────┐
+│ GenAgent 重生成（仅补充缺失部分）     │
+│ Prompt 注入:                         │
+│   - 上轮 issues (blocker + warning) │
+│   - coverage 缺口 (未覆盖的 FP/类型) │
+│   - 上轮失败用例 ID (避免重复)       │
+└─────────────────────────────────────┘
+```
+
+#### 6.8.2 闭环控制器
+
+```python
+class IterativeLoopController:
+    """迭代闭环控制器（借鉴 CoverUp）
+    
+    控制策略：
+    - 最多 3 轮（MAX_ITERATIONS=3）
+    - 每轮检测 coverage 是否提升，无提升则提前终止
+    - 重生成仅针对缺失部分，非全量重生成
+    - LLM 可调用 Tool Function 主动拉取更多上下文
+    """
+    
+    MAX_ITERATIONS = 3
+    COVERAGE_IMPROVEMENT_THRESHOLD = 0.05  # 每轮 coverage 至少提升 5%
+    
+    async def run_iterative_generation(
+        self,
+        gen_agent,
+        review_agent,
+        srr: dict,
+        functional_points: list[dict] | None = None,
+    ) -> tuple[list[dict], dict]:
+        """执行迭代闭环生成
+        
+        Returns:
+            tuple[final_cases, loop_report]:
+                final_cases: 最终用例列表
+                loop_report: {
+                    "iterations": int,
+                    "coverage_history": [float],     # 每轮 coverage
+                    "issues_history": [list],         # 每轮 issues
+                    "terminated_reason": str,         # 终止原因
+                    "total_tokens": int               # 总 token 消耗
+                }
+        """
+        all_cases = []
+        prev_coverage = 0.0
+        loop_report = {
+            "iterations": 0,
+            "coverage_history": [],
+            "issues_history": [],
+            "terminated_reason": "",
+            "total_tokens": 0,
+        }
+        
+        for iteration in range(1, self.MAX_ITERATIONS + 1):
+            loop_report["iterations"] = iteration
+            
+            # 1. GenAgent 生成（首轮全量，后续仅补充）
+            if iteration == 1:
+                cases = await gen_agent.generate(
+                    srr=srr,
+                    functional_points=functional_points,
+                )
+            else:
+                cases = await gen_agent.generate_supplement(
+                    srr=srr,
+                    prev_issues=loop_report["issues_history"][-1],
+                    coverage_gaps=self._calc_coverage_gaps(all_cases, srr),
+                    functional_points=functional_points,
+                )
+            
+            all_cases.extend(cases)
+            
+            # 2. ReviewAgent 审核
+            review_report, reviewed_cases = await review_agent.review(srr, all_cases)
+            loop_report["issues_history"].append(review_report.get("issues", []))
+            
+            # 3. 计算 coverage
+            current_coverage = self._calc_coverage(all_cases, srr, functional_points)
+            loop_report["coverage_history"].append(current_coverage)
+            
+            # 4. 终止条件判断
+            blockers = [i for i in review_report.get("issues", []) 
+                        if i.get("severity") == "blocker"]
+            if not blockers:
+                loop_report["terminated_reason"] = "无 blocker，审核通过"
+                break
+            
+            coverage_improvement = current_coverage - prev_coverage
+            if iteration > 1 and coverage_improvement < self.COVERAGE_IMPROVEMENT_THRESHOLD:
+                loop_report["terminated_reason"] = (
+                    f"coverage 提升不足 ({coverage_improvement:.3f} < "
+                    f"{self.COVERAGE_IMPROVEMENT_THRESHOLD})，提前终止"
+                )
+                break
+            
+            prev_coverage = current_coverage
+        else:
+            loop_report["terminated_reason"] = f"达到最大轮次 {self.MAX_ITERATIONS}"
+        
+        return all_cases, loop_report
+```
+
+#### 6.8.3 Tool Function 设计
+
+```python
+# GenAgent 可调用的 Tool Function（借鉴 CoverUp）
+TOOLS = [
+    {
+        "name": "get_more_context",
+        "description": "获取功能点的更多上下文（SRR 详细字段）",
+        "parameters": {
+            "fp_id": {"type": "string", "description": "功能点 ID"},
+            "field": {"type": "string", "description": "需要获取的字段名"},
+        },
+    },
+    {
+        "name": "get_similar_cases",
+        "description": "检索同模块的相似历史用例",
+        "parameters": {
+            "fp_id": {"type": "string", "description": "功能点 ID"},
+            "case_type": {"type": "string", "description": "用例类型"},
+        },
+    },
+]
+```
+
+#### 6.8.4 成本控制
+
+| 策略 | 配置 | 说明 |
+|------|------|------|
+| 最大轮次 | `MAX_ITERATIONS=3` | 避免无限重试 |
+| Coverage 提升阈值 | `5%` | 每轮至少提升 5%，否则终止 |
+| 增量生成 | 仅生成缺失部分 | 非全量重生成，降低 token 成本 |
+| Token 预算 | 每轮 token 上限 | 超预算强制终止 |
+
+> **预期收益**：用例通过率 +25%（CoverUp 实测数据）。
+>
+> **当前实现状态**：未实现，待 P1 级补齐。
+
+### 6.9 知识库分库与 PRD 模板（v2.0 优化，借鉴天猫）
+
+> **背景**：原方案单一知识库，无业务类型差异化。通用 LLM 不懂业务，结构化知识库 + PRD 规范化是用例可信度的关键。
+>
+> **参考案例**：
+> - [天猫 AI 用例生成](https://m.toutiao.com/group/7568369176465654318/) — 5 类业务类型差异化 + 4 类知识库 + PRD 标准化模板
+> - [金融 RAG 案例](https://cloud.tencent.com/developer/article/2714458) — Retrieval-Enrich-Generate-Verify 四层测试模型
+
+#### 6.9.1 知识库分库
+
+```
+知识库分库架构：
+
+┌─────────────────────────────────────────────────┐
+│                 路由 Agent                       │
+│   根据需求类型/模块/标签路由到对应知识库          │
+└─────────────────┬───────────────────────────────┘
+                  │
+    ┌─────────────┼─────────────┬─────────────┐
+    ▼             ▼             ▼             ▼
+┌────────┐  ┌────────┐   ┌────────┐   ┌────────┐
+│ 业务背景 │  │ 基线用例 │   │ 资损场景 │   │ 踩坑点 │
+│  库     │  │   库    │   │   库    │   │   库   │
+└────────┘  └────────┘   └────────┘   └────────┘
+```
+
+| 知识库类型 | 存储内容 | 检索时机 | 用途 |
+|-----------|---------|---------|------|
+| **业务背景库** | 业务规则、领域知识、术语表 | 需求解析阶段 | 补充 SRR 业务上下文 |
+| **基线用例库** | 已 approved 的高质量用例 | GenAgent 生成阶段 | Few-shot 注入 |
+| **资损场景库** | 涉及资金/合规的风险场景 | GenAgent 生成阶段 | 强制覆盖资损场景 |
+| **踩坑点库** | 历史 error_case + 修正记录 | ReviewAgent 审核阶段 | 避免重复错误 |
+
+#### 6.9.2 PRD 标准化模板
+
+```python
+PRD_TEMPLATE = {
+    "required_fields": [
+        "业务背景",           # 业务场景描述
+        "功能描述",           # 核心功能点
+        "风控约束",           # 风险控制要求
+        "数据约束",           # 字段/格式约束
+        "验收标准",           # 可验证的验收条件
+    ],
+    "optional_fields": [
+        "性能要求",
+        "安全要求",
+        "兼容性要求",
+    ],
+}
+
+
+class PRDCompletenessAgent:
+    """PRD 补全 Agent（基于 ClarifyAgent 扩展）
+    
+    检测 PRD 缺失字段，自动从知识库补全或提示用户补充。
+    """
+    
+    async def check_and_complete(self, srr: dict) -> dict:
+        """检查 PRD 完整性并补全缺失字段
+        
+        Returns:
+            {
+                "completeness_score": float,
+                "missing_fields": [...],
+                "auto_completed": {...},     # 自动补全的字段
+                "need_user_confirm": [...],  # 需用户确认的字段
+            }
+        """
+        # 1. 检查 required_fields 是否完整
+        # 2. 对缺失字段，从业务背景库检索补全
+        # 3. 无法自动补全的，标记 need_user_confirm
+        pass
+```
+
+#### 6.9.3 引用一致性检查
+
+```python
+class CitationConsistencyChecker:
+    """引用一致性检查器（借鉴金融 RAG 案例）
+    
+    确保用例中的每个数据点都能回溯到知识库原文。
+    """
+    
+    def check(self, test_cases: list[dict], kb_sources: list[dict]) -> dict:
+        """检查用例与知识库的引用一致性
+        
+        Returns:
+            {
+                "consistency_rate": float,
+                "unverified_claims": [...],   # 无法回溯的声明
+                "conflicting_claims": [...],  # 与知识库矛盾的声明
+            }
+        """
+        pass
+```
+
+> **当前实现状态**：单一知识库，无分库；无 PRD 模板；无引用一致性检查。待 P1 级补齐。
+>
+> **预期收益**：用例业务适配性 +40%（天猫实测数据）。
+
+### 6.10 覆盖率引导生成（v2.0 优化，借鉴 CoverUp/SymPrompt）
+
+> **背景**：原方案生成无覆盖率反馈，LLM 不知道哪些场景未被覆盖。
+>
+> **参考案例**：
+> - [CoverUp](https://arxiv.org/abs/2403.16218) — coverage 报告注入 prompt，LLM 主动请求更多源码上下文
+> - [SymPrompt (arXiv:2402.00097)](https://arxiv.org/html/2402.00097v2) — 按执行路径拆解多阶段 prompt，GPT-4 覆盖率 2× 提升
+
+#### 6.10.1 覆盖率计算
+
+```python
+class CoverageCalculator:
+    """覆盖率计算器
+    
+    支持两种覆盖率：
+    1. 代码覆盖率（针对代码级测试）：接入 coverage.py / pytest-cov
+    2. 需求覆盖率（针对需求级测试）：基于 SRR.test_points_hint
+    """
+    
+    def calc_requirement_coverage(
+        self,
+        test_cases: list[dict],
+        srr: dict,
+        functional_points: list[dict] | None = None,
+    ) -> dict:
+        """计算需求覆盖率
+        
+        Returns:
+            {
+                "overall_rate": float,
+                "by_type": {                  # 按用例类型
+                    "functional": float,
+                    "boundary": float,
+                    "exception": float,
+                    "security": float,
+                },
+                "by_fp": {                    # 按功能点
+                    "FP-001": float,
+                    "FP-002": float,
+                },
+                "uncovered_points": [...],    # 未覆盖的测试点
+                "uncovered_fps": [...],       # 未覆盖的功能点
+            }
+        """
+        pass
+```
+
+#### 6.10.2 覆盖率缺口注入
+
+```python
+def inject_coverage_gaps(prompt: str, coverage_report: dict) -> str:
+    """将覆盖率缺口注入 GenAgent 的 prompt
+    
+    格式示例：
+    
+    ## 覆盖率缺口（需补充）
+    
+    ### 未覆盖的测试点
+    - happy_path step 3: "用户点击提交按钮" → 需生成功能测试用例
+    - boundary: "密码长度 6-20" → 需生成边界值用例（长度=5, 6, 20, 21）
+    
+    ### 未覆盖的功能点
+    - FP-003 "用户注册" → 需生成至少 1 个用例
+    
+    ### 类型覆盖不足
+    - security: 0% → 需生成至少 1 个安全测试用例
+    """
+    gaps = coverage_report.get("uncovered_points", [])
+    if not gaps:
+        return prompt
+    
+    gap_section = "\n## 覆盖率缺口（需补充）\n"
+    for gap in gaps:
+        gap_section += f"- {gap['type']}: {gap['description']}\n"
+    
+    return prompt + gap_section
+```
+
+#### 6.10.3 多跳强制检索
+
+```python
+class MultiHopRetriever:
+    """多跳强制检索（借鉴多 Agent RAG 架构）
+    
+    强制两跳检索，防止 RAG 退化：
+    - 第一跳：语义检索（基于 SRR Embedding）
+    - 第二跳：基于第一跳结果合成后续查询
+    """
+    
+    async def retrieve(self, query: str, srr: dict) -> list[dict]:
+        """两跳检索
+        
+        Returns:
+            list[dict]: 检索结果，每项含 {content, source, similarity, hop}
+        """
+        # 第一跳：语义检索
+        first_hop = await self._semantic_search(query, top_k=5)
+        
+        # 第二跳：基于第一跳结果合成查询
+        second_hop_query = await self._synthesize_query(first_hop, srr)
+        second_hop = await self._semantic_search(second_hop_query, top_k=3)
+        
+        # 合并去重
+        results = self._merge_and_dedup(first_hop, second_hop)
+        return results
+```
+
+> **当前实现状态**：无覆盖率计算；无覆盖率缺口注入；无多跳检索。待 P1/P2 级补齐。
+>
+> **预期收益**：覆盖率 +20%（CoverUp 实测数据）。
+
+### 6.11 Prompt Registry 与回归检测（v2.0 优化，借鉴 Promptfoo）
+
+> **背景**：原方案 prompt 仅存储，无版本化管理。Prompt 变更可能引入退化，缺乏回归检测机制。
+>
+> **参考案例**：
+> - [Promptfoo](https://github.com/promptfoo/promptfoo) — YAML 定义 prompt 测试用例，接入 GitHub Actions 做 200+ 用例回归
+> - [多 Agent RAG](https://m.toutiao.com/group/7641218920271266338/) — Prompt 变更走 diff + 人工审批 + 量化回归检测
+
+#### 6.11.1 Prompt Registry 架构
+
+```
+┌─────────────────────────────────────────────────┐
+│              Prompt Registry                     │
+├─────────────────────────────────────────────────┤
+│  prompt_versions:                                │
+│    - id: gen_agent_v2.0                          │
+│      content: "..."                              │
+│      version: v2.0                               │
+│      diff_from: v1.9                             │
+│      status: approved / pending / rejected       │
+│      created_at: 2026-07-28                      │
+│      approved_by: zhangsan                       │
+│      regression_score: 0.85                      │
+│                                                  │
+│  regression_tests:                               │
+│    - id: regression_set_v1                       │
+│      test_cases: [...]  # 200+ 固定测试用例      │
+│      baseline_scores: {v1.9: 0.82, v2.0: 0.85}   │
+└─────────────────────────────────────────────────┘
+```
+
+#### 6.11.2 回归检测流程
+
+```python
+class PromptRegressionTester:
+    """Prompt 回归检测器
+    
+    流程：
+    1. Prompt 变更 → 生成 diff
+    2. 人工审批 diff
+    3. 在 200+ 固定测试用例上运行新 prompt
+    4. 对比 baseline_scores，计算退化/提升
+    5. 退化 > 5% → 拒绝发布；提升 > 5% → 更新 baseline
+    """
+    
+    async def run_regression(
+        self,
+        new_prompt: str,
+        prompt_id: str,
+        regression_set_id: str,
+    ) -> dict:
+        """运行回归测试
+        
+        Returns:
+            {
+                "overall_score": float,
+                "baseline_score": float,
+                "delta": float,               # overall - baseline
+                "degraded_cases": [...],      # 退化的用例
+                "improved_cases": [...],      # 提升的用例
+                "should_publish": bool,       # 是否允许发布
+            }
+        """
+        pass
+```
+
+> **当前实现状态**：prompt_store.py 仅存储，无版本化、无回归检测。待 P2 级补齐。
+
+### 6.12 多 Agent SharedContext 契约（v2.0 优化，借鉴多 Agent RAG）
+
+> **背景**：原方案 Agent 间通过 dict 传递，无契约化通信，易出现字段缺失/类型错误。
+>
+> **参考案例**：[多 Agent RAG 自我改进系统](https://m.toutiao.com/group/7641218920271266338/) — Orchestrator + Decomposition + RAG + Critique + Synthesis 五 Agent，SharedContext JSON Schema 解耦
+
+#### 6.12.1 SharedContext Schema
+
+```python
+from pydantic import BaseModel, Field
+
+
+class SharedContext(BaseModel):
+    """Agent 间共享上下文契约（v2.0 优化）
+    
+    所有 Agent 通过 SharedContext 通信，不直接互调。
+    每个 Agent 只读取自己需要的字段，写入自己负责的字段。
+    """
+    
+    # ─── 输入字段（orchestrator 初始化）───
+    srr: dict = Field(..., description="结构化需求文档")
+    requirement_id: str = Field(..., description="需求 ID")
+    product_id: str = Field(..., description="产品 ID")
+    
+    # ─── ClarifyAgent 写入 ───
+    clarify_result: dict | None = Field(None, description="澄清结果")
+    clarify_iteration: int = Field(0, description="澄清轮次")
+    
+    # ─── QualityGate 写入 ───
+    quality_score: float | None = Field(None, description="质量评分")
+    quality_passed: bool | None = Field(None, description="是否通过质量门")
+    
+    # ─── ImpactAnalysisAgent 写入 ───
+    impact_analysis: dict | None = Field(None, description="影响分析报告")
+    
+    # ─── GenAgent 写入 ───
+    test_cases: list[dict] = Field(default_factory=list, description="生成的用例列表")
+    gen_metadata: dict = Field(default_factory=dict, description="生成元信息")
+    
+    # ─── ReviewAgent 写入 ───
+    review_report: dict | None = Field(None, description="审核报告")
+    reviewed_cases: list[dict] = Field(default_factory=list, description="审核后的用例")
+    
+    # ─── 闭环控制 ───
+    loop_iteration: int = Field(0, description="闭环迭代轮次")
+    coverage_history: list[float] = Field(default_factory=list, description="覆盖率历史")
+    
+    # ─── 错误处理 ───
+    errors: list[dict] = Field(default_factory=list, description="错误记录")
+    warnings: list[dict] = Field(default_factory=list, description="警告记录")
+```
+
+#### 6.12.2 Agent 间通信规则
+
+```python
+# 规则 1：Agent 只读取自己需要的字段
+class ClarifyAgent:
+    def clarify(self, ctx: SharedContext) -> SharedContext:
+        # 只读 ctx.srr, ctx.clarify_iteration
+        # 只写 ctx.clarify_result, ctx.clarify_iteration
+        pass
+
+class GenAgent:
+    def generate(self, ctx: SharedContext) -> SharedContext:
+        # 只读 ctx.srr, ctx.impact_analysis, ctx.clarify_result
+        # 只写 ctx.test_cases, ctx.gen_metadata
+        pass
+
+# 规则 2：Agent 间不直接互调，通过 orchestrator 编排
+class Orchestrator:
+    async def run(self, ctx: SharedContext) -> SharedContext:
+        ctx = await clarify_agent.clarify(ctx)
+        ctx = await quality_gate.check(ctx)
+        ctx = await impact_agent.analyze(ctx)
+        ctx = await gen_agent.generate(ctx)
+        ctx = await review_agent.review(ctx)
+        return ctx
+```
+
+> **当前实现状态**：Agent 间通过 dict 传递，无 Schema 校验。待 P3 级补齐（架构升级）。
+
+### 6.13 Self-Consistency 早停降本（v2.0 优化，借鉴 Blend-ASC）
+
+> **背景**：原方案单次生成，关键场景（资损/合规）缺少多采样聚合。Self-Consistency 可提升可靠性，但成本高。
+>
+> **参考案例**：
+> - [Blend-ASC (ICML 2026)](https://icml.cc/virtual/2026/poster/61225) — 动态分配采样预算，比 vanilla SC 少用 4.8× 样本
+> - [CoT-PoT Ensembling](https://arxiv.org/html/2604.17433v1) — CoT + PoT 两种推理模式集成，78.6% 任务只需 2 个样本
+
+#### 6.13.1 Adaptive Consistency
+
+```python
+class AdaptiveConsistency:
+    """自适应一致性采样（借鉴 Blend-ASC）
+    
+    策略：
+    - 关键场景（资损/合规）N 次采样 + 多数表决
+    - 置信度达阈值即停，省 4.8× token
+    - 非关键场景单次生成
+    """
+    
+    MIN_SAMPLES = 2        # 最少采样数
+    MAX_SAMPLES = 5        # 最多采样数
+    CONFIDENCE_THRESHOLD = 0.85   # 置信度阈值，达到即停
+    
+    async def generate_with_consistency(
+        self,
+        gen_agent,
+        srr: dict,
+        is_critical: bool = False,
+    ) -> tuple[list[dict], dict]:
+        """带一致性的生成
+        
+        Args:
+            is_critical: 是否关键场景（资损/合规），关键场景强制多采样
+        
+        Returns:
+            tuple[consensus_cases, consistency_report]:
+                consensus_cases: 多数表决后的用例列表
+                consistency_report: {
+                    "samples": int,              # 实际采样数
+                    "agreement_rate": float,     # 一致率
+                    "early_stopped": bool,       # 是否提前终止
+                    "token_saved": float,        # 节省的 token 比例
+                }
+        """
+        if not is_critical:
+            # 非关键场景：单次生成
+            cases = await gen_agent.generate(srr)
+            return cases, {"samples": 1, "agreement_rate": 1.0, 
+                          "early_stopped": False, "token_saved": 0.0}
+        
+        # 关键场景：多采样 + 早停
+        samples = []
+        for i in range(self.MAX_SAMPLES):
+            sample = await gen_agent.generate(srr, temperature=0.4 + i * 0.1)
+            samples.append(sample)
+            
+            # 早停判断：连续 MIN_SAMPLES 个样本一致率 ≥ 阈值
+            if i >= self.MIN_SAMPLES - 1:
+                agreement = self._calc_agreement(samples)
+                if agreement >= self.CONFIDENCE_THRESHOLD:
+                    # 提前终止
+                    consensus = self._majority_vote(samples)
+                    return consensus, {
+                        "samples": i + 1,
+                        "agreement_rate": agreement,
+                        "early_stopped": True,
+                        "token_saved": 1 - (i + 1) / self.MAX_SAMPLES,
+                    }
+        
+        # 达到最大采样数，多数表决
+        consensus = self._majority_vote(samples)
+        agreement = self._calc_agreement(samples)
+        return consensus, {
+            "samples": self.MAX_SAMPLES,
+            "agreement_rate": agreement,
+            "early_stopped": False,
+            "token_saved": 0.0,
+        }
+```
+
+> **当前实现状态**：未实现。待 P3 级补齐（前沿探索）。
+>
+> **预期收益**：token 成本 -50%（Blend-ASC 实测数据）。
+
 ---
 
 ## 7. 历史数据复用机制
@@ -1266,24 +2173,29 @@ N个需求 → 按模块分组 → 共享上下文 → 并行GenAgent → 全局
 
 ## 9. 生成质量控制
 
-| 指标 | 定义 | MVP 目标值 | 完整通道目标值 |
-|------|------|-----------|---------------|
-| 接受率 | approved数 / 总生成数 | ≥ 80% | ≥ 85% |
-| 人工修正率 | 被修改用例 / 总审核 | ≤ 20% | ≤ 15% |
-| 覆盖率 | 覆盖 test_points_hint 比例 | ≥ 75% | ≥ 85% |
-| 可追溯率 | 有需求依据的用例比例 | ≥ 90% | ≥ 95% |
-| 一致性方差 | 多次生成覆盖率方差 | < 15% | < 10% |
-| 单次生成耗时 | 1需求 → 完整用例集 | **< 30s** | **< 60s** |
-| 复用命中率 | 使用历史模式/直接复用比例 | ≥ 20% | ≥ 30% |
+| 指标 | 定义 | MVP 目标值 | 完整通道目标值 | v2.0 优化目标值 |
+|------|------|-----------|---------------|----------------|
+| 接受率 | approved数 / 总生成数 | ≥ 80% | ≥ 85% | ≥ 90%（闭环生成） |
+| 人工修正率 | 被修改用例 / 总审核 | ≤ 20% | ≤ 15% | ≤ 10%（闭环生成） |
+| 覆盖率 | 覆盖 test_points_hint 比例 | ≥ 75% | ≥ 85% | ≥ 90%（覆盖率引导） |
+| 可追溯率 | 有需求依据的用例比例 | ≥ 90% | ≥ 95% | ≥ 98%（FP 定向） |
+| 一致性方差 | 多次生成覆盖率方差 | < 15% | < 10% | < 5%（ConsistencyChecker） |
+| 单次生成耗时 | 1需求 → 完整用例集 | **< 30s** | **< 60s** | < 90s（闭环 3 轮） |
+| 复用命中率 | 使用历史模式/直接复用比例 | ≥ 20% | ≥ 30% | ≥ 40%（知识库分库） |
+| 变异得分 | killed_mutants / total_mutants | — | — | ≥ 0.7（P2 级） |
+| LLM-as-Judge 分 | Faithfulness + Relevancy 综合 | — | — | ≥ 0.8（P1 级） |
 
 > **说明**：
 > - **MVP 链路**（2-4 次 LLM 调用，详见 [doc-00 §9.1](./00-architecture-overview.md#91-mvp-简化架构可行性优化)）目标 < 30s，与 doc-00 §9.1 一致。
 > - **完整通道**（20-30 次 LLM 调用，含 ClarifyAgent / ImpactAnalysisAgent / 多类型并行生成 / ReviewAgent 全量审核）目标 < 60s。
-> - 实际项目按 [doc-00 §9.1 配置驱动的通道选择](./00-architecture-overview.md#配置驱动的通道选择) 自动切换，简单需求走 MVP、复杂需求走完整通道。
+> - **v2.0 优化通道**（含迭代闭环 + 覆盖率引导 + LLM-as-Judge）目标 < 90s，用例质量显著提升。
+> - 实际项目按 [doc-00 §9.1 配置驱动的通道选择](./00-architecture-overview.md#配置驱动的通道选择) 自动切换，简单需求走 MVP、复杂需求走完整通道、关键需求走 v2.0 优化通道。
 
 ---
 
 ## 10. 实施建议
+
+### 10.1 基本原则
 
 1. **MVP 先做功能测试生成**，再逐步增加边界值、异常、安全
 2. **Few-shot 质量 >> 数量**，精选 5-10 个高质量示例
@@ -1291,3 +2203,63 @@ N个需求 → 按模块分组 → 共享上下文 → 并行GenAgent → 全局
 4. **温度设置**：功能测试 temperature=0.1，探索性 temperature=0.7
 5. **成本控制**：轻量模型初筛，复杂需求用高端模型
 6. **稳定性 P0 优先**：断路器 + 限速 + Schema校验 + DLQ 先上
+
+### 10.2 v2.0 优化实施路径（P0-P3 四级优先级）
+
+基于业界案例调研（CoverUp / Meta ACH / 天猫 / 字节 SmartUnit）和架构文档差异分析，制定以下优化路径：
+
+#### P0 级：补齐关键缺失（1-2 周）
+
+| 优化项 | 对应章节 | 预期收益 | 工作量 |
+|--------|---------|---------|--------|
+| 修复 GenAgent 向量库写入时序 | §1 Phase 6 | 避免 KB 污染 | 0.5 天 |
+| 实现四级去重策略 | §2.3 | 去重准确率 +30% | 1 天 |
+| 实现 TraceabilityMatrix | §3.2 | 孤立用例拦截 | 1 天 |
+| 补齐断路器触发条件 | §6.2 | 防 runaway agent | 1 天 |
+| 实现 ConsistencyChecker | §4.2 | 覆盖率测量可靠 | 2 天 |
+
+#### P1 级：引入闭环与质量增强（2-3 周）
+
+| 优化项 | 对应章节 | 预期收益 | 工作量 |
+|--------|---------|---------|--------|
+| 迭代闭环生成（CoverUp 模式） | §6.8 | 用例通过率 +25% | 3 天 |
+| 死锁预防策略补齐 | §6.7 | 并发安全 | 2 天 |
+| 跨模块影响分析 | §1.5.3 | 影响范围完整 | 2 天 |
+| LLM-as-Judge 质量评估 | §5.4 | 独立质量信号 | 2 天 |
+| 输出 Schema 强制校验 | §6.1 L3 | 格式错误拦截 | 1 天 |
+| 知识库分库 + PRD 模板 | §6.9 | 业务适配性 +40% | 3 天 |
+
+#### P2 级：进阶能力建设（3-4 周）
+
+| 优化项 | 对应章节 | 预期收益 | 工作量 |
+|--------|---------|---------|--------|
+| 变异测试 | §5.3 | 缺陷检测率 +30% | 5 天 |
+| 覆盖率引导生成 | §6.10 | 覆盖率 +20% | 3 天 |
+| Prompt Registry + 回归检测 | §6.11 | Prompt 治理可审计 | 3 天 |
+| 向量 DB 断路器 | §6.1 L2 | 快速失败 | 1 天 |
+| 5 级优雅降级 | §6.5 | 故障降级链路 | 3 天 |
+
+#### P3 级：前沿探索（长期）
+
+| 优化项 | 对应章节 | 预期收益 | 工作量 |
+|--------|---------|---------|--------|
+| 多 Agent SharedContext 契约 | §6.12 | 架构可扩展 | 2 周 |
+| Self-Consistency 早停 | §6.13 | token 成本 -50% | 1 周 |
+| 流量蒸馏 SFT | — | 模型业务契合 | 4 周+ |
+
+### 10.3 风险与对策
+
+| 风险 | 对策 |
+|------|------|
+| 变异测试成本高 | 设置 mutant 数量上限（用例数 × 2），优先针对安全/资损场景 |
+| 迭代闭环可能放大 LLM 成本 | 限制 N=3 轮，每轮检测 coverage 是否提升，无提升则停 |
+| 知识库分库增加检索复杂度 | 采用路由 Agent 先判定业务类型，再定向检索对应库 |
+| LLM-as-Judge 本身可靠性不足 | 仅 5% 采样，作为辅助信号而非决策信号 |
+| 闭环生成引入新死锁 | 死锁预防策略独立部署，灰度验证后再组合 |
+
+### 10.4 验证方式
+
+- **P0 级**：单元测试覆盖去重、追溯、一致性检查；集成测试验证流水线端到端稳定性
+- **P1 级**：A/B 对比（闭环 vs 单次的用例通过率）；死锁压力测试；LLM-as-Judge 评分与人工评审一致性
+- **P2 级**：变异得分基线；覆盖率 A/B 对比；Prompt 回归测试集
+- **P3 级**：架构兼容性测试；成本对比（token 消耗）

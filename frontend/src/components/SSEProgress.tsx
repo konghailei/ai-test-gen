@@ -15,14 +15,24 @@ const stageLabels: Record<string, string> = {
   clarify: '需求澄清',
   gate: '质量门禁',
   impact: '影响分析',
-  retrieve: '知识库检索',
   generate: '用例生成',
   review: '质量审核',
   done: '完成',
   error: '出错',
 }
 
-const stageIcons: string[] = ['📄', '🔀', '💬', '🛡️', '🎯', '🔍', '⚙️', '✅', '✅', '❌']
+// v2.0 修复：按 stage 名称映射图标，避免按索引取值导致错位
+const stageIcons: Record<string, string> = {
+  parse: '📄',
+  select_channel: '🔀',
+  clarify: '💬',
+  gate: '🛡️',
+  impact: '🎯',
+  generate: '⚙️',
+  review: '✅',
+  done: '✅',
+  error: '❌',
+}
 
 export default function SSEProgress({ stages, currentStage, progress, message, onCancel }: Props) {
   const currentIdx = stages.indexOf(currentStage)
@@ -57,7 +67,7 @@ export default function SSEProgress({ stages, currentStage, progress, message, o
                 isError ? 'bg-red-100 text-red-700' :
                 'bg-slate-50 text-slate-400'
               }`}>
-                <span>{stageIcons[i] || '•'}</span>
+                <span>{stageIcons[stage] || '•'}</span>
                 <span>{stageLabels[stage] || stage}</span>
               </div>
               {i < stages.length - 2 && (

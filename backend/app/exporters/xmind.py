@@ -45,17 +45,40 @@ def _attach_children(parent: dict, kids: list[dict]) -> dict:
     return parent
 
 
-def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
+def _case_type_label(t: str) -> str:
+    """用例类型转中文标签。"""
+    labels = {
+        "functional": "功能", "boundary": "边界", "exception": "异常",
+        "security": "安全", "performance": "性能", "regression": "回归",
+        "integration": "集成", "ui": "界面", "api": "接口", "data": "数据",
+    }
+    return labels.get(t, t)
+
+
+def export_to_xmind(cases: list[dict], project_name: str = "", include_details: bool = True) -> bytes:
     """导出为 XMind 思维导图 JSON 格式。
 
-    分组逻辑：
+    分组逻辑（v2.52: 对齐需求分析 XMind 结构）：
     1. 按需求 ID 分组
-    2. 需求下按功能点分组（有 FP 用 FP，无 FP 用类型兜底）
+    2. 需求下先分"业务场景"节点（跨功能点/整体性用例），再按功能点分组
     3. 功能点下展示用例 + 步骤 + 前置条件
+
+    结构示例：
+        <root>
+          └── 需求标题
+              ├── 业务场景
+              │   └── [性能] 整体性能测试
+              ├── 登录流程（功能点）
+              │   └── [功能] 正常登录验证
+              │       ├── 步骤1: 输入账号密码 → 预期: 登录成功
+              │       └── 前置条件: 已部署测试环境
+              └── 注册流程（功能点）
+                  └── [边界] 边界值测试
 
     Args:
         cases: 用例列表，每项含 req_id/req_title/title/type/functional_point/preconditions/steps
         project_name: 所属项目名称（作为根节点标题）
+        include_details: 是否包含详细步骤和前置条件，False 时用例仅保留标题
 
     Returns:
         bytes: .xmind ZIP 二进制
@@ -69,11 +92,13 @@ def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
         if rid not in req_groups:
             req_groups[rid] = {
                 "title": c.get("req_title") or f"需求 {rid}",
+                "project_name": c.get("project_name", ""),
                 "fp_groups": {},
             }
-        # 2. 需求下按功能点分组
-        fp = (c.get("functional_point") or c.get("related_fp")
-              or f"[{c.get('type', '用例')}]")
+        # 2. 按功能点分组：无功能点归属的用例归入"业务场景"
+        fp = (c.get("functional_point") or c.get("related_fp") or "").strip()
+        if not fp:
+            fp = "业务场景"
         if fp not in req_groups[rid]["fp_groups"]:
             req_groups[rid]["fp_groups"][fp] = []
         req_groups[rid]["fp_groups"][fp].append(c)
@@ -83,41 +108,51 @@ def export_to_xmind(cases: list[dict], project_name: str = "") -> bytes:
 
     req_nodes: list[dict] = []
     for rid, rg in sorted(req_groups.items()):
-        req_node = _topic(f"{rid} {rg['title']}")
+        # 需求节点：项目名 - 需求标题（跨项目时区分）
+        proj_name = rg.get("project_name", "")
+        req_title = rg["title"]
+        req_label = f"{proj_name} - {req_title}" if proj_name else req_title
+        req_node = _topic(req_label)
 
         fp_nodes: list[dict] = []
-        for fp_name, fp_cases in sorted(rg["fp_groups"].items()):
+        # "业务场景"排在最前（与需求分析 XMind 结构一致），其余功能点按字母序
+        fp_names = sorted(rg["fp_groups"].keys(), key=lambda x: (x != "业务场景", x))
+        for fp_name in fp_names:
+            fp_cases = rg["fp_groups"][fp_name]
             fp_node = _topic(fp_name)
 
             case_nodes: list[dict] = []
             for c in fp_cases:
-                case_title = f"[{c.get('type', '')}] {c.get('title', '')}"
+                # 用例类型使用中文标签
+                type_label = _case_type_label(c.get("type", ""))
+                case_title = f"[{type_label}] {c.get('title', '')}" if type_label else c.get("title", "")
                 case_node = _topic(case_title)
 
-                # 步骤作为子节点
-                steps = c.get("steps") or (c.get("case_json") or {}).get("steps", [])
-                step_nodes: list[dict] = []
-                for i, s in enumerate(steps):
-                    if not isinstance(s, dict):
-                        continue
-                    action = s.get("action", "")
-                    if not action:
-                        continue
-                    expected = s.get("expected") or s.get("expect", "")
-                    step_title = f"步骤{i + 1}: {action}"
-                    if expected:
-                        step_title += f"  →  {expected}"
-                    step_nodes.append(_topic(step_title))
-                if step_nodes:
-                    _attach_children(case_node, step_nodes)
+                if include_details:
+                    # 步骤作为子节点
+                    steps = c.get("steps") or (c.get("case_json") or {}).get("steps", [])
+                    step_nodes: list[dict] = []
+                    for i, s in enumerate(steps):
+                        if not isinstance(s, dict):
+                            continue
+                        action = s.get("action", "")
+                        if not action:
+                            continue
+                        expected = s.get("expected") or s.get("expect", "")
+                        step_title = f"步骤{i + 1}: {action}"
+                        if expected:
+                            step_title += f"  →  预期: {expected}"
+                        step_nodes.append(_topic(step_title))
+                    if step_nodes:
+                        _attach_children(case_node, step_nodes)
 
-                # 前置条件（追加到同一 children.attached）
-                precond = (c.get("preconditions")
-                           or (c.get("case_json") or {}).get("preconditions", []))
-                if precond:
-                    precond_nodes = [_topic(f"前置: {p}") for p in precond if p]
-                    if precond_nodes:
-                        _attach_children(case_node, precond_nodes)
+                    # 前置条件（追加到同一 children.attached）
+                    precond = (c.get("preconditions")
+                               or (c.get("case_json") or {}).get("preconditions", []))
+                    if precond:
+                        precond_nodes = [_topic(f"前置条件: {p}") for p in precond if p]
+                        if precond_nodes:
+                            _attach_children(case_node, precond_nodes)
 
                 case_nodes.append(case_node)
 
@@ -210,7 +245,7 @@ def _xchildren(parent: Element, kids: list[Element]) -> None:
         te.append(k)
 
 
-def export_to_xmind_xml(cases: list[dict], project_name: str = "") -> bytes:
+def export_to_xmind_xml(cases: list[dict], project_name: str = "", include_details: bool = True) -> bytes:
     """导出用例为 XMind 8 兼容的 XMAP 2.0 XML 格式。
 
     XMind 8 不支持 content.json 格式（仅支持 content.xml + XMAP 命名空间）。
@@ -218,21 +253,23 @@ def export_to_xmind_xml(cases: list[dict], project_name: str = "") -> bytes:
 
     树结构（需求→功能点→用例→步骤）：
         <root>
-          └── REQ-001 需求标题
-              └── [功能点] 登录流程
-                  └── [functional] 正常登录验证
-                      ├── 步骤1: 输入账号密码 → 登录成功
-                      └── 前置: 已部署测试环境
+          └── 需求标题
+              └── 登录流程（功能点）
+                  └── [功能] 正常登录验证
+                      ├── 步骤1: 输入账号密码 → 预期: 登录成功
+                      └── 前置条件: 已部署测试环境
     """
     root_title = project_name or "测试用例"
 
-    # 1. 分组（复用 JSON 版逻辑）
+    # 1. 分组（复用 JSON 版逻辑，v2.52: 无功能点归属的用例归入"业务场景"）
     req_groups: dict[str, dict] = {}
     for c in cases:
         rid = c.get("req_id") or c.get("related_requirement") or "未知"
         if rid not in req_groups:
-            req_groups[rid] = {"title": c.get("req_title") or f"需求 {rid}", "fp_groups": {}}
-        fp = c.get("functional_point") or c.get("related_fp") or f"[{c.get('type', '用例')}]"
+            req_groups[rid] = {"title": c.get("req_title") or f"需求 {rid}", "project_name": c.get("project_name", ""), "fp_groups": {}}
+        fp = (c.get("functional_point") or c.get("related_fp") or "").strip()
+        if not fp:
+            fp = "业务场景"
         if fp not in req_groups[rid]["fp_groups"]:
             req_groups[rid]["fp_groups"][fp] = []
         req_groups[rid]["fp_groups"][fp].append(c)
@@ -242,38 +279,48 @@ def export_to_xmind_xml(cases: list[dict], project_name: str = "") -> bytes:
 
     req_nodes: list[Element] = []
     for rid, rg in sorted(req_groups.items()):
-        req_node = _xtopic(f"{rid} {rg['title']}")
+        # 需求节点：项目名 - 需求标题（跨项目时区分）
+        proj_name = rg.get("project_name", "")
+        req_title = rg["title"]
+        req_label = f"{proj_name} - {req_title}" if proj_name else req_title
+        req_node = _xtopic(req_label)
         fp_nodes: list[Element] = []
-        for fp_name, fp_cases in sorted(rg["fp_groups"].items()):
+        # "业务场景"排在最前（与需求分析 XMind 结构一致），其余功能点按字母序
+        fp_names = sorted(rg["fp_groups"].keys(), key=lambda x: (x != "业务场景", x))
+        for fp_name in fp_names:
+            fp_cases = rg["fp_groups"][fp_name]
             fp_node = _xtopic(fp_name)
             case_nodes: list[Element] = []
             for c in fp_cases:
-                case_title = f"[{c.get('type', '')}] {c.get('title', '')}"
+                # 用例类型使用中文标签
+                type_label = _case_type_label(c.get("type", ""))
+                case_title = f"[{type_label}] {c.get('title', '')}" if type_label else c.get("title", "")
                 case_node = _xtopic(case_title)
 
-                # 步骤
-                steps = c.get("steps") or (c.get("case_json") or {}).get("steps", [])
-                step_kids: list[Element] = []
-                for i, s in enumerate(steps):
-                    if not isinstance(s, dict):
-                        continue
-                    action = s.get("action", "")
-                    if not action:
-                        continue
-                    expected = s.get("expected") or s.get("expect", "")
-                    text = f"步骤{i + 1}: {action}"
-                    if expected:
-                        text += f"  ->  {expected}"
-                    step_kids.append(_xtopic(text))
-                if step_kids:
-                    _xchildren(case_node, step_kids)
+                if include_details:
+                    # 步骤
+                    steps = c.get("steps") or (c.get("case_json") or {}).get("steps", [])
+                    step_kids: list[Element] = []
+                    for i, s in enumerate(steps):
+                        if not isinstance(s, dict):
+                            continue
+                        action = s.get("action", "")
+                        if not action:
+                            continue
+                        expected = s.get("expected") or s.get("expect", "")
+                        text = f"步骤{i + 1}: {action}"
+                        if expected:
+                            text += f"  ->  预期: {expected}"
+                        step_kids.append(_xtopic(text))
+                    if step_kids:
+                        _xchildren(case_node, step_kids)
 
-                # 前置条件
-                precond = c.get("preconditions") or (c.get("case_json") or {}).get("preconditions", [])
-                if precond:
-                    pre_kids = [_xtopic(f"前置: {p}") for p in precond if p]
-                    if pre_kids:
-                        _xchildren(case_node, pre_kids)
+                    # 前置条件
+                    precond = c.get("preconditions") or (c.get("case_json") or {}).get("preconditions", [])
+                    if precond:
+                        pre_kids = [_xtopic(f"前置条件: {p}") for p in precond if p]
+                        if pre_kids:
+                            _xchildren(case_node, pre_kids)
 
                 case_nodes.append(case_node)
             if case_nodes:
@@ -311,8 +358,3 @@ def export_to_xmind_xml(cases: list[dict], project_name: str = "") -> bytes:
         zf.writestr("manifest.json", _json.dumps({"file-entries": {"content.xml": {}, "metadata.json": {}}}))
         zf.writestr("metadata.json", _json.dumps({"creator": {"name": "AI测试用例生成系统", "version": "1.0"}}))
     return buf.getvalue()
-
-
-def _case_type_label(t: str) -> str:
-    return {"functional": "功能", "boundary": "边界", "exception": "异常",
-            "security": "安全", "performance": "性能"}.get(t, t)

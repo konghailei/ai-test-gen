@@ -128,7 +128,6 @@ cross_fp_interactions.shared_business_rules。
 - priority 必须是 P0/P1/P2/P3 之一，默认 P2
 - modules 字段为数组，支持多模块关联
 - 如果原文内容非常丰富，**不要省略任何全局性细节**，输出 JSON 可以很长
-- `additional_details` 字段用于存放无法映射到标准字段的原文内容
 - `fp_summary` 是功能点概要列表，每项含 name/fp_type/priority/summary/module，**不要展开功能点内部细节**
 - 优化需求时必须在 `legacy_data_impact` 中描述历史数据影响（无法判断则 user_clarification 留空）
 """
@@ -204,7 +203,6 @@ SRR_SCHEMA_GUIDE = """输出 JSON 必须包含以下字段(对应 SRR Schema):
   "assumptions": [                  // 假设与约束
     {"content": "", "type": "assumption|constraint|out_of_scope"}
   ],
-  "additional_details": "",         // 原文中无法映射到上述标准字段的额外内容
 
   // ===== v2.32 新增字段（总 SRR 核心职责，基于业界最佳实践） =====
   "cross_fp_interactions": {        // 跨功能点交互规则（总 SRR 核心职责）
@@ -411,7 +409,6 @@ FEW_SHOT_EXAMPLE = """【示例1: 中等复杂度需求】
     "global_constraints": ["登录响应P99 < 500ms", "统一使用 TLS 1.3 传输加密"]
   },
   "legacy_data_impact": null,
-  "additional_details": "需支持记住密码功能，密码使用bcrypt加密存储"
 }
 
 注意：此示例中只有一个功能点"用户登录"，因此 fp_summary 只列一项。

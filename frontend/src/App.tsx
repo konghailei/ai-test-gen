@@ -25,6 +25,7 @@ import AdminKnowledgeBase from './pages/AdminKnowledgeBase'
 import UserManual from './pages/UserManual'
 import Tasks from './pages/Tasks'
 import Logs from './pages/Logs'
+import Generate from './pages/Generate'
 
 /** 路由守卫：未登录 → 登录页 */
 function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -87,7 +88,9 @@ export default function App() {
           <Route path="/requirements" element={<Requirements />} />
           <Route path="/requirements/:id" element={<RequirementDetail />} />
           <Route path="/requirements/:id/clarify" element={<RequirementClarify />} />
-          <Route path="/requirements/:id/generate" element={<TestCases />} />
+          <Route path="/requirements/:id/generate" element={<Generate />} />
+          {/* v2.0：独立生成页面，支持从 Dashboard 直接访问 */}
+          <Route path="/generate" element={<Generate />} />
           <Route path="/testcases" element={<TestCases />} />
           <Route path="/knowledge" element={<KnowledgeBase />} />
           <Route path="/knowledge-qa" element={<KnowledgeQA />} />

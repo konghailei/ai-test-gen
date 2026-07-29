@@ -1,0 +1,67 @@
+<!-- 管理端 Shell 片段 - 琥珀色主题 -->
+<!-- 子代理应读取此文件获取管理端侧边栏 HTML 和 CSS 模板 -->
+
+<!-- 管理端侧边栏 HTML 结构（放在 app-shell 内部，main-area 之前）: -->
+<!--
+<aside class="sidebar admin-sidebar" data-region="sidebar">
+  <div class="sidebar-header">
+    <div class="logo-icon" style="background: linear-gradient(135deg, var(--chart-3), var(--chart-4));">
+      <i data-lucide="shield" style="color: var(--background-50);"></i>
+    </div>
+    <div class="logo-text">
+      <span class="logo-title">管理后台</span>
+      <span class="logo-subtitle">系统管理控制台</span>
+    </div>
+  </div>
+  <nav class="sidebar-nav">
+    <a class="nav-item admin-nav-item" data-nav-key="admin-dashboard" data-dom-id="nav-admin-dashboard" data-active="false" href="#">
+      <i data-lucide="layout-dashboard"></i><span>首页</span>
+    </a>
+    <a class="nav-item admin-nav-item" data-nav-key="admin-products" data-dom-id="nav-admin-products" data-active="false" href="#">
+      <i data-lucide="package"></i><span>产品管理</span>
+    </a>
+    <a class="nav-item admin-nav-item" data-nav-key="admin-prompts" data-dom-id="nav-admin-prompts" data-active="false" href="#">
+      <i data-lucide="file-code"></i><span>提示词管理</span>
+    </a>
+    <a class="nav-item admin-nav-item" data-nav-key="admin-knowledge" data-dom-id="nav-admin-knowledge" data-active="false" href="#">
+      <i data-lucide="book-open"></i><span>知识库</span>
+    </a>
+    <a class="nav-item admin-nav-item" data-nav-key="admin-users" data-dom-id="nav-admin-users" data-active="false" href="#">
+      <i data-lucide="users"></i><span>用户管理</span>
+    </a>
+    <a class="nav-item admin-nav-item" data-nav-key="admin-roles" data-dom-id="nav-admin-roles" data-active="false" href="#">
+      <i data-lucide="shield-check"></i><span>角色管理</span>
+    </a>
+    <a class="nav-item admin-nav-item" data-nav-key="admin-logs" data-dom-id="nav-admin-logs" data-active="false" href="#">
+      <i data-lucide="scroll-text"></i><span>日志查看</span>
+    </a>
+    <a class="nav-item admin-nav-item" data-nav-key="admin-settings" data-dom-id="nav-admin-settings" data-active="false" href="#">
+      <i data-lucide="settings"></i><span>系统设置</span>
+    </a>
+  </nav>
+</aside>
+-->
+
+<!-- 管理端侧边栏 CSS 覆盖（放在共享 shell CSS 之后）: -->
+<!--
+<style>
+.admin-sidebar .logo-icon {
+  background: linear-gradient(135deg, var(--chart-3), var(--chart-4)) !important;
+}
+.admin-nav-item[data-active="true"] {
+  background: color-mix(in srgb, var(--chart-3) 10%, transparent);
+  color: var(--chart-3);
+  border-left: 3px solid var(--chart-3);
+  font-weight: 600;
+}
+.admin-nav-item[data-active="true"] i,
+.admin-nav-item[data-active="true"] span {
+  color: var(--chart-3);
+}
+.admin-nav-item:hover:not([data-active="true"]) {
+  background: color-mix(in srgb, var(--chart-3) 5%, transparent);
+}
+</style>
+-->
+
+<!-- 管理端 header 与应用端相同：搜索框 + 通知按钮 + 用户区域 -->

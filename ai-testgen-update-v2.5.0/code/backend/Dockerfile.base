@@ -1,0 +1,29 @@
+# ============================================================================
+# AI-Test-Gen 基础镜像（python:3.12-slim + 全部 Python 依赖）
+#
+# 构建（仅首次或依赖变更时）：docker compose -f docker-compose.base.yml build base
+#
+# bge 模型通过 bind mount 从宿主机 ./models 挂载，不烘焙进镜像。
+# ============================================================================
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# 系统依赖：gcc/make 用于编译部分 Python 包（psycopg2 等）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc make libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装全部 Python 依赖（Docker 层缓存加速重复构建）
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && mkdir -p /app/data \
+    # 清理编译产物减小镜像
+    && apt-get purge -y gcc make \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')" || exit 1
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

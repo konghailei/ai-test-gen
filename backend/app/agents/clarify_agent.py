@@ -1607,7 +1607,8 @@ class ClarifyAgent:
                 continue  # 歧义问题不自动补全，仍需人工确认
 
             # 增量文档基线补全：把知识库历史需求的基础上下文合并进 SRR，
-            # 不覆盖文档自身已描述的内容（追加到 _baseline_context + additional_details）。
+            # 不覆盖文档自身已描述的内容（存入 _baseline_context 字段）。
+            # v2.40: 移除 additional_details，baseline 仅写入 _baseline_context
             if a.get("_is_baseline") and isinstance(value, dict) and value:
                 existing = srr.get("_baseline_context")
                 existing = existing if isinstance(existing, dict) else {}
@@ -1618,9 +1619,6 @@ class ClarifyAgent:
                 for k, v in existing.items():
                     merged.setdefault(k, v)
                 srr["_baseline_context"] = merged
-                add = srr.get("additional_details", "") or ""
-                base_txt = "\n\n【来自知识库历史版本补全的基础上下文】\n" + json.dumps(full_block, ensure_ascii=False)[:1500]
-                srr["additional_details"] = add + base_txt
                 a["auto_filled"] = True
                 augmentations.append({
                     "field": field,

@@ -87,6 +87,7 @@ export default function Tasks() {
   const [filterStatus, setFilterStatus] = useState<string>('')
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)  // v2.23: 展开耗时明细
   const [detailTask, setDetailTask] = useState<AnalysisTaskInfo | null>(null)  // v2.24: 任务详情弹窗
+  const [serverNow, setServerNow] = useState<string | undefined>(undefined)  // v2.36: 服务器当前时间
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const loadTasks = async () => {
@@ -98,6 +99,7 @@ export default function Tasks() {
       })
       setTasks(res.items || [])
       setTotal(res.total || 0)
+      setServerNow(res.server_now)
     } catch (e: any) {
       console.error('加载任务失败:', e?.message)
     } finally {
@@ -208,10 +210,12 @@ export default function Tasks() {
                   const Icon = typeInfo.icon
                   const StatusIcon = statusInfo.icon
                   const isRunning = task.status === 'running' || task.status === 'pending'
+                  // v2.36: 进行中的任务使用服务器时间，避免客户端时钟偏差导致负数
+                  const nowMs = serverNow ? new Date(serverNow).getTime() : Date.now()
                   const duration = task.completed_at
                     ? new Date(task.completed_at).getTime() - new Date(task.created_at).getTime()
-                    : Date.now() - new Date(task.created_at).getTime()
-                  const durationSec = Math.round(duration / 1000)
+                    : nowMs - new Date(task.created_at).getTime()
+                  const durationSec = Math.max(0, Math.round(duration / 1000))
                   // v2.23: 阶段耗时数据
                   const timings = task.phase_timings || {}
                   const hasTimings = Object.keys(timings).length > 0
@@ -325,9 +329,10 @@ export default function Tasks() {
                                 {Object.entries(timings).map(([phaseKey, t]: [string, any]) => {
                                   if (!t?.start) return null
                                   const isPhaseDone = !!t.end
+                                  // v2.36: 进行中的阶段使用服务器时间
                                   const elapsed = t.end
                                     ? t.duration_ms || (new Date(t.end).getTime() - new Date(t.start).getTime())
-                                    : Date.now() - new Date(t.start).getTime()
+                                    : nowMs - new Date(t.start).getTime()
                                   // 计算占总耗时的百分比
                                   const totalMs = Object.values(timings).reduce((sum, pt) => {
                                     if (!pt?.start) return sum
@@ -532,9 +537,11 @@ export default function Tasks() {
                     {Object.entries(detailTask.phase_timings).map(([phaseKey, t]: [string, PhaseTiming]) => {
                       if (!t?.start) return null
                       const isDone = !!t.end
+                      // v2.36: 进行中的阶段使用服务器时间
+                      const detailNowMs = detailTask.server_now ? new Date(detailTask.server_now).getTime() : (serverNow ? new Date(serverNow).getTime() : Date.now())
                       const elapsed = t.end
                         ? t.duration_ms || (new Date(t.end).getTime() - new Date(t.start).getTime())
-                        : Date.now() - new Date(t.start).getTime()
+                        : detailNowMs - new Date(t.start).getTime()
                       return (
                         <div key={phaseKey} className="flex items-center justify-between text-xs">
                           <span style={{ color: 'var(--foreground-secondary)' }}>
@@ -544,6 +551,77 @@ export default function Tasks() {
                         </div>
                       )
                     })}
+                  </div>
+                </div>
+              )}
+
+              {/* v2.0：生成统计信息（从 result_json 提取） */}
+              {detailTask.result_json && Object.keys(detailTask.result_json).length > 0 && (
+                <div>
+                  <p className="text-xs mb-0.5" style={{ color: 'var(--foreground-quaternary)' }}>生成统计</p>
+                  <div className="rounded p-3 space-y-2" style={{ background: 'var(--background-muted)' }}>
+                    {(() => {
+                      const r: any = detailTask.result_json
+                      return (
+                        <>
+                          {/* 用例数 + 类型分布 */}
+                          {r.case_count !== undefined && (
+                            <div className="flex items-center justify-between text-xs">
+                              <span style={{ color: 'var(--foreground-secondary)' }}>用例总数</span>
+                              <span className="font-mono font-medium" style={{ color: 'var(--foreground)' }}>{r.case_count}</span>
+                            </div>
+                          )}
+                          {r.type_dist && typeof r.type_dist === 'object' && Object.keys(r.type_dist).length > 0 && (
+                            <div className="flex items-start justify-between text-xs gap-2">
+                              <span style={{ color: 'var(--foreground-secondary)' }}>类型分布</span>
+                              <div className="flex flex-wrap gap-1 justify-end">
+                                {Object.entries(r.type_dist).map(([t, n]: [string, any]) => (
+                                  <span key={t} className="px-1.5 py-0.5 rounded text-xs" style={{ background: 'var(--brand-100)', color: 'var(--brand-700)' }}>
+                                    {t}: {n}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {/* 审核结果 */}
+                          {(r.review_passed !== undefined || r.review_blocked !== undefined) && (
+                            <div className="flex items-center justify-between text-xs">
+                              <span style={{ color: 'var(--foreground-secondary)' }}>审核结果</span>
+                              <span className="font-mono">
+                                <span style={{ color: 'var(--state-success)' }}>通过 {r.review_passed ?? 0}</span>
+                                <span style={{ color: 'var(--foreground-quaternary)' }}> / </span>
+                                <span style={{ color: 'var(--state-error)' }}>拦截 {r.review_blocked ?? 0}</span>
+                              </span>
+                            </div>
+                          )}
+                          {/* 平均置信度 */}
+                          {r.avg_confidence !== undefined && (
+                            <div className="flex items-center justify-between text-xs">
+                              <span style={{ color: 'var(--foreground-secondary)' }}>平均置信度</span>
+                              <span className="font-mono font-medium" style={{ color: 'var(--brand-500)' }}>
+                                {((r.avg_confidence || 0) * 100).toFixed(1)}%
+                              </span>
+                            </div>
+                          )}
+                          {/* 一致性异常标记 */}
+                          {r.consistency_inconsistent !== undefined && (
+                            <div className="flex items-center justify-between text-xs">
+                              <span style={{ color: 'var(--foreground-secondary)' }}>一致性</span>
+                              <span style={{ color: r.consistency_inconsistent ? 'var(--state-error)' : 'var(--state-success)' }} className="font-medium">
+                                {r.consistency_inconsistent ? '⚠ 存在异常' : '✓ 一致'}
+                              </span>
+                            </div>
+                          )}
+                          {/* 耗时 */}
+                          {r.duration_ms !== undefined && r.duration_ms > 0 && (
+                            <div className="flex items-center justify-between text-xs">
+                              <span style={{ color: 'var(--foreground-secondary)' }}>总耗时</span>
+                              <span className="font-mono" style={{ color: 'var(--foreground-tertiary)' }}>{formatDuration(r.duration_ms)}</span>
+                            </div>
+                          )}
+                        </>
+                      )
+                    })()}
                   </div>
                 </div>
               )}

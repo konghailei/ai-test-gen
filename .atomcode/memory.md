@@ -1,0 +1,1 @@
+- 内网 v2.1.1 的 docker-compose.offline.yml 已手动更新了 extra_hosts、APP_SECRET_KEY、MASTER_KEY 三处变更，后续更新包可以不再包含此文件

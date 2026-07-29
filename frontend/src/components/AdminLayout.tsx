@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Outlet, useNavigate } from 'react-router-dom'
+import { useState, useEffect, useRef } from 'react'
+import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import AdminSidebar from './AdminSidebar'
 import { useAuth } from '../auth'
 import { Menu, LogOut, ChevronDown, ShieldCheck, Key, X, Loader2, Save } from 'lucide-react'
@@ -7,12 +7,30 @@ import { Menu, LogOut, ChevronDown, ShieldCheck, Key, X, Loader2, Save } from 'l
 export default function AdminLayout() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
   const [collapsed, setCollapsed] = useState(false)
   const [showUserMenu, setShowUserMenu] = useState(false)
   const [showPwdModal, setShowPwdModal] = useState(false)
   const [pwdCurrent, setPwdCurrent] = useState('')
   const [pwdNew, setPwdNew] = useState('')
   const [pwdSaving, setPwdSaving] = useState(false)
+
+  // 路由变化时关闭下拉菜单，避免透明遮罩层残留拦截点击
+  useEffect(() => {
+    setShowUserMenu(false)
+  }, [location.pathname])
+
+  // 点击外部关闭下拉菜单（替代 fixed inset-0 透明遮罩层，避免遮挡侧边栏导航）
+  const userMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
 
   const handleChangePassword = async () => {
     if (!pwdCurrent || !pwdNew) return
@@ -79,7 +97,7 @@ export default function AdminLayout() {
           </div>
 
           {/* 用户区 */}
-          <div className="relative ml-auto">
+          <div className="relative ml-auto" ref={userMenuRef}>
             <button
               onClick={() => setShowUserMenu(!showUserMenu)}
               className="flex items-center gap-2 transition-colors"
@@ -106,7 +124,6 @@ export default function AdminLayout() {
 
             {showUserMenu && (
               <>
-                <div className="fixed inset-0 z-10" onClick={() => setShowUserMenu(false)} />
                 <div
                   className="absolute right-0 top-full z-20 animate-scale-in"
                   style={{

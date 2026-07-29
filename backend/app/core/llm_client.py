@@ -1180,13 +1180,182 @@ def _extract_json_block(text: str) -> dict | list | None:
     return _try_repair_json(block)
 
 
+def _normalize_code_expressions(text: str) -> str:
+    """预处理 LLM 误用的代码表达式为 JSON 字面量。
+
+    LLM 偶尔会在 JSON 输出中混入 JavaScript/Python 代码表达式（如
+    `"a".repeat(50)`、`"x" * 100`），导致 JSON 解析失败。本函数将这些
+    表达式替换为对应的字面量字符串，最大化容错能力。
+
+    支持的模式：
+        1. "str".repeat(N)        → "strstr...str" (N 次)
+        2. "str".repeat(N, "sep") → "strsepstr...str"
+        3. "str" * N              → "strstr...str" (Python 风格)
+        4. 超长重复字符串压缩      → "aaa...(N个a)" (防止 LLM 生成万级重复字符导致 JSON 结构损坏)
+
+    Args:
+        text: 可能含代码表达式的文本
+
+    Returns:
+        str: 替换代码表达式后的文本
+    """
+    import re
+
+    def _escape_for_json(s: str, quote: str) -> str:
+        """转义字符串内容以安全嵌入 JSON 字符串字面量。"""
+        return s.replace("\\", "\\\\").replace(quote, "\\" + quote)
+
+    def _build_replacement(quote: str, body: str, count: int, sep: str = "") -> str:
+        """构造替换字符串：quote + body * count + quote。"""
+        if count <= 0:
+            return f"{quote}{quote}"
+        if count > 10000:
+            count = 10000  # 防止内存爆炸
+        escaped = _escape_for_json(body, quote)
+        if sep:
+            # 带分隔符：str + sep + str + sep + ... + str（共 count 个 str，count-1 个 sep）
+            sep_esc = _escape_for_json(sep, quote)
+            return f"{quote}{(escaped + sep_esc) * (count - 1) + escaped}{quote}"
+        return f"{quote}{escaped * count}{quote}"
+
+    # 1. 处理 "str".repeat(N) 和 "str".repeat(N, "sep")
+    #    分双引号和单引号两种情况独立匹配，避免反向引用问题
+    for quote_char in ('"', "'"):
+        # 双引号版本：匹配 "body".repeat(N) 或 "body".repeat(N, "sep")
+        # body 内部允许 \" 转义和除 quote 外的任意字符
+        pattern = re.compile(
+            re.escape(quote_char) +
+            r'((?:\\' + re.escape(quote_char) + r'|[^' + re.escape(quote_char) + r'\\])*)' +
+            re.escape(quote_char) +
+            r'\.repeat\(\s*(\d+)\s*(?:,\s*' +
+            re.escape(quote_char) +
+            r'((?:\\' + re.escape(quote_char) + r'|[^' + re.escape(quote_char) + r'\\])*)' +
+            re.escape(quote_char) +
+            r'\s*)?\)'
+        )
+
+        # 使用默认参数固定 quote_char，避免闭包陷阱
+        def _replace_repeat(match: re.Match, qc=quote_char) -> str:
+            body = match.group(1) or ""
+            count = int(match.group(2))
+            sep = match.group(3) or ""
+            return _build_replacement(qc, body, count, sep)
+
+        text = pattern.sub(_replace_repeat, text)
+
+    # 2. 处理 "str" * N（Python 风格字符串重复）
+    for quote_char in ('"', "'"):
+        pattern_mul = re.compile(
+            re.escape(quote_char) +
+            r'((?:\\' + re.escape(quote_char) + r'|[^' + re.escape(quote_char) + r'\\])*)' +
+            re.escape(quote_char) +
+            r'\s*\*\s*(\d+)'
+        )
+
+        # 使用默认参数固定 quote_char
+        def _replace_mul(match: re.Match, qc=quote_char) -> str:
+            body = match.group(1) or ""
+            count = int(match.group(2))
+            return _build_replacement(qc, body, count)
+
+        text = pattern_mul.sub(_replace_mul, text)
+
+    # 3. 压缩超长重复字符串（LLM 生成边界值测试时可能误写万级重复字符）
+    #    场景：LLM 生成 "password": "aaaa...（22412 个 a）..." 导致输出过长，
+    #    LLM 在超长字符串后遗漏 JSON 闭合括号，JSON 解析失败。
+    #    策略：检测 JSON 字符串字面量内连续重复字符 ≥ 200 的情况，压缩为短表示。
+    #    阈值 200 既能覆盖问题场景，又不影响正常短字符串。
+    text = _compress_long_repeated_chars(text, threshold=200)
+
+    return text
+
+
+def _compress_long_repeated_chars(text: str, threshold: int = 200) -> str:
+    """压缩 JSON 字符串字面量中的超长重复字符序列。
+
+    当 LLM 生成边界值测试数据时（如 128 位密码），可能误将 "128 个 a" 实际写出
+    上万个 'a' 字符。这会导致：
+    1. 输出 token 大量浪费
+    2. LLM 在超长字符串后"忘记"闭合 JSON 对象括号，导致解析失败
+
+    本函数扫描 JSON 字符串字面量（双引号包围、正确处理转义），将连续重复字符
+    超过 threshold 的部分压缩为 "xxx...(N个x)" 格式。
+
+    Args:
+        text: 可能包含超长重复字符串的 JSON 文本
+        threshold: 触发压缩的最小连续重复字符数（默认 200）
+
+    Returns:
+        str: 压缩后的文本
+    """
+    import re
+
+    # 匹配 JSON 字符串字面量：双引号包围，内部允许 \" 转义和其他任意字符
+    # 使用非贪婪匹配 + 负向断言确保正确识别字符串边界
+    string_pattern = re.compile(r'"((?:\\.|[^"\\])*)"')
+
+    def _compress_match(match: re.Match) -> str:
+        """处理单个字符串字面量匹配，压缩内部超长重复字符。"""
+        content = match.group(1)
+        # 快速检查：字符串较短或无长重复序列时直接返回
+        if len(content) < threshold:
+            return match.group(0)
+
+        # 检测连续重复字符：用正则找到所有 (char){n,} 其中 n >= threshold
+        # 注意：需要处理转义字符，不压缩转义序列（如 \n \t）
+        def _replace_repeated(m: re.Match) -> str:
+            char = m.group(1)
+            count = len(m.group(0)) // len(char) if len(char) > 0 else 0
+            if count >= threshold:
+                # 保留前 5 个字符 + 省略描述 + 后 3 个字符
+                return f"{char * 5}...({count}个{char})...{char * 3}"
+            return m.group(0)
+
+        # 匹配连续重复的同一非转义字符（排除反斜杠开头的转义序列）
+        # 使用 (.) 捕获一个字符，然后 \1+ 匹配后续相同字符
+        repeated_pattern = re.compile(r'([^\n\\])\1{')
+        # 上述正则不完整，改用直接匹配方式
+        # 匹配同一字符连续出现 threshold 次以上
+        # 注意：不匹配反斜杠（避免破坏转义序列）
+        result = []
+        i = 0
+        n = len(content)
+        while i < n:
+            ch = content[i]
+            # 跳过转义序列（反斜杠 + 下一字符）
+            if ch == "\\" and i + 1 < n:
+                result.append(content[i:i + 2])
+                i += 2
+                continue
+            # 统计当前字符的连续出现次数
+            j = i + 1
+            while j < n and content[j] == ch:
+                j += 1
+            run_len = j - i
+            if run_len >= threshold:
+                # 压缩：保留前 5 + 描述 + 后 3
+                result.append(f"{ch * 5}...({run_len}个{ch})...{ch * 3}")
+            else:
+                result.append(content[i:j])
+            i = j
+
+        compressed = "".join(result)
+        # 转义压缩后的内容中的双引号和反斜杠（虽然占位符不太可能包含这些，但安全起见）
+        # 注意：原始 content 已经是去掉了外层引号的字符串字面量内容，转义状态保持不变
+        # 压缩后的 ...(N个x)... 部分不含特殊字符，不需要额外转义
+        return f'"{compressed}"'
+
+    return string_pattern.sub(_compress_match, text)
+
+
 def _try_repair_json(text: str) -> dict | None:
     """尝试修复常见 JSON 格式问题后解析。
 
     修复项：
-    1. 尾随逗号（}, ] 前的逗号）
-    2. 单引号 → 双引号
-    3. 截断的 JSON（补全缺失的右括号，按 LIFO 顺序）
+    1. LLM 误用的代码表达式（"a".repeat(50) → "aaa..."）
+    2. 尾随逗号（}, ] 前的逗号）
+    3. 单引号 → 双引号
+    4. 截断的 JSON（补全缺失的右括号，按 LIFO 顺序）
 
     Args:
         text: 可能可修复的 JSON 文本
@@ -1196,8 +1365,11 @@ def _try_repair_json(text: str) -> dict | None:
     """
     import re
 
+    # 0. 预处理：替换 LLM 误用的代码表达式（如 "a".repeat(50)）
+    repaired = _normalize_code_expressions(text)
+
     # 1. 去除尾随逗号
-    repaired = re.sub(r",\s*([}\]])", r"\1", text)
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
 
     # 2. 尝试解析
     try:
@@ -1288,6 +1460,83 @@ def _try_repair_json(text: str) -> dict | None:
             return json.loads(truncated)
         except json.JSONDecodeError:
             pass
+
+    # 5. 逐对象截断修复：适用于数组中某个对象因缺失闭合括号而损坏的场景
+    #    典型场景：LLM 生成超长字符串（如 22412 个 'a'）后，遗漏了 JSON 对象的
+    #    闭合 }，导致后续对象被解析器误认为前一个对象的属性，JSON 解析失败。
+    #    策略：遍历所有 } 位置，对每个位置截断并用栈补全剩余括号，尝试解析。
+    #    这样即使中间缺失 }，也能通过截断+补全恢复可解析的 JSON。
+    stripped = repaired.lstrip()
+    if stripped.startswith("["):
+        # 找到所有 } 的位置（在字符串外部的）
+        brace_positions: list[int] = []
+        stk3: list[str] = []
+        in_str3 = False
+        esc3 = False
+        for i, ch in enumerate(repaired):
+            if esc3:
+                esc3 = False
+                continue
+            if ch == "\\":
+                esc3 = True
+                continue
+            if ch == '"':
+                in_str3 = not in_str3
+                continue
+            if in_str3:
+                continue
+            if ch == "{":
+                stk3.append("{")
+            elif ch == "}":
+                if stk3 and stk3[-1] == "{":
+                    stk3.pop()
+                    brace_positions.append(i)
+                # 不匹配的 } 也记录（可能帮助截断）
+                elif stk3:
+                    brace_positions.append(i)
+        # 从后往前，在每个 } 位置尝试截断+栈补全
+        closing_map = {"{": "}", "[": "]"}
+        for pos in reversed(brace_positions):
+            truncated3 = repaired[: pos + 1]
+            # 重新计算截断后文本的栈状态
+            stk4: list[str] = []
+            in_str4 = False
+            esc4 = False
+            for ch in truncated3:
+                if esc4:
+                    esc4 = False
+                    continue
+                if ch == "\\":
+                    esc4 = True
+                    continue
+                if ch == '"':
+                    in_str4 = not in_str4
+                    continue
+                if in_str4:
+                    continue
+                if ch == "{":
+                    stk4.append("{")
+                elif ch == "}":
+                    if stk4 and stk4[-1] == "{":
+                        stk4.pop()
+                elif ch == "[":
+                    stk4.append("[")
+                elif ch == "]":
+                    if stk4 and stk4[-1] == "[":
+                        stk4.pop()
+            # 补全缺失的闭合括号
+            if stk4:
+                truncated3 += "".join(closing_map[c] for c in reversed(stk4))
+            try:
+                data3 = json.loads(truncated3)
+                if isinstance(data3, list) and len(data3) > 0:
+                    logger.debug(
+                        "[LLM/repair] 逐对象截断成功: 保留 {} 个对象（丢弃末尾损坏对象）",
+                        len(data3),
+                    )
+                    return data3
+            except json.JSONDecodeError:
+                continue
 
     return None
 

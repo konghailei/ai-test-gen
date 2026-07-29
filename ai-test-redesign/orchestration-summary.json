@@ -1,0 +1,342 @@
+{
+  "skillProvenance": {
+    "name": "solo-design",
+    "version": "2026.07.06.8",
+    "version_source": "skill-version.json",
+    "runtime_skill_dir": "c:\\Users\\kong\\.trae-cn\\builtin\\design\\hebe\\skills\\solo-design",
+    "recorded_at": "2026-07-23T14:55:00+08:00"
+  },
+  "project": {
+    "name": "AI测试生成系统",
+    "path": "d:\\git_down\\ai-test-gen\\ai-test-redesign",
+    "operation": "create",
+    "deviceType": "desktop",
+    "language": "zh-CN",
+    "dashboardMode": true,
+    "intentProfile": {
+      "caseFamily": "library_bound",
+      "graphicStrategy": null,
+      "sourceType": null,
+      "routingReason": "User-selected Apple Design Library is active; redesign existing React frontend with Library-bound strict path"
+    },
+    "replicationMode": null,
+    "sourceUrl": null,
+    "contextReadBudget": {
+      "workflowFileReadLimit": 1,
+      "largeWorkflowFilesCachedInSummary": [],
+      "restoreInputsCached": [],
+      "subAgentReadsFullSummary": false
+    },
+    "readBudgetLedger": [
+      {
+        "file": "workflows/create-project-library-bound.md",
+        "readCount": 1,
+        "limit": 1,
+        "reason": "initial route-locked workflow read for Library-bound create",
+        "exceeded": false
+      }
+    ],
+    "dispatchPreflightManifest": [],
+    "cssPreflightEvidence": {
+      "applies": false,
+      "status": "not-needed",
+      "command": null,
+      "brandPrefix": "apple",
+      "checks": {
+        "themeVars": "not-needed",
+        "semanticTokenFallback": "not-needed",
+        "themeInline": "not-needed",
+        "tailwindCdn": "not-needed",
+        "htmlClass": "not-needed"
+      },
+      "retryCount": 0,
+      "blockingReason": null
+    },
+    "repairEntryEvidence": [],
+    "finishReadinessEvidence": null,
+    "visualSpecExcerpt": null,
+    "restorationContractLite": null,
+    "styleDefinitionBrief": null,
+    "designRead": "B2B SaaS dashboard / QA engineers & tech leads / calm professional trust / high density / avoid purple gradient overload",
+    "designDials": {
+      "layoutVariance": 2,
+      "motionIntensity": 1,
+      "visualDensity": 4
+    },
+    "styleContinuityAnchors": null,
+    "specsConstraints": null,
+    "sharedProjectShellContract": {
+      "navigationShell": "Left sidebar (240px width, var(--sidebar) background) with nav items using data-nav-key for active state; top header (64px height, var(--background) background, var(--border) bottom border) with search input, notification bell, and user avatar; content wrapper with var(--background-200) background and 32px padding",
+      "primaryColorSystem": "Apple Blue var(--primary) #007aff for active nav states, primary CTAs, and accent highlights; var(--sidebar-primary) for sidebar active item",
+      "typographySystem": "DM Sans font stack (var(--font-sans)); type scale: 13px body, 15px subheading, 20px section title, 28px page title; weight 400 for body, 600 for headings",
+      "radiusScale": "var(--radius) 1.2rem for cards and containers; rounded-full for buttons and pills; calc(var(--radius) * 0.6) for inputs",
+      "surfaceDepthModel": "Cards: 1px solid var(--border) with var(--card) background at rest, shadow-sm on hover; Sidebar: flat var(--sidebar) background with no shadow; Header: 1px bottom border var(--border); Modals/overlays: shadow-xl with var(--popover) background",
+      "ctaStyle": "Primary: pill-shaped button with var(--primary) fill and var(--primary-foreground) text, height 40px; Secondary: text link with var(--primary) text and trailing chevron; Ghost: var(--muted-foreground) text with hover var(--foreground)",
+      "alignmentRules": "Left-aligned content; 24px gap between major sections; 16px gap between cards in a row; sidebar items left-aligned with 12px padding; table rows left-aligned with 16px cell padding"
+    },
+    "generationTree": {
+      "root": {
+        "nodeId": "gen-project-shell",
+        "kind": "project-shell",
+        "pageIds": ["page-dashboard", "page-requirements", "page-login"],
+        "output": "partials/project-shell.html",
+        "sharedRegions": ["sidebar", "top-header", "content-wrapper"],
+        "privateRegions": [],
+        "mutableSlots": ["activeNavItem", "pageTitle"],
+        "status": "planned",
+        "children": [
+          {
+            "nodeId": "gen-page-dashboard",
+            "kind": "page-leaf",
+            "pageIds": ["page-dashboard"],
+            "output": "pages/dashboard.html",
+            "sharedRegions": [],
+            "privateRegions": ["dashboard content area: stat cards, chart, recent requirements table"],
+            "mutableSlots": ["activeNavItem", "pageTitle"],
+            "status": "planned",
+            "children": []
+          },
+          {
+            "nodeId": "gen-page-requirements",
+            "kind": "page-leaf",
+            "pageIds": ["page-requirements"],
+            "output": "pages/requirements.html",
+            "sharedRegions": [],
+            "privateRegions": ["requirements content area: toolbar, filter tabs, requirements table, pagination"],
+            "mutableSlots": ["activeNavItem", "pageTitle"],
+            "status": "planned",
+            "children": []
+          },
+          {
+            "nodeId": "gen-page-login",
+            "kind": "page-leaf",
+            "pageIds": ["page-login"],
+            "output": "pages/login.html",
+            "sharedRegions": [],
+            "privateRegions": ["entire login page: brand lockup, login form, footer"],
+            "mutableSlots": [],
+            "status": "planned",
+            "children": []
+          }
+        ]
+      }
+    }
+  },
+  "designSource": {
+    "operatingMode": "library-bound",
+    "libraryIdentity": {
+      "name": "苹果",
+      "id": "dl_builtin_apple",
+      "version": null,
+      "scope": "built-in-global",
+      "path": "c:\\Users\\kong\\.trae-cn\\design_libraries\\dl_builtin_apple",
+      "versionSource": "metadata.json"
+    },
+    "libraryPath": "c:\\Users\\kong\\.trae-cn\\design_libraries\\dl_builtin_apple",
+    "cssFilePath": "c:\\Users\\kong\\.trae-cn\\design_libraries\\dl_builtin_apple\\colors_and_type.css",
+    "brandPrefix": "apple",
+    "themeMode": "light",
+    "designDecisionSummary": "Apple-inspired restrained palette: Apple Blue #007aff primary, #f2f2f7 sidebar/secondary surfaces, #ffffff cards, DM Sans typography, 1.2rem radius, whisper-light shadows, pill-shaped buttons, border-defined cards",
+    "componentContractKind": "legacy-json",
+    "forbiddenInventedComponents": [],
+    "allowedComponents": ["button", "card", "input", "navigation", "product-grid", "comparison-table"],
+    "styleConstraints": {
+      "radiusMax": 19.2,
+      "spacingBase": 3.84,
+      "fontSizeBody": 13,
+      "fontSizeMin": 11,
+      "controlHeightDefault": 40,
+      "controlHeightLarge": 48
+    },
+    "productContext": {
+      "kitType": "app",
+      "productType": "B2B AI test case generation platform"
+    },
+    "actualTokenNameReference": [
+      {"semanticPurpose": "Page background", "tokenName": "background"},
+      {"semanticPurpose": "Primary text", "tokenName": "foreground"},
+      {"semanticPurpose": "Card surface", "tokenName": "card"},
+      {"semanticPurpose": "Card text", "tokenName": "card-foreground"},
+      {"semanticPurpose": "Popover/modal surface", "tokenName": "popover"},
+      {"semanticPurpose": "Popover text", "tokenName": "popover-foreground"},
+      {"semanticPurpose": "Primary brand action (Apple Blue)", "tokenName": "primary"},
+      {"semanticPurpose": "Primary action text", "tokenName": "primary-foreground"},
+      {"semanticPurpose": "Secondary surface", "tokenName": "secondary"},
+      {"semanticPurpose": "Secondary text", "tokenName": "secondary-foreground"},
+      {"semanticPurpose": "Muted surface", "tokenName": "muted"},
+      {"semanticPurpose": "Muted/placeholder text", "tokenName": "muted-foreground"},
+      {"semanticPurpose": "Accent surface", "tokenName": "accent"},
+      {"semanticPurpose": "Accent text", "tokenName": "accent-foreground"},
+      {"semanticPurpose": "Destructive action (Apple Red)", "tokenName": "destructive"},
+      {"semanticPurpose": "Destructive action text", "tokenName": "destructive-foreground"},
+      {"semanticPurpose": "Success state (Apple Green)", "tokenName": "success"},
+      {"semanticPurpose": "Success text", "tokenName": "success-foreground"},
+      {"semanticPurpose": "Border color", "tokenName": "border"},
+      {"semanticPurpose": "Input border", "tokenName": "input"},
+      {"semanticPurpose": "Focus ring", "tokenName": "ring"},
+      {"semanticPurpose": "Sidebar background", "tokenName": "sidebar"},
+      {"semanticPurpose": "Sidebar text", "tokenName": "sidebar-foreground"},
+      {"semanticPurpose": "Sidebar active item", "tokenName": "sidebar-primary"},
+      {"semanticPurpose": "Sidebar active text", "tokenName": "sidebar-primary-foreground"},
+      {"semanticPurpose": "Sidebar hover surface", "tokenName": "sidebar-accent"},
+      {"semanticPurpose": "Sidebar hover text", "tokenName": "sidebar-accent-foreground"},
+      {"semanticPurpose": "Sidebar border", "tokenName": "sidebar-border"},
+      {"semanticPurpose": "Chart series 1 (green)", "tokenName": "chart-1"},
+      {"semanticPurpose": "Chart series 2 (blue)", "tokenName": "chart-2"},
+      {"semanticPurpose": "Chart series 3 (orange)", "tokenName": "chart-3"},
+      {"semanticPurpose": "Chart series 4 (purple)", "tokenName": "chart-4"},
+      {"semanticPurpose": "Chart series 5 (magenta)", "tokenName": "chart-5"},
+      {"semanticPurpose": "Sans-serif font stack", "tokenName": "font-sans"},
+      {"semanticPurpose": "Monospace font stack", "tokenName": "font-mono"},
+      {"semanticPurpose": "Base border radius", "tokenName": "radius"},
+      {"semanticPurpose": "Subtle shadow (2xs)", "tokenName": "shadow-2xs"},
+      {"semanticPurpose": "Card shadow (sm)", "tokenName": "shadow-sm"},
+      {"semanticPurpose": "Raised shadow", "tokenName": "shadow"},
+      {"semanticPurpose": "Card hover shadow (md)", "tokenName": "shadow-md"},
+      {"semanticPurpose": "Float shadow (lg)", "tokenName": "shadow-lg"},
+      {"semanticPurpose": "Overlay shadow (xl)", "tokenName": "shadow-xl"},
+      {"semanticPurpose": "Modal shadow (2xl)", "tokenName": "shadow-2xl"},
+      {"semanticPurpose": "Base spacing unit", "tokenName": "spacing"}
+    ]
+  },
+  "pages": [
+    {
+      "nodeId": "page-login",
+      "slug": "login",
+      "title": "登录",
+      "htmlSrc": "pages/login.html",
+      "pageIndex": 1,
+      "stateGroupId": null,
+      "stateRole": null,
+      "baseStatePageId": null,
+      "sharedShellContract": [],
+      "mutableRegions": [],
+      "derivedFromHtmlSrc": null,
+      "derivationType": "original",
+      "sourcePageId": null,
+      "sourceHtmlSrc": null,
+      "pageType": "task-driven",
+      "viewportMode": "app-shell",
+      "businessScenario": "用户登录入口，输入邮箱密码进入系统",
+      "visualNorthStar": "居中登录卡片悬浮在柔和灰色画布上，Apple Blue 主按钮，充足留白，极简无干扰",
+      "compositionPattern": "Centered single-column form with brand lockup above",
+      "continuityAnchors": ["Apple Blue primary button", "DM Sans typography", "pill-shaped inputs and buttons"],
+      "libraryRestraintMode": true,
+      "uiKitPath": "c:\\Users\\kong\\.trae-cn\\design_libraries\\dl_builtin_apple\\ui_kits\\website\\index.html",
+      "componentPlan": ["button", "input", "card"],
+      "imagePlan": [],
+      "chartsRequired": false,
+      "miniProgramStyle": false,
+      "qualityRisks": ["form must be vertically centered", "input focus states must use ring token"],
+      "generationNodeId": "gen-page-login",
+      "generationPath": ["gen-project-shell", "gen-page-login"],
+      "inheritedFragments": [],
+      "privateRegions": ["entire login page: brand lockup, login form, footer"],
+      "mutableSlots": []
+    },
+    {
+      "nodeId": "page-dashboard",
+      "slug": "dashboard",
+      "title": "仪表盘",
+      "htmlSrc": "pages/dashboard.html",
+      "pageIndex": 2,
+      "stateGroupId": null,
+      "stateRole": null,
+      "baseStatePageId": null,
+      "sharedShellContract": [],
+      "mutableRegions": [],
+      "derivedFromHtmlSrc": null,
+      "derivationType": "original",
+      "sourcePageId": null,
+      "sourceHtmlSrc": null,
+      "pageType": "information-dense",
+      "viewportMode": "app-shell",
+      "businessScenario": "系统总览仪表盘，展示需求统计、用例覆盖率、最近活动和快捷操作",
+      "visualNorthStar": "数据密集型总览：顶部四张统计卡片，中间趋势图表，底部最近需求列表，Apple 克制配色",
+      "compositionPattern": "Dashboard grid: KPI cards row above, chart + activity table below",
+      "continuityAnchors": ["shared sidebar + header shell", "Apple Blue active states", "card border-defined surfaces", "DM Sans type rhythm"],
+      "libraryRestraintMode": true,
+      "uiKitPath": "c:\\Users\\kong\\.trae-cn\\design_libraries\\dl_builtin_apple\\ui_kits\\website\\index.html",
+      "componentPlan": ["card", "button", "navigation"],
+      "imagePlan": [],
+      "chartsRequired": true,
+      "miniProgramStyle": false,
+      "qualityRisks": ["chart must use token colors", "stat cards must not overflow", "table wrapping on dense data"],
+      "generationNodeId": "gen-page-dashboard",
+      "generationPath": ["gen-project-shell", "gen-page-dashboard"],
+      "inheritedFragments": ["partials/project-shell.html"],
+      "privateRegions": ["dashboard content area: stat cards, chart, recent requirements table"],
+      "mutableSlots": ["activeNavItem", "pageTitle"]
+    },
+    {
+      "nodeId": "page-requirements",
+      "slug": "requirements",
+      "title": "需求管理",
+      "htmlSrc": "pages/requirements.html",
+      "pageIndex": 3,
+      "stateGroupId": null,
+      "stateRole": null,
+      "baseStatePageId": null,
+      "sharedShellContract": [],
+      "mutableRegions": [],
+      "derivedFromHtmlSrc": null,
+      "derivationType": "original",
+      "sourcePageId": null,
+      "sourceHtmlSrc": null,
+      "pageType": "information-dense",
+      "viewportMode": "app-shell",
+      "businessScenario": "需求列表管理，支持搜索、筛选、查看需求详情和创建新需求",
+      "visualNorthStar": "可扫描的需求表格，顶部筛选标签和搜索栏，Apple Blue 点缀活跃状态和主操作按钮",
+      "compositionPattern": "List-table with toolbar above: search + filter tabs + table + pagination",
+      "continuityAnchors": ["shared sidebar + header shell", "Apple Blue active filter states", "card border-defined table container", "pill-shaped action buttons"],
+      "libraryRestraintMode": true,
+      "uiKitPath": "c:\\Users\\kong\\.trae-cn\\design_libraries\\dl_builtin_apple\\ui_kits\\website\\index.html",
+      "componentPlan": ["card", "input", "button", "navigation"],
+      "imagePlan": [],
+      "chartsRequired": false,
+      "miniProgramStyle": false,
+      "qualityRisks": ["table must handle long requirement titles", "filter tabs must be clearly active", "status badges must use semantic tokens"],
+      "generationNodeId": "gen-page-requirements",
+      "generationPath": ["gen-project-shell", "gen-page-requirements"],
+      "inheritedFragments": ["partials/project-shell.html"],
+      "privateRegions": ["requirements content area: toolbar, filter tabs, requirements table, pagination"],
+      "mutableSlots": ["activeNavItem", "pageTitle"]
+    }
+  ],
+  "assets": [],
+  "wiringPlan": [
+    {
+      "sourceNodeId": "page-login",
+      "domId": "btn-login",
+      "targetPageId": "page-dashboard"
+    },
+    {
+      "sourceNodeId": "page-dashboard",
+      "domId": "nav-requirements",
+      "targetPageId": "page-requirements"
+    }
+  ],
+  "hiddenInteractionPlan": [
+    {
+      "sourceNodeId": "page-dashboard",
+      "domId": "nav-dashboard",
+      "targetPageId": "page-dashboard",
+      "hideEdge": true,
+      "reason": "global sidebar nav - current page"
+    },
+    {
+      "sourceNodeId": "page-requirements",
+      "domId": "nav-dashboard",
+      "targetPageId": "page-dashboard",
+      "hideEdge": true,
+      "reason": "global sidebar nav - return to dashboard"
+    },
+    {
+      "sourceNodeId": "page-requirements",
+      "domId": "nav-requirements",
+      "targetPageId": "page-requirements",
+      "hideEdge": true,
+      "reason": "global sidebar nav - current page"
+    }
+  ]
+}

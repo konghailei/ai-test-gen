@@ -1,0 +1,42 @@
+# ============================================================================
+# Docker 构建忽略清单
+# 排除项目运行时数据，减小构建上下文体积，加快 build 速度
+# ============================================================================
+
+# 数据目录（运行时持久化，构建不需要）
+data/
+logs/
+milvus/
+
+# 本地模型（通过 bind mount 挂载进容器，不烘焙进镜像；
+# 排除可避免 ~2.4GB 模型被打入 build context，极大加速构建）
+models/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# 前端构建产物
+frontend/dist/
+frontend/node_modules/
+
+# IDE 和工具
+.vscode/
+.idea/
+*.swp
+
+# 文档和脚本（构建不需要）
+docs/
+scripts/
+*.md
+
+# Git
+.git/
+.gitignore
+
+# 环境配置
+.env
+*.local

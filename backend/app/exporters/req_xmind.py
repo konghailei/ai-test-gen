@@ -2,9 +2,9 @@
 
 把需求 SRR 结构导出为 .xmind 文件，便于评审/分享/归档。
 
-树结构（总体SRR 与功能点平级为一级节点）：
+树结构（业务场景 与功能点平级为一级节点）：
     需求标题（根）
-      ├── 总体SRR（一级）
+      ├── 业务场景（一级）
       │   ├── 基本信息（优先级 / 类型 / 摘要）
       │   ├── 主流程（Happy Path）
       │   │   └── 步骤1: action → expected
@@ -288,7 +288,7 @@ def export_requirement_to_xmind(
     root_topic = _topic(root_title)
     root_kids: list[Element] = []
 
-    # ===== 1. 总体 SRR（一级节点，含基本信息/流程/规则等二级节点）=====
+    # ===== 1. 业务场景（一级节点，含基本信息/流程/规则等二级节点）=====
     total_srr_kids: list[Element] = []
 
     # 1a. 基本信息
@@ -380,15 +380,10 @@ def export_requirement_to_xmind(
             _children(ldi_node, ldi_kids)
             total_srr_kids.append(ldi_node)
 
-    # 1d. 附加详情
-    additional = srr.get("additional_details") or srr.get("additional_details_text") or ""
-    if _as_str(additional).strip():
-        add_node = _topic("附加详情")
-        _children(add_node, [_topic(_as_str(additional))])
-        total_srr_kids.append(add_node)
+    # v2.40: 移除 additional_details 字段，不再导出"附加详情"节点
 
     if total_srr_kids:
-        total_srr_node = _topic("总体SRR")
+        total_srr_node = _topic("业务场景")
         _children(total_srr_node, total_srr_kids)
         root_kids.append(total_srr_node)
 
@@ -645,7 +640,7 @@ def export_requirement_to_xmind_json(
     root_topic = _jtopic(root_title)
     root_kids: list[dict] = []
 
-    # ===== 1. 总体 SRR（一级节点，含基本信息/流程/规则等二级节点）=====
+    # ===== 1. 业务场景（一级节点，含基本信息/流程/规则等二级节点）=====
     total_srr_kids: list[dict] = []
 
     # 1a. 基本信息
@@ -737,15 +732,10 @@ def export_requirement_to_xmind_json(
             _jattach(ldi_node, ldi_kids)
             total_srr_kids.append(ldi_node)
 
-    # 1d. 附加详情
-    additional = srr.get("additional_details") or srr.get("additional_details_text") or ""
-    if _as_str(additional).strip():
-        add_node = _jtopic("附加详情")
-        _jattach(add_node, [_jtopic(_as_str(additional))])
-        total_srr_kids.append(add_node)
+    # v2.40: 移除 additional_details 字段，不再导出"附加详情"节点
 
     if total_srr_kids:
-        total_srr_node = _jtopic("总体SRR")
+        total_srr_node = _jtopic("业务场景")
         _jattach(total_srr_node, total_srr_kids)
         root_kids.append(total_srr_node)
 

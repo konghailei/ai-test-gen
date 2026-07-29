@@ -156,6 +156,9 @@ export interface ReqVersionDetail {
 export interface TestCase {
   id: string
   req_id: string
+  req_title?: string
+  project_name?: string
+  product_id?: string
   title: string
   type: string
   priority: string
@@ -198,6 +201,20 @@ export interface SSEEvent {
   gate_result?: Record<string, unknown>
   clarify_result?: Record<string, unknown>
   kb_flowback?: Record<string, unknown>
+  // v2.0：一致性检查与 FP 覆盖率
+  consistency_check?: {
+    is_inconsistent?: boolean
+    count_diff_pct?: number
+    type_jaccard?: number
+    semantic_similarity?: number
+    reasons?: string[]
+  }
+  fp_coverage?: {
+    total_fps?: number
+    covered_fps?: number
+    coverage_rate?: number
+    uncovered?: Array<{ id: string; name?: string }>
+  }
   duration_ms?: number
   [key: string]: unknown
 }
@@ -365,6 +382,7 @@ export interface AnalysisTaskInfo {
   result_json: Record<string, unknown>
   error: string
   phase_timings?: Record<string, PhaseTiming>  // v2.23: 阶段耗时追踪
+  server_now?: string  // v2.36: 服务器当前时间（UTC ISO），用于计算耗时避免客户端时钟偏差
   created_at: string
   updated_at: string
   completed_at: string | null

@@ -23,14 +23,14 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth import require_admin, require_write, get_current_user
 from pydantic import BaseModel, Field
-from sqlalchemy import select, delete, exc as sa_exc
+from sqlalchemy import select, delete, exc as sa_exc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
 from app.db.models import (
     Product, Project, Module, Requirement, ModuleDependency, TestCase, User,
     FunctionalPoint, FPDependency, AnalysisTask, GenerationBatch, ReqDependency,
-    Traceability,
+    Traceability, ErrorCase,
 )
 from app.models.api_schemas import ApiResponse
 from app.utils.logger import logger
@@ -164,32 +164,121 @@ async def update_product(pid: str, body: UpdateProductRequest, session: AsyncSes
     return ApiResponse(success=True, message="已更新")
 
 
+@router.get("/products/{pid}/delete-check", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def delete_product_check(pid: str, session: AsyncSession = Depends(get_session)):
+    """产品删除预检查：返回产品名称与关联数据统计，供前端二次确认。
+
+    前端删除前调用此接口，展示「将删除 X 个项目/Y 个模块/Z 个需求…」，
+    并要求用户输入产品名称才能继续删除。
+    """
+    result = await session.execute(select(Product).where(Product.id == pid))
+    prod = result.scalar_one_or_none()
+    if not prod:
+        raise HTTPException(404, "产品不存在")
+
+    # 统计各关联表数量（不真正删除）
+    async def _count(stmt):
+        r = await session.execute(select(func.count()).select_from(stmt.subquery()))
+        return r.scalar() or 0
+
+    project_cnt = await _count(select(Project.id).where(Project.product_id == pid))
+    module_cnt = await _count(select(Module.id).where(Module.product_id == pid))
+    req_cnt = await _count(select(Requirement.id).where(Requirement.product_id == pid))
+
+    # 需求关联的子表数量
+    req_ids_subq = select(Requirement.id).where(Requirement.product_id == pid).scalar_subquery()
+    tc_cnt = await _count(select(TestCase.id).where(TestCase.req_id.in_(req_ids_subq)))
+    fp_cnt = await _count(select(FunctionalPoint.id).where(FunctionalPoint.requirement_id.in_(req_ids_subq)))
+
+    return ApiResponse(success=True, message="ok", data={
+        "id": prod.id,
+        "name": prod.name,
+        "stats": {
+            "projects": project_cnt,
+            "modules": module_cnt,
+            "requirements": req_cnt,
+            "test_cases": tc_cnt,
+            "functional_points": fp_cnt,
+        },
+    })
+
+
 @router.delete("/products/{pid}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
-async def delete_product(pid: str, session: AsyncSession = Depends(get_session)):
-    """删除产品及关联的项目、模块（级联）。"""
-    # 查该产品下所有需求，用于级联删除与清理向量库
+async def delete_product(
+    pid: str,
+    session: AsyncSession = Depends(get_session),
+    confirm_name: str | None = Query(default=None, description="二次确认：产品名称（必须与实际名称完全一致）"),
+):
+    """删除产品及关联的项目、模块（级联）。
+
+    安全要求：必须传入 confirm_name 参数，且与产品名称完全一致才执行删除。
+    前端在删除前应弹出输入框，要求用户手动输入产品名称。
+    """
+    # 1) 查产品是否存在 + 校验确认名称
+    result = await session.execute(select(Product).where(Product.id == pid))
+    prod = result.scalar_one_or_none()
+    if not prod:
+        raise HTTPException(404, "产品不存在")
+    if not confirm_name:
+        raise HTTPException(400, "请输入产品名称以确认删除")
+    if confirm_name.strip() != prod.name:
+        raise HTTPException(400, f"输入的产品名称「{confirm_name}」与实际名称「{prod.name}」不匹配，删除已阻止")
+
+    # 2) 查该产品下所有需求，用于级联删除与清理向量库
     req_result = await session.execute(
         select(Requirement.id).where(Requirement.product_id == pid)
     )
     req_ids = [row[0] for row in req_result.all()]
 
-    # 应用层级联删除关联数据（先子表后父表，避免外键冲突）
+    # 3) 应用层级联删除关联数据（先子表后父表，避免外键冲突）
     # 必须先删引用 Project/Requirement 的子表，最后再删 Project 与 Product 本身
-    await session.execute(delete(Module).where(Module.product_id == pid))
-    await _cascade_delete_requirements(session, req_ids)
-    await session.execute(delete(Project).where(Project.product_id == pid))
-    await session.execute(delete(Product).where(Product.id == pid))
-    await session.commit()
+    try:
+        # 模块依赖边（旧库可能未生效 ondelete=CASCADE，显式删除更安全）
+        mod_ids_subq = select(Module.id).where(Module.product_id == pid).scalar_subquery()
+        await session.execute(
+            delete(ModuleDependency).where(
+                ModuleDependency.source_module_id.in_(mod_ids_subq)
+                | ModuleDependency.target_module_id.in_(mod_ids_subq)
+            )
+        )
+        await session.execute(delete(Module).where(Module.product_id == pid))
+        await _cascade_delete_requirements(session, req_ids)
+        await session.execute(delete(Project).where(Project.product_id == pid))
+        await session.execute(delete(Product).where(Product.id == pid))
+        await session.commit()
+    except sa_exc.IntegrityError as e:
+        await session.rollback()
+        logger.error("[API/products] 产品删除失败(外键冲突): pid={}, error={}", pid, str(e)[:200])
+        raise HTTPException(500, f"删除失败：存在未清理的关联数据（外键冲突）。详情：{str(e.orig)[:200]}")
+    except Exception as e:
+        await session.rollback()
+        logger.error("[API/products] 产品删除失败: pid={}, error={}", pid, str(e)[:200])
+        raise HTTPException(500, f"删除失败：{str(e)[:200]}")
 
-    # 同步删除向量库中该产品所有需求的记录
-    for req_id in req_ids:
-        try:
-            from app.db.milvus_store import vector_store
-            await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
-        except Exception as e:
-            logger.warning("[API/products] 向量库删除失败(不阻断): req_id={}, error={}", req_id, str(e)[:100])
+    # 4) 同步删除向量库中该产品的所有需求与用例向量（按 product_id 批量清理）
+    # v2.51 修复：原循环单条 delete 未 flush，导致 Milvus BOUNDED 一致性下查询仍返回已删数据。
+    # 改为按 product_id 批量 delete + flush，确保彻底清理。
+    try:
+        from app.db.milvus_store import vector_store
+        deleted_reqs = await asyncio.to_thread(vector_store.delete_requirement_by_product, pid)
+        deleted_cases = await asyncio.to_thread(vector_store.delete_test_case_by_product, pid)
+        logger.info(
+            "[API/products] 向量库清理完成: pid={}, 需求向量={}, 用例向量={}",
+            pid, deleted_reqs, deleted_cases,
+        )
+    except Exception as e:
+        logger.warning(
+            "[API/products] 向量库批量清理失败(不阻断): pid={}, error={}",
+            pid, str(e)[:200],
+        )
+        # 退化策略：按 req_id 逐条清理（仍走 delete_requirement，已含 flush）
+        for req_id in req_ids:
+            try:
+                await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
+            except Exception as inner_e:
+                logger.warning("[API/products] 单条需求向量清理失败: req_id={}, error={}", req_id, str(inner_e)[:100])
 
-    logger.info("[API/products] 产品已删除: id={}, 关联需求 {} 条已清理", pid, len(req_ids))
+    logger.info("[API/products] 产品已删除: id={}, name={}, 关联需求 {} 条已清理", pid, prod.name, len(req_ids))
     return ApiResponse(success=True, message="已删除")
 
 
@@ -317,24 +406,49 @@ async def _cascade_delete_requirements(session: AsyncSession, req_ids: list[str]
 
     这些子表对 requirements.id 的外键均为 RESTRICT（未设 ondelete=CASCADE），
     必须显式先删子表再删需求，否则触发外键冲突（ForeignKeyViolationError）。
-    顺序：Traceability（同时引用 test_cases 与 requirements，须最先）→ TestCase →
-    AnalysisTask / GenerationBatch / ReqDependency；Requirement 最后删除，
-    FunctionalPoint 由 DB ondelete=CASCADE 自动级联。
+    顺序：Traceability（同时引用 test_cases 与 requirements，须最先）→
+    ErrorCase（引用 test_cases，须在 TestCase 之前）→ TestCase →
+    FPDependency（引用 functional_points，须在 FunctionalPoint 之前）→
+    FunctionalPoint → AnalysisTask / GenerationBatch / ReqDependency；
+    Requirement 最后删除。
+
+    注：FunctionalPoint/FPDependency 虽在 models.py 标注 ondelete=CASCADE，
+    但部分旧库约束可能未生效（Base.metadata.create_all 不修改已存在表的外键），
+    为保证删除一定能成功，这里统一显式删除，不依赖 DB 级 CASCADE。
     """
     if not req_ids:
         return
-    # 收集这批需求关联的测试用例 ID，用于清理追溯矩阵（test_case_id 维度）
+    # 收集这批需求关联的测试用例 ID，用于清理引用 test_cases 的子表
     tc_rows = await session.execute(select(TestCase.id).where(TestCase.req_id.in_(req_ids)))
     tc_ids = [r[0] for r in tc_rows.all()]
+
+    # 收集这批需求关联的功能点 ID，用于清理 FPDependency
+    fp_rows = await session.execute(
+        select(FunctionalPoint.id).where(FunctionalPoint.requirement_id.in_(req_ids))
+    )
+    fp_ids = [r[0] for r in fp_rows.all()]
 
     # 1) 追溯矩阵：同时引用 test_cases 与 requirements，必须在 TestCase 之前删除
     trace_cond = Traceability.requirement_id.in_(req_ids)
     if tc_ids:
         trace_cond = trace_cond | Traceability.test_case_id.in_(tc_ids)
     await session.execute(delete(Traceability).where(trace_cond))
-    # 2) 测试用例
+    # 2) 错误案例库：original_case_id 引用 test_cases.id（RESTRICT），必须在 TestCase 之前删除
+    if tc_ids:
+        await session.execute(delete(ErrorCase).where(ErrorCase.original_case_id.in_(tc_ids)))
+    # 3) 测试用例
     await session.execute(delete(TestCase).where(TestCase.req_id.in_(req_ids)))
-    # 3) 其余引用需求的子表
+    # 4) 功能点依赖关系：引用 functional_points.id（RESTRICT/CASCADE），须在 FunctionalPoint 之前删除
+    if fp_ids:
+        await session.execute(
+            delete(FPDependency).where(
+                FPDependency.source_fp_id.in_(fp_ids) | FPDependency.target_fp_id.in_(fp_ids)
+            )
+        )
+    # 5) 功能点本身
+    if fp_ids:
+        await session.execute(delete(FunctionalPoint).where(FunctionalPoint.id.in_(fp_ids)))
+    # 6) 其余引用需求的子表
     await session.execute(delete(AnalysisTask).where(AnalysisTask.req_id.in_(req_ids)))
     await session.execute(delete(GenerationBatch).where(GenerationBatch.req_id.in_(req_ids)))
     await session.execute(
@@ -342,7 +456,7 @@ async def _cascade_delete_requirements(session: AsyncSession, req_ids: list[str]
             ReqDependency.source_req_id.in_(req_ids) | ReqDependency.target_req_id.in_(req_ids)
         )
     )
-    # 4) 需求本身（FunctionalPoint 经 ondelete=CASCADE 自动级联）
+    # 7) 需求本身（所有子表已清理完毕）
     await session.execute(delete(Requirement).where(Requirement.id.in_(req_ids)))
 
 

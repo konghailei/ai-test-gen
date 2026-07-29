@@ -49,7 +49,7 @@ from typing import Any, AsyncGenerator, TypedDict
 from langgraph.graph import END, StateGraph
 
 from app.agents.clarify_agent import clarify_agent
-from app.agents.gen_agent import gen_agent
+from app.agents.gen_agent import gen_agent, GenAgent
 from app.agents.impact_agent import impact_agent
 from app.agents.req_agent import req_agent
 from app.agents.review_agent import review_agent
@@ -123,6 +123,10 @@ class PipelineState(TypedDict, total=False):
     review_result: dict
     reviewed_cases: list
     kb_flowback: dict
+    # v2.0：一致性检查结果（由 _gen_node 产出，done 事件消费）
+    # ⚠️ 必须在 PipelineState 中显式声明，否则 LangGraph StateGraph 会过滤掉
+    # 未定义字段，导致 done 事件中 consistency_check 始终为空
+    consistency_check: dict
 
     # 控制流
     clarify_iteration: int
@@ -645,7 +649,8 @@ class Orchestrator:
             sum(1 for c in cases if c.get("related_fp")),
         )
 
-        # ── v3.2: 一致性检查（vs 上次生成）──
+        # ── v3.2 + v2.0 增强: 一致性检查（vs 上次生成 + 语义相似度 + 类型方差）──
+        # 对应 docs/03 §4.2 ConsistencyChecker
         consistency_check = {}
         try:
             from app.db.database import async_session
@@ -653,11 +658,15 @@ class Orchestrator:
             from sqlalchemy import select as _sel
             import json as _json
             async with async_session() as cs:
+                # v2.0 修复：只取已完成的 generate_cases 任务作为历史对比基线，
+                # 排除当前正在执行的任务（status='running'）和失败任务，
+                # 避免 prev_result 为空导致一致性检查无效或误判
                 prev_tasks = await cs.execute(
                     _sel(AnalysisTask).where(
                         AnalysisTask.req_id == req_id,
                         AnalysisTask.task_type == "generate_cases",
-                    ).order_by(AnalysisTask.created_at.desc()).limit(2)
+                        AnalysisTask.status == "completed",
+                    ).order_by(AnalysisTask.created_at.desc()).limit(1)
                 )
                 prev_rows = prev_tasks.scalars().all()
                 if len(prev_rows) >= 1:
@@ -665,32 +674,86 @@ class Orchestrator:
                     prev_result = prev_task.result_json or {}
                     prev_count = prev_result.get("case_count", 0)
                     prev_types = prev_result.get("type_dist", {})
+                    prev_titles = prev_result.get("case_titles", [])
                     cur_count = len(cases)
+                    cur_titles = [c.get("title", "") for c in cases]
                     cur_types: dict[str, int] = {}
                     for c in cases:
                         t = c.get("type", "unknown")
                         cur_types[t] = cur_types.get(t, 0) + 1
                     count_diff = abs(cur_count - prev_count) / max(prev_count, 1)
-                    is_inconsistent = count_diff > 0.2
+
+                    # v2.0 增强 1: 类型分布方差（Jaccard 相似度）
+                    all_types = set(prev_types.keys()) | set(cur_types.keys())
+                    if all_types:
+                        intersection = sum(
+                            min(prev_types.get(t, 0), cur_types.get(t, 0)) for t in all_types
+                        )
+                        union = sum(
+                            max(prev_types.get(t, 0), cur_types.get(t, 0)) for t in all_types
+                        )
+                        type_jaccard = intersection / union if union > 0 else 1.0
+                    else:
+                        type_jaccard = 1.0
+
+                    # v2.0 增强 2: 语义相似度（基于标题 Embedding）
+                    semantic_sim = 0.0
+                    if prev_titles and cur_titles:
+                        try:
+                            from app.db.hybrid_search import kb_cache
+                            import asyncio as _aio
+                            all_titles = prev_titles + cur_titles
+                            embeddings = await _aio.to_thread(kb_cache.embed_batch, all_titles)
+                            if embeddings and len(embeddings) == len(all_titles):
+                                prev_embs = embeddings[:len(prev_titles)]
+                                cur_embs = embeddings[len(prev_titles):]
+                                # 计算平均相似度：每个当前用例找最佳匹配
+                                sims = []
+                                for ce in cur_embs:
+                                    best = max(
+                                        GenAgent._cosine_similarity(ce, pe)
+                                        for pe in prev_embs
+                                    ) if prev_embs else 0.0
+                                    sims.append(best)
+                                semantic_sim = sum(sims) / len(sims) if sims else 0.0
+                        except Exception as sim_e:
+                            logger.debug("[Orchestrator] 语义相似度计算跳过: {}", str(sim_e)[:100])
+
+                    # 综合一致性判定
+                    # v2.0 三维度: 用例数方差(<20%) + 类型分布(Jaccard>0.7) + 语义相似度(>0.7)
+                    count_inconsistent = count_diff > 0.2
+                    type_inconsistent = type_jaccard < 0.7
+                    semantic_inconsistent = 0.0 < semantic_sim < 0.7  # 0.0 表示计算失败，跳过
+
+                    is_inconsistent = count_inconsistent or (
+                        type_inconsistent and semantic_inconsistent
+                    )
+
                     consistency_check = {
                         "prev_case_count": prev_count,
                         "curr_case_count": cur_count,
                         "count_diff_pct": round(count_diff * 100, 1),
                         "prev_type_dist": prev_types,
                         "curr_type_dist": cur_types,
+                        "type_jaccard": round(type_jaccard, 3),
+                        "semantic_similarity": round(semantic_sim, 3),
                         "is_inconsistent": is_inconsistent,
+                        # v2.0 三维度判定明细
+                        "count_inconsistent": count_inconsistent,
+                        "type_inconsistent": type_inconsistent,
+                        "semantic_inconsistent": semantic_inconsistent,
                     }
                     if is_inconsistent:
                         logger.warning(
-                            "[Orchestrator/GenAgent] ⚠️ 一致性告警: req_id={}, prev_count={}, curr_count={}, diff={:.0f}%",
+                            "[Orchestrator/GenAgent] ⚠️ 一致性告警: req_id={}, "
+                            "prev_count={}, curr_count={}, diff={:.0f}%, "
+                            "type_jaccard={:.3f}, semantic_sim={:.3f}",
                             req_id, prev_count, cur_count, count_diff * 100,
+                            type_jaccard, semantic_sim,
                         )
-                    # 保存本次统计供下次对比
-                    try:
-                        prev_task.result_json = {**prev_result, "case_count": cur_count, "type_dist": cur_types}
-                        await cs.commit()
-                    except Exception:
-                        pass
+                # v2.0 修复：无论是否有历史任务，都保存当前生成的统计信息，
+                # 供下次生成对比使用。保存逻辑移到 _review_node 之后由 API 层处理，
+                # 这里仅负责读取历史数据做对比。
         except Exception as e:
             logger.debug("[Orchestrator] 一致性检查跳过（非阻塞）: {}", str(e)[:120])
 

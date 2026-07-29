@@ -50,25 +50,20 @@ _FORMAT_META: dict[str, tuple[str, str]] = {
 # 工厂函数
 # ============================================================================
 
-def export_cases(cases: list[dict], fmt: str, project_name: str = "") -> tuple[str, str, str]:
+def export_cases(cases: list[dict], fmt: str, project_name: str = "", include_details: bool = True) -> tuple[str, str, str]:
     """导出用例为指定格式（工厂函数）。
 
     Args:
         cases: 用例 JSON 列表（每项为单条 UTCF TestCase dict）
         fmt: 导出格式，支持 json / markdown / gherkin / pytest
+        project_name: 项目名称（XMind 根标题）
+        include_details: 是否包含详细步骤和前置条件（XMind 格式适用）
 
     Returns:
         tuple[str, str, str]: (content, media_type, filename)
-            - content: 导出的文本内容
-            - media_type: HTTP Content-Type
-            - filename: 建议的下载文件名
 
     Raises:
         ValueError: 不支持的格式
-
-    Note:
-        - json 格式由 API 层直接处理（json.dumps），不经过此工厂
-        - 其他三种格式由对应的导出器生成
     """
     if fmt not in SUPPORTED_FORMATS:
         raise ValueError(f"不支持的导出格式: {fmt}，支持: {SUPPORTED_FORMATS}")
@@ -82,15 +77,15 @@ def export_cases(cases: list[dict], fmt: str, project_name: str = "") -> tuple[s
     elif fmt == "pytest":
         content = export_pytest(cases)
     elif fmt == "xmind":
-        content = export_to_xmind(cases, project_name=project_name)
+        content = export_to_xmind(cases, project_name=project_name, include_details=include_details)
     elif fmt == "xmind8":
-        content = export_to_xmind_xml(cases, project_name=project_name)
+        content = export_to_xmind_xml(cases, project_name=project_name, include_details=include_details)
     else:
         # json 由 API 层处理，此处不会执行
         import json
         content = json.dumps(cases, ensure_ascii=False, indent=2)
 
-    logger.info("[Exporters] 导出完成: format={}, cases={}", fmt, len(cases))
+    logger.info("[Exporters] 导出完成: format={}, cases={}, include_details={}", fmt, len(cases), include_details)
     return content, media_type, filename
 
 

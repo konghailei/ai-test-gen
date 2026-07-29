@@ -61,6 +61,15 @@ SYSTEM_PROMPT = """你是一位资深测试工程师。请根据以下结构化�
 7. 测试数据应覆盖正常值、边界值、异常值
 8. **不要编造 SRR 中不存在的新功能**,但可以基于现有字段/规则合理推断边界、异常和组合场景
 9. **宁可多生成低置信度用例,也不遗漏潜在风险**
+10. **所有字段值必须是 JSON 字面量**（字符串、数字、布尔、null、数组、对象）
+    - 严禁使用任何代码表达式、函数调用或非 JSON 语法
+    - 错误示例：`"password": "a".repeat(128)`、`"username": "x" * 50`、`"data": Array(10).fill(0)`
+    - 正确示例：`"password": "a*128"`、`"username": "x*50"`（用简短占位符表示长字符串）
+    - 不要使用 `.repeat()` / `* N` / `Array()` 等代码构造
+11. **字符串值长度限制**：每个字符串值不得超过 200 字符
+    - 边界值测试中的超长输入（如 128 位密码），用简短描述表示，不要实际写出全部字符
+    - 错误示例：`"password": "aaaaaa...（此处实际写出 128 个 a）"` — 会导致输出过长且 JSON 结构出错
+    - 正确示例：`"password": "a重复128次"`、`"password": "aaa...(共128个a,省略中间部分)"`
 
 ## 输出示例（完整 UTCF 用例格式，请严格仿照此格式输出）
 
@@ -190,6 +199,158 @@ UTCF_CASE_SCHEMA = """每个用例的 JSON 结构：
     "skip_conditions": []
   }
 }"""
+
+
+# ============================================================================
+# SRR 覆盖率检查清单构建（v3.3：增强 SRR 对用例生成的指导）
+# ============================================================================
+
+def _build_coverage_checklist(srr: dict, functional_points: list[dict]) -> str:
+    """从 SRR 中显式提取所有必须覆盖的要点，构建覆盖率检查清单。
+
+    让 LLM 清楚知道需要覆盖多少个点，提高覆盖率和生成稳定性。
+
+    Args:
+        srr: SRR JSON 字典
+        functional_points: 功能点列表
+
+    Returns:
+        str: 覆盖率检查清单文本（注入 prompt）
+    """
+    items: list[str] = []
+
+    # 1. 总 SRR 的 happy_path
+    flows = srr.get("flows", {}) if isinstance(srr, dict) else {}
+    happy_path = flows.get("happy_path", {})
+    hp_steps = happy_path.get("steps", []) if isinstance(happy_path, dict) else []
+    if hp_steps:
+        items.append(f"### 总 SRR 主流程（happy_path）：{len(hp_steps)} 个步骤")
+        for i, step in enumerate(hp_steps, 1):
+            if isinstance(step, dict):
+                action = step.get("action", step.get("desc", ""))
+                items.append(f"  - [happy_path.{i}] {action}")
+            else:
+                items.append(f"  - [happy_path.{i}] {step}")
+
+    # 2. 总 SRR 的 alternate_flows
+    alt_flows = flows.get("alternate_flows", [])
+    if alt_flows:
+        items.append(f"### 总 SRR 异常分支（alternate_flows）：{len(alt_flows)} 个分支")
+        for i, af in enumerate(alt_flows, 1):
+            if isinstance(af, dict):
+                name = af.get("name", af.get("trigger", ""))
+                items.append(f"  - [alternate_flow.{i}] {name}")
+            else:
+                items.append(f"  - [alternate_flow.{i}] {af}")
+
+    # 3. 总 SRR 的 preconditions
+    preconds = srr.get("preconditions", [])
+    if preconds:
+        items.append(f"### 总 SRR 前置条件（preconditions）：{len(preconds)} 条")
+        for i, p in enumerate(preconds, 1):
+            items.append(f"  - [precondition.{i}] {p}")
+
+    # 4. 总 SRR 的跨 FP 交互规则
+    cfi = srr.get("cross_fp_interactions", {}) if isinstance(srr, dict) else {}
+    shared_rules = cfi.get("shared_business_rules", [])
+    if shared_rules:
+        items.append(f"### 跨 FP 共享业务规则：{len(shared_rules)} 条")
+        for i, r in enumerate(shared_rules, 1):
+            if isinstance(r, dict):
+                desc = r.get("rule", r.get("description", ""))
+                items.append(f"  - [shared_rule.{i}] {desc}")
+            else:
+                items.append(f"  - [shared_rule.{i}] {r}")
+
+    # 5. 各功能点的覆盖要点
+    for fp in functional_points:
+        fp_id = fp.get("id", "")
+        fp_name = fp.get("name", fp_id)
+        fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+
+        items.append(f"### 功能点 [{fp_id}] {fp_name}")
+
+        # FP happy_path
+        fp_flows = fp_srr.get("flows", {})
+        fp_hp = fp_flows.get("happy_path", {})
+        fp_hp_steps = fp_hp.get("steps", []) if isinstance(fp_hp, dict) else []
+        if fp_hp_steps:
+            items.append(f"  主流程步骤：{len(fp_hp_steps)} 个")
+            for i, step in enumerate(fp_hp_steps, 1):
+                if isinstance(step, dict):
+                    action = step.get("action", step.get("desc", ""))
+                    items.append(f"  - [{fp_id}.happy_path.{i}] {action}")
+                else:
+                    items.append(f"  - [{fp_id}.happy_path.{i}] {step}")
+
+        # FP alternate_flows
+        fp_alt = fp_flows.get("alternate_flows", [])
+        if fp_alt:
+            items.append(f"  异常分支：{len(fp_alt)} 个")
+            for i, af in enumerate(fp_alt, 1):
+                if isinstance(af, dict):
+                    name = af.get("name", af.get("trigger", ""))
+                    items.append(f"  - [{fp_id}.alt_flow.{i}] {name}")
+                else:
+                    items.append(f"  - [{fp_id}.alt_flow.{i}] {af}")
+
+        # FP business_rules
+        fp_rules = fp_srr.get("business_rules", [])
+        if fp_rules:
+            items.append(f"  业务规则：{len(fp_rules)} 条")
+            for i, r in enumerate(fp_rules, 1):
+                if isinstance(r, dict):
+                    desc = r.get("rule", r.get("description", r.get("condition", "")))
+                    items.append(f"  - [{fp_id}.rule.{i}] {desc}")
+                else:
+                    items.append(f"  - [{fp_id}.rule.{i}] {r}")
+
+        # FP data_constraints
+        fp_dc = fp_srr.get("data_constraints", [])
+        if fp_dc:
+            items.append(f"  数据约束：{len(fp_dc)} 条")
+            for i, d in enumerate(fp_dc, 1):
+                if isinstance(d, dict):
+                    field = d.get("field", "")
+                    cons = d.get("constraints", d.get("constraint", ""))
+                    items.append(f"  - [{fp_id}.data.{i}] {field}: {cons}")
+                else:
+                    items.append(f"  - [{fp_id}.data.{i}] {d}")
+
+        # FP boundary_conditions
+        fp_bc = fp_srr.get("boundary_conditions", [])
+        if fp_bc:
+            items.append(f"  边界条件：{len(fp_bc)} 条")
+            for i, b in enumerate(fp_bc, 1):
+                if isinstance(b, dict):
+                    field = b.get("field", "")
+                    trigger = b.get("trigger", "")
+                    items.append(f"  - [{fp_id}.boundary.{i}] {field}: {trigger}")
+                else:
+                    items.append(f"  - [{fp_id}.boundary.{i}] {b}")
+
+        # FP acceptance_criteria
+        fp_ac = fp_srr.get("acceptance_criteria", [])
+        if fp_ac:
+            items.append(f"  验收标准：{len(fp_ac)} 条")
+            for i, a in enumerate(fp_ac, 1):
+                if isinstance(a, dict):
+                    desc = a.get("criteria", a.get("description", a.get("condition", "")))
+                    items.append(f"  - [{fp_id}.acceptance.{i}] {desc}")
+                else:
+                    items.append(f"  - [{fp_id}.acceptance.{i}] {a}")
+
+        # FP test_hints
+        fp_hints = fp.get("test_hints", [])
+        if fp_hints:
+            items.append(f"  测试提示：{len(fp_hints)} 条")
+            for i, h in enumerate(fp_hints, 1):
+                items.append(f"  - [{fp_id}.hint.{i}] {h}")
+
+    if not items:
+        return ""
+
+    return "## SRR 覆盖率检查清单（必须覆盖以下所有要点）\n\n" + "\n".join(items)
 
 
 # ============================================================================
@@ -329,6 +490,10 @@ def build_user_prompt(
 - 受影响模块下的关键需求，至少生成 1 个跨模块影响验证用例
 - 在回归用例的 related_fp 字段中标注受影响的 fp_id"""
 
+    # v3.3：SRR 覆盖率检查清单——从 SRR 中显式提取所有必须覆盖的要点
+    # 让 LLM 清楚知道需要覆盖多少个点，提高覆盖率和稳定性
+    coverage_checklist = _build_coverage_checklist(srr, functional_points or [])
+
     if enable_multi_type:
         gen_requirements = """## 生成要求
 1. **功能测试** (≥ 3个) — 覆盖 happy_path 和 alternate_flows
@@ -349,11 +514,22 @@ def build_user_prompt(
 {fp_section}
 {impact_analysis_section}
 
+{coverage_checklist}
+
 ## 当前需求
 {json.dumps(srr, ensure_ascii=False, indent=2)}
 
 {gen_requirements}
 {fp_requirements}
+
+## 覆盖率自检（生成前必读）
+在生成用例之前，请先对照上面的「SRR 覆盖率检查清单」：
+1. 确认每个 happy_path 步骤都有对应的用例覆盖
+2. 确认每个 alternate_flow 分支都有对应的异常/功能用例
+3. 确认每条 business_rule 都有验证用例
+4. 确认每条 data_constraint 都有边界值用例
+5. 确认每条 acceptance_criteria 都有对应的验收用例
+6. 生成完成后，在 notes 字段中标注该用例覆盖了检查清单中的哪些条目（如 "覆盖: happy_path.step1, happy_path.step2"）
 
 ## 输出格式
 输出 JSON 数组，每个元素为一个测试用例（符合上述 UTCF_CASE_SCHEMA）。

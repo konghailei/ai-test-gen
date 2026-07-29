@@ -314,7 +314,7 @@ export const requirements = {
     if (params?.limit) query.append('limit', String(params.limit))
     if (params?.offset) query.append('offset', String(params.offset))
     const qs = query.toString()
-    return request<{ items: AnalysisTaskInfo[]; total: number }>(`/requirements/tasks${qs ? '?' + qs : ''}`)
+    return request<{ items: AnalysisTaskInfo[]; total: number; server_now?: string }>(`/requirements/tasks${qs ? '?' + qs : ''}`)
   },
   /** v2.14: 查询单个任务状态（轮询进度） */
   getTask: (taskId: string) =>
@@ -477,6 +477,23 @@ export const testCases = {
     return request<PaginatedData<TestCase>>(`/testcases?${params}`)
   },
   get: (id: string) => request<TestCase>(`/testcases/${id}`),
+  /** 人工新增用例（必须关联需求 req_id） */
+  create: (data: {
+    req_id: string
+    product_id?: string
+    title: string
+    type?: string
+    priority?: string
+    description?: string
+    preconditions?: string[]
+    steps?: { step: number; action: string; expected: string }[]
+    expected?: string
+    assertions?: { target: string; comparison: string; value: string }[]
+  }) =>
+    request<{ id: string; req_id: string; product_id: string; title: string; type: string; priority: string; status: string }>(
+      '/testcases',
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
   update: (id: string, data: Record<string, unknown>) =>
     request(`/testcases/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id: string) => request(`/testcases/${id}`, { method: 'DELETE' }),
@@ -486,6 +503,11 @@ export const testCases = {
     request(`/testcases/${id}/feedback`, {
       method: 'POST',
       body: JSON.stringify({ accepted, comments }),
+    }),
+  batchFeedback: (caseIds: string[], accepted: boolean, comments = '') =>
+    request<{ updated_count: number; new_status: string }>(`/testcases/batch/feedback`, {
+      method: 'POST',
+      body: JSON.stringify({ case_ids: caseIds, accepted, comments }),
     }),
 }
 
@@ -662,16 +684,20 @@ export const logs = {
   /** LLM 调用日志列表（分页，不含完整 prompt/response） */
   listLlmLogs: (params: {
     page?: number; page_size?: number;
-    agent_name?: string; task_id?: string; req_id?: string; success?: boolean;
+    agent_name?: string; model?: string; task_id?: string; req_id?: string;
+    success?: boolean; start_date?: string; end_date?: string;
   } = {}) => {
     const sp = new URLSearchParams({
       page: String(params.page || 1),
       page_size: String(params.page_size || 20),
     })
     if (params.agent_name) sp.set('agent_name', params.agent_name)
+    if (params.model) sp.set('model', params.model)
     if (params.task_id) sp.set('task_id', params.task_id)
     if (params.req_id) sp.set('req_id', params.req_id)
     if (params.success !== undefined) sp.set('success', String(params.success))
+    if (params.start_date) sp.set('start_date', params.start_date)
+    if (params.end_date) sp.set('end_date', params.end_date)
     return request<PaginatedData<LLMCallLogItem>>(`/admin/llm-logs?${sp}`)
   },
   /** LLM 调用日志详情（含完整 system_prompt/user_prompt/response/parsed_json） */
@@ -680,7 +706,8 @@ export const logs = {
   /** 用户操作日志列表（分页） */
   listOperationLogs: (params: {
     page?: number; page_size?: number;
-    username?: string; action?: string; target_type?: string; target_id?: string; success?: boolean;
+    username?: string; action?: string; target_type?: string; target_id?: string;
+    success?: boolean; start_date?: string; end_date?: string;
   } = {}) => {
     const sp = new URLSearchParams({
       page: String(params.page || 1),
@@ -691,6 +718,8 @@ export const logs = {
     if (params.target_type) sp.set('target_type', params.target_type)
     if (params.target_id) sp.set('target_id', params.target_id)
     if (params.success !== undefined) sp.set('success', String(params.success))
+    if (params.start_date) sp.set('start_date', params.start_date)
+    if (params.end_date) sp.set('end_date', params.end_date)
     return request<PaginatedData<OperationLogItem>>(`/admin/operation-logs?${sp}`)
   },
 }
@@ -710,7 +739,7 @@ export const auth = {
 // 导出
 // ============================================================
 export const exportCases = {
-  download: async (format: string, caseIds?: string[], projectName?: string) => {
+  download: async (format: string, caseIds?: string[], projectName?: string, includeDetails?: boolean) => {
     const params = new URLSearchParams({ format })
     const url = `${BASE}/export?${params}`
     // ⚠️ 必须携带 Authorization 头：后端 export_testcases 依赖 Depends(get_current_user)
@@ -720,6 +749,7 @@ export const exportCases = {
     if (caseIds?.length) {
       const body: Record<string, unknown> = { format, case_ids: caseIds }
       if (projectName) body.project_name = projectName
+      if (includeDetails !== undefined) body.include_details = includeDetails
       const res = await fetch(url, {
         method: 'POST',
         headers,
@@ -750,8 +780,12 @@ export const products = {
   list: () => request<import('../types').Product[]>('/products/products'),
   create: (name: string, desc = '') =>
     request('/products/products', { method: 'POST', body: JSON.stringify({ name, description: desc }) }),
-  delete: (id: string) =>
-    request(`/products/products/${id}`, { method: 'DELETE' }),
+  /** 删除产品（需传入 confirm_name 进行二次确认，名称必须完全匹配） */
+  delete: (id: string, confirmName: string) =>
+    request(`/products/products/${id}?confirm_name=${encodeURIComponent(confirmName)}`, { method: 'DELETE' }),
+  /** 删除预检查：返回产品名称与关联数据统计（项目/模块/需求/用例/功能点数量） */
+  deleteCheck: (id: string) =>
+    request<{ id: string; name: string; stats: { projects: number; modules: number; requirements: number; test_cases: number; functional_points: number } }>(`/products/products/${id}/delete-check`),
   listProjects: (pid: string) =>
     request<import('../types').Project[]>(`/products/products/${pid}/projects`),
   createProject: (pid: string, name: string, desc = '', version = '1.0') =>

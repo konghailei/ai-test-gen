@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>需求管理设计：为什么我们这么设计？</title>
+<style>
+  :root{
+    --blue:#1890ff; --blue-d:#0d6fe0;
+    --yellow:#faad14; --purple:#722ed1; --green:#52c41a; --pink:#eb2f96;
+    --ink:#1f2329; --sub:#5b6573; --line:#e8edf3; --bg:#eef2f7; --card:#ffffff;
+    --shadow:0 8px 28px rgba(20,40,80,.10);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB","Segoe UI",sans-serif;
+    background:var(--bg); color:var(--ink); overflow:hidden;
+  }
+  /* 进度条 */
+  .progress{position:fixed;top:0;left:0;height:5px;background:linear-gradient(90deg,var(--blue),#36cfc9);width:0;z-index:50;transition:width .35s}
+  /* 幻灯片容器 */
+  .deck{position:relative;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center}
+  .slide{
+    position:absolute;width:min(1120px,94vw);height:min(660px,92vh);
+    background:var(--card);border-radius:22px;box-shadow:var(--shadow);
+    padding:42px 54px;display:none;flex-direction:column;overflow:hidden;
+  }
+  .slide.active{display:flex;animation:fade .45s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+  .slide h1{font-size:34px;line-height:1.25;margin-bottom:6px}
+  .slide h2{font-size:25px;margin-bottom:16px;display:flex;align-items:center;gap:10px}
+  .slide h2 .tag{font-size:13px;font-weight:600;color:#fff;background:var(--blue);padding:3px 10px;border-radius:20px}
+  .slide p,.slide li{font-size:16.5px;line-height:1.7;color:var(--sub)}
+  .lead{font-size:18px;color:var(--ink)}
+  .small{font-size:13.5px;color:#98a2b3}
+  .accent{color:var(--blue);font-weight:700}
+  .row{display:flex;gap:20px}
+  .col{flex:1}
+  ul{list-style:none;display:flex;flex-direction:column;gap:9px}
+  li::before{content:"▸";color:var(--blue);font-weight:700;margin-right:8px}
+  .card{background:#f7faff;border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+  .pill{display:inline-block;font-size:12.5px;font-weight:700;padding:3px 11px;border-radius:20px;color:#fff}
+  .badge{display:inline-block;font-size:11.5px;font-weight:700;color:#fff;background:#8c98a8;padding:2px 9px;border-radius:6px;margin-left:6px;vertical-align:middle}
+  .badge.b1{background:#13a8a8}.badge.b2{background:#d4380d}.badge.b3{background:#722ed1}
+  .badge.b4{background:#08979c}.badge.b5{background:#c41d7f}.badge.b6{background:#d48806}
+  .badge.b7{background:#1d39c4}.badge.b8{background:#531dab}
+  .ex{background:#fffbe6;border-left:4px solid var(--yellow);border-radius:0 10px 10px 0;padding:12px 16px;margin-top:12px;font-size:15px;color:#614700}
+  .ex b{color:#ad6800}
+  .vs{font-size:13px;font-weight:700;color:#fff;background:#bfbfbf;border-radius:6px;padding:2px 8px}
+  .ok{color:#389e0d;font-weight:700}
+  .no{color:#cf1322;font-weight:700}
+  .wk{color:#d48806;font-weight:700}
+  svg{display:block}
+  .fig{display:flex;align-items:center;justify-content:center}
+  /* 封面 */
+  .cover{justify-content:center;align-items:flex-start;background:linear-gradient(135deg,#e6f4ff 0%,#f0f5ff 60%,#ffffff 100%)}
+  .cover .kicker{font-size:15px;font-weight:700;color:var(--blue);letter-spacing:2px}
+  .cover h1{font-size:46px;margin:14px 0 10px}
+  .cover .sub{font-size:19px;color:var(--sub);margin-bottom:26px;max-width:780px}
+  .cover .meta{display:flex;gap:10px;flex-wrap:wrap}
+  .cover .meta span{background:#fff;border:1px solid var(--line);border-radius:20px;padding:7px 16px;font-size:14px;color:var(--sub);box-shadow:var(--shadow)}
+  /* 导航 */
+  .nav{position:fixed;bottom:18px;right:24px;display:flex;gap:10px;z-index:60}
+  .nav button{width:46px;height:46px;border:none;border-radius:50%;background:#fff;box-shadow:var(--shadow);font-size:20px;color:var(--blue);cursor:pointer;transition:.2s}
+  .nav button:hover{background:var(--blue);color:#fff}
+  .counter{position:fixed;bottom:26px;left:24px;font-size:14px;color:var(--sub);z-index:60;background:#fff;padding:6px 14px;border-radius:20px;box-shadow:var(--shadow)}
+  .dots{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);display:flex;gap:7px;z-index:60}
+  .dots i{width:9px;height:9px;border-radius:50%;background:#cdd6e0;cursor:pointer;transition:.2s}
+  .dots i.on{background:var(--blue);transform:scale(1.35)}
+  table.cmp{width:100%;border-collapse:collapse;font-size:13px}
+  table.cmp th,table.cmp td{border:1px solid var(--line);padding:8px 9px;text-align:center;vertical-align:middle}
+  table.cmp th{background:#f0f5ff;color:var(--ink);font-weight:700}
+  table.cmp td:first-child{text-align:left;font-weight:700;background:#fafcff}
+  .hint{position:fixed;top:14px;right:20px;font-size:12px;color:#aab4c0;z-index:60}
+  .foot{margin-top:auto;font-size:12.5px;color:#aab4c0}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="hint">← → 翻页 · 空格下一页</div>
+<div class="deck" id="deck">
+
+  <!-- 1 封面 -->
+  <section class="slide cover active">
+    <div class="kicker">AI 测试平台 · 需求管理设计专题</div>
+    <h1>需求管理设计：<br/>为什么我们这么设计？</h1>
+    <div class="sub">把"我们系统"的需求管理，和业界 4 种常见做法摆在一起比优劣，用生活中的例子，给完全不懂的你讲清楚。</div>
+    <div class="meta">
+      <span>📄 基线：docs/11 系统 vs 业界</span>
+      <span>🎯 仅需求管理设计（不含测试用例生成）</span>
+      <span>🗓️ 2026-07-29</span>
+    </div>
+  </section>
+
+  <!-- 2 什么是需求管理设计 -->
+  <section class="slide">
+    <h2>先讲人话：什么是"需求管理设计" <span class="tag">0</span></h2>
+    <div class="row">
+      <div class="col">
+        <p class="lead">开奶茶店前，得先想清楚：卖哪些口味、杯子多大、会员怎么算、停电了怎么办……</p>
+        <p style="margin-top:10px">把这些"<b>要想清楚的事</b>"想周全、记清楚、还能随时改和查，叫<span class="accent">需求管理</span>。<br/>
+        "需求管理<b>设计</b>"讨论的是：<b>用什么"架子"去装这些需求</b>，才不容易乱、不容易漏、改了还能追溯？</p>
+        <div class="ex"><b>🧋 本文主角：</b>我们自研的 AI 测试平台（ai-test-gen），它在"需求管理"这一层有一套自己的设计。</div>
+      </div>
+      <div class="col fig">
+        <!-- 奶茶杯 SVG -->
+        <svg width="220" height="300" viewBox="0 0 220 300">
+          <defs><linearGradient id="tea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd591"/><stop offset="1" stop-color="#fa8c16"/></linearGradient></defs>
+          <rect x="60" y="70" width="100" height="170" rx="14" fill="url(#tea)" stroke="#d46b08" stroke-width="3"/>
+          <rect x="78" y="40" width="64" height="40" rx="6" fill="#fff" stroke="#d46b08" stroke-width="3"/>
+          <ellipse cx="110" cy="70" rx="50" ry="10" fill="#fff7e6" stroke="#d46b08" stroke-width="3"/>
+          <circle cx="95" cy="140" r="9" fill="#fff" opacity=".8"/><circle cx="125" cy="170" r="9" fill="#fff" opacity=".8"/><circle cx="105" cy="195" r="9" fill="#fff" opacity=".8"/>
+          <rect x="150" y="95" width="10" height="120" rx="5" fill="#ffccc7" stroke="#cf1322" stroke-width="2"/>
+          <text x="110" y="262" text-anchor="middle" font-size="16" fill="#d46b08" font-weight="700">奶茶店 = 系统</text>
+          <text x="110" y="285" text-anchor="middle" font-size="13" fill="#8c98a8">菜单 = 需求</text>
+        </svg>
+      </div>
+    </div>
+    <div class="grid4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px">
+      <div class="card" style="font-size:13.5px"><b>需求</b><br/>用户想要系统做什么</div>
+      <div class="card" style="font-size:13.5px"><b>结构化</b><br/>散乱的话→能定位、能统计的条目</div>
+      <div class="card" style="font-size:13.5px"><b>可追溯</b><br/>看到结果，能反查它从哪条需求来</div>
+      <div class="card" style="font-size:13.5px"><b>澄清</b><br/>把模糊、说不清的需求问清楚</div>
+    </div>
+  </section>
+
+  <!-- 3 我们系统长什么样 -->
+  <section class="slide">
+    <h2>我们系统的需求管理，长这样 <span class="tag">1</span></h2>
+    <p class="lead">拆成 <span class="accent">5 块拼图</span>，每块都像奶茶店里的某样东西：</p>
+    <div class="grid5" style="margin-top:14px">
+      <div class="card" style="text-align:center">
+        <div style="font-size:30px">🗄️</div><b>① 双 SRR 分层</b>
+        <div class="small" style="margin-top:6px">共享规则 / 专属规则分开，绝不重复写</div>
+      </div>
+      <div class="card" style="text-align:center">
+        <div style="font-size:30px">🧩</div><b>② FP 功能点</b>
+        <div class="small" style="margin-top:6px">拆成可复用、可去重、可看影响的模块</div>
+      </div>
+      <div class="card" style="text-align:center">
+        <div style="font-size:30px">⏳</div><b>③ 状态机+版本</b>
+        <div class="small" style="margin-top:6px">草稿→确认→归档，还能回到旧版本</div>
+      </div>
+      <div class="card" style="text-align:center">
+        <div style="font-size:30px">👴</div><b>④ KB 澄清</b>
+        <div class="small" style="margin-top:6px">老员工查档案，帮你补全模糊需求</div>
+      </div>
+      <div class="card" style="text-align:center">
+        <div style="font-size:30px">📦</div><b>⑤ 可追溯</b>
+        <div class="small" style="margin-top:6px">像快递单号，一路查到源头</div>
+      </div>
+    </div>
+    <div class="ex" style="margin-top:18px"><b>🧋 奶茶店映射：</b>① 卫生标准只写一次（全店通用）｜② 会员规则改了不误伤奶茶｜③ 新菜单改坏能翻回上周版｜④ 写"中杯"系统提醒你上次是 500ml｜⑤ 看到"会员打折"能反查源自哪条需求。</div>
+  </section>
+
+  <!-- 4 五种方法同台 -->
+  <section class="slide">
+    <h2>台上的 5 种做法 <span class="tag">2</span></h2>
+    <div class="grid5" style="margin-top:6px">
+      <div class="card" style="border-top:5px solid var(--yellow)"><span class="pill" style="background:var(--yellow)">A</span><br/><b>散文式</b><div class="small">Word 写记叙文，想到哪写到哪</div></div>
+      <div class="card" style="border-top:5px solid var(--purple)"><span class="pill" style="background:var(--purple)">B</span><br/><b>重型工具</b><div class="small">DOORS/Polarion，靠追踪矩阵管航母级项目</div></div>
+      <div class="card" style="border-top:5px solid var(--green)"><span class="pill" style="background:var(--green)">C</span><br/><b>敏捷看板</b><div class="small">Jira/禅道，便利贴式 Story + 状态流</div></div>
+      <div class="card" style="border-top:5px solid var(--pink)"><span class="pill" style="background:var(--pink)">D</span><br/><b>学术澄清</b><div class="small">ClarifyGPT，用"写代码"反推歧义</div></div>
+      <div class="card" style="border-top:5px solid var(--blue);box-shadow:0 0 0 2px var(--blue)"><span class="pill" style="background:var(--blue)">E</span><br/><b>我们系统</b><div class="small">轻量结构化 SRR+FP+版本+KB</div></div>
+    </div>
+    <div class="ex" style="margin-top:18px"><b>这篇怎么比：</b>逐个讲 A/B/C/D 长什么样 → 再拆开讲我们的 5 块拼图 → 最后用一张总表 + 选型理由收尾。每个都配生活例子和<b>网络优秀案例</b>佐证。</div>
+  </section>
+
+  <!-- 5 A 散文式 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--yellow)">A</span> 散文/纯文档式</h2>
+    <div class="row">
+      <div class="col">
+        <p><b>长什么样：</b>像你给合伙人发的微信——"明天把菜单定一下，奶茶甜度客户说要可调，顺便看看隔壁会员卡怎么弄。"信息有，但<span class="no">散、乱、没结构</span>。</p>
+        <ul>
+          <li>✅ 上手零门槛，5 分钟能写</li>
+          <li>✅ 早期灵感记录很顺手</li>
+          <li class="no">❌ 无法精确定位（"那条安全需求是哪条？"答不上）</li>
+          <li class="no">❌ 难以统计、容易遗漏、难追溯</li>
+          <li class="no">❌ 模糊需求不会被自动发现</li>
+        </ul>
+      </div>
+      <div class="col">
+        <div class="card" style="background:#fff1f0;border-color:#ffccc7">
+          <b>📱 微信例子：</b><br/>
+          "登录要支持账号密码和验证码。密码要能隐藏。为了安全最好输错5次锁账号。界面要好看，按钮用蓝色。"<br/>
+          <span class="small">——三句话混了功能/安全/界面，没编号没优先级，开发得自己拆。</span>
+        </div>
+        <div class="ex" style="margin-top:14px"><b>🌐 网络案例 1：</b>Atlassian 把"写清晰需求"列为敏捷第一实践，要求用 INVEST 准则消除"快/友好"这类<span class="accent">模糊词</span>。散文式恰恰相反——既不结构化，也没澄清机制。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 B 重型工具 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--purple)">B</span> 重型需求工具式（DOORS / Polarion）</h2>
+    <div class="row">
+      <div class="col">
+        <p><b>长什么样：</b>造航母时，每个螺丝钉都要能查到装在哪、谁供的、改了影响哪根管道。靠一张<span class="accent">"需求追踪矩阵(RTM)"</span>大表实现双向追溯。</p>
+        <ul>
+          <li>✅ 追溯极强、合规无忧（航空/医疗/汽车强制）</li>
+          <li>✅ 改一条需求，自动标红"牵连 30 处"</li>
+          <li class="no">❌ 重：要培训，普通人一周未必上手</li>
+          <li class="no">❌ 贵：授权费动辄几十万</li>
+          <li class="no">❌ 慢：写一条需求要走流程</li>
+        </ul>
+      </div>
+      <div class="col fig">
+        <svg width="250" height="220" viewBox="0 0 250 220">
+          <rect x="20" y="30" width="210" height="50" rx="10" fill="#f9f0ff" stroke="var(--purple)" stroke-width="2"/>
+          <text x="125" y="60" text-anchor="middle" font-size="14" fill="var(--purple)" font-weight="700">需求 REQ-003</text>
+          <rect x="20" y="100" width="95" height="40" rx="8" fill="#fff" stroke="#d3adf7" stroke-width="2"/>
+          <text x="67" y="124" text-anchor="middle" font-size="12">设计</text>
+          <rect x="135" y="100" width="95" height="40" rx="8" fill="#fff" stroke="#d3adf7" stroke-width="2"/>
+          <text x="182" y="124" text-anchor="middle" font-size="12">代码</text>
+          <rect x="77" y="160" width="95" height="40" rx="8" fill="#fff" stroke="#d3adf7" stroke-width="2"/>
+          <text x="124" y="184" text-anchor="middle" font-size="12">测试用例</text>
+          <line x1="125" y1="80" x2="67" y2="100" stroke="var(--purple)" stroke-width="2"/>
+          <line x1="125" y1="80" x2="182" y2="100" stroke="var(--purple)" stroke-width="2"/>
+          <line x1="67" y1="140" x2="124" y2="160" stroke="var(--purple)" stroke-width="2"/>
+          <line x1="182" y1="140" x2="124" y2="160" stroke="var(--purple)" stroke-width="2"/>
+        </svg>
+      </div>
+    </div>
+    <div class="ex"><b>🌐 网络案例 2/3：</b>RTM 被比作"<span class="accent">QA 的安全带</span>"——平时无感，出事时庆幸它在。但同一资料提醒：<b>"追溯成本要和风险成正比，不是每个项目都需要正式 RTM。"</b> 中小项目用 DOORS 是杀鸡用牛刀——这也是我们没选它的核心原因。</div>
+  </section>
+
+  <!-- 7 C 敏捷看板 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--green)">C</span> 敏捷看板式（Jira / 禅道 / TAPD）</h2>
+    <div class="row">
+      <div class="col">
+        <p><b>长什么样：</b>你家的"家务便利贴看板"——一张贴纸写"买菜"，贴「待办」；做了移「进行中」；做完移「完成」。Jira 把贴纸叫 <b>User Story</b>，三列叫<b>看板</b>，再配每 2 周一轮的迭代。</p>
+        <ul>
+          <li>✅ 协作强、进度可视、特别适配迭代</li>
+          <li>✅ 开发/测试/产品同一张看板，沟通成本低</li>
+          <li class="no">❌ 需求易碎片化（一条一卡，全局靠人拼）</li>
+          <li class="no">❌ 跨模块共享规则 / 非功能需求没处放</li>
+          <li class="no">❌ 卡片里仍是散文，缺"规则不重复"硬约束</li>
+        </ul>
+      </div>
+      <div class="col fig">
+        <svg width="250" height="200" viewBox="0 0 250 200">
+          <rect x="10" y="20" width="70" height="160" rx="8" fill="#f6ffed" stroke="#b7eb8f"/>
+          <rect x="90" y="20" width="70" height="160" rx="8" fill="#e6f7ff" stroke="#91d5ff"/>
+          <rect x="170" y="20" width="70" height="160" rx="8" fill="#fff7e6" stroke="#ffd591"/>
+          <text x="45" y="40" text-anchor="middle" font-size="12" font-weight="700" fill="#52c41a">待办</text>
+          <text x="125" y="40" text-anchor="middle" font-size="12" font-weight="700" fill="#1890ff">进行中</text>
+          <text x="205" y="40" text-anchor="middle" font-size="12" font-weight="700" fill="#fa8c16">完成</text>
+          <rect x="18" y="55" width="54" height="34" rx="5" fill="#fff" stroke="#d9d9d9"/><rect x="18" y="98" width="54" height="34" rx="5" fill="#fff" stroke="#d9d9d9"/>
+          <rect x="98" y="55" width="54" height="34" rx="5" fill="#fff" stroke="#d9d9d9"/>
+          <rect x="178" y="55" width="54" height="34" rx="5" fill="#fff" stroke="#d9d9d9"/>
+        </svg>
+      </div>
+    </div>
+    <div class="ex"><b>🌐 网络案例 1/4：</b>Atlassian 自己都要求"把<b>非功能需求（性能/安全）跟着每个功能一起写</b>"；可现实里 Story 最容易把"跨模块共享规则"漏掉——它不属于任何一张便利贴。aqua 也指出纯看板在跨团队/合规上弱，所以才有 Jama/Polarion 补位。这正是看板的<span class="accent">结构性短板</span>。</div>
+  </section>
+
+  <!-- 8 D 学术澄清 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--pink)">D</span> 学术歧义澄清式（ClarifyGPT · FSE'24）</h2>
+    <div class="row">
+      <div class="col">
+        <p><b>长什么样：</b>你写的需求模糊，它<b>先试着写代码</b>，发现代码里"这里也对、那里也对、自相矛盾"，于是反过来问你："你这句到底是 A 还是 B 意思？"</p>
+        <ul>
+          <li>✅ 歧义发现<span class="ok">非常精准</span>，直戳"需求想不清"痛点</li>
+          <li>✅ 硬核数据：GPT-4 一次写对率 70.96% → 80.80%（被引 130+）</li>
+          <li class="no">❌ 依赖"先写代码"——需求阶段还没代码时失效</li>
+          <li class="no">❌ 不治"规则重复/分层/版本/追溯"等工程管理</li>
+          <li class="no">❌ 工程化重，不是开箱即用</li>
+        </ul>
+      </div>
+      <div class="col fig">
+        <svg width="250" height="210" viewBox="0 0 250 210">
+          <rect x="20" y="20" width="210" height="40" rx="8" fill="#fff0f6" stroke="var(--pink)" stroke-width="2"/>
+          <text x="125" y="45" text-anchor="middle" font-size="12" fill="var(--pink)">模糊需求："排个序"</text>
+          <path d="M125 60 L70 110 L70 150" fill="none" stroke="var(--pink)" stroke-width="2"/>
+          <path d="M125 60 L180 110 L180 150" fill="none" stroke="var(--pink)" stroke-width="2"/>
+          <rect x="30" y="150" width="80" height="40" rx="8" fill="#fff" stroke="#ffadd2"/><text x="70" y="174" text-anchor="middle" font-size="11">升序?</text>
+          <rect x="140" y="150" width="80" height="40" rx="8" fill="#fff" stroke="#ffadd2"/><text x="180" y="174" text-anchor="middle" font-size:11>降序?</text>
+          <text x="125" y="205" text-anchor="middle" font-size="11" fill="#8c98a8">代码两可 → 回头追问</text>
+        </svg>
+      </div>
+    </div>
+    <div class="ex"><b>🌐 网络案例 5：</b>ClarifyGPT（中科院/北航，FSE'24 顶会）核心动机："用户常常无法准确表达需求，现有 LLM 不懂主动澄清，直接按模糊需求生成，结果跑偏。"思路值得借鉴——但前提是<b>已有代码可写</b>。我们系统是需求阶段就澄清，所以改用"知识库+结构化检测"<span class="accent">更早更轻</span>地达成同类目标。</div>
+  </section>
+
+  <!-- 9 E 总览 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--blue)">E</span> 我们系统：借各家优点，避开各自的坑</h2>
+    <div class="grid2" style="margin-top:8px">
+      <div class="card"><b>🟢 吸收了谁</b>
+        <ul style="margin-top:6px">
+          <li>ClarifyGPT 的"<b>先澄清再动手</b>"共识</li>
+          <li>BDD 的"把模糊变具体（用例子）</li>
+          <li>DOORS 的"<b>基线 / 影响分析</b>"思想</li>
+          <li>RTM 的"<b>可追溯是安全带</b>"理念</li>
+        </ul>
+      </div>
+      <div class="card"><b>🔵 我们怎么落地（轻量版）</b>
+        <ul style="margin-top:6px">
+          <li>双 SRR 分层 → 规则<b>不重复</b></li>
+          <li>FP 子系统 → 可复用/去重/影响分析</li>
+          <li>状态机+版本 → 可回滚（不买重型工具）</li>
+          <li>KB 澄清 → 用 <b>2026 生产级 RAG</b> 实现</li>
+        </ul>
+      </div>
+    </div>
+    <div class="ex"><b>🎯 一句话：</b>我们没闭门造车，而是用轻量方式，把业界验证过的优点"拼"成最适合中小产品、快速迭代、且人人能读懂的一套。</div>
+  </section>
+
+  <!-- 10 E1 双SRR -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--blue)">E①</span> 双 SRR 分层：分开放的规则柜</h2>
+    <div class="row">
+      <div class="col fig">
+        <svg width="300" height="240" viewBox="0 0 300 240">
+          <rect x="20" y="30" width="120" height="180" rx="12" fill="#e6f4ff" stroke="var(--blue)" stroke-width="2"/>
+          <text x="80" y="55" text-anchor="middle" font-size="13" font-weight="700" fill="var(--blue)">🗄️ 通用规则</text>
+          <text x="80" y="80" text-anchor="middle" font-size="11">interaction_srr</text>
+          <rect x="32" y="95" width="96" height="28" rx="6" fill="#fff" stroke="#91d5ff"/><text x="80" y="113" text-anchor="middle" font-size="11">杯子要耐热</text>
+          <rect x="32" y="130" width="96" height="28" rx="6" fill="#fff" stroke="#91d5ff"/><text x="80" y="148" text-anchor="middle" font-size="11">卫生标准</text>
+          <rect x="32" y="165" width="96" height="28" rx="6" fill="#fff" stroke="#91d5ff"/><text x="80" y="183" text-anchor="middle" font-size="11">会员通用契约</text>
+          <rect x="170" y="60" width="110" height="60" rx="10" fill="#f6ffed" stroke="#52c41a" stroke-width="2"/>
+          <text x="225" y="82" text-anchor="middle" font-size="12" font-weight="700" fill="#389e0d">🧋 奶茶</text>
+          <text x="225" y="103" text-anchor="middle" font-size="10">糖度可调(sub_srr)</text>
+          <rect x="170" y="140" width="110" height="60" rx="10" fill="#fff7e6" stroke="#fa8c16" stroke-width="2"/>
+          <text x="225" y="162" text-anchor="middle" font-size="12" font-weight="700" fill="#d46b08">🍟 小食</text>
+          <text x="225" y="183" text-anchor="middle" font-size="10">油炸温度(sub_srr)</text>
+          <line x1="140" y1="110" x2="170" y2="90" stroke="var(--blue)" stroke-width="2" stroke-dasharray="4"/>
+          <line x1="140" y1="140" x2="170" y2="170" stroke="var(--blue)" stroke-width="2" stroke-dasharray="4"/>
+        </svg>
+      </div>
+      <div class="col">
+        <p><b>铁律：</b>单功能规则 → 放 <b>sub_srr</b>；跨功能共享 → 放 <b>interaction_srr</b>；<span class="accent">禁止重复写</span>。</p>
+        <p class="small" style="margin-top:6px">doc11 实证：旧架构每条规则出现 2 次，新架构降到 <b>0 次</b>。</p>
+        <div class="ex"><b>🧋 例子：</b>"杯子要耐热"是全店通用 → 只在通用柜写一次；"奶茶糖度可调"只属奶茶 → 放奶茶柜。绝不在每个小食单上都抄一遍"杯子耐热"。</div>
+        <div class="ex" style="background:#f9f0ff;border-color:#d3adf7"><b>🌐 网络案例 6：</b>BDD 用"具体例子"把模糊变具体（如"消费100元→金牌8折"），目标一致；但我们多了<b>层级职责分离</b>，避免 BDD 在大型系统里"例子散落、互相重复"。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 11 E2 FP -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--blue)">E②</span> FP 功能点：可拼装的乐高模块</h2>
+    <div class="row">
+      <div class="col fig">
+        <svg width="300" height="220" viewBox="0 0 300 220">
+          <rect x="20" y="40" width="110" height="60" rx="8" fill="#f6ffed" stroke="#52c41a" stroke-width="2"/>
+          <text x="75" y="66" text-anchor="middle" font-size="12" font-weight="700" fill="#389e0d">🏪 总店</text>
+          <text x="75" y="88" text-anchor="middle" font-size="11">会员打折 FP</text>
+          <rect x="170" y="40" width="110" height="60" rx="8" fill="#e6f4ff" stroke="var(--blue)" stroke-width="2"/>
+          <text x="225" y="66" text-anchor="middle" font-size="12" font-weight="700" fill="var(--blue)">🏬 分店</text>
+          <text x="225" y="88" text-anchor="middle" font-size="11">也要会员打折</text>
+          <rect x="95" y="135" width="110" height="50" rx="8" fill="#fff" stroke="#d9d9d9" stroke-dasharray="5"/>
+          <text x="150" y="158" text-anchor="middle" font-size="11" fill="#8c98a8">系统发现同名 FP</text>
+          <text x="150" y="176" text-anchor="middle" font-size="11" fill="#389e0d">→ 直接复用，不重做</text>
+          <line x1="75" y1="100" x2="150" y2="135" stroke="#52c41a" stroke-width="2" stroke-dasharray="4"/>
+          <line x1="225" y1="100" x2="150" y2="135" stroke="var(--blue)" stroke-width="2" stroke-dasharray="4"/>
+        </svg>
+      </div>
+      <div class="col">
+        <p><b>每个 FP 是独立可管单元：</b></p>
+        <ul>
+          <li>🔁 <b>去重跳过 LLM</b>：同模块已有同名 → 直接复制，省调用费</li>
+          <li>📦 模块多选：一个 FP 可挂多个模块</li>
+          <li>🕸️ 依赖图谱 / BFS 影响分析：改一处知道牵连谁</li>
+          <li>✅ 审核流：pending → approved（店长签字才用）</li>
+        </ul>
+        <div class="ex"><b>🧋 例子：</b>总店做过"会员打折"，分店也要——系统发现同名 FP 已存在，<b>直接复用</b>，不重新设计，两家规则还一致。</div>
+        <div class="ex" style="background:#f6ffed;border-color:#b7eb8f"><b>🌐 网络案例 1：</b>业界共识"渐进细化"——别一次写全，让需求分层在临近实现时再细化。我们的 FP 把这件事工程化了，还加了业界面少见的"<b>去重跳过 LLM</b>"降本优化；依赖影响分析则是 DOORS"影响分析"的轻量版。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12 E3 状态机版本 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--blue)">E③</span> 状态机 + 版本：带时光机的公文</h2>
+    <div class="row">
+      <div class="col fig">
+        <svg width="320" height="200" viewBox="0 0 320 200">
+          <rect x="15" y="60" width="62" height="40" rx="8" fill="#fff" stroke="#d9d9d9"/><text x="46" y="84" text-anchor="middle" font-size="11">草稿</text>
+          <rect x="95" y="60" width="62" height="40" rx="8" fill="#fff" stroke="#91d5ff"/><text x="126" y="84" text-anchor="middle" font-size="11">待审</text>
+          <rect x="175" y="60" width="62" height="40" rx="8" fill="#e6f4ff" stroke="var(--blue)" stroke-width="2"/><text x="206" y="84" text-anchor="middle" font-size="11" font-weight="700">已确认</text>
+          <rect x="255" y="60" width="50" height="40" rx="8" fill="#f0f5ff" stroke="#d3adf7"/><text x="280" y="84" text-anchor="middle" font-size="11">归档</text>
+          <line x1="77" y1="80" x2="95" y2="80" stroke="#bbb" stroke-width="2"/><line x1="157" y1="80" x2="175" y2="80" stroke="#bbb" stroke-width="2"/><line x1="237" y1="80" x2="255" y2="80" stroke="#bbb" stroke-width="2"/>
+          <path d="M280 120 Q160 180 46 120" fill="none" stroke="var(--blue)" stroke-width="2" stroke-dasharray="5"/>
+          <text x="163" y="175" text-anchor="middle" font-size="11" fill="var(--blue)">⏳ 改坏了？一键回到旧版本</text>
+        </svg>
+      </div>
+      <div class="col">
+        <p><b>状态机：</b>draft → pending_review → confirmed → archived，任意态可"补充重新生成"。</p>
+        <p><b>版本快照：</b>每次改动前自动存一份，能回到任意历史版本（restoreVersion）。</p>
+        <div class="ex"><b>🧋 例子：</b>新菜单先"草稿"，店长审过变"已确认"上线。两周后想改糖度，系统先自动存"当前版快照"，改坏了能一键回到改之前那版。</div>
+        <div class="ex" style="background:#f9f0ff;border-color:#d3adf7"><b>🌐 网络案例 3：</b>DOORS 的"基线（冻结快照）"思想我们取其精华做轻量版——不强制走变更委员会，但<b>每次改动前自动快照</b>，保留"可回滚"核心收益，又没官僚成本。资料还建议"把版本控制作为 Definition of Done 的一部分"。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 13 E4 KB澄清 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--blue)">E④</span> 需求侧 KB 澄清：记性超好的老员工</h2>
+    <div class="row">
+      <div class="col">
+        <p><b>需求模糊/不全时，系统自动查"知识库"帮你补全、发现遗漏：</b></p>
+        <div class="card" style="font-size:14px;margin-top:8px">
+          🔍 检索组合（doc11 称"生产级"）：<br/>
+          向量(bge-large-zh) + BM25(中文分词)<br/>
+          → <b>RRF 融合(k=60)</b> → <b>Cross-Encoder 重排</b><br/>
+          → 模块过滤(防跨模块误匹配) → 冷启动降级
+        </div>
+        <div class="ex"><b>🧋 例子：</b>你写"会员等级按消费金额分"。系统查档案发现上次定义过"铜/银/金，门槛 1000/5000/20000"，于是问你："这次也用这三档吗？"——把模糊点自动揪出。</div>
+      </div>
+      <div class="col fig">
+        <svg width="260" height="220" viewBox="0 0 260 220">
+          <circle cx="80" cy="70" r="28" fill="#e6f4ff" stroke="var(--blue)" stroke-width="2"/>
+          <text x="80" y="76" text-anchor="middle" font-size="24">👴</text>
+          <rect x="120" y="38" width="120" height="64" rx="10" fill="#fff" stroke="#91d5ff"/>
+          <text x="180" y="62" text-anchor="middle" font-size="11" fill="var(--blue)">上次中杯=500ml</text>
+          <text x="180" y="84" text-anchor="middle" font-size="11" fill="var(--blue)">这次也用吗？</text>
+          <rect x="40" y="130" width="180" height="70" rx="10" fill="#f0f5ff" stroke="#d3adf7" stroke-width="2"/>
+          <text x="130" y="155" text-anchor="middle" font-size="11" font-weight="700" fill="var(--purple)">📚 知识库(档案柜)</text>
+          <text x="130" y="178" text-anchor="middle" font-size="10" fill="#8c98a8">向量+BM25+RRF+重排</text>
+          <line x1="80" y1="98" x2="130" y2="130" stroke="var(--blue)" stroke-width="2" stroke-dasharray="4"/>
+        </svg>
+      </div>
+    </div>
+    <div class="ex" style="background:#f9f0ff;border-color:#d3adf7"><b>🌐 网络案例 5/7/8：</b>澄清必要性被 ClarifyGPT 证明，但我们<b>不靠写代码反推</b>，改用知识库在更早阶段澄清。更关键：我们的检索是 <span class="accent">2026 生产级 RAG</span>（混合检索+重排），不是朴素 RAG——2026 共识"朴素 RAG 已死，生产级=混合检索+重排，Top-K 精度再提 15–30%"。RAG 还能"减少幻觉、答案可溯源"，契合我们"可追溯"基调。</div>
+  </section>
+
+  <!-- 14 E5 可追溯 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:var(--blue)">E⑤</span> 全链路可追溯：快递单号一路查</h2>
+    <div class="row">
+      <div class="col fig">
+        <svg width="320" height="180" viewBox="0 0 320 180">
+          <rect x="10" y="70" width="80" height="44" rx="8" fill="#e6f4ff" stroke="var(--blue)" stroke-width="2"/><text x="50" y="97" text-anchor="middle" font-size="11" font-weight="700">📄 需求</text>
+          <rect x="120" y="70" width="80" height="44" rx="8" fill="#f6ffed" stroke="#52c41a" stroke-width="2"/><text x="160" y="97" text-anchor="middle" font-size="11" font-weight="700">🧩 FP</text>
+          <rect x="230" y="70" width="80" height="44" rx="8" fill="#fff7e6" stroke="#fa8c16" stroke-width="2"/><text x="270" y="97" text-anchor="middle" font-size="11" font-weight="700">🧠 XMind</text>
+          <line x1="90" y1="92" x2="120" y2="92" stroke="var(--blue)" stroke-width="2"/><line x1="200" y1="92" x2="230" y2="92" stroke="var(--blue)" stroke-width="2"/>
+          <text x="160" y="50" text-anchor="middle" font-size="11" fill="#8c98a8">related_fp → Traceability → 覆盖率矩阵</text>
+          <rect x="10" y="135" width="300" height="28" rx="6" fill="#fafcff" stroke="#d9d9d9"/>
+          <text x="160" y="153" text-anchor="middle" font-size="10" fill="#5b6573">📦 单号 SF123：包裹从哪发 → 到过哪 → 现在哪，全程可查</text>
+        </svg>
+      </div>
+      <div class="col">
+        <p><b>实现：</b><span class="accent">related_fp → Traceability → XMind 分组 → FP 覆盖率矩阵</span>。每条需求能一路追到影响的功能点，再追到下游产物。</p>
+        <div class="ex"><b>🧋 例子：</b>看到"会员打折"功能，能反查：源自需求第几节 → 影响了哪些 FP → 在 XMind 归到哪组。像用快递单号查包裹全程。</div>
+        <div class="ex" style="background:#fff1f0;border-color:#ffccc7"><b>🌐 网络案例 2/1：</b>可追溯是行业刚需——RTM 被比作"<span class="accent">QA 的安全带</span>"，Atlassian 也把它列为六实践之一防范围蔓延。我们的差异点是做到 <b>FP 级</b>追溯（不止"需求↔用例"两级）：比看板靠人脑拼可靠，又比 DOORS 全链路强追溯轻得多。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 15 对比总表 -->
+  <section class="slide">
+    <h2>横向对比总表 <span class="tag">8</span></h2>
+    <table class="cmp">
+      <thead><tr><th>维度</th><th>A 散文</th><th>B 重型</th><th>C 看板</th><th>D 澄清</th><th>E 我们</th></tr></thead>
+      <tbody>
+        <tr><td>上手难度</td><td class="ok">极简</td><td class="no">很难</td><td class="ok">简单</td><td class="wk">较难</td><td class="ok">简单</td></tr>
+        <tr><td>规则不重复</td><td class="no">❌</td><td class="wk">靠人工</td><td class="no">❌</td><td class="no">❌</td><td class="ok">双SRR强制</td></tr>
+        <tr><td>功能点复用</td><td class="no">❌</td><td class="wk">⚠️</td><td class="no">❌</td><td class="no">❌</td><td class="ok">去重跳过LLM</td></tr>
+        <tr><td>版本回滚</td><td class="no">❌</td><td class="ok">强</td><td class="wk">弱</td><td class="no">❌</td><td class="ok">快照</td></tr>
+        <tr><td>模糊自动澄清</td><td class="no">❌</td><td class="no">❌</td><td class="no">❌</td><td class="ok">靠代码</td><td class="ok">靠KB+检测</td></tr>
+        <tr><td>跨模块规则</td><td class="no">❌</td><td class="wk">⚠️</td><td class="no">难放</td><td class="no">❌</td><td class="ok">interaction_srr</td></tr>
+        <tr><td>全链路可追溯</td><td class="no">❌</td><td class="ok">⭐极强</td><td class="wk">中等</td><td class="no">❌</td><td class="ok">FP级</td></tr>
+        <tr><td>中文私有化</td><td class="ok">✅</td><td class="wk">⚠️</td><td class="ok">✅</td><td class="no">学术</td><td class="ok">可离线</td></tr>
+        <tr><td>成本</td><td>免费</td><td class="no">昂贵</td><td>中</td><td>研究</td><td class="ok">免费/自建</td></tr>
+      </tbody>
+    </table>
+    <div class="foot">✅=优势　⚠️=一般　❌=短板　⭐=极强　|　我们系统（E）在"规则不重复/复用/澄清/回滚/可追溯"上综合占优，且成本最低。</div>
+  </section>
+
+  <!-- 16 AI: 多Agent流水线 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:#13a8a8">AI①</span> 需求分析不是一个人干：一组 AI 员工接力</h2>
+    <div class="col fig">
+      <svg width="640" height="170" viewBox="0 0 640 170">
+        <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#8c98a8"/></marker></defs>
+        <rect x="6" y="55" width="92" height="56" rx="10" fill="#e6f4ff" stroke="var(--blue)" stroke-width="2"/><text x="52" y="80" text-anchor="middle" font-size="12" font-weight="700" fill="var(--blue)">📥 ReqAgent</text><text x="52" y="98" text-anchor="middle" font-size="9.5">解析需求</text>
+        <rect x="118" y="55" width="100" height="56" rx="10" fill="#fff0f6" stroke="var(--pink)" stroke-width="2"/><text x="168" y="80" text-anchor="middle" font-size="12" font-weight="700" fill="var(--pink)">🔍 ClarifyAgent</text><text x="168" y="98" text-anchor="middle" font-size="9.5">澄清补全</text>
+        <rect x="236" y="55" width="96" height="56" rx="10" fill="#f6ffed" stroke="#52c41a" stroke-width="2"/><text x="284" y="80" text-anchor="middle" font-size="12" font-weight="700" fill="#389e0d">🚧 QualityGate</text><text x="284" y="98" text-anchor="middle" font-size="9.5">质量门禁</text>
+        <rect x="350" y="55" width="104" height="56" rx="10" fill="#fff7e6" stroke="#fa8c16" stroke-width="2"/><text x="402" y="80" text-anchor="middle" font-size="12" font-weight="700" fill="#d46b08">🕸️ ImpactAnalysis</text><text x="402" y="98" text-anchor="middle" font-size="9.5">影响分析</text>
+        <rect x="472" y="55" width="96" height="56" rx="10" fill="#f0f5ff" stroke="#d3adf7" stroke-width="2" stroke-dasharray="5"/><text x="520" y="78" text-anchor="middle" font-size="11.5" font-weight="700" fill="#722ed1">⚙️ GenAgent</text><text x="520" y="95" text-anchor="middle" font-size="9">用例生成(下游)</text>
+        <line x1="98" y1="83" x2="116" y2="83" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+        <line x1="218" y1="83" x2="234" y2="83" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+        <line x1="332" y1="83" x2="348" y2="83" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+        <line x1="446" y1="83" x2="470" y2="83" stroke="#8c98a8" stroke-width="2" stroke-dasharray="4" marker-end="url(#ar)"/>
+        <rect x="6" y="128" width="444" height="24" rx="6" fill="#e6fffb" stroke="#13a8a8"/><text x="228" y="144" text-anchor="middle" font-size="11" fill="#08979c" font-weight="700">⬅ 需求分析段（本文范围）　　GenAgent 之后属测试用例生成，本文不展开 ➡</text>
+      </svg>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <div class="col">
+        <p class="lead">系统把"读懂需求"拆给<b>多个专职 AI（Agent）</b>接力完成，而不是一个模型包打天下：</p>
+        <ul>
+          <li>📥 <b>ReqAgent</b>：像"需求分析师"，把人话文档读成结构化双 SRR + 拆成 FP</li>
+          <li>🔍 <b>ClarifyAgent</b>：像"爱挑刺的同事"，查知识库补全模糊点、问你问题</li>
+          <li>🚧 <b>QualityGate</b>：像"质检员"，不合格打回重来</li>
+          <li>🕸️ <b>ImpactAnalysis</b>：像"风险员"，改一处算出牵连哪些 FP</li>
+        </ul>
+      </div>
+      <div class="col">
+        <div class="ex"><b>🧋 例子：</b>开分店时，ReqAgent 把"老板口述"写成标准菜单；ClarifyAgent 发现"中杯"没定义，回头问；QualityGate 检查菜单齐不齐；ImpactAnalysis 算出"改糖度"会牵连奶茶和会员两个模块。</div>
+        <div class="ex" style="background:#e6fffb;border-color:#87e8de"><b>🌐 网络案例 4/7：</b>多 Agent 协作（创建/视觉/编排/可观测）已成行业趋势（如 Pcloudy Qpilot）；我们用 Req→Clarify→Quality→Impact 的小队，把"需求分析"这一段做专、做稳，再交给下游。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 17 AI: 人话变结构化 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:#13a8a8">AI②</span> AI 怎么把"人话"变成"结构化需求"</h2>
+    <div class="row">
+      <div class="col fig">
+        <svg width="300" height="250" viewBox="0 0 300 250">
+          <rect x="10" y="20" width="110" height="50" rx="10" fill="#fff" stroke="#d9d9d9"/><text x="65" y="42" text-anchor="middle" font-size="11">📝 人话需求</text><text x="65" y="60" text-anchor="middle" font-size="9.5" fill="#8c98a8">"登录要支持验证码"</text>
+          <rect x="150" y="20" width="120" height="50" rx="10" fill="#e6f4ff" stroke="var(--blue)" stroke-width="2"/><text x="210" y="42" text-anchor="middle" font-size="11" font-weight="700" fill="var(--blue)">🧠 LLM</text><text x="210" y="60" text-anchor="middle" font-size="9.5" fill="#8c98a8">ReqAgent 调用</text>
+          <line x1="120" y1="45" x2="148" y2="45" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+          <rect x="20" y="100" width="120" height="60" rx="10" fill="#f0f5ff" stroke="var(--blue)" stroke-width="2"/><text x="80" y="124" text-anchor="middle" font-size="11" font-weight="700">🗄️ 双 SRR</text><text x="80" y="144" text-anchor="middle" font-size="9.5" fill="#8c98a8">规则分层不重复</text>
+          <rect x="160" y="100" width="120" height="60" rx="10" fill="#f6ffed" stroke="#52c41a" stroke-width="2"/><text x="220" y="124" text-anchor="middle" font-size="11" font-weight="700">🧩 FP 积木</text><text x="220" y="144" text-anchor="middle" font-size="9.5" fill="#8c98a8">可复用/去重</text>
+          <line x1="140" y1="70" x2="80" y2="98" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="160" y1="70" x2="220" y2="98" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+          <rect x="70" y="185" width="160" height="50" rx="10" fill="#fff7e6" stroke="#fa8c16" stroke-width="2"/><text x="150" y="208" text-anchor="middle" font-size="11" font-weight="700" fill="#d46b08">🗃️ Milvus 入库</text><text x="150" y="226" text-anchor="middle" font-size="9.5" fill="#8c98a8">bge-large-zh 向量化</text>
+          <line x1="80" y1="160" x2="130" y2="183" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="220" y1="160" x2="170" y2="183" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+        </svg>
+      </div>
+      <div class="col">
+        <ul>
+          <li><b>读文档→结构化：</b>ReqAgent 调 LLM，一次产出 <b>双 SRR</b>（通用/专属规则分开放）+ 自动把需求<b>拆成 FP</b>（功能点积木）</li>
+          <li><b>向量化入库：</b>需求被中文嵌入模型（bge-large-zh，1024 维）转成"向量"，存进 <b>Milvus</b> 向量库 + PostgreSQL，供以后检索</li>
+          <li><b>去重跳过 LLM：</b>同模块已有同名 FP → 直接复制，<span class="accent">不重复花钱调模型</span>（doc11：显著降本）</li>
+        </ul>
+        <div class="ex"><b>🧋 例子：</b>老板口述"登录加验证码"，ReqAgent 立刻整理成：通用规则（60秒倒计时）+ 奶茶店专属规则（短信通道），并拆成"获取验证码/校验"两个 FP；同时把这份菜单向量化存进"档案柜"，下次别家店能搜到。</div>
+        <div class="ex" style="background:#e6fffb;border-color:#87e8de"><b>🌐 网络案例 7/8：</b>把需求向量化进向量库正是 <b>RAG 的基础步骤</b>——2026 共识"先 Embedding 再存向量库"，我们的 bge-large-zh + Milvus 就是这套标准做法，保证后续澄清/检索"可溯源、不幻觉"。</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 18 AI: 澄清+把关+闭环 -->
+  <section class="slide">
+    <h2><span class="pill" style="background:#13a8a8">AI③</span> AI 怎么"澄清 + 把关 + 闭环"</h2>
+    <div class="row">
+      <div class="col fig">
+        <svg width="290" height="230" viewBox="0 0 290 230">
+          <rect x="20" y="20" width="120" height="46" rx="10" fill="#fff0f6" stroke="var(--pink)" stroke-width="2"/><text x="80" y="42" text-anchor="middle" font-size="11" font-weight="700" fill="var(--pink)">📝 原始需求</text>
+          <rect x="150" y="20" width="120" height="46" rx="10" fill="#fff" stroke="#d3adf7"/><text x="210" y="38" text-anchor="middle" font-size="10.5" fill="#722ed1">🔍 ClarifyAgent</text><text x="210" y="55" text-anchor="middle" font-size="9" fill="#8c98a8">查KB+检测</text>
+          <rect x="150" y="85" width="120" height="44" rx="10" fill="#e6fffb" stroke="#13a8a8"/><text x="210" y="103" text-anchor="middle" font-size="10" fill="#08979c">📚 知识库检索</text><text x="210" y="119" text-anchor="middle" font-size="9" fill="#8c98a8">混合+RRF+重排</text>
+          <rect x="20" y="85" width="120" height="44" rx="10" fill="#f6ffed" stroke="#52c41a"/><text x="80" y="103" text-anchor="middle" font-size="10.5" fill="#389e0d">❓ 追问/补全</text><text x="80" y="119" text-anchor="middle" font-size="9" fill="#8c98a8">模糊点揪出</text>
+          <rect x="85" y="155" width="120" height="44" rx="10" fill="#f0f5ff" stroke="var(--blue)" stroke-width="2"/><text x="145" y="173" text-anchor="middle" font-size="10.5" font-weight="700" fill="var(--blue)">✅ 结构化需求</text><text x="145" y="189" text-anchor="middle" font-size="9" fill="#8c98a8">入Milvus+版本快照</text>
+          <line x1="140" y1="43" x2="148" y2="43" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="210" y1="66" x2="210" y2="83" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="150" y1="107" x2="140" y2="107" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="80" y1="129" x2="120" y2="153" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="210" y1="129" x2="170" y2="153" stroke="#8c98a8" stroke-width="2" marker-end="url(#ar)"/>
+        </svg>
+      </div>
+      <div class="col">
+        <ul>
+          <li><b>澄清：</b>ClarifyAgent 做完整性/歧义/遗漏检测，调 <b>hybrid_search</b>（向量+BM25+RRF+CrossEncoder 重排+模块过滤）查知识库，自动补全或追问；还能 LLM 二次校验答案</li>
+          <li><b>把关：</b>QualityGate 当"质检员"，不达标打回；ImpactAnalysis 用 BFS 算出"改一处牵连哪些 FP"</li>
+          <li><b>闭环：</b>确认后的需求写入 <b>Milvus + PostgreSQL</b>，打版本快照（restoreVersion）；<span class="accent">related_fp → Traceability</span> 让每条需求可一路反查</li>
+        </ul>
+        <div class="ex"><b>🧋 例子：</b>ClarifyAgent 发现"会员等级"没说门槛，查档案问你；你答完，QualityGate 检查菜单齐了放行；ImpactAnalysis 标出"这改动了会员和优惠两个模块"；最终菜单存入档案柜并拍了张"快照"，以后改坏能找回。</div>
+        <div class="ex" style="background:#f9f0ff;border-color:#d3adf7"><b>🌐 网络案例 5/7/8：</b>澄清逻辑与 ClarifyGPT 同源（但我们用知识库而非写代码）；检索是 2026 生产级 RAG；落库用向量库使答案"可追溯、减幻觉"——三个环节都有业界前沿依据。</div>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<div class="progress" id="progress"></div>
+<div class="counter" id="counter">1 / 17</div>
+<div class="dots" id="dots"></div>
+<div class="nav">
+  <button id="prev" title="上一页">‹</button>
+  <button id="next" title="下一页">›</button>
+</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  const total=slides.length;
+  let cur=0;
+  const prog=document.getElementById('progress');
+  const counter=document.getElementById('counter');
+  const dotsBox=document.getElementById('dots');
+  slides.forEach((_,i)=>{const d=document.createElement('i');d.onclick=()=>show(i);dotsBox.appendChild(d);});
+  const dots=[...dotsBox.children];
+  function show(i){
+    cur=Math.max(0,Math.min(total-1,i));
+    slides.forEach((s,idx)=>s.classList.toggle('active',idx===cur));
+    prog.style.width=((cur+1)/total*100)+'%';
+    counter.textContent=(cur+1)+' / '+total;
+    dots.forEach((d,idx)=>d.classList.toggle('on',idx===cur));
+  }
+  document.getElementById('next').onclick=()=>show(cur+1);
+  document.getElementById('prev').onclick=()=>show(cur-1);
+  document.addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'||e.key===' '){e.preventDefault();show(cur+1);}
+    if(e.key==='ArrowLeft'){e.preventDefault();show(cur-1);}
+    if(e.key==='Home')show(0); if(e.key==='End')show(total-1);
+  });
+  // 点击左右半屏翻页
+  document.getElementById('deck').addEventListener('click',e=>{
+    if(e.target.closest('.nav')||e.target.closest('.dots')||e.target.closest('a'))return;
+    const x=e.clientX; if(x<window.innerWidth*0.35)show(cur-1); else if(x>window.innerWidth*0.65)show(cur+1);
+  });
+  show(0);
+</script>
+</body>
+</html>

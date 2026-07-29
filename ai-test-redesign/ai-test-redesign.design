@@ -1,0 +1,1106 @@
+{
+  "data": [
+    {
+      "id": "page-login",
+      "title": "登录",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784789639000,
+      "canvasData": {
+        "x": 36,
+        "y": -60,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/login.html",
+        "interactions": [
+          {
+            "domId": "btn-login",
+            "targetPageId": "page-dashboard"
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-dashboard",
+      "title": "仪表盘",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784789639000,
+      "canvasData": {
+        "x": 564,
+        "y": -60,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/dashboard.html",
+        "interactions": [
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "btn-user-manual",
+            "targetPageId": "page-user-manual"
+          },
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-requirements",
+      "title": "需求管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784789639000,
+      "canvasData": {
+        "x": 1092,
+        "y": -60,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/requirements.html",
+        "interactions": [
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-test-cases",
+      "title": "测试用例",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784789639000,
+      "canvasData": {
+        "x": 36,
+        "y": 276,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/test-cases.html",
+        "interactions": [
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-knowledge-base",
+      "title": "知识库",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784789639000,
+      "canvasData": {
+        "x": 564,
+        "y": 276,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/knowledge-base.html",
+        "interactions": [
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-knowledge-qa",
+      "title": "知识问答",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784789639000,
+      "canvasData": {
+        "x": 1092,
+        "y": 276,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/knowledge-qa.html",
+        "interactions": [
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-project-management",
+      "title": "项目管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 1620,
+        "y": -60,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/project-management.html",
+        "interactions": [
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-module-management",
+      "title": "模块管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 1620,
+        "y": 276,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/module-management.html",
+        "interactions": [
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-dependency-graph",
+      "title": "依赖图谱",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 36,
+        "y": 612,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/dependency-graph.html",
+        "interactions": [
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-requirement-detail",
+      "title": "需求详情",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 564,
+        "y": 612,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/requirement-detail.html",
+        "interactions": [
+          {
+            "domId": "btn-clarify",
+            "targetPageId": "page-requirement-clarify"
+          },
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-tasks",
+      "title": "任务管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 1092,
+        "y": 948,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/tasks.html",
+        "interactions": [
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-admin-dashboard",
+      "title": "管理首页",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 1092,
+        "y": 612,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-dashboard.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings"
+          },
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-admin-products",
+      "title": "产品管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 1620,
+        "y": 612,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-products.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings"
+          },
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-admin-prompts",
+      "title": "提示词管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 2148,
+        "y": -60,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-prompts.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-admin-knowledge",
+      "title": "知识库管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 2148,
+        "y": 276,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-knowledge.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-admin-users",
+      "title": "用户管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 2148,
+        "y": 612,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-users.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-admin-roles",
+      "title": "角色管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 2676,
+        "y": -60,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-roles.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-admin-logs",
+      "title": "日志查看",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 2676,
+        "y": 276,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-logs.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-admin-settings",
+      "title": "系统设置",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784796000000,
+      "canvasData": {
+        "x": 2676,
+        "y": 612,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-settings.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-requirement-clarify",
+      "title": "需求澄清",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784799600000,
+      "canvasData": {
+        "x": 564,
+        "y": 948,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/requirement-clarify.html",
+        "interactions": [
+          {
+            "domId": "btn-back-to-detail",
+            "targetPageId": "page-requirement-detail"
+          },
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirement-clarify",
+            "hideEdge": true
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirement-clarify",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "page-user-manual",
+      "title": "用户手册",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1784799600000,
+      "canvasData": {
+        "x": 36,
+        "y": 948,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/user-manual.html",
+        "interactions": [
+          {
+            "domId": "btn-back-to-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-dashboard",
+            "targetPageId": "page-dashboard"
+          },
+          {
+            "domId": "nav-requirements",
+            "targetPageId": "page-requirements"
+          },
+          {
+            "domId": "nav-test-cases",
+            "targetPageId": "page-test-cases"
+          },
+          {
+            "domId": "nav-knowledge-base",
+            "targetPageId": "page-knowledge-base"
+          },
+          {
+            "domId": "nav-knowledge-qa",
+            "targetPageId": "page-knowledge-qa"
+          },
+          {
+            "domId": "nav-project-management",
+            "targetPageId": "page-project-management"
+          },
+          {
+            "domId": "nav-module-management",
+            "targetPageId": "page-module-management"
+          },
+          {
+            "domId": "nav-dependency-graph",
+            "targetPageId": "page-dependency-graph"
+          },
+          {
+            "domId": "nav-admin-entry",
+            "targetPageId": "page-admin-dashboard"
+          }
+        ]
+      }
+    }
+  ],
+  "config": {
+    "autoLayout": false,
+    "deviceType": "desktop",
+    "projectName": "AI测试生成系统",
+    "designLibrary": {
+      "name": "苹果",
+      "id": "dl_builtin_apple",
+      "version": null,
+      "scope": "built-in-global",
+      "path": "c:\\Users\\kong\\.trae-cn\\design_libraries\\dl_builtin_apple",
+      "versionSource": "metadata.json"
+    },
+    "visualEditorEnabled": false,
+    "showEdge": false
+  }
+}

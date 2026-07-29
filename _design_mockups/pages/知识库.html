@@ -1,0 +1,1533 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识库</title>
+    <style id="theme-vars">
+/*
+ * Pinguo design tokens
+ * Brand: Pinguo
+ * Domain: Consumer imaging product
+ * Style: Restrained, elegant, Apple-inspired
+ * Theme mode: light-dark
+ * Source language: zh
+ * Output language: en
+ *
+ * Color architecture (two layers):
+ *   1. Primitive palette - six categories. brand / background / text / icon
+ *      are each a 10-step scale (50 lightest to 900 darkest). state-success and
+ *      state-error are functional colors anchored on Apple system colors.
+ *      Anchors follow Apple Human Interface Guidelines system colors
+ *      (System Blue #007AFF, System Green #34C759, System Red #FF3B30,
+ *      system grays / label / background colors).
+ *   2. Semantic tokens - :root (light) and .dark map roles onto primitives.
+ *      Components and UI kits must only consume the semantic tokens below.
+ */
+
+/* @group-priority: brand, background, text, icon, state-success, state-error */
+
+:root {
+  
+  /* solo-design consumption aliases: explicit prefix for fill-html-head.mjs */
+  --apple-background: var(--background, #ffffff);
+  --apple-foreground: var(--foreground, #0f172a);
+  --apple-card: var(--card, var(--background));
+  --apple-card-foreground: var(--card-foreground, var(--foreground));
+  --apple-popover: var(--popover, var(--card));
+  --apple-popover-foreground: var(--popover-foreground, var(--card-foreground, var(--foreground)));
+  --apple-primary: var(--primary, #111827);
+  --apple-primary-foreground: var(--primary-foreground, #ffffff);
+  --apple-secondary: var(--secondary, var(--muted, var(--card)));
+  --apple-secondary-foreground: var(--secondary-foreground, var(--foreground));
+  --apple-muted: var(--muted, var(--card));
+  --apple-muted-foreground: var(--muted-foreground, var(--foreground));
+  --apple-accent: var(--accent, var(--secondary, var(--muted, var(--card))));
+  --apple-accent-foreground: var(--accent-foreground, var(--foreground));
+  --apple-destructive: var(--destructive, #ef4444);
+  --apple-destructive-foreground: var(--destructive-foreground, #ffffff);
+  --apple-border: var(--border, currentColor);
+  --apple-input: var(--input, var(--border));
+  --apple-ring: var(--ring, var(--primary));
+  --apple-chart-1: var(--chart-1, var(--primary));
+  --apple-chart-2: var(--chart-2, var(--secondary, var(--primary)));
+  --apple-chart-3: var(--chart-3, var(--accent, var(--primary)));
+  --apple-chart-4: var(--chart-4, var(--muted-foreground, var(--foreground)));
+  --apple-chart-5: var(--chart-5, var(--foreground));
+  --apple-sidebar: var(--sidebar, var(--background));
+  --apple-sidebar-foreground: var(--sidebar-foreground, var(--foreground));
+  --apple-sidebar-primary: var(--sidebar-primary, var(--primary));
+  --apple-sidebar-primary-foreground: var(--sidebar-primary-foreground, var(--primary-foreground));
+  --apple-sidebar-accent: var(--sidebar-accent, var(--accent, var(--muted, var(--card))));
+  --apple-sidebar-accent-foreground: var(--sidebar-accent-foreground, var(--accent-foreground, var(--foreground)));
+
+  /* solo-design consumption aliases: radius scale for fill-html-head.mjs */
+  --apple-radius-sm: calc(var(--radius, 1.2rem) * 0.5);
+  --apple-radius-md: var(--radius, 1.2rem);
+  --apple-radius-lg: calc(var(--radius, 1.2rem) * 1.5);
+
+/* ===== PRIMITIVE PALETTE ===== */
+
+  /* brand */
+  --brand-50: #e8f2ff;
+  --brand-100: #cfe5ff;
+  --brand-200: #9fcbff;
+  --brand-300: #66abff;
+  --brand-400: #2e8dff;
+  --brand-500: #007aff; /* @primary */
+  --brand-600: #0064d6;
+  --brand-700: #004fad;
+  --brand-800: #003b82;
+  --brand-900: #00275a;
+
+  /* background */
+  --background-50: #ffffff;
+  --background-100: #f7f7fa;
+  --background-200: #f2f2f7;
+  --background-300: #e5e5ea;
+  --background-400: #d1d1d6;
+  --background-500: #aeaeb2;
+  --background-600: #8e8e93;
+  --background-700: #3a3a3c;
+  --background-800: #1c1c1e;
+  --background-900: #000000;
+
+  /* text */
+  --text-50: #f5f5f7;
+  --text-100: #e3e3e8;
+  --text-200: #c7c7cc;
+  --text-300: #aeaeb2;
+  --text-400: #8e8e93;
+  --text-500: #6e6e73;
+  --text-600: #48484a;
+  --text-700: #3c3c43;
+  --text-800: #1d1d1f;
+  --text-900: #000000;
+
+  /* icon */
+  --icon-50: #f5f5f7;
+  --icon-100: #e5e5ea;
+  --icon-200: #d1d1d6;
+  --icon-300: #c7c7cc;
+  --icon-400: #aeaeb2;
+  --icon-500: #8e8e93;
+  --icon-600: #6e6e73;
+  --icon-700: #48484a;
+  --icon-800: #2c2c2e;
+  --icon-900: #1d1d1f;
+
+  /* state-success */
+  --state-success: #34c759; /* @primary */
+  --state-success-dark: #30d158;
+  --state-success-surface: #e9f9ee;
+  --state-success-foreground: #ffffff;
+
+  /* state-error */
+  --state-error: #ff3b30; /* @primary */
+  --state-error-dark: #ff453a;
+  --state-error-surface: #ffecea;
+  --state-error-foreground: #ffffff;
+
+  /* ===== SEMANTIC ROLES ===== */
+
+  /* semantic */
+  --background: var(--background-50);
+  --foreground: var(--text-800);
+  --card: var(--background-50);
+  --card-foreground: var(--text-800);
+  --popover: var(--background-50);
+  --popover-foreground: var(--text-900);
+
+  --primary: var(--brand-500);
+  --primary-foreground: var(--background-50);
+  --secondary: var(--background-200);
+  --secondary-foreground: var(--text-800);
+  --muted: var(--background-200);
+  --muted-foreground: var(--text-400);
+  --accent: var(--background-100);
+  --accent-foreground: var(--text-800);
+  --destructive: var(--state-error);
+  --destructive-foreground: var(--state-error-foreground);
+  --success: var(--state-success);
+  --success-foreground: var(--state-success-foreground);
+  --border: var(--background-300);
+  --input: var(--background-400);
+  --ring: var(--brand-500);
+
+  --icon: var(--icon-900);
+  --icon-muted: var(--icon-500);
+
+  /* chart */
+  --chart-1: var(--state-success);
+  --chart-2: var(--brand-500);
+  --chart-3: #ff9500;
+  --chart-4: #5856d6;
+  --chart-5: #af52de;
+
+  /* sidebar */
+  --sidebar: var(--background-200);
+  --sidebar-foreground: var(--text-800);
+  --sidebar-primary: var(--brand-500);
+  --sidebar-primary-foreground: var(--background-50);
+  --sidebar-accent: var(--background-300);
+  --sidebar-accent-foreground: var(--text-800);
+  --sidebar-border: var(--background-300);
+  --sidebar-ring: var(--brand-500);
+
+  /* TYPOGRAPHY */
+  --font-sans: DM Sans, ui-sans-serif, sans-serif, system-ui;
+  --font-serif: DM Sans, ui-sans-serif, sans-serif, system-ui;
+  --font-mono: JetBrains Mono, monospace;
+  --tracking-normal: 0em;
+
+  /* RADIUS */
+  --radius: 1.2rem;
+
+  /* SHADOWS */
+  --shadow-2xs: 0 1px 2px -1px rgba(0, 0, 0, 0.04); /* Hairline */
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.04); /* Subtle */
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05), 0 1px 3px -1px rgba(0, 0, 0, 0.05); /* Card */
+  --shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.06), 0 1px 2px -1px rgba(0, 0, 0, 0.05); /* Raised */
+  --shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -2px rgba(0, 0, 0, 0.05); /* Card Hover */
+  --shadow-lg: 0 8px 24px -8px rgba(0, 0, 0, 0.08), 0 4px 8px -4px rgba(0, 0, 0, 0.05); /* Float */
+  --shadow-xl: 0 16px 40px -10px rgba(0, 0, 0, 0.10), 0 8px 16px -8px rgba(0, 0, 0, 0.06); /* Overlay */
+  --shadow-2xl: 0 24px 64px -12px rgba(0, 0, 0, 0.12); /* Modal */
+
+  /* SPACING */
+  --spacing: 0.24rem;
+}
+
+/* ===== SEMANTIC ROLES - dark (primitive palette inherited) ===== */
+.dark {
+  --background: var(--background-900);
+  --foreground: var(--text-50);
+  --card: var(--background-800);
+  --card-foreground: var(--text-50);
+  --popover: var(--background-700);
+  --popover-foreground: var(--text-50);
+
+  --primary: var(--brand-400);
+  --primary-foreground: var(--background-900);
+  --secondary: var(--background-800);
+  --secondary-foreground: var(--text-50);
+  --muted: var(--background-800);
+  --muted-foreground: var(--text-400);
+  --accent: var(--background-700);
+  --accent-foreground: var(--text-50);
+  --destructive: var(--state-error-dark);
+  --destructive-foreground: var(--state-error-foreground);
+  --success: var(--state-success-dark);
+  --success-foreground: var(--state-success-foreground);
+  --border: var(--background-700);
+  --input: var(--background-700);
+  --ring: var(--brand-400);
+
+  --icon: var(--icon-50);
+  --icon-muted: var(--icon-500);
+
+  --chart-1: var(--state-success-dark);
+  --chart-2: var(--brand-400);
+  --chart-3: #ff9f0a;
+  --chart-4: #5e5ce6;
+  --chart-5: #bf5af2;
+
+  --sidebar: var(--background-800);
+  --sidebar-foreground: var(--text-50);
+  --sidebar-primary: var(--brand-400);
+  --sidebar-primary-foreground: var(--background-900);
+  --sidebar-accent: var(--background-700);
+  --sidebar-accent-foreground: var(--text-50);
+  --sidebar-border: var(--background-700);
+  --sidebar-ring: var(--brand-400);
+
+  --shadow-2xs: 0 1px 2px -1px rgba(0, 0, 0, 0.30);
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.30);
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.36), 0 1px 3px -1px rgba(0, 0, 0, 0.36);
+  --shadow: 0 2px 4px -1px rgba(0, 0, 0, 0.40), 0 1px 2px -1px rgba(0, 0, 0, 0.36);
+  --shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.44), 0 2px 4px -2px rgba(0, 0, 0, 0.36);
+  --shadow-lg: 0 8px 24px -8px rgba(0, 0, 0, 0.50), 0 4px 8px -4px rgba(0, 0, 0, 0.40);
+  --shadow-xl: 0 16px 40px -10px rgba(0, 0, 0, 0.55), 0 8px 16px -8px rgba(0, 0, 0, 0.44);
+  --shadow-2xl: 0 24px 64px -12px rgba(0, 0, 0, 0.60);
+}
+
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--apple-background);
+    --color-foreground: var(--apple-foreground);
+    --color-card: var(--apple-card);
+    --color-card-foreground: var(--apple-card-foreground);
+    --color-popover: var(--apple-popover);
+    --color-popover-foreground: var(--apple-popover-foreground);
+    --color-primary: var(--apple-primary);
+    --color-primary-foreground: var(--apple-primary-foreground);
+    --color-secondary: var(--apple-secondary);
+    --color-secondary-foreground: var(--apple-secondary-foreground);
+    --color-muted: var(--apple-muted);
+    --color-muted-foreground: var(--apple-muted-foreground);
+    --color-accent: var(--apple-accent);
+    --color-accent-foreground: var(--apple-accent-foreground);
+    --color-destructive: var(--apple-destructive);
+    --color-destructive-foreground: var(--apple-destructive-foreground);
+    --color-border: var(--apple-border);
+    --color-input: var(--apple-input);
+    --color-ring: var(--apple-ring);
+    --color-chart-1: var(--apple-chart-1);
+    --color-chart-2: var(--apple-chart-2);
+    --color-chart-3: var(--apple-chart-3);
+    --color-chart-4: var(--apple-chart-4);
+    --color-chart-5: var(--apple-chart-5);
+    --color-sidebar: var(--apple-sidebar);
+    --color-sidebar-foreground: var(--apple-sidebar-foreground);
+    --color-sidebar-primary: var(--apple-sidebar-primary);
+    --color-sidebar-primary-foreground: var(--apple-sidebar-primary-foreground);
+    --color-sidebar-accent: var(--apple-sidebar-accent);
+    --color-sidebar-accent-foreground: var(--apple-sidebar-accent-foreground);
+    --radius-sm: var(--apple-radius-sm);
+    --radius-md: var(--apple-radius-md);
+    --radius-lg: var(--apple-radius-lg);
+  }
+  @layer base {
+    body { background: var(--apple-background); color: var(--apple-foreground); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--apple-background); }
+      .text-background { color: var(--apple-background); }
+      .border-background { border-color: var(--apple-background); }
+      .ring-background { --tw-ring-color: var(--apple-background); }
+      .bg-foreground { background-color: var(--apple-foreground); }
+      .text-foreground { color: var(--apple-foreground); }
+      .border-foreground { border-color: var(--apple-foreground); }
+      .ring-foreground { --tw-ring-color: var(--apple-foreground); }
+      .bg-card { background-color: var(--apple-card); }
+      .text-card { color: var(--apple-card); }
+      .border-card { border-color: var(--apple-card); }
+      .ring-card { --tw-ring-color: var(--apple-card); }
+      .bg-card-foreground { background-color: var(--apple-card-foreground); }
+      .text-card-foreground { color: var(--apple-card-foreground); }
+      .border-card-foreground { border-color: var(--apple-card-foreground); }
+      .ring-card-foreground { --tw-ring-color: var(--apple-card-foreground); }
+      .bg-popover { background-color: var(--apple-popover); }
+      .text-popover { color: var(--apple-popover); }
+      .border-popover { border-color: var(--apple-popover); }
+      .ring-popover { --tw-ring-color: var(--apple-popover); }
+      .bg-popover-foreground { background-color: var(--apple-popover-foreground); }
+      .text-popover-foreground { color: var(--apple-popover-foreground); }
+      .border-popover-foreground { border-color: var(--apple-popover-foreground); }
+      .ring-popover-foreground { --tw-ring-color: var(--apple-popover-foreground); }
+      .bg-primary { background-color: var(--apple-primary); }
+      .text-primary { color: var(--apple-primary); }
+      .border-primary { border-color: var(--apple-primary); }
+      .ring-primary { --tw-ring-color: var(--apple-primary); }
+      .bg-primary-foreground { background-color: var(--apple-primary-foreground); }
+      .text-primary-foreground { color: var(--apple-primary-foreground); }
+      .border-primary-foreground { border-color: var(--apple-primary-foreground); }
+      .ring-primary-foreground { --tw-ring-color: var(--apple-primary-foreground); }
+      .bg-secondary { background-color: var(--apple-secondary); }
+      .text-secondary { color: var(--apple-secondary); }
+      .border-secondary { border-color: var(--apple-secondary); }
+      .ring-secondary { --tw-ring-color: var(--apple-secondary); }
+      .bg-secondary-foreground { background-color: var(--apple-secondary-foreground); }
+      .text-secondary-foreground { color: var(--apple-secondary-foreground); }
+      .border-secondary-foreground { border-color: var(--apple-secondary-foreground); }
+      .ring-secondary-foreground { --tw-ring-color: var(--apple-secondary-foreground); }
+      .bg-muted { background-color: var(--apple-muted); }
+      .text-muted { color: var(--apple-muted); }
+      .border-muted { border-color: var(--apple-muted); }
+      .ring-muted { --tw-ring-color: var(--apple-muted); }
+      .bg-muted-foreground { background-color: var(--apple-muted-foreground); }
+      .text-muted-foreground { color: var(--apple-muted-foreground); }
+      .border-muted-foreground { border-color: var(--apple-muted-foreground); }
+      .ring-muted-foreground { --tw-ring-color: var(--apple-muted-foreground); }
+      .bg-accent { background-color: var(--apple-accent); }
+      .text-accent { color: var(--apple-accent); }
+      .border-accent { border-color: var(--apple-accent); }
+      .ring-accent { --tw-ring-color: var(--apple-accent); }
+      .bg-accent-foreground { background-color: var(--apple-accent-foreground); }
+      .text-accent-foreground { color: var(--apple-accent-foreground); }
+      .border-accent-foreground { border-color: var(--apple-accent-foreground); }
+      .ring-accent-foreground { --tw-ring-color: var(--apple-accent-foreground); }
+      .bg-destructive { background-color: var(--apple-destructive); }
+      .text-destructive { color: var(--apple-destructive); }
+      .border-destructive { border-color: var(--apple-destructive); }
+      .ring-destructive { --tw-ring-color: var(--apple-destructive); }
+      .bg-destructive-foreground { background-color: var(--apple-destructive-foreground); }
+      .text-destructive-foreground { color: var(--apple-destructive-foreground); }
+      .border-destructive-foreground { border-color: var(--apple-destructive-foreground); }
+      .ring-destructive-foreground { --tw-ring-color: var(--apple-destructive-foreground); }
+      .bg-border { background-color: var(--apple-border); }
+      .text-border { color: var(--apple-border); }
+      .border-border { border-color: var(--apple-border); }
+      .ring-border { --tw-ring-color: var(--apple-border); }
+      .bg-input { background-color: var(--apple-input); }
+      .text-input { color: var(--apple-input); }
+      .border-input { border-color: var(--apple-input); }
+      .ring-input { --tw-ring-color: var(--apple-input); }
+      .bg-ring { background-color: var(--apple-ring); }
+      .text-ring { color: var(--apple-ring); }
+      .border-ring { border-color: var(--apple-ring); }
+      .ring-ring { --tw-ring-color: var(--apple-ring); }
+      .bg-chart-1 { background-color: var(--apple-chart-1); }
+      .text-chart-1 { color: var(--apple-chart-1); }
+      .border-chart-1 { border-color: var(--apple-chart-1); }
+      .ring-chart-1 { --tw-ring-color: var(--apple-chart-1); }
+      .bg-chart-2 { background-color: var(--apple-chart-2); }
+      .text-chart-2 { color: var(--apple-chart-2); }
+      .border-chart-2 { border-color: var(--apple-chart-2); }
+      .ring-chart-2 { --tw-ring-color: var(--apple-chart-2); }
+      .bg-chart-3 { background-color: var(--apple-chart-3); }
+      .text-chart-3 { color: var(--apple-chart-3); }
+      .border-chart-3 { border-color: var(--apple-chart-3); }
+      .ring-chart-3 { --tw-ring-color: var(--apple-chart-3); }
+      .bg-chart-4 { background-color: var(--apple-chart-4); }
+      .text-chart-4 { color: var(--apple-chart-4); }
+      .border-chart-4 { border-color: var(--apple-chart-4); }
+      .ring-chart-4 { --tw-ring-color: var(--apple-chart-4); }
+      .bg-chart-5 { background-color: var(--apple-chart-5); }
+      .text-chart-5 { color: var(--apple-chart-5); }
+      .border-chart-5 { border-color: var(--apple-chart-5); }
+      .ring-chart-5 { --tw-ring-color: var(--apple-chart-5); }
+      .bg-sidebar { background-color: var(--apple-sidebar); }
+      .text-sidebar { color: var(--apple-sidebar); }
+      .border-sidebar { border-color: var(--apple-sidebar); }
+      .ring-sidebar { --tw-ring-color: var(--apple-sidebar); }
+      .bg-sidebar-foreground { background-color: var(--apple-sidebar-foreground); }
+      .text-sidebar-foreground { color: var(--apple-sidebar-foreground); }
+      .border-sidebar-foreground { border-color: var(--apple-sidebar-foreground); }
+      .ring-sidebar-foreground { --tw-ring-color: var(--apple-sidebar-foreground); }
+      .bg-sidebar-primary { background-color: var(--apple-sidebar-primary); }
+      .text-sidebar-primary { color: var(--apple-sidebar-primary); }
+      .border-sidebar-primary { border-color: var(--apple-sidebar-primary); }
+      .ring-sidebar-primary { --tw-ring-color: var(--apple-sidebar-primary); }
+      .bg-sidebar-primary-foreground { background-color: var(--apple-sidebar-primary-foreground); }
+      .text-sidebar-primary-foreground { color: var(--apple-sidebar-primary-foreground); }
+      .border-sidebar-primary-foreground { border-color: var(--apple-sidebar-primary-foreground); }
+      .ring-sidebar-primary-foreground { --tw-ring-color: var(--apple-sidebar-primary-foreground); }
+      .bg-sidebar-accent { background-color: var(--apple-sidebar-accent); }
+      .text-sidebar-accent { color: var(--apple-sidebar-accent); }
+      .border-sidebar-accent { border-color: var(--apple-sidebar-accent); }
+      .ring-sidebar-accent { --tw-ring-color: var(--apple-sidebar-accent); }
+      .bg-sidebar-accent-foreground { background-color: var(--apple-sidebar-accent-foreground); }
+      .text-sidebar-accent-foreground { color: var(--apple-sidebar-accent-foreground); }
+      .border-sidebar-accent-foreground { border-color: var(--apple-sidebar-accent-foreground); }
+      .ring-sidebar-accent-foreground { --tw-ring-color: var(--apple-sidebar-accent-foreground); }
+    </style>
+    <style>
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      [data-icon] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        background-color: currentColor;
+      }
+    </style>
+</head>
+<body class="font-sans antialiased">
+    <style>
+/* ═══════════════════════════════════════════════════════════════
+   Shared Project Shell — Apple Design Library (dl_builtin_apple)
+   All colors/typography/radius/shadows via CSS variables
+   from colors_and_type.css — no hardcoded values
+   Note: var(--muted) is the semantic alias for --background-200 (#f2f2f7)
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── App Shell Root ── */
+.app-shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  color: var(--foreground);
+  background: var(--background);
+}
+
+/* ── Sidebar (240px fixed) ── */
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: var(--sidebar);
+  border-right: 1px solid var(--sidebar-border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 64px;
+  padding: 0 16px;
+  flex-shrink: 0;
+}
+
+.sidebar-logo-icon {
+  width: 22px;
+  height: 22px;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.sidebar-logo-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--sidebar-foreground);
+  white-space: nowrap;
+  letter-spacing: -0.01em;
+}
+
+/* ── Sidebar Navigation ── */
+.sidebar-nav {
+  flex: 1;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: calc(var(--radius) * 0.5);
+  color: var(--sidebar-foreground);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 400;
+  white-space: nowrap;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.nav-item svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.nav-item:hover {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.nav-item[data-active="true"] {
+  background: var(--sidebar-primary);
+  color: var(--sidebar-primary-foreground);
+  font-weight: 500;
+}
+
+.nav-item[data-active="true"]:hover {
+  background: var(--sidebar-primary);
+  color: var(--sidebar-primary-foreground);
+}
+
+/* ── Main Area ── */
+.main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* ── Top Header (64px fixed) ── */
+.top-header {
+  height: 64px;
+  flex-shrink: 0;
+  background: var(--background);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 32px;
+  gap: 16px;
+}
+
+/* ── Product Switcher ── */
+.product-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--input);
+  border-radius: calc(var(--radius) * 0.6);
+  background: var(--background);
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.product-switcher:hover,
+.product-switcher:focus-visible {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+  outline: none;
+}
+.product-switcher > svg {
+  width: 16px;
+  height: 16px;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+.product-switcher-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--foreground);
+  white-space: nowrap;
+}
+.product-switcher-arrow {
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+/* ── System Info ── */
+.system-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 8px;
+  flex-shrink: 0;
+}
+.system-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  height: 32px;
+  border-radius: calc(var(--radius) * 0.5);
+  background: var(--state-success-surface);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--state-success);
+  flex-shrink: 0;
+}
+.status-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--state-success);
+  white-space: nowrap;
+}
+.version-tag {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: calc(var(--radius) * 0.4);
+  background: var(--secondary);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* ── Header Actions ── */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* ── Notification Button ── */
+.notification-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: calc(var(--radius) * 0.5);
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.notification-btn:hover {
+  background: var(--accent);
+}
+
+.notification-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+.notification-dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--destructive);
+  border: 2px solid var(--background);
+}
+
+/* ── User Area ── */
+.user-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 4px 8px 4px 4px;
+  border-radius: calc(var(--radius) * 0.5);
+  transition: background-color 0.18s ease;
+}
+
+.user-area:hover {
+  background: var(--accent);
+}
+
+.user-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.user-name {
+  font-size: 13px;
+  color: var(--foreground);
+  white-space: nowrap;
+}
+
+.user-area svg {
+  width: 16px;
+  height: 16px;
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+/* ── Content Wrapper ── */
+.content-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--muted);
+  padding: 32px;
+  min-height: 0;
+}
+
+/* ── Page Title Slot ── */
+.page-title-bar {
+  margin-bottom: 24px;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--foreground);
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+/* ── Page Content Slot ── */
+.page-content {
+  min-height: 0;
+}
+</style>
+
+    <style>
+/* ═══════════════════════════════════════════════════════════════
+   Knowledge Base Page Styles — Apple Design Library (dl_builtin_apple)
+   All colors/typography/radius/shadows via CSS variables
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Toolbar Card ── */
+.toolbar-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.kb-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--input);
+  border-radius: calc(var(--radius) * 0.6);
+  background: var(--background);
+  flex: 1;
+  min-width: 200px;
+  max-width: 320px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.kb-search:focus-within {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+
+.kb-search svg {
+  width: 16px;
+  height: 16px;
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+.kb-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+.kb-search input::placeholder {
+  color: var(--muted-foreground);
+}
+
+.toolbar-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Filter Select ── */
+.select-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.filter-select {
+  height: 40px;
+  padding: 0 36px 0 12px;
+  border: 1px solid var(--input);
+  border-radius: calc(var(--radius) * 0.6);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  white-space: nowrap;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.filter-select:focus {
+  outline: 0;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+
+.select-chevron {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+/* ── Primary Button ── */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: calc(var(--radius) * 0.6);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: opacity 0.18s ease, box-shadow 0.18s ease;
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-primary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.btn-primary svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── Stats Overview Grid ── */
+.kb-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.kb-stat-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  transition: box-shadow 0.18s ease;
+}
+
+.kb-stat-card:hover {
+  box-shadow: var(--shadow-sm);
+}
+
+.kb-stat-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.kb-stat-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.kb-stat-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.kb-stat-icon-primary { color: var(--primary); }
+.kb-stat-icon-success { color: var(--success); }
+.kb-stat-icon-warning { color: var(--chart-3); }
+
+.kb-stat-label {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  font-weight: 400;
+}
+
+.kb-stat-value {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--foreground);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  margin-bottom: 8px;
+}
+
+.kb-stat-sub {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.kb-stat-sub-neutral { color: var(--muted-foreground); }
+.kb-stat-sub-success { color: var(--success); }
+.kb-stat-sub-warning { color: var(--chart-3); }
+
+/* ── Knowledge Entry Table Card ── */
+.kb-table-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 24px;
+  overflow: hidden;
+}
+
+.kb-table-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+
+.kb-table-card-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.kb-table-meta {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.kb-table-wrap {
+  overflow-x: auto;
+}
+
+.kb-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.kb-table th {
+  text-align: left;
+  padding: 12px 24px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted-foreground);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  background: var(--accent);
+}
+
+.kb-table td {
+  padding: 0 24px;
+  height: 60px;
+  font-size: 13px;
+  color: var(--foreground);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.kb-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.kb-table tbody tr {
+  transition: background-color 0.18s ease;
+}
+
+.kb-table tbody tr:hover {
+  background: var(--accent);
+}
+
+/* ── Title cell ── */
+.kb-title {
+  display: block;
+  font-weight: 600;
+  color: var(--foreground);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.18s ease;
+}
+
+.kb-title:hover {
+  color: var(--primary);
+}
+
+/* ── Date / time cells ── */
+.kb-date {
+  color: var(--foreground);
+  white-space: nowrap;
+}
+
+.kb-date-empty {
+  color: var(--muted-foreground);
+}
+
+.kb-time {
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+/* ── Badges ── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: calc(var(--radius) * 0.45);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  line-height: 1.5;
+}
+
+/* Module badges — colored per module */
+.badge-module-user { background: var(--primary); color: var(--primary-foreground); }
+.badge-module-payment { background: var(--success); color: var(--success-foreground); }
+.badge-module-message { background: var(--chart-3); color: var(--foreground); }
+.badge-module-system { background: var(--muted); color: var(--muted-foreground); }
+
+/* Status badges */
+.badge-status-published { background: var(--success); color: var(--success-foreground); }
+.badge-status-draft { background: var(--chart-3); color: var(--foreground); }
+.badge-status-archived { background: var(--muted); color: var(--muted-foreground); }
+
+/* ── Row Actions ── */
+.row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.row-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: calc(var(--radius) * 0.4);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.row-action-btn:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.row-action-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.row-action-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── Pagination ── */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.pagination-info {
+  font-size: 13px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.pagination-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.page-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius) * 0.4);
+  background: transparent;
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+.page-btn:hover:not(:disabled):not(.page-btn-active) {
+  background: var(--accent);
+}
+
+.page-btn-active {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 500;
+  cursor: default;
+}
+
+.page-btn:disabled {
+  color: var(--muted-foreground);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.page-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.page-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .kb-stats-grid {
+    grid-template-columns: 1fr;
+  }
+}
+    </style>
+
+    <div class="app-shell" data-viewport-mode="app-shell">
+      <!-- 侧边栏 -->
+      <aside class="sidebar" data-region="sidebar">
+        <!-- Logo 区域 -->
+        <div class="sidebar-header">
+          <i data-lucide="sparkles" class="sidebar-logo-icon"></i>
+          <span class="sidebar-logo-text">AI测试生成</span>
+        </div>
+        <!-- 导航列表 -->
+        <nav class="sidebar-nav" aria-label="主导航">
+          <a class="nav-item" data-nav-key="dashboard" data-dom-id="nav-dashboard" data-active="false" href="#">
+            <i data-lucide="layout-dashboard"></i>
+            <span>仪表盘</span>
+          </a>
+          <a class="nav-item" data-nav-key="project-management" data-dom-id="nav-project-management" data-active="false" href="#">
+            <i data-lucide="folder-kanban"></i>
+            <span>项目管理</span>
+          </a>
+          <a class="nav-item" data-nav-key="module-management" data-dom-id="nav-module-management" data-active="false" href="#">
+            <i data-lucide="layers"></i>
+            <span>模块管理</span>
+          </a>
+          <a class="nav-item" data-nav-key="requirements" data-dom-id="nav-requirements" data-active="false" href="#">
+            <i data-lucide="file-text"></i>
+            <span>需求管理</span>
+          </a>
+          <a class="nav-item" data-nav-key="test-cases" data-dom-id="nav-test-cases" data-active="false" href="#">
+            <i data-lucide="check-square"></i>
+            <span>测试用例</span>
+          </a>
+          <a class="nav-item" data-nav-key="dependency-graph" data-dom-id="nav-dependency-graph" data-active="false" href="#">
+            <i data-lucide="git-branch"></i>
+            <span>依赖图谱</span>
+          </a>
+          <a class="nav-item" data-nav-key="knowledge-base" data-dom-id="nav-knowledge-base" data-active="true" href="#">
+            <i data-lucide="book-open"></i>
+            <span>知识库</span>
+          </a>
+          <a class="nav-item" data-nav-key="knowledge-qa" data-dom-id="nav-knowledge-qa" data-active="false" href="#">
+            <i data-lucide="message-circle"></i>
+            <span>知识问答</span>
+          </a>
+          <div class="nav-divider" style="height:1px;background:var(--border);margin:8px 16px;"></div>
+          <a class="nav-item" data-nav-key="admin-entry" data-dom-id="nav-admin-entry" data-active="false" href="#">
+            <i data-lucide="shield"></i>
+            <span>管理后台</span>
+          </a>
+        </nav>
+      </aside>
+
+      <!-- 主区域 -->
+      <div class="main-area">
+        <!-- 顶栏 -->
+        <header class="top-header" data-region="top-header">
+          <!-- 产品切换 -->
+          <div class="product-switcher" data-dom-id="product-switcher" role="button" tabindex="0" aria-label="切换产品" title="切换产品">
+            <i data-lucide="layers"></i>
+            <span class="product-switcher-name">全部产品</span>
+            <i data-lucide="chevron-down" class="product-switcher-arrow"></i>
+          </div>
+          <!-- 系统状态与版本 -->
+          <div class="system-info">
+            <div class="system-status" title="系统运行状态">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span class="status-label">运行正常</span>
+            </div>
+            <div class="version-tag" title="系统版本">v2.3</div>
+          </div>
+          <!-- 顶栏操作区 -->
+          <div class="header-actions">
+            <!-- 通知铃铛 -->
+            <button class="notification-btn" type="button" aria-label="通知">
+              <i data-lucide="bell"></i>
+              <span class="notification-dot" aria-hidden="true"></span>
+            </button>
+            <!-- 用户区域 -->
+            <div class="user-area">
+              <div class="user-avatar">测</div>
+              <span class="user-name">测试工程师</span>
+              <i data-lucide="chevron-down"></i>
+            </div>
+          </div>
+        </header>
+
+        <!-- 内容容器 -->
+        <main class="content-wrapper overflow-y-auto" data-region="content-wrapper" data-scroll-region="primary">
+          <!-- 页面标题插槽 -->
+          <div class="page-title-bar" data-slot="pageTitle">
+            <h1 class="page-title">知识库</h1>
+          </div>
+          <!-- 页面内容插入点 -->
+          <div class="page-content" data-slot="pageContent">
+
+            <!-- A. 工具栏 -->
+            <div class="toolbar-card">
+              <!-- 左侧：搜索框 -->
+              <div class="kb-search">
+                <i data-lucide="search"></i>
+                <input type="text" placeholder="搜索知识条目标题/内容" aria-label="搜索知识条目标题或内容">
+              </div>
+              <!-- 中间：模块筛选 + 状态筛选 -->
+              <div class="select-wrap">
+                <select class="filter-select" aria-label="模块筛选">
+                  <option>全部模块</option>
+                  <option>用户中心</option>
+                  <option>支付服务</option>
+                  <option>消息服务</option>
+                  <option>系统管理</option>
+                </select>
+                <i data-lucide="chevron-down" class="select-chevron"></i>
+              </div>
+              <div class="select-wrap">
+                <select class="filter-select" aria-label="状态筛选">
+                  <option>全部状态</option>
+                  <option>草稿</option>
+                  <option>已发布</option>
+                  <option>已归档</option>
+                </select>
+                <i data-lucide="chevron-down" class="select-chevron"></i>
+              </div>
+              <!-- 右侧占位伸缩 + 新建按钮 -->
+              <div class="toolbar-spacer"></div>
+              <button class="btn-primary" type="button">
+                <i data-lucide="plus"></i>
+                <span>新建知识条目</span>
+              </button>
+            </div>
+
+            <!-- B. 统计概览行 -->
+            <div class="kb-stats-grid">
+              <div class="kb-stat-card">
+                <div class="kb-stat-top">
+                  <div class="kb-stat-icon kb-stat-icon-primary"><i data-lucide="book-open"></i></div>
+                  <span class="kb-stat-label">知识条目总数</span>
+                </div>
+                <div class="kb-stat-value">128</div>
+                <div class="kb-stat-sub kb-stat-sub-neutral">覆盖 4 个模块</div>
+              </div>
+              <div class="kb-stat-card">
+                <div class="kb-stat-top">
+                  <div class="kb-stat-icon kb-stat-icon-success"><i data-lucide="check-circle"></i></div>
+                  <span class="kb-stat-label">已发布</span>
+                </div>
+                <div class="kb-stat-value">96</div>
+                <div class="kb-stat-sub kb-stat-sub-success">+12 本月</div>
+              </div>
+              <div class="kb-stat-card">
+                <div class="kb-stat-top">
+                  <div class="kb-stat-icon kb-stat-icon-warning"><i data-lucide="clock"></i></div>
+                  <span class="kb-stat-label">待审核</span>
+                </div>
+                <div class="kb-stat-value">18</div>
+                <div class="kb-stat-sub kb-stat-sub-warning">需跟进处理</div>
+              </div>
+            </div>
+
+            <!-- C. 知识条目列表 -->
+            <div class="kb-table-card">
+              <div class="kb-table-card-header">
+                <h2 class="kb-table-card-title">知识条目列表</h2>
+                <span class="kb-table-meta">共 128 条记录</span>
+              </div>
+              <div class="kb-table-wrap">
+                <table class="kb-table">
+                  <colgroup>
+                    <col style="width: 32%;">
+                    <col style="width: 12%;">
+                    <col style="width: 11%;">
+                    <col style="width: 14%;">
+                    <col style="width: 13%;">
+                    <col style="width: 18%;">
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>标题</th>
+                      <th>模块</th>
+                      <th>状态</th>
+                      <th>上线日期</th>
+                      <th>更新时间</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><a class="kb-title" href="#" title="用户登录安全策略规范">用户登录安全策略规范</a></td>
+                      <td><span class="badge badge-module-user">用户中心</span></td>
+                      <td><span class="badge badge-status-published">已发布</span></td>
+                      <td><span class="kb-date">2024-01-10</span></td>
+                      <td><span class="kb-time">2小时前</span></td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="row-action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><a class="kb-title" href="#" title="支付接口签名算法说明">支付接口签名算法说明</a></td>
+                      <td><span class="badge badge-module-payment">支付服务</span></td>
+                      <td><span class="badge badge-status-published">已发布</span></td>
+                      <td><span class="kb-date">2024-01-08</span></td>
+                      <td><span class="kb-time">昨天</span></td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="row-action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><a class="kb-title" href="#" title="消息推送重试机制">消息推送重试机制</a></td>
+                      <td><span class="badge badge-module-message">消息服务</span></td>
+                      <td><span class="badge badge-status-draft">草稿</span></td>
+                      <td><span class="kb-date kb-date-empty">—</span></td>
+                      <td><span class="kb-time">3天前</span></td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="row-action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><a class="kb-title" href="#" title="权限模型设计文档">权限模型设计文档</a></td>
+                      <td><span class="badge badge-module-system">系统管理</span></td>
+                      <td><span class="badge badge-status-published">已发布</span></td>
+                      <td><span class="kb-date">2024-01-05</span></td>
+                      <td><span class="kb-time">1周前</span></td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="row-action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><a class="kb-title" href="#" title="支付退款流程说明">支付退款流程说明</a></td>
+                      <td><span class="badge badge-module-payment">支付服务</span></td>
+                      <td><span class="badge badge-status-published">已发布</span></td>
+                      <td><span class="kb-date">2024-01-03</span></td>
+                      <td><span class="kb-time">1周前</span></td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="row-action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><a class="kb-title" href="#" title="用户注册流程规范">用户注册流程规范</a></td>
+                      <td><span class="badge badge-module-user">用户中心</span></td>
+                      <td><span class="badge badge-status-draft">草稿</span></td>
+                      <td><span class="kb-date kb-date-empty">—</span></td>
+                      <td><span class="kb-time">2周前</span></td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="row-action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><a class="kb-title" href="#" title="消息模板变量列表">消息模板变量列表</a></td>
+                      <td><span class="badge badge-module-message">消息服务</span></td>
+                      <td><span class="badge badge-status-archived">已归档</span></td>
+                      <td><span class="kb-date">2023-12-20</span></td>
+                      <td><span class="kb-time">1个月前</span></td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="row-action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td><a class="kb-title" href="#" title="系统监控告警规则">系统监控告警规则</a></td>
+                      <td><span class="badge badge-module-system">系统管理</span></td>
+                      <td><span class="badge badge-status-published">已发布</span></td>
+                      <td><span class="kb-date">2023-12-15</span></td>
+                      <td><span class="kb-time">1个月前</span></td>
+                      <td>
+                        <div class="row-actions">
+                          <button class="row-action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
+                          <button class="row-action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- D. 分页控件 -->
+              <div class="pagination">
+                <span class="pagination-info">共 128 条，第 1-8 条</span>
+                <div class="pagination-controls">
+                  <button class="page-btn" type="button" aria-label="上一页" disabled><i data-lucide="chevron-left"></i></button>
+                  <button class="page-btn page-btn-active" type="button">1</button>
+                  <button class="page-btn" type="button">2</button>
+                  <button class="page-btn" type="button">3</button>
+                  <span class="page-ellipsis">…</span>
+                  <button class="page-btn" type="button">16</button>
+                  <button class="page-btn" type="button" aria-label="下一页"><i data-lucide="chevron-right"></i></button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </main>
+      </div>
+    </div>
+    <script>lucide.createIcons();</script>
+</body>
+</html>

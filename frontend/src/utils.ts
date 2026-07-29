@@ -36,7 +36,7 @@ export const STATUS_LABELS: Record<string, string> = {
 
 /** 用例状态中文映射 */
 export const CASE_STATUS_LABELS: Record<string, string> = {
-  draft: '草稿',
+  draft: '未审核',
   reviewed: '已审核',
   approved: '已通过',
   rejected: '已驳回',

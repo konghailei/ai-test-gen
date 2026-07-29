@@ -160,9 +160,9 @@ Level 3: 细化后的 SRR v2 (进入生成流程)
   "assumptions": [
     {"content": "用户已在系统中注册", "type": "assumption"},
     {"content": "密码通过HTTPS传输", "type": "constraint"},
-    {"content": "第三方OAuth登录不在本次范围", "type": "out_of_scope"}
-  ],
-  "additional_details": "本次登录功能仅支持账号密码方式，后续版本将支持手机验证码登录。"
+    {"content": "第三方OAuth登录不在本次范围", "type": "out_of_scope"},
+    {"content": "本次登录功能仅支持账号密码方式，后续版本将支持手机验证码登录", "type": "out_of_scope"}
+  ]
 }
 ```
 
@@ -179,9 +179,8 @@ Level 3: 细化后的 SRR v2 (进入生成流程)
 | `ui_rules` | 界面/交互规则 | 前端行为描述、交互逻辑、UI状态变化 |
 | `data_model` | 数据模型/实体关系 | 数据表结构、实体关系图、字段定义 |
 | `assumptions` | 假设与约束 | 业务假设、技术约束、明确排除的范围 |
-| `additional_details` | 兜底字段 | 无法映射到上述字段的原文，原文照搬 |
 
-**完整性策略**：上述字段均为可选（LLM 按原文内容决定是否输出），`additional_details` 作为最终兜底——LLM 未映射到标准字段的任何原文内容都会存入此字段，确保**零信息丢失**。
+**完整性策略**：上述字段均为可选（LLM 按原文内容决定是否输出）。v2.40 起移除了原 `additional_details` 兜底字段——所有原文内容必须归入上述标准字段之一（无法归类的内容归入 `assumptions` 并标注 `type`），避免 LLM 偷懒把整段原文塞入兜底字段导致下游 Agent（Gen/Review/Impact）无法消费。
 
 ### 2.2.2 SRR 校验容错机制（v2.1 新增）⭐
 
