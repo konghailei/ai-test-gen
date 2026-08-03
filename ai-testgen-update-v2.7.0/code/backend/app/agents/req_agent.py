@@ -19,7 +19,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, NamedTuple
+
+
+class ParseResult(NamedTuple):
+    """ReqAgent 解析结果（含 FP 提取产物）。
+
+    v2.52: 替代实例属性传递，消除单例并发污染。
+    """
+    srr: dict                          # SRR JSON 字典
+    fps: list[dict]                    # 功能点列表（新生成的）
+    fp_deps: list[dict]                # FP 间依赖关系
+    interaction_srr: dict | None       # 交互层 SRR（跨 FP 规则）
 
 from app.core.llm_client import llm_client
 from app.db.milvus_store import vector_store
@@ -53,8 +64,12 @@ class ReqAgent:
         raw_requirement: str,
         product_id: str = "",
         product_name: str = "",
-    ) -> dict:
-        """解析原始需求为 SRR JSON。
+    ) -> ParseResult:
+        """解析原始需求为 SRR JSON + FP 提取产物。
+
+        v2.52: 返回 ParseResult 替代实例属性，消除并发污染。
+        实例属性（last_fps/last_fp_dependencies/interaction_srr）仍被填充，
+        保持向后兼容。
 
         Args:
             raw_requirement: 原始需求文本（Markdown/JSON/JIRA/纯文本）
@@ -62,18 +77,10 @@ class ReqAgent:
             product_name: 产品名称（可选）
 
         Returns:
-            dict: SRR JSON 字典，符合 SRR Pydantic 模型
+            ParseResult: (srr, fps, fp_deps, interaction_srr)
 
         Raises:
             RuntimeError: LLM 调用失败或解析结果不符合 Schema
-
-        Note:
-            解析流程（docs/01 §3）：
-                1. 构建 Prompt（注入 SRR Schema 指导 + Few-shot 示例）
-                2. 调用 LLM（call_json，强制 JSON 输出，温度 0.5 保提取质量）
-                3. 后处理：字段归一化 + 补全 + Literal 映射
-                4. Schema 宽松校验（容错模式，仅 Critical 字段阻断）
-                5. 写入向量库（供后续 ClarifyAgent 检索）
         """
         logger.info("[ReqAgent] ▶ 开始解析需求: text_len={}, product_id={}, product_name={}",
                     len(raw_requirement), product_id or "(未指定)", product_name or "(未指定)")
@@ -139,8 +146,7 @@ class ReqAgent:
             "srr_version": str,
             "requirement": dict,
             "flows": dict,
-            "data_constraints": list,
-            "acceptance_criteria": list,
+            "cross_fp_interactions": dict,
             "api_definitions": list,
         }
         logger.info("[ReqAgent] 调用 LLM (refine): temperature=0.5, max_tokens=unlimited")
@@ -225,8 +231,11 @@ class ReqAgent:
         raw_requirement: str,
         product_id: str = "",
         product_name: str = "",
-    ) -> dict:
-        """解析实现（内部）。"""
+    ) -> ParseResult:
+        """解析实现（内部）。
+
+        v2.52: 返回 ParseResult 元组，消除实例属性并发污染。
+        """
         # 1. 构建 Prompt
         user_prompt = prompts.build_user_prompt(raw_requirement, product_id, product_name)
         system_prompt = prompt_manager.get("req_agent", "SYSTEM_PROMPT") + "\n\n" + prompt_manager.get("req_agent", "FEW_SHOT_EXAMPLE")
@@ -241,9 +250,8 @@ class ReqAgent:
             "srr_version": str,
             "requirement": dict,
             "flows": dict,
-            "data_constraints": list,
-            "acceptance_criteria": list,  # v2.1 新增字段
-            "api_definitions": list,      # v2.1 新增字段
+            "cross_fp_interactions": dict,  # v2.48: 替换已移除的 data_constraints/acceptance_criteria
+            "api_definitions": list,
         }
         logger.info("[ReqAgent] 调用 LLM: temperature=0.5, max_tokens=unlimited, schema_keys={}", list(schema_hint.keys()))
         srr = await self._llm.call_json(
@@ -328,19 +336,25 @@ class ReqAgent:
                     len(srr.get("data_constraints", [])))
 
         # 6. v1.5.1: 一体式 FP 提取（从完整原始文档拆分功能点 + 子 SRR）
-        self.last_fps = []
-        self.last_fp_dependencies = []  # P0-3: 同步重置
+        fps: list[dict] = []
+        fp_deps: list[dict] = []
+        interaction_srr: dict | None = None
         try:
-            self.last_fps = await self._fp_extract_from_raw(
+            fps, fp_deps, interaction_srr = await self._fp_extract_from_raw(
                 raw_text=raw_requirement,
                 srr=srr,
                 product_name=product_name,
             )
-            logger.info("[ReqAgent] FP 提取完成: {} 个功能点", len(self.last_fps))
+            logger.info("[ReqAgent] FP 提取完成: {} 个功能点", len(fps))
         except Exception as e:
             logger.warning("[ReqAgent] FP 提取失败（不阻断主流程）: {}", str(e)[:200])
 
-        return srr
+        # v2.52: 保持向后兼容——写入实例属性（旧代码读取）
+        self.last_fps = fps
+        self.last_fp_dependencies = fp_deps
+        self.interaction_srr = interaction_srr
+
+        return ParseResult(srr=srr, fps=fps, fp_deps=fp_deps, interaction_srr=interaction_srr)
 
     def _post_process(
         self,
@@ -412,7 +426,9 @@ class ReqAgent:
         # 若 LLM 仍输出，由下方迁移逻辑合并到 cross_fp_interactions.shared_business_rules
         srr.setdefault("non_functional", {})
         srr.setdefault("relationships", [])
-        srr.setdefault("test_points_hint", [])
+        # v2.48: test_points_hint 已移除（测试提示由用例生成阶段自行推导）
+        # 若 LLM 仍输出该字段，pop 掉避免下游传播
+        srr.pop("test_points_hint", None)
 
         # v2.22: 功能点概要（LLM 首次解析时可能输出，后端 FP 拆分后会基于实际 FP 覆盖）
         srr.setdefault("fp_summary", [])
@@ -552,17 +568,10 @@ class ReqAgent:
         # v2.1：全面字段名归一化（LLM 常输出不同字段名）
         self._normalize_field_names(srr)
 
-        # v2.9：增量文档兜底识别——若 LLM 未输出 _is_incremental，但原文含增量信号，
-        # 则补标记并生成默认基线缺口，确保下游 ClarifyAgent 强制触发 KB 基础补全。
-        # （LLM 已输出 _is_incremental 时尊重其判断，不覆盖）
-        # v2.14 修复：移除硬编码登录相关 _baseline_gaps（污染非登录需求，如架构文档），
-        # 改为留空列表，交由 ClarifyAgent 基于原文动态推导真实缺口。
-        if not srr.get("_is_incremental") and raw_requirement:
-            if self._looks_like_incremental(raw_requirement):
-                srr["_is_incremental"] = True
-                # 不注入硬编码缺口，留给 ClarifyAgent 基于原文动态推导
-                srr.setdefault("_baseline_gaps", [])
-                logger.info("[ReqAgent] 检测到增量文档信号，标记 _is_incremental=true（基线缺口由 ClarifyAgent 推导）")
+        # v2.46: 移除增量文档兜底识别逻辑——所有需求一律按完整独立需求处理，
+        # 执行全面完整分析，不再区分"增量文档"与"完整文档"。
+        # 原 v2.9 增量模式会标记 _is_incremental=true 并触发 ClarifyAgent 基线补全，
+        # 但用户要求所有需求都做全面且真实的分析，不降级为增量模式。
 
         return srr
 
@@ -810,28 +819,38 @@ class ReqAgent:
                 else:
                     ac["type"] = "functional"
 
+        # v2.48: data_constraints.type 中文化兜底（防止 LLM 输出英文类型）
+        # 与 req_xmind.py 的 DATA_TYPE_CN / 前端 labels.ts DATA_TYPE_LABELS 对齐
+        from app.exporters.req_xmind import _data_type_cn
+        for dc in srr.get("data_constraints", []):
+            if isinstance(dc, dict) and dc.get("type"):
+                dc["type"] = _data_type_cn(str(dc["type"]))
+        # 功能点 sub_srr 中的 data_constraints 也做中文化（若总 SRR 携带 functional_points）
+        for fp in srr.get("functional_points", []) or srr.get("fps", []) or []:
+            if not isinstance(fp, dict):
+                continue
+            sub_srr = fp.get("srr_json") or fp.get("sub_srr") or {}
+            if isinstance(sub_srr, dict):
+                for dc in sub_srr.get("data_constraints", []) or []:
+                    if isinstance(dc, dict) and dc.get("type"):
+                        dc["type"] = _data_type_cn(str(dc["type"]))
+
     async def _fp_extract_from_raw(
         self,
         raw_text: str,
         srr: dict,
         product_name: str = "",
-    ) -> list[dict]:
+    ) -> tuple[list[dict], list[dict], dict | None]:
         """v1.6: 从原始文档一体式提取功能点 + 交互层 SRR。
 
-        流程：
-          1. 查询同模块已有 FP → 已存在的名称不再让 LLM 重新生成
-          2. LLM 一次性输出 interaction_srr + functional_points（仅新 FP）
-          3. 已有 FP + LLM 新生成 FP = 完整 FP 列表
-
-        返回仅含**新生成**的 FP；已有 FP 由调用方从 DB 复制。
+        v2.52: 返回元组替代实例属性，消除并发污染。
 
         Returns:
-            list[dict]: 仅 LLM 新生成的功能点（不含复用已有 FP）
+            tuple[list[dict], list[dict], dict | None]:
+                (新生成的功能点列表, FP依赖列表, 交互层SRR)
         """
         from app.core import prompt_manager as pm
         import json as _json
-
-        self.interaction_srr = None  # 重置
 
         req_meta = srr.get("requirement", {})
         modules = req_meta.get("modules", []) or []
@@ -895,18 +914,16 @@ class ReqAgent:
                 agent_name="FpAgent",
             )
             if isinstance(result, dict):
-                self.interaction_srr = result.get("interaction_srr")
-                self.last_fp_dependencies = result.get("dependencies", [])
+                interaction_srr = result.get("interaction_srr")
+                fp_deps = result.get("dependencies", [])
                 # 过滤掉 LLM 标记为 reuse_existing 的（已在 DB 中，只保留真正新生成的）
                 all_fps = result.get("functional_points", [])
                 new_fps = [f for f in all_fps if not f.get("reuse_existing")]
-                return new_fps
-            return []
+                return new_fps, fp_deps, interaction_srr
+            return [], [], None
         except Exception:
             logger.warning("[ReqAgent] FP 一体式提取 LLM 调用失败")
-            self.last_fp_dependencies = []
-            self.interaction_srr = None
-            return []
+            return [], [], None
 
     @staticmethod
     def update_fp_summary_from_fps(srr: dict, fps: list[dict]) -> dict:

@@ -90,3 +90,7 @@ after-*.yaml
 testcases-*.yaml
 xmind-*.yaml
 edit-dialog.yaml
+
+# ===== 本地临时文件 / 历史离线包（不入库） =====
+dy
+ai-testgen-update-*.zip

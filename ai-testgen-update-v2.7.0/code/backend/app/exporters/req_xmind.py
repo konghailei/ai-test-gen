@@ -9,14 +9,18 @@
       │   ├── 主流程（Happy Path）
       │   │   └── 步骤1: action → expected
       │   ├── 异常分支（Alternate Flows）
-      │   ├── 业务规则 / 边界条件 / 数据约束 / 验收标准 / 前置条件
+      │   ├── 业务规则 / 边界条件 / 数据约束 / 前置条件
       │   └── 附加详情
       ├── [fp_type] 功能点1（一级）
       │   ├── 摘要
-      │   ├── 主流程 / 异常分支 / 业务规则 / ...
-      │   └── 测试提示
+      │   └── 主流程 / 异常分支 / 业务规则 / 数据约束 / 非功能需求
       └── [fp_type] 功能点2（一级）
           └── ...
+
+v2.48 变更：
+- 移除 acceptance_criteria（验收标准）独立导出（已合并到业务规则）
+- 移除 test_hints（测试提示）导出（不再生成）
+- data_constraints.type 中文化（兼容英文历史数据映射为中文）
 """
 
 from __future__ import annotations
@@ -24,6 +28,156 @@ from __future__ import annotations
 import io, json, uuid, zipfile
 from datetime import datetime, timezone
 from xml.etree.ElementTree import Element, SubElement, tostring
+
+
+# ============================================================================
+# v2.48: 数据约束字段类型英文 → 中文映射（兼容历史数据）
+# ============================================================================
+DATA_TYPE_CN: dict[str, str] = {
+    "string": "字符串",
+    "str": "字符串",
+    "text": "文本",
+    "integer": "整数",
+    "int": "整数",
+    "long": "长整数",
+    "bigint": "长整数",
+    "short": "短整数",
+    "float": "小数",
+    "double": "双精度小数",
+    "decimal": "高精度小数",
+    "number": "数字",
+    "boolean": "布尔",
+    "bool": "布尔",
+    "date": "日期",
+    "datetime": "日期时间",
+    "timestamp": "时间戳",
+    "time": "时间",
+    "enum": "枚举",
+    "array": "数组",
+    "list": "数组",
+    "object": "对象",
+    "dict": "对象",
+    "json": "JSON",
+    "uuid": "UUID",
+    "url": "URL",
+    "email": "邮箱",
+    "phone": "电话",
+    "file": "文件",
+    "image": "图片",
+    "binary": "二进制",
+    "blob": "二进制大对象",
+}
+
+# v2.48: 功能点类型英文 → 中文映射（与前端 FP_TYPE_LABELS 对齐）
+FP_TYPE_CN: dict[str, str] = {
+    "workflow": "业务流程",
+    "constraint": "约束规则",
+    "calculation": "计算规则",
+    "api_behavior": "API 行为",
+    "data_record": "数据记录",
+    "config": "系统配置",
+}
+
+# v2.48: 业务规则类型英文 → 中文映射（与前端 BR_TYPE_LABELS 对齐）
+BR_TYPE_CN: dict[str, str] = {
+    "validation": "校验",
+    "calculation": "计算",
+    "workflow": "流程",
+    "permission": "权限",
+    "security": "安全",
+    "session": "会话",
+    "timeout": "超时",
+    "rate_limit": "限流",
+    "notification": "通知",
+    "data_retention": "数据保留",
+    "audit": "审计",
+    "encryption": "加密",
+    "integration": "集成",
+    "business": "业务",
+    "constraint": "约束",
+    "data_integrity": "数据完整性",
+    "field_validation": "字段校验",
+    "access_control": "访问控制",
+    "format": "格式",
+    "duplication": "去重",
+    "mandatory": "必填",
+    "uniqueness": "唯一性",
+    "relationship": "关联",
+    "logic": "逻辑",
+    "prerequisite": "前置条件",
+    "authorization": "授权",
+    "authentication": "认证",
+    "presentation": "展示",
+    "initialization": "初始化",
+    "data_format": "数据格式",
+    "range": "范围",
+    "enumeration": "枚举",
+}
+
+# v2.53: 跨 FP 交互类型英文 → 中文映射（CrossFpFlow.interaction_type）
+INTERACTION_TYPE_CN: dict[str, str] = {
+    "sequence": "顺序调用",
+    "data_flow": "数据流",
+    "event": "事件",
+    "dependency": "依赖",
+}
+
+# v2.53: 假设类型英文 → 中文映射（Assumption.type）
+ASSUMPTION_TYPE_CN: dict[str, str] = {
+    "assumption": "假设",
+    "constraint": "约束",
+    "out_of_scope": "范围外",
+}
+
+
+def _data_type_cn(dtype: str) -> str:
+    """把数据约束 type 字段映射为中文显示。
+
+    - 已是中文直接返回
+    - 英文（不区分大小写）按映射表返回
+    - 未知值原样返回
+    """
+    if not dtype:
+        return ""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in dtype):
+        return dtype
+    return DATA_TYPE_CN.get(dtype.lower(), dtype)
+
+
+def _fp_type_cn(fp_type: str) -> str:
+    """把功能点类型映射为中文显示（已是中文则原样返回）。"""
+    if not fp_type:
+        return ""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in fp_type):
+        return fp_type
+    return FP_TYPE_CN.get(fp_type.lower(), fp_type)
+
+
+def _br_type_cn(br_type: str) -> str:
+    """把业务规则 type 字段映射为中文显示（已是中文则原样返回）。"""
+    if not br_type:
+        return ""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in br_type):
+        return br_type
+    return BR_TYPE_CN.get(br_type.lower(), br_type)
+
+
+def _interaction_type_cn(itype: str) -> str:
+    """把跨 FP 交互类型映射为中文显示（已是中文则原样返回）。"""
+    if not itype:
+        return ""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in itype):
+        return itype
+    return INTERACTION_TYPE_CN.get(itype.lower(), itype)
+
+
+def _assumption_type_cn(atype: str) -> str:
+    """把假设类型映射为中文显示（已是中文则原样返回）。"""
+    if not atype:
+        return ""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in atype):
+        return atype
+    return ASSUMPTION_TYPE_CN.get(atype.lower(), atype)
 
 
 def _id() -> str: return uuid.uuid4().hex
@@ -61,9 +215,11 @@ def _format_item_title(it: dict, label: str = "") -> str:
 
     按标签类型选择最佳字段组合：
     - 边界条件：field + trigger → expect
-    - 数据约束：field (type): constraints
-    - 业务规则：rule / description
-    - 验收标准：description / criteria
+    - 数据约束：field (type 中文): constraints
+    - 业务规则（v2.48 含原验收标准）：[类型中文] rule / description / criteria
+    - 共享业务规则：[类型中文] rule（适用: applied_fps）
+    - FP 调用顺序（cross_fp_flows）：[交互类型中文] source_fp → target_fp: description
+    - FP 间契约（fp_contracts）：provider_fp → consumer_fp: contract_desc (data_fields)
     - 通用：rule/condition/criteria/constraint → description → name → JSON
     """
     if not isinstance(it, dict):
@@ -84,23 +240,199 @@ def _format_item_title(it: dict, label: str = "") -> str:
         if parts:
             return " | ".join(parts)
 
-    # 数据约束：field (type): constraints
+    # 数据约束：field (type 中文): constraints  ← v2.48 中文化
     if label == "数据约束":
         field = _as_str(it.get("field"))
-        dtype = _as_str(it.get("type"))
+        dtype_cn = _data_type_cn(_as_str(it.get("type")))
         constraints = _as_str(it.get("constraints") or it.get("constraint"))
         required = it.get("required")
         parts = []
         if field:
             parts.append(field)
-        if dtype:
-            parts.append(f"[{dtype}]")
+        if dtype_cn:
+            parts.append(f"[{dtype_cn}]")
         if required is not None:
             parts.append("必填" if required else "选填")
         if constraints:
             parts.append(constraints)
         if parts:
             return " ".join(parts)
+
+    # 业务规则 / 共享业务规则：[类型中文] rule / description  ← v2.48 类型中文化；v2.53 共享规则补充 applied_fps
+    if label in ("业务规则", "共享业务规则"):
+        br_type = _br_type_cn(_as_str(it.get("type")))
+        text = (
+            _as_str(it.get("rule") or it.get("condition") or it.get("criteria") or it.get("constraint"))
+            or _as_str(it.get("description"))
+            or _as_str(it.get("name"))
+            or _as_str(it.get("title"))
+        )
+        if text:
+            desc = _as_str(it.get("description") or it.get("detail") or it.get("note"))
+            if desc and desc != text:
+                text = f"{text}（{desc}）"
+            if br_type:
+                text = f"[{br_type}] {text}"
+            # 共享规则补充适用 FP（兼容 applied_fps / applies_to 两种字段名）
+            if label == "共享业务规则":
+                applied = it.get("applied_fps") or it.get("applies_to") or []
+                if applied and isinstance(applied, list):
+                    text += f"（适用: {', '.join(str(a) for a in applied)}）"
+            return text
+
+    # FP 调用顺序（cross_fp_flows）：[交互类型中文] source_fp → target_fp: description
+    # v2.53 修复K: 原逻辑落入通用匹配，丢失 source_fp/target_fp/interaction_type 关键字段
+    if label == "FP 调用顺序":
+        # 兼容 source_fp/from 与 target_fp/to 两种字段命名
+        source_fp = _as_str(it.get("source_fp") or it.get("from"))
+        target_fp = _as_str(it.get("target_fp") or it.get("to"))
+        itype_cn = _interaction_type_cn(_as_str(it.get("interaction_type")))
+        # 兼容 description/contract 两种字段命名
+        desc = _as_str(it.get("description") or it.get("contract"))
+        name = _as_str(it.get("name"))
+        parts = []
+        prefix = f"[{itype_cn}] " if itype_cn else ""
+        # 主体：source → target
+        if source_fp or target_fp:
+            parts.append(f"{prefix}{source_fp or '?'} → {target_fp or '?'}")
+        elif name:
+            parts.append(f"{prefix}{name}")
+        elif desc:
+            parts.append(f"{prefix}{desc}")
+        else:
+            parts.append(f"{prefix}{json.dumps(it, ensure_ascii=False)}")
+            return parts[0]
+        # 描述作为补充信息
+        if desc and f"{source_fp} → {target_fp}" != desc:
+            parts.append(desc)
+        elif name and not (source_fp or target_fp):
+            pass  # name 已作为主体
+        elif name:
+            parts.append(name)
+        return " | ".join(p for p in parts if p)
+
+    # FP 间契约（fp_contracts）：provider_fp → consumer_fp: contract_desc (data_fields)
+    # v2.53 修复L: 原逻辑无匹配字段，落入 JSON fallback，丢失 provider/consumer/data_fields
+    if label == "FP 间契约":
+        # 兼容 provider_fp/fp_a 与 consumer_fp/fp_b 两种字段命名
+        provider = _as_str(it.get("provider_fp") or it.get("fp_a"))
+        consumer = _as_str(it.get("consumer_fp") or it.get("fp_b"))
+        # 兼容 contract_desc/contract/description 两种字段命名
+        contract_desc = _as_str(it.get("contract_desc") or it.get("contract") or it.get("description"))
+        data_fields = it.get("data_fields") or []
+        parts = []
+        if provider or consumer:
+            parts.append(f"{provider or '?'} → {consumer or '?'}")
+        if contract_desc:
+            parts.append(contract_desc)
+        if data_fields and isinstance(data_fields, list):
+            parts.append(f"字段: {', '.join(str(f) for f in data_fields)}")
+        if parts:
+            return " | ".join(parts)
+
+    # v2.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
+    # 原导出器未覆盖这些字段，导致静默丢失。下面为每个字段添加专用格式化分支。
+    if label == "API 接口":
+        method = _as_str(it.get("method")).upper()
+        path = _as_str(it.get("path"))
+        summary = _as_str(it.get("summary"))
+        request_body = _as_str(it.get("request_body"))
+        response_body = _as_str(it.get("response_body"))
+        error_responses = it.get("error_responses") or []
+        parts = []
+        if method or path:
+            parts.append(f"{method} {path}".strip())
+        if summary:
+            parts.append(summary)
+        if request_body:
+            parts.append(f"请求: {request_body}")
+        if response_body:
+            parts.append(f"响应: {response_body}")
+        if error_responses and isinstance(error_responses, list):
+            parts.append(f"错误: {', '.join(str(e) for e in error_responses)}")
+        if parts:
+            return " | ".join(parts)
+
+    if label == "用户角色":
+        role = _as_str(it.get("role"))
+        description = _as_str(it.get("description"))
+        permissions = it.get("permissions") or []
+        parts = []
+        if role:
+            parts.append(role)
+        if description:
+            parts.append(description)
+        if permissions and isinstance(permissions, list):
+            parts.append(f"权限: {', '.join(str(p) for p in permissions)}")
+        if parts:
+            return " | ".join(parts)
+
+    if label == "外部依赖":
+        name = _as_str(it.get("name"))
+        dtype = _as_str(it.get("type"))
+        description = _as_str(it.get("description"))
+        impact = _as_str(it.get("impact_if_unavailable"))
+        parts = []
+        if name:
+            parts.append(name)
+        if dtype:
+            parts.append(f"[{dtype}]")
+        if description:
+            parts.append(description)
+        if impact:
+            parts.append(f"不可用时: {impact}")
+        if parts:
+            return " ".join(p for p in parts if p)
+
+    if label == "界面规则":
+        element = _as_str(it.get("element"))
+        behavior = _as_str(it.get("behavior"))
+        condition = _as_str(it.get("condition"))
+        parts = []
+        if element:
+            parts.append(element)
+        if behavior:
+            parts.append(behavior)
+        if condition:
+            parts.append(f"触发: {condition}")
+        if parts:
+            return " | ".join(parts)
+
+    if label == "数据模型":
+        entity_name = _as_str(it.get("entity_name"))
+        description = _as_str(it.get("description"))
+        fields = it.get("fields") or []
+        relationships = it.get("relationships") or []
+        parts = []
+        if entity_name:
+            parts.append(entity_name)
+        if description:
+            parts.append(description)
+        if fields and isinstance(fields, list):
+            # fields 可能是 DataConstraint dict 列表，也可能是简单字符串
+            field_strs = []
+            for f in fields:
+                if isinstance(f, dict):
+                    fname = _as_str(f.get("field") or f.get("name"))
+                    ftype = _data_type_cn(_as_str(f.get("type")))
+                    if fname and ftype:
+                        field_strs.append(f"{fname}({ftype})")
+                    elif fname:
+                        field_strs.append(fname)
+                else:
+                    field_strs.append(str(f))
+            if field_strs:
+                parts.append(f"字段: {', '.join(field_strs)}")
+        if relationships and isinstance(relationships, list):
+            parts.append(f"关系: {', '.join(str(r) for r in relationships)}")
+        if parts:
+            return " | ".join(parts)
+
+    if label == "假设与约束":
+        content = _as_str(it.get("content"))
+        atype = _assumption_type_cn(_as_str(it.get("type")))
+        if content:
+            return f"[{atype}] {content}" if atype else content
 
     # 通用匹配
     text = (
@@ -198,7 +530,7 @@ def _build_fp_node(fp: dict) -> Element | None:
     if not isinstance(fp, dict):
         return None
     name = _as_str(fp.get("name") or "未命名功能点")
-    fp_type = _as_str(fp.get("fp_type") or fp.get("type") or "")
+    fp_type = _fp_type_cn(_as_str(fp.get("fp_type") or fp.get("type") or ""))  # v2.48 中文化
     title = f"[{fp_type}] {name}" if fp_type else name
     fp_node = _topic(title)
 
@@ -223,11 +555,11 @@ def _build_fp_node(fp: dict) -> Element | None:
             if alt_node:
                 sub_nodes.append(alt_node)
 
-        # 3-5. 业务规则 / 数据约束 / 验收标准
+        # 3-4. 业务规则（v2.48 已合并验收标准） / 数据约束
+        # v2.48: 移除 acceptance_criteria 独立导出（已合并到 business_rules）
         for field, label in [
             ("business_rules", "业务规则"),
             ("data_constraints", "数据约束"),
-            ("acceptance_criteria", "验收标准"),
         ]:
             items = sub_srr.get(field) or []
             if isinstance(items, list) and items:
@@ -235,7 +567,7 @@ def _build_fp_node(fp: dict) -> Element | None:
                 if node:
                     sub_nodes.append(node)
 
-        # 6. 非功能需求
+        # 5. 非功能需求
         nf = sub_srr.get("non_functional") or {}
         if isinstance(nf, dict) and nf:
             nf_items = []
@@ -248,12 +580,7 @@ def _build_fp_node(fp: dict) -> Element | None:
                 _children(nf_node, nf_items)
                 sub_nodes.append(nf_node)
 
-    # 测试提示
-    hints = fp.get("test_hints") or []
-    if isinstance(hints, list) and hints:
-        hints_node = _topic(f"测试提示（{len(hints)} 条）")
-        _children(hints_node, [_topic(_as_str(h)) for h in hints])
-        sub_nodes.append(hints_node)
+    # v2.48: 移除 test_hints（测试提示）导出 — 不再生成该字段
 
     if sub_nodes:
         _children(fp_node, sub_nodes)
@@ -381,6 +708,27 @@ def export_requirement_to_xmind(
             total_srr_kids.append(ldi_node)
 
     # v2.40: 移除 additional_details 字段，不再导出"附加详情"节点
+
+    # v2.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
+    # 原导出器未覆盖，导致静默丢失。统一聚合到"附加信息"二级节点下。
+    extra_kids: list = []
+    for field, label in [
+        ("api_definitions", "API 接口"),
+        ("user_roles", "用户角色"),
+        ("dependencies", "外部依赖"),
+        ("ui_rules", "界面规则"),
+        ("data_model", "数据模型"),
+        ("assumptions", "假设与约束"),
+    ]:
+        items = srr.get(field) or []
+        if isinstance(items, list) and items:
+            sub_node = _build_list_node(items, label)
+            if sub_node:
+                extra_kids.append(sub_node)
+    if extra_kids:
+        extra_node = _topic("附加信息")
+        _children(extra_node, extra_kids)
+        total_srr_kids.append(extra_node)
 
     if total_srr_kids:
         total_srr_node = _topic("业务场景")
@@ -546,7 +894,7 @@ def _jbuild_fp(fp: dict) -> dict | None:
     if not isinstance(fp, dict):
         return None
     name = _as_str(fp.get("name") or "未命名功能点")
-    fp_type = _as_str(fp.get("fp_type") or fp.get("type") or "")
+    fp_type = _fp_type_cn(_as_str(fp.get("fp_type") or fp.get("type") or ""))  # v2.48 中文化
     title = f"[{fp_type}] {name}" if fp_type else name
     fp_node = _jtopic(title)
 
@@ -571,11 +919,11 @@ def _jbuild_fp(fp: dict) -> dict | None:
             if alt_node:
                 sub_nodes.append(alt_node)
 
-        # 3-5. 业务规则 / 数据约束 / 验收标准
+        # 3-4. 业务规则（v2.48 已合并验收标准） / 数据约束
+        # v2.48: 移除 acceptance_criteria 独立导出（已合并到 business_rules）
         for field, label in [
             ("business_rules", "业务规则"),
             ("data_constraints", "数据约束"),
-            ("acceptance_criteria", "验收标准"),
         ]:
             items = sub_srr.get(field) or []
             if isinstance(items, list) and items:
@@ -583,7 +931,7 @@ def _jbuild_fp(fp: dict) -> dict | None:
                 if node:
                     sub_nodes.append(node)
 
-        # 6. 非功能需求
+        # 5. 非功能需求
         nf = sub_srr.get("non_functional") or {}
         if isinstance(nf, dict) and nf:
             nf_items = []
@@ -596,13 +944,7 @@ def _jbuild_fp(fp: dict) -> dict | None:
                 _jattach(nf_node, nf_items)
                 sub_nodes.append(nf_node)
 
-    hints = fp.get("test_hints") or []
-    if isinstance(hints, list) and hints:
-        hints_node = _jtopic(f"测试提示（{len(hints)} 条）")
-        hint_kids = [_jtopic(_as_str(h)) for h in hints if h]
-        if hint_kids:
-            _jattach(hints_node, hint_kids)
-            sub_nodes.append(hints_node)
+    # v2.48: 移除 test_hints（测试提示）导出 — 不再生成该字段
 
     if sub_nodes:
         _jattach(fp_node, sub_nodes)
@@ -733,6 +1075,27 @@ def export_requirement_to_xmind_json(
             total_srr_kids.append(ldi_node)
 
     # v2.40: 移除 additional_details 字段，不再导出"附加详情"节点
+
+    # v2.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
+    # 原导出器未覆盖，导致静默丢失。统一聚合到"附加信息"二级节点下。
+    extra_kids: list = []
+    for field, label in [
+        ("api_definitions", "API 接口"),
+        ("user_roles", "用户角色"),
+        ("dependencies", "外部依赖"),
+        ("ui_rules", "界面规则"),
+        ("data_model", "数据模型"),
+        ("assumptions", "假设与约束"),
+    ]:
+        items = srr.get(field) or []
+        if isinstance(items, list) and items:
+            sub_node = _jbuild_list(items, label)
+            if sub_node:
+                extra_kids.append(sub_node)
+    if extra_kids:
+        extra_node = _jtopic("附加信息")
+        _jattach(extra_node, extra_kids)
+        total_srr_kids.append(extra_node)
 
     if total_srr_kids:
         total_srr_node = _jtopic("业务场景")

@@ -146,16 +146,12 @@ class ImpactAnalysisAgent:
         all_affected = set(direct)
         indirect = []
 
-        # 按需查询依赖边：仅加载与当前涉及模块相关的边
+        # 加载所有模块依赖边构建完整邻接表
+        # v2.51 修复：原实现仅加载与 direct 相关的边，导致 BFS 只能遍历 1 跳，
+        # 2-3 跳的间接受影响模块被漏掉，回归测试范围被低估。
+        # 模块数量通常有限，全表加载性能可接受。
         # v2.2: 模块 ID 含产品前缀（如 "auth_PROD-001"），天然形成产品范围，无需额外 product_id 过滤
-        result = await session.execute(
-            select(ModuleDependency).where(
-                or_(
-                    ModuleDependency.source_module_id.in_(direct),
-                    ModuleDependency.target_module_id.in_(direct),
-                )
-            )
-        )
+        result = await session.execute(select(ModuleDependency))
         edges = result.scalars().all()
 
         # 构建邻接表
@@ -420,14 +416,15 @@ class ImpactAnalysisAgent:
         Returns:
             list[dict]: 每项含 {fp_id, fp_name, relation_type, req_id, req_title, depth}
         """
-        # 查询所有以 fp_id 为 target 或 source 的依赖边（仅 approved 状态）
+        # v2.45: 仅遍历 review_status='approved' 且 is_active=True 的依赖边
+        # （未审核依赖不参与影响分析；项目归档后的历史版本依赖也不参与）
+        # v2.52: 修复 BFS 只能 1 跳的问题——原实现仅加载与起始 fp_id 直接相连的边，
+        # 导致 2-3 跳的间接受影响 FP 全部漏掉，回归测试范围被严重低估。
+        # 改为加载所有 approved + active 边构建完整邻接表（与模块 BFS 一致）。
         result = await session.execute(
             select(FPDependency).where(
                 FPDependency.review_status == "approved",
-                or_(
-                    FPDependency.target_fp_id == fp_id,
-                    FPDependency.source_fp_id == fp_id,
-                )
+                FPDependency.is_active == True,  # noqa: E712
             )
         )
         all_edges = result.scalars().all()

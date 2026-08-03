@@ -317,35 +317,9 @@ def _build_coverage_checklist(srr: dict, functional_points: list[dict]) -> str:
                 else:
                     items.append(f"  - [{fp_id}.data.{i}] {d}")
 
-        # FP boundary_conditions
-        fp_bc = fp_srr.get("boundary_conditions", [])
-        if fp_bc:
-            items.append(f"  边界条件：{len(fp_bc)} 条")
-            for i, b in enumerate(fp_bc, 1):
-                if isinstance(b, dict):
-                    field = b.get("field", "")
-                    trigger = b.get("trigger", "")
-                    items.append(f"  - [{fp_id}.boundary.{i}] {field}: {trigger}")
-                else:
-                    items.append(f"  - [{fp_id}.boundary.{i}] {b}")
-
-        # FP acceptance_criteria
-        fp_ac = fp_srr.get("acceptance_criteria", [])
-        if fp_ac:
-            items.append(f"  验收标准：{len(fp_ac)} 条")
-            for i, a in enumerate(fp_ac, 1):
-                if isinstance(a, dict):
-                    desc = a.get("criteria", a.get("description", a.get("condition", "")))
-                    items.append(f"  - [{fp_id}.acceptance.{i}] {desc}")
-                else:
-                    items.append(f"  - [{fp_id}.acceptance.{i}] {a}")
-
-        # FP test_hints
-        fp_hints = fp.get("test_hints", [])
-        if fp_hints:
-            items.append(f"  测试提示：{len(fp_hints)} 条")
-            for i, h in enumerate(fp_hints, 1):
-                items.append(f"  - [{fp_id}.hint.{i}] {h}")
+        # v2.48: boundary_conditions 已合并到 business_rules / alternate_flows，不再单独列出
+        # v2.48: acceptance_criteria 已合并到 business_rules（type=validation），不再单独列出
+        # v2.48: test_hints 已移除，测试提示由用例生成阶段自行推导
 
     if not items:
         return ""
@@ -424,11 +398,9 @@ def build_user_prompt(
                                     ([{"order": 1, "action": fp.get("srr_json", {}).get("flows", {}).get("happy_path", ""),
                                        "expect": ""}] if isinstance(fp.get("srr_json", {}).get("flows", {}).get("happy_path", ""), str) else []),
                 "alternate_flows": fp.get("srr_json", {}).get("flows", {}).get("alternate_flows", []),
-                "boundary_conditions": fp.get("srr_json", {}).get("boundary_conditions", []),
                 "business_rules": fp.get("srr_json", {}).get("business_rules", []),
                 "data_constraints": fp.get("srr_json", {}).get("data_constraints", []),
-                "acceptance_criteria": fp.get("srr_json", {}).get("acceptance_criteria", []),
-                "test_hints": fp.get("test_hints", []),
+                "non_functional": fp.get("srr_json", {}).get("non_functional", {}),
                 "atomicity_check": fp.get("atomicity_check", {}),
             }
             for fp in functional_points
@@ -449,12 +421,11 @@ def build_user_prompt(
 ### 功能点覆盖要求（优先级最高）
 - 每个功能点（FP）至少生成 1 个测试用例，覆盖其 happy_path_steps 中的每个步骤
 - 若 alternate_flows 非空：每个异常分支生成 1 个用例（从 name/trigger/expect 推导）
-- 若 boundary_conditions 非空：每个边界条件生成 1 个边界值用例
 - 若 data_constraints 中有 required=true 的字段：补充必填校验用例
 - 若 business_rules 中有 type=security/validation/workflow 的规则：生成对应类型的用例
+- v2.48: business_rules 已包含原验收标准（type=validation/business），验收用例从 business_rules 推导
 - 在每个用例中添加 "related_fp" 字段，值为此用例对应的功能点 ID
-- prependitions 作为用例前置条件，acceptance_criteria 作为验收标准
-- test_hints 是该 FP 的种子测试提示，应作为用例设计的重要参考"""
+- preconditions 作为用例前置条件"""
 
     # v3.0：注入 SRR 中的影响功能说明（来自依赖图谱 FP 节点点击生成）
     impact_analysis_section = ""
@@ -526,10 +497,9 @@ def build_user_prompt(
 在生成用例之前，请先对照上面的「SRR 覆盖率检查清单」：
 1. 确认每个 happy_path 步骤都有对应的用例覆盖
 2. 确认每个 alternate_flow 分支都有对应的异常/功能用例
-3. 确认每条 business_rule 都有验证用例
+3. 确认每条 business_rule 都有验证用例（含原验收标准，type=validation/business）
 4. 确认每条 data_constraint 都有边界值用例
-5. 确认每条 acceptance_criteria 都有对应的验收用例
-6. 生成完成后，在 notes 字段中标注该用例覆盖了检查清单中的哪些条目（如 "覆盖: happy_path.step1, happy_path.step2"）
+5. 生成完成后，在 notes 字段中标注该用例覆盖了检查清单中的哪些条目（如 "覆盖: happy_path.step1, happy_path.step2"）
 
 ## 输出格式
 输出 JSON 数组，每个元素为一个测试用例（符合上述 UTCF_CASE_SCHEMA）。

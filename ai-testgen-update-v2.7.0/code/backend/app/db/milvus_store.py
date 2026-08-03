@@ -412,6 +412,14 @@ class MilvusVectorStore:
             or (srr_json.get("requirement", {}) or {}).get("product_id", "")
             or "PROD-DEFAULT"
         )
+        # v2.45: 项目隔离兜底——保证按项目删除/检索向量时 metadata 带 project_id。
+        # 调用方（如 archive_project）已显式传入 project_id 时优先使用；
+        # 否则从 SRR 的 requirement.project_id 提取；缺失时为空字符串。
+        meta["project_id"] = (
+            meta.get("project_id")
+            or (srr_json.get("requirement", {}) or {}).get("project_id", "")
+            or ""
+        )
         # srr_json 作为 metadata 中的字符串字段存储（JSON 编码后的完整 SRR），
         # 供 ClarifyAgent KB 自动补全经 meta.get("srr_json") + json.loads 提取字段值。
         # Milvus metadata 上限 65536 字节 → 超大文档需裁剪（去掉 _raw_text/add_details 等长字段）。
@@ -429,6 +437,7 @@ class MilvusVectorStore:
         doc_type: str | None = None,
         fp_id: str | None = None,
         requirement_id: str | None = None,
+        project_id: str | None = None,
     ) -> list[dict]:
         """检索相似需求。
 
@@ -436,6 +445,8 @@ class MilvusVectorStore:
             - 新增 doc_type 过滤（"requirement" / "functional_point"），实现总 SRR 与 FP 隔离
             - 新增 fp_id 过滤（按功能点 ID 过滤，仅对 FP 记录生效）
             - 新增 requirement_id 过滤（按需求 ID 过滤，可同时匹配总 SRR 和该需求下的 FP）
+        v2.45 扩展：
+            - 新增 project_id 过滤（按项目过滤检索结果）
 
         Args:
             query: 查询文本
@@ -449,6 +460,7 @@ class MilvusVectorStore:
                 - None: 同时检索两类（默认，向后兼容）
             fp_id: 按功能点 ID 过滤（v2.34 新增，仅对 FP 记录生效）
             requirement_id: 按需求 ID 过滤（v2.34 新增）
+            project_id: 按项目 ID 过滤（v2.45 新增）
 
         Returns:
             list[dict]: 相似需求列表
@@ -463,7 +475,14 @@ class MilvusVectorStore:
         if doc_type:
             conditions.append(f'metadata["type"] == "{_safe_id(doc_type, "type")}"')
         if requirement_id:
-            conditions.append(f'metadata["requirement_id"] == "{_safe_id(requirement_id, "requirement_id")}"')
+            # v2.51 修复：总 SRR 写入 metadata.req_id，FP 归档写入 metadata.requirement_id
+            # 需同时匹配两个字段，否则总 SRR 永远无法被 requirement_id 过滤命中
+            safe_rid = _safe_id(requirement_id, "requirement_id")
+            conditions.append(
+                f'(metadata["requirement_id"] == "{safe_rid}" || metadata["req_id"] == "{safe_rid}")'
+            )
+        if project_id:
+            conditions.append(f'metadata["project_id"] == "{_safe_id(project_id, "project_id")}"')
         where_filter = " && ".join(conditions) if conditions else None
 
         # modules 无法用 Milvus expr 直接过滤（以逗号分隔字符串存储于 metadata），
@@ -555,6 +574,34 @@ class MilvusVectorStore:
         logger.info("[Milvus] 按 product_id 批量删除需求向量: product={}, count={}", product_id, len(ids))
         return len(ids)
 
+    def delete_requirement_by_project(self, project_id: str) -> int:
+        """按 project_id 批量删除需求向量（v2.45 新增）。
+
+        用于项目恢复活动时一次性清理该项目所有需求+FP 向量。
+
+        Args:
+            project_id: 项目 ID
+
+        Returns:
+            实际删除的向量数
+        """
+        self._ensure_connected()
+        collection = self._get_collection("requirements")
+        safe_pid = _safe_id(project_id, "project_id")
+        results = collection.query(
+            expr=f'metadata["project_id"] == "{safe_pid}"',
+            output_fields=["id"],
+            limit=16384,
+        )
+        if not results:
+            return 0
+        ids = [r["id"] for r in results]
+        ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
+        collection.delete(f'id in [{ids_expr}]')
+        collection.flush()
+        logger.info("[Milvus] 按 project_id 批量删除需求向量: project={}, count={}", project_id, len(ids))
+        return len(ids)
+
     def update_requirement_metadata(self, req_id: str, metadata_updates: dict) -> None:
         """更新需求向量的元数据（如 go_live_date 变更）。
 
@@ -627,12 +674,15 @@ class MilvusVectorStore:
         meta["doc_type"] = "test_case"
         # 产品隔离：显式 product_id 优先，否则取 metadata 中的；兜底 PROD-DEFAULT
         meta["product_id"] = product_id or meta.get("product_id", "") or "PROD-DEFAULT"
+        # v2.45: 项目隔离兜底——保证按项目删除用例向量时 metadata 带 project_id
+        meta["project_id"] = meta.get("project_id", "") or ""
         self._upsert("test_cases", [case_id], [text], [meta])
 
     def search_similar_cases(self, query: str, top_k: int = 5,
                              case_type: str | None = None,
                              req_id: str | None = None,
                              product_id: str | None = None,
+                             project_id: str | None = None,
                              modules: list[str] | None = None) -> list[dict]:
         """检索相似用例。
 
@@ -642,6 +692,7 @@ class MilvusVectorStore:
             case_type: 按用例类型过滤（可选）
             req_id: 按需求 ID 过滤（可选）
             product_id: 按产品过滤（可选，产品隔离必须）
+            project_id: 按项目过滤（v2.45 新增，与 search_similar_requirements 保持一致）
             modules: 按模块过滤（多选，内存过滤）
         """
         self._ensure_connected()
@@ -652,6 +703,8 @@ class MilvusVectorStore:
             conditions.append(f'metadata["req_id"] == "{_safe_id(req_id, "req_id")}"')
         if product_id:
             conditions.append(f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"')
+        if project_id:
+            conditions.append(f'metadata["project_id"] == "{_safe_id(project_id, "project_id")}"')
         where_filter = " && ".join(conditions) if conditions else None
 
         # modules 无法用 Milvus expr 直接过滤（以逗号分隔字符串存储于 metadata），
@@ -724,6 +777,32 @@ class MilvusVectorStore:
         collection.delete(f'id in [{ids_expr}]')
         collection.flush()
         logger.info("[Milvus] 按 product_id 批量删除用例向量: product={}, count={}", product_id, len(ids))
+        return len(ids)
+
+    def delete_test_case_by_project(self, project_id: str) -> int:
+        """按 project_id 批量删除用例向量（v2.45 新增，用于项目恢复活动时清理）。
+
+        Args:
+            project_id: 项目 ID
+
+        Returns:
+            实际删除的向量数
+        """
+        self._ensure_connected()
+        collection = self._get_collection("test_cases")
+        safe_pid = _safe_id(project_id, "project_id")
+        results = collection.query(
+            expr=f'metadata["project_id"] == "{safe_pid}"',
+            output_fields=["id"],
+            limit=16384,
+        )
+        if not results:
+            return 0
+        ids = [r["id"] for r in results]
+        ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
+        collection.delete(f'id in [{ids_expr}]')
+        collection.flush()
+        logger.info("[Milvus] 按 project_id 批量删除用例向量: project={}, count={}", project_id, len(ids))
         return len(ids)
 
     def delete_cases_by_req_id(self, req_id: str) -> None:
@@ -819,6 +898,9 @@ class MilvusVectorStore:
         self._ensure_connected()
         collection = self._get_collection("req_pats")
         collection.delete(f'id == "{_safe_id(pattern_id, "pattern_id")}"')
+        # v2.51: 必须 flush 才能让 delete 在 query/num_entities 中生效
+        # （与 delete_requirement / delete_test_case 保持一致，BOUNDED 一致性下否则仍返回已删除记录）
+        collection.flush()
 
     # ========================================================================
     # 错误案例操作
@@ -865,6 +947,8 @@ class MilvusVectorStore:
         self._ensure_connected()
         collection = self._get_collection("errors")
         collection.delete(f'id == "{_safe_id(error_id, "error_id")}"')
+        # v2.51: 必须 flush 才能让 delete 在 query/num_entities 中生效
+        collection.flush()
 
     # ========================================================================
     # 健康检查 / 工具方法

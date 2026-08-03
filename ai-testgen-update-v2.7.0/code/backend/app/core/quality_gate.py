@@ -67,14 +67,13 @@ class QualityGate:
     在 ClarifyAgent 之后、用例生成之前执行最终质量检查。
     对应 docs/01-requirement-parsing.md §5.2 的 RequirementQualityGate。
 
-    检查项（7 项）：
+    检查项（6 项，v2.48 移除 test_points_hint 检查）：
         1. Schema 校验（Blocker）
         2. 关键字段非空（Blocker）：requirement.title / requirement.summary / flows.happy_path
         3. 质量评分达标（Blocker）：quality_report.overall_score >= pass_score
         4. 无未解决的 Critical 问题（Blocker）
-        5. 验收标准明确性（Warning）：test_points_hint 充分
-        6. happy_path 步骤数（Warning）：>= 2 步
-        7. 冷启动模式提示（Warning）：阈值已放宽，建议人工审核
+        5. happy_path 步骤数（Warning）：>= 2 步
+        6. 冷启动模式提示（Warning）：阈值已放宽，建议人工审核
 
     动态阈值（docs/01 §5.2）：
         - 冷启动模式（kb_empty=True 或 product_first_requirement=True）→ 0.60
@@ -165,9 +164,8 @@ class QualityGate:
                 2. 关键字段非空 → Blocker
                 3. 质量评分达标 → Blocker
                 4. 无未解决 Critical 问题 → Blocker
-                5. 验收标准明确性 → Warning
-                6. happy_path 步骤数 → Warning
-                7. 冷启动模式提示 → Warning
+                5. happy_path 步骤数 → Warning
+                6. 冷启动模式提示 → Warning
         """
         blockers: list[str] = []
         warnings: list[str] = []
@@ -210,25 +208,13 @@ class QualityGate:
                     f"仍有 {len(critical)} 个 Critical 问题未解决"
                 )
 
-        # 5. 验收标准明确性（警告）
-        hints = srr.get("test_points_hint", [])
-
-        def _hint_point(h) -> str:
-            """安全提取验收标准文本，避免 h 为字符串/非预期类型时崩溃。"""
-            if isinstance(h, dict):
-                p = h.get("point", "")
-                return p if isinstance(p, str) else ""
-            return h if isinstance(h, str) else ""
-
-        if not hints or all(len(_hint_point(h)) <= 5 for h in hints):
-            warnings.append("验收标准不够明确")
-
-        # 6. happy_path 步骤数（警告）
+        # 5. happy_path 步骤数（警告）
+        # v2.48: 移除 test_points_hint 检查（已不再生成测试提示）
         steps = self._get_nested_value(srr, "flows.happy_path.steps") or []
         if len(steps) < 2:
             warnings.append("正常流程步骤过少")
 
-        # 7. 冷启动模式提示（警告，非阻断）
+        # 6. 冷启动模式提示（警告，非阻断）
         if cold_start:
             warnings.append(
                 "冷启动模式：知识库为空或为该产品首个需求，"

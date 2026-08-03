@@ -59,6 +59,10 @@ async def init_db() -> None:
         ModuleDependency, KnowledgeQA, User, PromptOverride, ReqPattern,
         KBSetting, AnalysisTask, FPDependencyHistory, PromptHistory,
         LLMCallLog, OperationLog,
+        # v2.45: 补全 v2.45 新增模型的导入（虽然 Base.metadata.create_all 会自动建表，
+        # 但显式导入保持与 models.py 定义一致，避免未来重构遗漏）
+        FunctionalPoint, FPDependency, FPDependencyVersion,
+        FPDependencyVersionItem, Role,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 
@@ -87,7 +91,8 @@ async def init_db() -> None:
                 ("change_type", "VARCHAR(16)", "change_type"),
                 ("change_summary", "TEXT NOT NULL DEFAULT ''", "change_summary"),
                 ("diff_json", "JSON NOT NULL DEFAULT '{}'", "diff_json"),
-                ("go_live_date", "TIMESTAMP", "go_live_date"),
+                # v2.45 修复：go_live_date 改为 TIMESTAMP WITH TIME ZONE，与 models.py 一致
+                ("go_live_date", "TIMESTAMP WITH TIME ZONE", "go_live_date"),
                 # 归档时间真实字段（区别于 updated_at，避免被任何字段修改污染）
                 ("archived_at", "TIMESTAMP WITH TIME ZONE", "archived_at"),
                 # 向量化状态追踪
@@ -105,7 +110,13 @@ async def init_db() -> None:
                 ("archived_at", "TIMESTAMP WITH TIME ZONE", "archived_at"),
             ],
             "projects": [
-                ("version", "VARCHAR(32) DEFAULT '1.0'", "version"),
+                # v2.45 修复：version 字段补 NOT NULL，与 models.py 一致
+                ("version", "VARCHAR(32) NOT NULL DEFAULT '1.0'", "version"),
+                # v2.45: 项目级归档（从需求级迁移）
+                ("status", "VARCHAR(16) NOT NULL DEFAULT 'active'", "status"),
+                ("go_live_date", "TIMESTAMP WITH TIME ZONE", "go_live_date"),
+                ("archived_at", "TIMESTAMP WITH TIME ZONE", "archived_at"),
+                ("archived_by", "VARCHAR(64) NOT NULL DEFAULT ''", "archived_by"),
             ],
             "knowledge_qa": [
                 ("conversation_history", "JSON NOT NULL DEFAULT '[]'", "conversation_history"),
@@ -114,10 +125,13 @@ async def init_db() -> None:
             ],
             # v1.4: 功能点新表（Base.metadata.create_all 自动创建）
             "functional_points": [
-                # v1.5.1: FP 独立生命周期（为 FP 级归档预留）
-                ("status", "VARCHAR(16) NOT NULL DEFAULT 'active'", "status"),
+                # v1.5.1: FP 独立生命周期；v2.45: 默认值修正为合法状态 pending_review
+                ("status", "VARCHAR(16) NOT NULL DEFAULT 'pending_review'", "status"),
                 # v2.2: 多模块关联字段（替代单一 module_id，支持 FP 关联多个模块）
                 ("modules", "JSON NOT NULL DEFAULT '[]'::json", "modules"),
+                # v2.45: 概括描述字段（归档时从 srr_json 同步，用于依赖图谱节点详情）
+                ("summary", "TEXT NOT NULL DEFAULT ''", "summary"),
+                ("relations_summary", "TEXT NOT NULL DEFAULT ''", "relations_summary"),
             ],
             # v2.3: FP 依赖审核流程字段
             "fp_dependencies": [
@@ -125,7 +139,21 @@ async def init_db() -> None:
                 ("reviewed_by", "VARCHAR(64) NOT NULL DEFAULT ''", "reviewed_by"),
                 ("reviewed_at", "TIMESTAMP WITH TIME ZONE", "reviewed_at"),
                 ("created_by", "VARCHAR(64) NOT NULL DEFAULT 'api'", "created_by"),
-                ("updated_at", "TIMESTAMP WITH TIME ZONE", "updated_at"),
+                # v2.45 修复：updated_at 补 NOT NULL 和默认值，与 models.py 一致
+                ("updated_at", "TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()", "updated_at"),
+                # v2.45: 版本管理（项目归档时冻结为历史版本，恢复活动时重新启用）
+                ("is_active", "BOOLEAN NOT NULL DEFAULT TRUE", "is_active"),
+                # v2.45 修复：version_pk 补外键约束，与 models.py 一致
+                ("version_pk", "INTEGER REFERENCES fp_dependency_versions(id) ON DELETE SET NULL", "version_pk"),
+            ],
+            # v2.53 修复：fp_dependency_history 审计字段（v2.45 新增，存量库缺列导致归档 500）
+            # 场景：项目归档冻结依赖时写入 old_is_active/new_is_active/old_version_pk/new_version_pk，
+            # 旧库未建这 4 列 -> INSERT 报 UndefinedColumnError -> 归档 500。
+            "fp_dependency_history": [
+                ("old_is_active", "BOOLEAN", "old_is_active"),
+                ("new_is_active", "BOOLEAN", "new_is_active"),
+                ("old_version_pk", "INTEGER", "old_version_pk"),
+                ("new_version_pk", "INTEGER", "new_version_pk"),
             ],
             # v2.3: 提示词版本管理字段
             "prompt_overrides": [
@@ -134,6 +162,16 @@ async def init_db() -> None:
             # v2.23: 任务阶段耗时追踪
             "analysis_tasks": [
                 ("phase_timings", "JSON NOT NULL DEFAULT '{}'::json", "phase_timings"),
+            ],
+            # v2.45: fp_dependency_version_items 跨需求双向追溯字段
+            # 该表为 v2.45 新表，整体由 create_all 创建；此处补条目是为
+            # 早期 v2.45 构建已建表但缺这 4 列的存量库提供 ALTER TABLE 补列能力。
+            # NOT NULL 列需带 DEFAULT '' 以便存量行填充，避免 ALTER 失败。
+            "fp_dependency_version_items": [
+                ("source_req_id", "VARCHAR(64) NOT NULL DEFAULT ''", "source_req_id"),
+                ("source_req_title", "VARCHAR(512) NOT NULL DEFAULT ''", "source_req_title"),
+                ("target_req_id", "VARCHAR(64) NOT NULL DEFAULT ''", "target_req_id"),
+                ("target_req_title", "VARCHAR(512) NOT NULL DEFAULT ''", "target_req_title"),
             ],
         }
 
@@ -206,6 +244,10 @@ async def init_db() -> None:
                 ("requirements", "idx_req_product_project", "product_id, project_id"),
                 ("test_cases", "idx_case_product", "product_id"),
                 ("test_cases", "idx_case_req", "req_id, product_id"),
+                # v2.45: fp_dependencies 新增列的索引（存量库 ALTER TABLE 不自动建索引）
+                ("fp_dependencies", "idx_fp_dep_active", "is_active"),
+                ("fp_dependencies", "idx_fp_dep_version", "version_pk"),
+                ("fp_dependencies", "idx_fp_dep_review", "review_status"),
             ]
             for tbl, idx_name, cols in SEARCH_INDEXES:
                 if not inspector.has_table(tbl):
@@ -267,22 +309,25 @@ async def init_db() -> None:
                         logger.warning("DB 迁移: {}.{} BM25 设置失败（已跳过，不影响启动）: {}",
                                        table, vec_col, str(mig_e)[:120])
 
-            # Step 6: go_live_date 列类型升级 DATE → TIMESTAMP（上线时间精确到时分秒）
+            # Step 6: go_live_date 列类型升级（DATE/TIMESTAMP → TIMESTAMP WITH TIME ZONE）
             if inspector.has_table("requirements"):
                 req_cols = {c["name"]: c for c in inspector.get_columns("requirements")}
                 col_info = req_cols.get("go_live_date")
                 if col_info:
                     col_type_str = str(col_info.get("type", "")).upper()
-                    if "DATE" in col_type_str and "TIMESTAMP" not in col_type_str:
+                    # v2.45: 统一升级为 TIMESTAMP WITH TIME ZONE（DATE 或无时区的 TIMESTAMP 都需升级）
+                    needs_upgrade = ("DATE" in col_type_str and "TIMESTAMP" not in col_type_str) or \
+                                    ("TIMESTAMP" in col_type_str and "WITH TIME ZONE" not in col_type_str)
+                    if needs_upgrade:
                         try:
                             sp = conn_sync.begin_nested()
                             conn_sync.execute(text(
                                 "ALTER TABLE requirements "
-                                "ALTER COLUMN go_live_date TYPE TIMESTAMP "
-                                "USING go_live_date::timestamp"
+                                "ALTER COLUMN go_live_date TYPE TIMESTAMP WITH TIME ZONE "
+                                "USING go_live_date::timestamp with time zone"
                             ))
                             sp.commit()
-                            logger.info("DB 迁移: requirements.go_live_date DATE → TIMESTAMP 升级完成")
+                            logger.info("DB 迁移: requirements.go_live_date → TIMESTAMP WITH TIME ZONE 升级完成")
                         except Exception as mig_e:
                             sp.rollback()
                             logger.warning("DB 迁移: go_live_date 类型升级失败: {}", str(mig_e)[:120])
@@ -302,6 +347,15 @@ async def init_db() -> None:
             await cleanup_session.commit()
             if result.rowcount > 0:
                 logger.info("[DB] 清理 stale 分析任务: {} 个 running/pending 标记为 interrupted", result.rowcount)
+            # 联动回退卡死在 analyzing 的需求（避免澄清/确认/提交全部拒绝）
+            req_result = await cleanup_session.execute(
+                update(Requirement)
+                .where(Requirement.status == "analyzing")
+                .values(status="draft")
+            )
+            if req_result.rowcount > 0:
+                await cleanup_session.commit()
+                logger.info("[DB] 回退卡死需求: {} 个 analyzing → draft", req_result.rowcount)
     except Exception as e:
         logger.warning("[DB] stale 任务清理失败（不影响启动）: {}", str(e)[:150])
 

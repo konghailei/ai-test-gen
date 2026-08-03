@@ -195,7 +195,11 @@ class ClarifyLoopGuard:
         _route_after_gate 调用本类的 should_retry / should_force_pass 判断路由。
     """
 
-    MAX_ITERATIONS: int = settings.MAX_CLARIFY_ITERATIONS
+    # v2.52: 改为 property，运行时读取 settings（消除导入时绑定隐患）
+    @property
+    @classmethod
+    def MAX_ITERATIONS(cls) -> int:
+        return settings.MAX_CLARIFY_ITERATIONS
 
     @staticmethod
     def should_retry(iteration: int, gate_passed: bool) -> bool:
@@ -210,7 +214,7 @@ class ClarifyLoopGuard:
         """
         if gate_passed:
             return False
-        return iteration < ClarifyLoopGuard.MAX_ITERATIONS
+        return iteration < settings.MAX_CLARIFY_ITERATIONS
 
     @staticmethod
     def should_force_pass(iteration: int, gate_passed: bool) -> bool:
@@ -225,7 +229,7 @@ class ClarifyLoopGuard:
         """
         if gate_passed:
             return False
-        return iteration >= ClarifyLoopGuard.MAX_ITERATIONS
+        return iteration >= settings.MAX_CLARIFY_ITERATIONS
 
 
 # ============================================================================
@@ -504,12 +508,12 @@ class Orchestrator:
             gate_dict["forced_pass"] = True
             warnings = gate_dict.get("warnings", []) or []
             warnings.append(
-                f"达到最大澄清轮次（{ClarifyLoopGuard.MAX_ITERATIONS}），强制通过"
+                f"达到最大澄清轮次（{settings.MAX_CLARIFY_ITERATIONS}），强制通过"
             )
             gate_dict["warnings"] = warnings
             logger.warning(
                 "[Orchestrator] QualityGate 强制通过（达到最大轮次 {}）",
-                ClarifyLoopGuard.MAX_ITERATIONS,
+                settings.MAX_CLARIFY_ITERATIONS,
             )
         else:
             gate_dict["forced_pass"] = False
@@ -612,7 +616,7 @@ class Orchestrator:
                             "name": fp.name,
                             "fp_type": fp.fp_type,
                             "srr_json": fp.srr_json or {},
-                            "test_hints": fp.test_hints or [],
+                            # v2.48: test_hints 已移除，不再传入 gen_agent（测试提示由生成阶段自行推导）
                             "atomicity_check": fp.atomicity_check or {},
                         }
                         for fp in fp_records
