@@ -61,7 +61,8 @@ class Requirement(Base):
     diff_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # 上线时间：归档时填写，用于 KB 检索时区分最新需求（同功能以靠后时间为准）
-    go_live_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # v2.45 修复：统一使用 timezone=True，与 Project.go_live_date 保持一致
+    go_live_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 归档时间：归档时设置，用户可手动修改。区别于 updated_at（任何字段修改都会刷新）。
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -305,7 +306,11 @@ class Product(Base):
 # ============================================================================
 
 class Project(Base):
-    """项目/版本表。属于一个产品，一个项目下有多个需求，涉及多个模块。"""
+    """项目/版本表。属于一个产品，一个项目下有多个需求，涉及多个模块。
+
+    v2.45: 归档操作从需求级迁移到项目级。项目归档后，项目下所有 confirmed 需求自动归档。
+    go_live_date / archived_at 提升到项目级，需求级字段保留作快照（向下兼容）。
+    """
     __tablename__ = "projects"
     __table_args__ = (
         UniqueConstraint("product_id", "name", name="uq_project_product_name"),
@@ -320,6 +325,26 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     version: Mapped[str] = mapped_column(String(32), default="1.0")
+    # v2.46: 项目归档三状态机（参考需求状态设计）
+    #   active          — 活跃：可编辑需求/用例/FP
+    #   pending_archive — 待归档：用户主动标记，冻结编辑；归档前需校验需求已确认
+    #   archived        — 已归档：写入知识库，生成依赖版本快照，供后续需求检索
+    status: Mapped[str] = mapped_column(
+        String(16), default="active",
+        comment="v2.46 项目归档状态：active（活跃）/ pending_archive（待归档）/ archived（已归档）"
+    )
+    go_live_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="v2.45 项目级上线时间（归档时设置，恢复活动时清空）"
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="v2.45 项目归档时间"
+    )
+    archived_by: Mapped[str] = mapped_column(
+        String(64), default="",
+        comment="v2.45 归档操作人"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -669,6 +694,16 @@ class FunctionalPoint(Base):
     status: Mapped[str] = mapped_column(
         String(16), default="pending_review", comment="pending_review / approved / archived（FP 审核生命周期）"
     )
+    # v2.45: FP 概括描述（从 srr_json.sub_srr.summary 同步，用于依赖图谱节点点击查看）
+    summary: Mapped[str] = mapped_column(
+        Text, default="",
+        comment="v2.45 FP 实现内容概括描述（归档时从 srr_json.sub_srr.summary 同步）"
+    )
+    # v2.45: 与其他 FP 关系概括描述（聚合 FPDependency.description，用于依赖图谱节点点击查看）
+    relations_summary: Mapped[str] = mapped_column(
+        Text, default="",
+        comment="v2.45 与其他功能点关系概括描述（归档时聚合生成）"
+    )
     atomicity_check: Mapped[dict] = mapped_column(
         JSON, default=dict,
         comment="三要素自检：trigger / result / boundary，缺项标记 needs_review"
@@ -718,12 +753,24 @@ class FPDependency(Base):
     )
     description: Mapped[str] = mapped_column(Text, default="", comment="关系说明")
     review_status: Mapped[str] = mapped_column(
-        String(16), default="pending", index=True,
+        String(16), default="pending",
         comment="v2.3 审核状态：pending（待审核）/ approved（已审核）/ rejected（已驳回）"
+        # v2.45: 移除列级 index=True，改用 __table_args__ 中显式 Index 统一命名
     )
     reviewed_by: Mapped[str] = mapped_column(String(64), default="", comment="审核人")
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str] = mapped_column(String(64), default="api", comment="创建人")
+    # v2.45: 是否启用（项目归档时设为 False 冻结为历史版本；项目恢复活动时设为 True 重新启用）
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True,
+        comment="v2.45 是否启用：项目归档时 False（冻结历史版本），恢复活动时 True"
+    )
+    # v2.45: 所属版本快照外键（当前版本为 null；归档后指向 fp_dependency_versions.id）
+    version_pk: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("fp_dependency_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        comment="v2.45 所属版本快照ID（当前版本为 null）"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -735,6 +782,10 @@ class FPDependency(Base):
     __table_args__ = (
         Index("idx_fp_dep_src_tgt", "source_fp_id", "target_fp_id"),
         Index("idx_fp_dep_review", "review_status"),
+        Index("idx_fp_dep_active", "is_active"),
+        # v2.45: 统一命名索引，避免列级 index=True 自动生成 ix_fp_dependencies_*
+        # 与本表显式 Index 并存造成冗余；与 database.py SEARCH_INDEXES 命名一致
+        Index("idx_fp_dep_version", "version_pk"),
         UniqueConstraint("source_fp_id", "target_fp_id", "relation_type", name="uq_fp_dep_edge"),
     )
 
@@ -762,6 +813,11 @@ class FPDependencyHistory(Base):
     )
     old_review_status: Mapped[str] = mapped_column(String(16), default="", comment="变更前审核状态")
     new_review_status: Mapped[str] = mapped_column(String(16), default="", comment="变更后审核状态")
+    # v2.45: 追踪 is_active / version_pk 变更（项目归档冻结/恢复活动解冻时的审计）
+    old_is_active: Mapped[bool | None] = mapped_column(Boolean, nullable=True, comment="变更前是否启用")
+    new_is_active: Mapped[bool | None] = mapped_column(Boolean, nullable=True, comment="变更后是否启用")
+    old_version_pk: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="变更前版本快照ID")
+    new_version_pk: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="变更后版本快照ID")
     changed_by: Mapped[str] = mapped_column(String(64), default="api", comment="操作人")
     change_reason: Mapped[str] = mapped_column(Text, default="", comment="变更原因（关联需求变更说明）")
     related_req_id: Mapped[str | None] = mapped_column(
@@ -775,6 +831,129 @@ class FPDependencyHistory(Base):
     __table_args__ = (
         Index("idx_fp_dephist_fp", "source_fp_id", "target_fp_id"),
         Index("idx_fp_dephist_action", "action"),
+    )
+
+
+# ============================================================================
+# 17.5 功能点依赖版本快照表（fp_dependency_versions，v2.45 新增）
+# ============================================================================
+
+class FPDependencyVersion(Base):
+    """功能点依赖关系版本快照表（v2.45 新增）。
+
+    项目归档时生成一个版本快照，记录该项目下所有功能点依赖关系。
+    项目恢复活动时，对应版本 is_active 设为 False，不再参与新需求影响分析。
+
+    版本号格式：{project.version}-{project.name}，如 "1.0-用户管理系统"。
+    同一项目重新归档时，版本号后缀递增：1.0-用户管理系统-v2。
+    """
+    __tablename__ = "fp_dependency_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    version_id: Mapped[str] = mapped_column(
+        String(128), unique=True, index=True,
+        comment="版本号：{project.version}-{project.name}，重新归档时后缀递增 -v2/-v3"
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("projects.id", ondelete="CASCADE"), index=True,
+        comment="关联项目ID"
+    )
+    project_version: Mapped[str] = mapped_column(
+        String(32), comment="项目版本号快照（如 1.0）"
+    )
+    project_name: Mapped[str] = mapped_column(
+        String(255), comment="项目名称快照"
+    )
+    go_live_date: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="上线时间快照（从 Project.go_live_date 同步）"
+    )
+    snapshot_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        comment="快照时间"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, index=True,
+        comment="是否启用：项目恢复活动时设为 False，新需求影响分析不再考虑该版本"
+    )
+    archived_by: Mapped[str] = mapped_column(
+        String(64), default="", comment="归档操作人"
+    )
+    requirement_count: Mapped[int] = mapped_column(
+        Integer, default=0, comment="归档需求数量"
+    )
+    fp_count: Mapped[int] = mapped_column(
+        Integer, default=0, comment="归档功能点数量"
+    )
+    dependency_count: Mapped[int] = mapped_column(
+        Integer, default=0, comment="快照依赖关系数量"
+    )
+    change_summary: Mapped[str] = mapped_column(
+        Text, default="", comment="变更说明（可选）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    __table_args__ = (
+        Index("idx_fp_depver_project", "project_id", "is_active"),
+    )
+
+
+# ============================================================================
+# 17.6 功能点依赖版本快照明细表（fp_dependency_version_items，v2.45 新增）
+# ============================================================================
+
+class FPDependencyVersionItem(Base):
+    """功能点依赖关系版本快照明细表（v2.45 新增）。
+
+    存储每个版本快照下的具体依赖关系明细，用于版本对比和历史回溯。
+    """
+    __tablename__ = "fp_dependency_version_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    version_pk: Mapped[int] = mapped_column(
+        Integer, ForeignKey("fp_dependency_versions.id", ondelete="CASCADE"),
+        index=True, comment="版本快照外键"
+    )
+    source_fp_id: Mapped[str] = mapped_column(
+        String(64), index=True, comment="源功能点ID"
+    )
+    source_fp_name: Mapped[str] = mapped_column(
+        String(255), comment="源功能点名称（快照）"
+    )
+    target_fp_id: Mapped[str] = mapped_column(
+        String(64), index=True, comment="目标功能点ID"
+    )
+    target_fp_name: Mapped[str] = mapped_column(
+        String(255), comment="目标功能点名称（快照）"
+    )
+    relation_type: Mapped[str] = mapped_column(
+        String(32), comment="关系类型：depends_on / data_flows / invariants / lifecycle_scenarios / conflicts_with"
+    )
+    description: Mapped[str] = mapped_column(
+        Text, default="", comment="关系说明（快照）"
+    )
+    review_status: Mapped[str] = mapped_column(
+        String(16), comment="快照时审核状态：pending / approved / rejected"
+    )
+    source_req_id: Mapped[str] = mapped_column(
+        String(64), index=True, comment="源FP所属需求ID（跨需求追溯）"
+    )
+    source_req_title: Mapped[str] = mapped_column(
+        String(512), default="", comment="源FP所属需求标题（快照）"
+    )
+    # v2.45: 补充 target 侧需求字段，支持跨需求双向追溯（快照表，FP 删除后仍可追溯）
+    target_req_id: Mapped[str] = mapped_column(
+        String(64), index=True, comment="目标FP所属需求ID（跨需求追溯）"
+    )
+    target_req_title: Mapped[str] = mapped_column(
+        String(512), default="", comment="目标FP所属需求标题（快照）"
+    )
+
+    __table_args__ = (
+        Index("idx_fp_depitem_version", "version_pk"),
+        Index("idx_fp_depitem_fp", "source_fp_id", "target_fp_id"),
     )
 
 

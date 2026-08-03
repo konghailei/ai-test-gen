@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, memo, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, Archive, GitBranch, Share2, History, RefreshCw, Layers, Clock, Download, FilePlus, Image as ImageIcon, ChevronDown } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, GitBranch, Share2, History, RefreshCw, Layers, Clock, Download, FilePlus, Image as ImageIcon, ChevronDown } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product, RequirementRevision } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
@@ -111,14 +111,6 @@ function splitTextIntoBlocks(text: string): Array<
   const isTableLine = (s: string) => /^\s*\|.*\|\s*$/.test(s)
   const isSeparator = (s: string) => /^[|\s:-]+$/.test(s) && s.includes('-')
   const isImageStart = (s: string) => /^【图片/.test(s)
-  // 图片描述的后续行：空行 / 【xxx】格式 / 列表项 / 缩进行
-  const isImageContentLine = (s: string) => {
-    if (s.trim() === '') return true
-    if (/^【/.test(s.trim())) return true
-    if (/^[-*]/.test(s.trim())) return true
-    if (/^\s/.test(s)) return true
-    return false
-  }
 
   while (i < lines.length) {
     if (isTableLine(lines[i])) {
@@ -136,12 +128,21 @@ function splitTextIntoBlocks(text: string): Array<
       }
     } else if (isImageStart(lines[i])) {
       // 图片描述块：【图片N 开头 + 后续内容行
+      // v2.47: 遇到连续两个空行（段落分隔）或表格或新图片时结束，避免描述被拆分
       const match = lines[i].match(/^【图片(\d+)/)
       const imgIdx = match ? parseInt(match[1], 10) : null
       let j = i + 1
-      while (j < lines.length && !isTableLine(lines[j]) && !isImageStart(lines[j]) && isImageContentLine(lines[j])) {
+      let prevBlank = false
+      while (j < lines.length) {
+        if (isTableLine(lines[j])) break
+        if (isImageStart(lines[j])) break
+        // 连续两个空行视为段落分隔，结束图片块
+        if (lines[j].trim() === '' && prevBlank) break
+        prevBlank = lines[j].trim() === ''
         j++
       }
+      // 移除尾部空行（避免折叠栏内有多余空行）
+      while (j > i + 1 && lines[j - 1].trim() === '') j--
       flushText(i)
       blocks.push({ type: 'image_desc', lines: lines.slice(i, j), startLine: i, imageIndex: imgIdx })
       i = j
@@ -153,76 +154,6 @@ function splitTextIntoBlocks(text: string): Array<
   flushText(lines.length)
   return blocks
 }
-
-// ============================================================================
-// 归档弹窗（React.memo 隔离，避免页面重渲染卡顿）
-// ============================================================================
-
-const ArchiveModal = memo(function ArchiveModal({
-  reqId,
-  onClose,
-  onArchived,
-}: {
-  reqId: string
-  onClose: () => void
-  onArchived: () => void
-}) {
-  const [archiveDate, setArchiveDate] = useState(new Date().toISOString().slice(0, 10))
-  const [archiving, setArchiving] = useState(false)
-
-  const handleArchive = async () => {
-    if (!archiveDate) { alert('请选择上线日期'); return }
-    setArchiving(true)
-    try {
-      await reqApi.archive(reqId, archiveDate)
-      onArchived()
-    } catch (e: any) {
-      alert('归档失败: ' + e.message)
-    } finally {
-      setArchiving(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} onClick={() => !archiving && onClose()}>
-      <div className="max-w-md w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 flex items-center justify-center" style={{ borderRadius: 'calc(var(--radius) * 0.6)', background: 'var(--state-warning-surface)' }}>
-            <Archive className="w-5 h-5" style={{ color: 'var(--state-warning)' }} />
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>归档需求</h2>
-            <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>归档后数据将导入知识库，不可再编辑</p>
-          </div>
-        </div>
-        <div className="space-y-3">
-          <div>
-            <label className="label">上线日期 <span style={{ color: 'var(--state-error)' }}>*</span></label>
-            <input
-              type="date"
-              value={archiveDate}
-              onChange={e => setArchiveDate(e.target.value)}
-              className="input-field text-sm"
-              autoFocus
-            />
-          </div>
-          <div className="p-3 text-xs flex items-start gap-2" style={{ background: 'rgba(0, 122, 255, 0.08)', borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--brand-700)' }}>
-            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            <span>上线日期用于知识库检索时区分最新需求。同一功能检索出多个需求时，以靠后日期为准。</span>
-          </div>
-        </div>
-        <div className="flex justify-end gap-3 mt-5">
-          <button onClick={onClose} className="btn-secondary" disabled={archiving}>
-            <X className="w-4 h-4" /> 取消
-          </button>
-          <button onClick={handleArchive} disabled={!archiveDate || archiving} className="btn-primary">
-            {archiving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />} 确认归档
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-})
 
 // ============================================================================
 // 主页面组件
@@ -246,8 +177,6 @@ export default function RequirementDetail() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
 
-  // 归档 — 日期和保存状态由 memo 组件内部管理，父组件仅控制弹窗显隐
-  const [showArchiveModal, setShowArchiveModal] = useState(false)
   // 确认生成最终SRR
   const [finalizing, setFinalizing] = useState(false)
   // v1.6: 确认需求完成
@@ -546,19 +475,6 @@ export default function RequirementDetail() {
       setSaving(false)
     }
   }
-
-  // 归档成功回调：重新加载需求详情
-  const handleArchived = useCallback(async () => {
-    setShowArchiveModal(false)
-    if (id) {
-      try {
-        const updated = await reqApi.get(id)
-        setReq(updated)
-        // v2.33: 归档变更 revision，刷新基线
-        refreshRevisionBaseline()
-      } catch {}
-    }
-  }, [id, refreshRevisionBaseline])
 
   const handleFinalize = async () => {
     if (!id) return
@@ -1253,38 +1169,43 @@ export default function RequirementDetail() {
                     }
 
                     if (block.type === 'image_desc') {
-                      // 图片描述块：两栏布局，行号列显示行号，内容列显示原始图片 + 折叠的多模态描述
+                      // 图片描述块：两栏布局，行号列显示行号，内容列将原始图片+多模态描述合并到同一折叠栏（v2.47 修复内容分成两块问题）
                       const imgIdx = block.imageIndex
                       const imgUrl = imgIdx != null ? imageMap.get(imgIdx) : undefined
                       const descLines = block.lines
+                      const imgLabel = descLines[0]?.replace(/^【|\】$/g, '') || `图片${imgIdx ?? ''}描述`
                       return (
                         <div key={bi} className="flex text-sm leading-relaxed" style={{ borderTop: '1px solid var(--border)' }}>
                           <LineNumberCol start={block.startLine} end={block.startLine + descLines.length} />
-                          <div className="flex-1 py-2 px-4 space-y-2">
-                            {/* 原始图片（始终展示） */}
-                            {imgUrl && (
-                              <div className="block p-2" style={{ background: 'var(--background-muted)', border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
-                                <div className="text-xs mb-1 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}>
-                                  <ImageIcon className="w-3.5 h-3.5" /> 原始图片（图片{imgIdx}）
-                                </div>
-                                <img
-                                  src={imgUrl}
-                                  alt={`原始图片${imgIdx}`}
-                                  className="max-w-full"
-                                  style={{ borderRadius: 'calc(var(--radius) * 0.5)', border: '1px solid var(--border)', maxHeight: '400px' }}
-                                />
-                              </div>
-                            )}
-                            {/* 多模态识别内容（折叠展示） */}
+                          <div className="flex-1 py-2 px-4">
+                            {/* v2.47: 原始图片 + 多模态识别内容统一折叠，避免内容分成两块、避免部分内容不在折叠栏 */}
                             <details className="group overflow-hidden" style={{ background: 'rgba(0, 122, 255, 0.05)', border: '1px solid rgba(0, 122, 255, 0.2)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
                               <summary className="cursor-pointer list-none flex items-center gap-2 px-3 py-2 text-xs font-medium select-none" style={{ color: 'var(--brand-700)' }}>
                                 <span className="inline-block transition-transform group-open:rotate-90" style={{ color: 'var(--brand-400)' }}>{'\u25B6'}</span>
-                                <span>{descLines[0]?.replace(/^【|\】$/g, '') || `图片${imgIdx ?? ''}描述`}</span>
+                                <ImageIcon className="w-3.5 h-3.5" />
+                                <span>{imgLabel}</span>
                                 <span className="font-normal" style={{ color: 'var(--brand-400)' }}>（{descLines.length} 行，点击{'\u5C55'}开）</span>
                               </summary>
-                              <pre className="px-3 pb-3 pt-1 text-xs whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--foreground-secondary)', fontFamily: 'var(--font-sans)', borderTop: '1px solid rgba(0, 122, 255, 0.1)', background: 'rgba(255, 255, 255, 0.6)' }}>
-                                {descLines.join('\n')}
-                              </pre>
+                              <div className="px-3 pb-3 pt-2 space-y-2" style={{ borderTop: '1px solid rgba(0, 122, 255, 0.1)', background: 'rgba(255, 255, 255, 0.6)' }}>
+                                {/* 原始图片（移入折叠栏内） */}
+                                {imgUrl && (
+                                  <div className="block p-2" style={{ background: 'var(--background-muted)', border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+                                    <div className="text-xs mb-1 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}>
+                                      <ImageIcon className="w-3.5 h-3.5" /> 原始图片（图片{imgIdx}）
+                                    </div>
+                                    <img
+                                      src={imgUrl}
+                                      alt={`原始图片${imgIdx}`}
+                                      className="max-w-full"
+                                      style={{ borderRadius: 'calc(var(--radius) * 0.5)', border: '1px solid var(--border)', maxHeight: '400px' }}
+                                    />
+                                  </div>
+                                )}
+                                {/* 多模态识别内容 */}
+                                <pre className="text-xs whitespace-pre-wrap leading-relaxed" style={{ color: 'var(--foreground-secondary)', fontFamily: 'var(--font-sans)' }}>
+                                  {descLines.join('\n')}
+                                </pre>
+                              </div>
                             </details>
                           </div>
                         </div>
@@ -1636,8 +1557,8 @@ export default function RequirementDetail() {
     <div className="space-y-6">
       {/* 返回 + 操作按钮 */}
       <div className="flex items-center justify-between">
-        <button onClick={() => navigate('/requirements')} className="btn-ghost">
-          <ArrowLeft className="w-4 h-4" /> 返回列表
+        <button onClick={() => navigate(-1)} className="btn-ghost">
+          <ArrowLeft className="w-4 h-4" /> 返回
         </button>
         <div className="flex items-center gap-2">
           {!editing && (
@@ -1746,13 +1667,6 @@ export default function RequirementDetail() {
                   </div>
                 )}
               </div>
-              {/* active / confirmed → 可归档（归档后导入知识库） */}
-              {(detail.status === 'active' || detail.status === 'confirmed') && (
-                <button onClick={() => setShowArchiveModal(true)} className="btn-secondary">
-                  <Archive className="w-4 h-4" />
-                  归档
-                </button>
-              )}
               {/* v1.6: confirmed → 允许生成测试用例（active 兼容旧数据） */}
               {(detail.status === 'active' || detail.status === 'confirmed') && (
                 <button onClick={() => navigate(`/requirements/${id}/generate`)} className="btn-primary">
@@ -2095,14 +2009,6 @@ export default function RequirementDetail() {
         </div>
       )}
 
-      {/* 归档弹窗（React.memo 隔离） */}
-      {showArchiveModal && id && (
-        <ArchiveModal
-          reqId={id}
-          onClose={() => setShowArchiveModal(false)}
-          onArchived={handleArchived}
-        />
-      )}
     </div>
   )
 }

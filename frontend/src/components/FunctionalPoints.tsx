@@ -2,16 +2,12 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, Trash2, Edit3, Save, X, Search, Layers, RefreshCw, AlertTriangle, Sparkles, CopyPlus, Archive, ChevronDown, Check, Package } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
+import { fpTypeLabel } from '../utils/labels'
 
 interface Props {
   reqId: string
   productId?: string
   status?: string  // 需求状态：archived 时功能点锁定为只读
-}
-
-const FP_TYPE_LABELS: Record<string, string> = {
-  workflow: '业务流程', constraint: '约束校验', calculation: '计算规则',
-  api_behavior: 'API 行为', data_record: '数据记录', config: '配置项',
 }
 
 export default function FunctionalPoints({ reqId, productId, status }: Props) {
@@ -513,7 +509,7 @@ export default function FunctionalPoints({ reqId, productId, status }: Props) {
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-sm font-medium text-slate-800">{fp.name}</span>
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
-                              {FP_TYPE_LABELS[fp.fp_type] || fp.fp_type}
+                              {fpTypeLabel(fp.fp_type)}
                             </span>
                             {/* 模块标签（继承） */}
                             {fp.module_names?.map((mn: string, idx: number) => (
@@ -678,7 +674,7 @@ function FpItem({
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>{fp.name}</span>
               <span className="text-[10px] px-1.5 py-0.5 rounded font-medium" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
-                {FP_TYPE_LABELS[fp.fp_type] || fp.fp_type}
+                {fpTypeLabel(fp.fp_type)}
               </span>
               {/* 未分配模块警告标签 */}
               {isFpUnassigned(fp) && (

@@ -1,0 +1,609 @@
+"""GenAgent 用例生成 Agent。
+
+基于 SRR 生成完整的 UTCF 测试用例集，支持分类生成策略
+（功能/边界/异常/安全）和 Few-shot 示例注入。
+
+设计依据：
+- docs/03-case-generation-flow.md §2（GenAgent 核心设计）
+- docs/03-case-generation-flow.md §2.2（Few-shot Prompt 模板）
+
+分类生成策略（docs/03 §2.1）：
+    - 功能测试：Step-by-step 推导，SRR.flows → Given-When-Then
+    - 边界值测试：等价类 + 边界分析，SRR.data_constraints → 边界
+    - 异常测试：故障注入 + 防御推理，枚举故障点 + 预期处理
+    - 安全测试：OWASP 检查清单，SQL注入/XSS/越权/脱敏
+
+输入：SRR JSON + 通道配置 + 影响指导（可选）
+输出：UTCF 用例列表
+
+Note:
+    - gen_confidence 必须放在 gen_metadata 对象内（修复问题5）
+    - 用例 ID 格式：TC-{MODULE}-{4位批次}-{4位序号}（符合 doc-04 §1 正则）
+    - FULL 通道启用分类生成，FAST 通道单次批量生成
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import datetime
+from typing import Any
+
+from app.config import settings
+from app.core.llm_client import llm_client
+from app.core import prompt_manager
+from app.db.milvus_store import vector_store
+from app.prompts import gen_agent as prompts
+from app.utils.id_gen import gen_test_case_id, gen_batch_id
+from app.utils.logger import logger
+
+
+class GenAgent:
+    """用例生成 Agent。
+
+    对应 docs/00-architecture-overview.md §4 的 GenAgent 节点。
+
+    Usage:
+        agent = GenAgent()
+        cases = await agent.generate(srr, channel_config, impact_guidance="")
+    """
+
+    def __init__(self) -> None:
+        """初始化 GenAgent。"""
+        self._llm = llm_client
+
+    async def generate(
+        self,
+        srr: dict,
+        enable_multi_type: bool = True,
+        impact_guidance: str = "",
+        functional_points: list[dict] | None = None,
+    ) -> list[dict]:
+        """根据 SRR 生成测试用例集。
+
+        Args:
+            srr: SRR JSON 字典
+            enable_multi_type: 是否启用分类生成（FULL 通道 True / FAST 通道 False）
+            impact_guidance: 影响分析指导文本（仅优化需求时传入）
+            functional_points: 需求已拆分的功能点列表（v1.4 新增）。传入时
+                LLM 按每个 FP 定向生成用例，并在用例中标注 related_fp 字段，
+                供 persist_to_kb 写入 test_case↔functional_point 追溯关系。
+
+        Returns:
+            list[dict]: UTCF 用例列表，每个用例为字典格式
+
+        Note:
+            生成流程（docs/03 §2，v3.1 起跳过 KB 检索）：
+                1. 构建 Prompt（分类/批量 + FP 定向，直接基于 SRR）
+                2. 调用 LLM 生成
+                3. 解析用例 JSON + 生成 ID
+                4. gen_confidence 放入 gen_metadata
+        """
+        req_id = srr.get("requirement", {}).get("id", "")
+        product_id = srr.get("requirement", {}).get("product_id", "")
+        modules = srr.get("requirement", {}).get("modules", []) or []
+        logger.info("[GenAgent] ▶ 开始生成: req_id={}, multi_type={}, has_impact_guidance={}, fp_count={}",
+                    req_id, enable_multi_type, bool(impact_guidance), len(functional_points or []))
+
+        # v3.2: 轻量 KB 检索——查同模块下已 approved 的高质量用例 Top-3 作为 Few-shot 参考
+        few_shot_cases: list = []
+        matched_patterns: list = []
+        functional_points = functional_points or []
+        if modules:
+            try:
+                from app.db.database import async_session
+                from app.db.models import TestCase
+                from sqlalchemy import select as _select
+                async with async_session() as _s:
+                    cases_in_module = await _s.execute(
+                        _select(TestCase.case_json, TestCase.id)
+                        .where(TestCase.product_id == product_id, TestCase.status == "approved")
+                        .order_by(TestCase.updated_at.desc())
+                        .limit(10)
+                    )
+                    for cj, cid in cases_in_module.all():
+                        if not isinstance(cj, dict):
+                            continue
+                        few_shot_cases.append({
+                            "id": cid,
+                            "title": cj.get("title", ""),
+                            "type": cj.get("type", ""),
+                            "priority": cj.get("priority", ""),
+                            "steps": cj.get("steps", [])[:3],
+                            "assertions": cj.get("assertions", [])[:2],
+                        })
+                    # 去重 + Top-3
+                    seen = set()
+                    uniq = []
+                    for c in few_shot_cases:
+                        title = c.get("title", "")
+                        if title and title not in seen:
+                            seen.add(title)
+                            uniq.append(c)
+                    few_shot_cases = uniq[:3]
+            except Exception as e:
+                logger.debug("[GenAgent] 轻量 KB 检索失败（不阻断）: {}", str(e)[:120])
+        logger.info("[GenAgent] 轻量 KB 检索: few_shot_cases={}, matched_patterns={}",
+                    len(few_shot_cases), len(matched_patterns))
+
+        # 3. 构建 Prompt（含 FP 定向上下文）
+        user_prompt = prompts.build_user_prompt(
+            srr=srr,
+            few_shot_cases=few_shot_cases or None,
+            matched_patterns=matched_patterns or None,
+            impact_guidance=impact_guidance,
+            enable_multi_type=enable_multi_type,
+            functional_points=functional_points,
+        )
+        logger.debug("[GenAgent] Prompt 构建完成: len={}", len(user_prompt))
+
+        # 4. 调用 LLM 生成用例（max_tokens=32768，确保能生成足够的用例）
+        try:
+            logger.info("[GenAgent] 调用 LLM: temperature=0.4, multi_type={}, fp_count={}, "
+                        "max_tokens=32768",
+                        enable_multi_type, len(functional_points or []))
+            raw_cases = await self._llm.call_json(
+                prompt=user_prompt,
+                system_prompt=prompt_manager.get("gen_agent", "SYSTEM_PROMPT"),
+                temperature=0.4,
+                max_tokens=32768,
+                allow_array=True,  # 允许 LLM 输出 JSON 数组，不锁死 json_object
+                agent_name="GenAgent",
+            )
+        except Exception as e:
+            logger.error("[GenAgent] LLM 调用失败: {}", str(e)[:200])
+            raise RuntimeError(f"用例生成失败: {e}") from e
+
+        # 5. 解析用例列表（LLM 可能返回数组或含 test_suite 的对象）
+        cases = self._extract_cases(raw_cases)
+        logger.info("[GenAgent] LLM 返回用例: raw_type={}, extracted={}",
+                    type(raw_cases).__name__, len(cases))
+
+        # 6. 后处理：生成 ID、补全字段、放入 gen_metadata
+        module_prefix = self._derive_module_prefix(srr)
+        batch_id = gen_batch_id()
+        gen_model = self._get_model_name()
+        cases = self._post_process_cases(cases, req_id, module_prefix, batch_id, gen_model)
+
+        # v2.0: 四级去重（精确→语义→子集→LLM等价判定），对应 docs/03 §2.3
+        before_dedup = len(cases)
+        cases = await self._deduplicate_cases(cases)
+        dedup_removed = before_dedup - len(cases)
+        if dedup_removed > 0:
+            logger.info("[GenAgent] 去重完成: before={}, after={}, removed={}",
+                        before_dedup, len(cases), dedup_removed)
+
+        # 统计用例类型分布
+        type_dist: dict[str, int] = {}
+        for c in cases:
+            t = c.get("type", "unknown")
+            type_dist[t] = type_dist.get(t, 0) + 1
+        logger.info("[GenAgent] 后处理完成: cases={}, module_prefix={}, type_dist={}",
+                    len(cases), module_prefix, type_dist)
+
+        # v3.3：SRR 覆盖率校验日志——统计 SRR 要点数 vs 生成用例数，评估覆盖情况
+        self._log_coverage_stats(srr, functional_points, cases)
+
+        # 7. 向量库写入延后至 ReviewAgent.persist_to_kb（v2.0 修正，对应 docs/03 §1 Phase 6）
+        # 仅写入 PG 供 ReviewAgent 读取，向量库由 persist_to_kb 统一写入 approved 用例
+        # 避免未审核用例污染 Few-shot 检索结果
+        product_id = srr.get("requirement", {}).get("product_id", "")
+        logger.info("[GenAgent] ◀ 生成完成 ▶ 下一节点 ReviewAgent: "
+                    "cases={}, types={}, batch_id={}",
+                    len(cases), type_dist, batch_id)
+        return cases
+
+    # ========================================================================
+    # SRR 覆盖率校验（v3.3）
+    # ========================================================================
+
+    def _log_coverage_stats(self, srr: dict, functional_points: list[dict], cases: list[dict]) -> None:
+        """统计 SRR 要点数 vs 生成用例数，输出覆盖率日志。
+
+        不阻断流水线，仅用于监控和可观测性。
+        """
+        try:
+            # 统计 SRR 要点总数
+            total_points = 0
+            hp_count = 0
+            alt_count = 0
+            rule_count = 0
+            data_count = 0
+            boundary_count = 0
+            acceptance_count = 0
+
+            # 总 SRR
+            flows = srr.get("flows", {}) if isinstance(srr, dict) else {}
+            hp_steps = flows.get("happy_path", {}).get("steps", []) if isinstance(flows.get("happy_path"), dict) else []
+            hp_count += len(hp_steps)
+            alt_flows = flows.get("alternate_flows", [])
+            alt_count += len(alt_flows)
+
+            # 各功能点
+            for fp in functional_points:
+                fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+                fp_flows = fp_srr.get("flows", {})
+                fp_hp = fp_flows.get("happy_path", {})
+                fp_hp_steps = fp_hp.get("steps", []) if isinstance(fp_hp, dict) else []
+                hp_count += len(fp_hp_steps)
+                alt_count += len(fp_flows.get("alternate_flows", []))
+                rule_count += len(fp_srr.get("business_rules", []))
+                data_count += len(fp_srr.get("data_constraints", []))
+                boundary_count += len(fp_srr.get("boundary_conditions", []))
+                acceptance_count += len(fp_srr.get("acceptance_criteria", []))
+
+            total_points = hp_count + alt_count + rule_count + data_count + boundary_count + acceptance_count
+            case_count = len(cases)
+
+            # 按 related_fp 统计各功能点的用例数
+            fp_coverage: dict[str, int] = {}
+            for c in cases:
+                rfp = c.get("related_fp", c.get("related_requirement", ""))
+                fp_coverage[rfp] = fp_coverage.get(rfp, 0) + 1
+
+            # 覆盖率 = 用例数 / SRR要点数（粗略估计，>1.0 表示平均每个要点有多个用例）
+            coverage_ratio = case_count / max(total_points, 1)
+
+            logger.info(
+                "[GenAgent/coverage] SRR 要点统计: total={}, hp={}, alt={}, rules={}, data={}, boundary={}, acceptance={} | "
+                "用例数={}, 覆盖比={:.2f}, FP分布={}",
+                total_points, hp_count, alt_count, rule_count, data_count, boundary_count, acceptance_count,
+                case_count, coverage_ratio, fp_coverage,
+            )
+
+            # 覆盖率过低时告警
+            if total_points > 0 and coverage_ratio < 0.5:
+                logger.warning(
+                    "[GenAgent/coverage] ⚠️ 覆盖率偏低: SRR 有 {} 个要点，但仅生成 {} 个用例（覆盖比 {:.2f}），"
+                    "建议检查 prompt 或增加 max_tokens",
+                    total_points, case_count, coverage_ratio,
+                )
+        except Exception as e:
+            logger.debug("[GenAgent/coverage] 覆盖率统计失败（不阻断）: {}", str(e)[:120])
+
+    # ========================================================================
+    # 用例解析与后处理
+    # ========================================================================
+
+    def _extract_cases(self, raw: Any) -> list[dict]:
+        """从 LLM 输出中提取用例列表。
+
+        LLM 可能返回：
+        - JSON 数组 [...]
+        - 含 test_suite 的对象 {"test_suite": [...]}
+        - 单个用例对象 {...}
+
+        Args:
+            raw: LLM 输出
+
+        Returns:
+            list[dict]: 用例列表
+        """
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            if "test_suite" in raw:
+                return raw["test_suite"]
+            if "cases" in raw:
+                return raw["cases"]
+            # 单个用例
+            if "title" in raw or "steps" in raw:
+                return [raw]
+        return []
+
+    def _post_process_cases(
+        self,
+        cases: list[dict],
+        req_id: str,
+        module_prefix: str,
+        batch_id: str,
+        gen_model: str,
+    ) -> list[dict]:
+        """后处理：生成 ID、补全字段、整理 gen_metadata。
+
+        Args:
+            cases: LLM 生成的原始用例列表
+            req_id: 关联需求 ID
+            module_prefix: 模块前缀（用于生成用例 ID）
+            batch_id: 生成批次 ID
+            gen_model: 生成模型名
+
+        Returns:
+            list[dict]: 后处理后的用例列表
+
+        Note:
+            - gen_confidence 必须放在 gen_metadata 对象内（修复问题5）
+            - 用例 ID 缺失则自动生成
+            - related_requirement 缺失则补 req_id
+        """
+        now = datetime.now().isoformat()
+        processed: list[dict] = []
+
+        for case in cases:
+            # ⚠️ 始终覆盖 LLM 生成的占位 ID（如 TC-AUTH-0001-0001），
+            # 避免同模块重复生成时 UniqueViolationError
+            case["id"] = gen_test_case_id(module_prefix)
+
+            # 补全关联需求
+            case.setdefault("related_requirement", req_id)
+
+            # 补全必填字段
+            case.setdefault("title", "未命名用例")
+            case.setdefault("type", "functional")
+            case.setdefault("priority", "P1")
+            case.setdefault("preconditions", [])
+            case.setdefault("steps", [])
+            case.setdefault("assertions", [])
+            case.setdefault("tags", [])
+            case.setdefault("test_data", {})
+            case.setdefault("cleanup", [])
+            case.setdefault("execution", {})
+            case.setdefault("related_fp", "")  # v2.0.1: FP 追溯（LLM 可能漏写）
+
+            # ⚠️ gen_confidence 必须放在 gen_metadata 内（修复问题5）
+            # 如果 LLM 把 gen_confidence 放在了顶层，移入 gen_metadata
+            top_level_conf = case.pop("gen_confidence", None)
+            gen_metadata = case.setdefault("gen_metadata", {})
+            if top_level_conf is not None:
+                gen_metadata.setdefault("gen_confidence", top_level_conf)
+            gen_metadata.setdefault("gen_confidence", 0.7)  # 默认置信度
+            gen_metadata.setdefault("gen_model", gen_model)
+            gen_metadata.setdefault("gen_at", now)
+
+            # source_pattern 同步到 gen_metadata 和顶层
+            if "source_pattern" in case:
+                gen_metadata.setdefault("source_pattern", case["source_pattern"])
+            else:
+                case.setdefault("source_pattern", "")
+
+            processed.append(case)
+
+        return processed
+
+    def _derive_module_prefix(self, srr: dict) -> str:
+        """从 SRR 推导用例 ID 的模块前缀。
+
+        Args:
+            srr: SRR JSON 字典
+
+        Returns:
+            str: 模块前缀（大写字母），如 AUTH / CRUD
+        """
+        modules = srr.get("requirement", {}).get("modules", [])
+        if modules:
+            # 取第一个模块名，提取字母部分
+            prefix = "".join(c for c in modules[0].upper() if c.isalpha())
+            return prefix[:10] or "GEN"
+        return "GEN"
+
+    def _get_model_name(self) -> str:
+        """获取当前 LLM 模型名。"""
+        from app.config import settings
+        return settings.llm_config.get("model", "unknown")
+
+    # ========================================================================
+    # 四级去重（v2.0，对应 docs/03 §2.3）
+    # ========================================================================
+
+    async def _deduplicate_cases(self, cases: list[dict]) -> list[dict]:
+        """四级去重: 精确匹配 → 语义去重 → 子集检测 → LLM 等价判定。
+
+        对应 docs/03-case-generation-flow.md §2.3。
+        借鉴 Meta ACH (arXiv:2501.12862) 的 LLM 等价突变检测思路。
+
+        Args:
+            cases: 后处理后的用例列表
+
+        Returns:
+            list[dict]: 去重后的用例列表
+        """
+        if len(cases) <= 1:
+            return cases
+
+        # Level 1: 精确去重（同 title + 同 steps）
+        cases = self._exact_dedup(cases)
+        logger.debug("[GenAgent/Dedup] L1 精确去重后: {}", len(cases))
+
+        # Level 2: 语义去重（标题 Embedding 余弦相似度 > 0.95）
+        cases = await self._semantic_dedup(cases, threshold=0.95)
+        logger.debug("[GenAgent/Dedup] L2 语义去重后: {}", len(cases))
+
+        # Level 3: 子集去重（case_a.steps 是 case_b.steps 子集 → 保留 case_b）
+        cases = self._subset_dedup(cases)
+        logger.debug("[GenAgent/Dedup] L3 子集去重后: {}", len(cases))
+
+        # Level 4: LLM 等价判定（对相似度 0.85-0.95 的疑似对调用 LLM 判定）
+        # 仅在疑似对较多时触发，避免增加 LLM 成本
+        cases = await self._llm_equivalence_dedup(cases, similarity_range=(0.85, 0.95))
+        logger.debug("[GenAgent/Dedup] L4 LLM等价去重后: {}", len(cases))
+
+        return cases
+
+    def _exact_dedup(self, cases: list[dict]) -> list[dict]:
+        """Level 1: 精确去重（同 title + 同 steps）。"""
+        seen: set = set()
+        unique: list[dict] = []
+        for c in cases:
+            title = c.get("title", "")
+            steps = json.dumps(c.get("steps", []), sort_keys=True, ensure_ascii=False)
+            key = (title, steps)
+            if key not in seen:
+                seen.add(key)
+                unique.append(c)
+        return unique
+
+    async def _semantic_dedup(
+        self, cases: list[dict], threshold: float = 0.95
+    ) -> list[dict]:
+        """Level 2: 语义去重（标题 Embedding 余弦相似度 > threshold 合并）。
+
+        保留置信度更高的用例。
+        """
+        if len(cases) <= 1:
+            return cases
+
+        try:
+            from app.db.hybrid_search import kb_cache
+            # 批量获取标题 Embedding
+            titles = [c.get("title", "") for c in cases]
+            embeddings = await asyncio.to_thread(
+                kb_cache.embed_batch, titles
+            )
+        except Exception as e:
+            logger.debug("[GenAgent/Dedup] L2 语义去重跳过（Embedding 失败）: {}", str(e)[:100])
+            return cases
+
+        if not embeddings or len(embeddings) != len(cases):
+            return cases
+
+        # 计算余弦相似度，标记待移除的索引
+        to_remove: set = set()
+        for i in range(len(cases)):
+            if i in to_remove:
+                continue
+            for j in range(i + 1, len(cases)):
+                if j in to_remove:
+                    continue
+                sim = self._cosine_similarity(embeddings[i], embeddings[j])
+                if sim >= threshold:
+                    # 保留置信度更高的
+                    conf_i = cases[i].get("gen_metadata", {}).get("gen_confidence", 0.5)
+                    conf_j = cases[j].get("gen_metadata", {}).get("gen_confidence", 0.5)
+                    if conf_i >= conf_j:
+                        to_remove.add(j)
+                    else:
+                        to_remove.add(i)
+                        break
+
+        return [c for idx, c in enumerate(cases) if idx not in to_remove]
+
+    def _subset_dedup(self, cases: list[dict]) -> list[dict]:
+        """Level 3: 子集去重（case_a.steps 是 case_b.steps 子集 → 保留 case_b）。"""
+        if len(cases) <= 1:
+            return cases
+
+        def _steps_key(steps: list) -> set:
+            """提取步骤的 action 文本作为集合。"""
+            return {s.get("action", "") for s in (steps or []) if s.get("action")}
+
+        to_remove: set = set()
+        for i in range(len(cases)):
+            if i in to_remove:
+                continue
+            steps_i = _steps_key(cases[i].get("steps", []))
+            if not steps_i:
+                continue
+            for j in range(len(cases)):
+                if i == j or j in to_remove:
+                    continue
+                steps_j = _steps_key(cases[j].get("steps", []))
+                if not steps_j:
+                    continue
+                # i 的步骤是 j 的子集 → i 冗余，移除 i
+                if steps_i.issubset(steps_j) and len(steps_i) < len(steps_j):
+                    to_remove.add(i)
+                    break
+
+        return [c for idx, c in enumerate(cases) if idx not in to_remove]
+
+    async def _llm_equivalence_dedup(
+        self, cases: list[dict], similarity_range: tuple = (0.85, 0.95)
+    ) -> list[dict]:
+        """Level 4: LLM 等价判定（对疑似重复但 Embedding 相似度在 similarity_range 内的对）。
+
+        借鉴 Meta ACH 等价突变检测 (arXiv:2501.12862)，精确度 0.95。
+
+        成本控制：
+        - 仅对疑似对调用 LLM（约占总对数 5-10%）
+        - 批量判定（一次 LLM 调用处理 N 对）
+        - 疑似对 < 2 对时跳过（不值得调用 LLM）
+        """
+        if len(cases) <= 1:
+            return cases
+
+        # 1. 计算所有对的 Embedding 相似度，筛选疑似对
+        try:
+            from app.db.hybrid_search import kb_cache
+            titles = [c.get("title", "") for c in cases]
+            embeddings = await asyncio.to_thread(kb_cache.embed_batch, titles)
+        except Exception:
+            return cases
+
+        if not embeddings or len(embeddings) != len(cases):
+            return cases
+
+        suspicious_pairs: list[tuple[int, int, float]] = []
+        for i in range(len(cases)):
+            for j in range(i + 1, len(cases)):
+                sim = self._cosine_similarity(embeddings[i], embeddings[j])
+                if similarity_range[0] <= sim < similarity_range[1]:
+                    suspicious_pairs.append((i, j, sim))
+
+        # 疑似对太少不值得调用 LLM
+        if len(suspicious_pairs) < 2:
+            return cases
+
+        # 2. 批量调用 LLM 判定等价性
+        pairs_text = []
+        for idx, (i, j, sim) in enumerate(suspicious_pairs):
+            pairs_text.append(
+                f"对{idx + 1}:\n"
+                f"  用例A: title={cases[i].get('title', '')}, type={cases[i].get('type', '')}\n"
+                f"  用例B: title={cases[j].get('title', '')}, type={cases[j].get('type', '')}\n"
+                f"  相似度={sim:.3f}"
+            )
+
+        prompt = (
+            "请判定以下用例对是否语义等价（测试同一场景）。\n"
+            "输出 JSON 数组，每个元素: {\"pair\": 对序号, \"equivalent\": true/false}\n\n"
+            + "\n".join(pairs_text)
+        )
+
+        try:
+            result = await self._llm.call_json(
+                prompt=prompt,
+                system_prompt="你是测试用例去重专家，只判定两用例是否测试同一场景。",
+                temperature=0.0,
+                max_tokens=2048,
+                allow_array=True,
+                agent_name="GenAgent-Dedup",
+            )
+        except Exception as e:
+            logger.debug("[GenAgent/Dedup] L4 LLM等价判定跳过: {}", str(e)[:100])
+            return cases
+
+        # 3. 根据判定结果移除等价对中置信度较低的
+        to_remove: set = set()
+        if isinstance(result, list):
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                pair_idx = item.get("pair", 0) - 1
+                equivalent = item.get("equivalent", False)
+                if 0 <= pair_idx < len(suspicious_pairs) and equivalent:
+                    i, j, _ = suspicious_pairs[pair_idx]
+                    conf_i = cases[i].get("gen_metadata", {}).get("gen_confidence", 0.5)
+                    conf_j = cases[j].get("gen_metadata", {}).get("gen_confidence", 0.5)
+                    if conf_i >= conf_j:
+                        to_remove.add(j)
+                    else:
+                        to_remove.add(i)
+
+        return [c for idx, c in enumerate(cases) if idx not in to_remove]
+
+    @staticmethod
+    def _cosine_similarity(vec_a: list, vec_b: list) -> float:
+        """计算余弦相似度。"""
+        if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+            return 0.0
+        import math
+        dot = sum(a * b for a, b in zip(vec_a, vec_b))
+        norm_a = math.sqrt(sum(a * a for a in vec_a))
+        norm_b = math.sqrt(sum(b * b for b in vec_b))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
+
+# 全局单例
+gen_agent = GenAgent()

@@ -32,7 +32,7 @@ export default function Dashboard() {
   }, [selectedProductId])
 
   const cards = [
-    { label: '需求总数', value: stats?.total_requirements ?? '-', icon: FileText, href: '/requirements' },
+    { label: '需求总数', value: stats?.total_requirements ?? '-', icon: FileText, href: '/projects' },
     { label: '测试用例', value: stats?.total_test_cases ?? '-', icon: TestTube, href: '/testcases' },
     { label: '测试模式', value: stats?.total_patterns ?? '-', icon: Layers, href: '/knowledge' },
     { label: '生成批次', value: stats?.total_batches ?? '-', icon: Activity, href: '/generate' },
@@ -141,7 +141,7 @@ export default function Dashboard() {
             <h2 className="section-title flex items-center gap-2 m-0" style={{ fontSize: 16 }}>
               <FileText className="w-4 h-4" style={{ color: 'var(--brand-500)' }} /> 最近需求
             </h2>
-            <Link to="/requirements" className="text-[13px] font-medium" style={{ color: 'var(--brand-500)' }}>
+            <Link to="/projects" className="text-[13px] font-medium" style={{ color: 'var(--brand-500)' }}>
               查看全部
             </Link>
           </div>
@@ -152,7 +152,7 @@ export default function Dashboard() {
               <div className="text-center py-8" style={{ color: 'var(--foreground-tertiary)' }}>
                 <FileText className="w-8 h-8 mx-auto mb-2 opacity-50" />
                 <p className="text-sm">暂无需求数据</p>
-                <Link to="/requirements" className="text-xs mt-2 inline-block" style={{ color: 'var(--brand-500)' }}>上传第一个需求</Link>
+                <Link to="/projects" className="text-xs mt-2 inline-block" style={{ color: 'var(--brand-500)' }}>上传第一个需求</Link>
               </div>
             ) : (
               <div className="space-y-1">

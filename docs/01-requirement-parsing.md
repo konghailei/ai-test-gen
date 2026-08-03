@@ -76,7 +76,9 @@ Level 3: 细化后的 SRR v2 (进入生成流程)
 - [REQ-xxx] 依赖/被依赖
 ```
 
-### 2.2 Level 2: 结构化需求 JSON (SRR v2.1) ⭐
+### 2.2 Level 2: 结构化需求 JSON (SRR v2.48) ⭐
+
+> **v2.53 文档同步**：本节示例与字段说明已对齐代码实现（[backend/app/models/srr.py](file:///d:/git_down/ai-test-gen/backend/app/models/srr.py) 的 `SRR` 类），反映 v2.22/v2.32/v2.34/v2.40/v2.48 共 8 个版本的演进。早期 v2.1 示例中的 `boundary_conditions`/`data_constraints`/`business_rules`/`acceptance_criteria`/`test_points_hint` 等顶层字段已下沉或合并，详见 §2.2.3 版本变更记录。
 
 ```json
 {
@@ -104,17 +106,6 @@ Level 3: 细化后的 SRR v2 (进入生成流程)
       {"name": "密码错误", "trigger": "输入错误密码", "expect": "提示「密码错误」"}
     ]
   },
-  "boundary_conditions": [
-    {"field": "密码", "condition": "长度 < 6", "expect": "前端校验拦截"},
-    {"field": "密码", "condition": "长度 = 6", "expect": "允许提交"}
-  ],
-  "business_rules": [
-    {"id": "BR-01", "rule": "连续失败5次锁定30分钟", "type": "security"}
-  ],
-  "data_constraints": [
-    {"field": "username", "type": "string", "required": true, "constraints": "3-50 chars", "example": "john_doe"},
-    {"field": "password", "type": "string", "required": true, "constraints": "6-128 chars", "example": "***"}
-  ],
   "non_functional": {
     "performance": "P99 < 500ms",
     "security": "TLS 1.3, bcrypt加密"
@@ -122,16 +113,42 @@ Level 3: 细化后的 SRR v2 (进入生成流程)
   "relationships": [
     {"target": "REQ-2024-000", "type": "depends_on"}
   ],
-  "test_points_hint": [
-    {"category": "functional", "point": "正常登录流程"},
-    {"category": "boundary", "point": "密码长度边界值"}
+  // ===== v2.22 新增：功能点概要（总 SRR 中的 FP 全景视图，不展开内部细节） =====
+  "fp_summary": [
+    {"name": "用户登录", "fp_type": "workflow", "priority": "P0",
+     "summary": "账号密码登录主流程", "module": "auth"},
+    {"name": "登录失败锁定", "fp_type": "constraint", "priority": "P1",
+     "summary": "连续失败5次锁定30分钟", "module": "auth"}
   ],
-  // ===== v2.1 新增字段（完整映射需求原文） =====
-  "acceptance_criteria": [
-    {"id": "AC-01", "description": "用户可凭正确账号密码登录", "type": "functional"},
-    {"id": "AC-02", "description": "错误密码提示且记录失败次数", "type": "functional"},
-    {"id": "AC-03", "description": "连续失败5次锁定30分钟", "type": "security"}
-  ],
+  // ===== v2.32 新增：跨功能点交互规则（总 SRR 核心职责，4 子字段） =====
+  "cross_fp_interactions": {
+    "cross_fp_flows": [
+      {"name": "登录后加载菜单",
+       "source_fp": "用户登录", "target_fp": "菜单加载",
+       "interaction_type": "sequence",
+       "description": "登录成功后触发菜单加载，传递 user_id"}
+    ],
+    "shared_business_rules": [
+      {"id": "SBR-01", "rule": "全链路 TLS 加密",
+       "applied_fps": ["用户登录", "数据查询"], "type": "security"}
+    ],
+    "fp_contracts": [
+      {"provider_fp": "用户登录", "consumer_fp": "菜单加载",
+       "data_fields": ["user_id", "token"],
+       "contract_desc": "登录成功返回 user_id 和 token，菜单加载需携带 token 鉴权"}
+    ],
+    "global_constraints": ["所有接口响应时间 ≤ 200ms", "统一使用 ISO 8601 时间格式"]
+  },
+  // ===== v2.32 新增（v2.40 精简为 4 核心维度 + 2 元数据）：历史数据影响分析（仅优化需求生成） =====
+  "legacy_data_impact": {
+    "is_optimization": true,
+    "impact_scope": "受影响的功能点、数据实体、上下游系统、用户角色",
+    "migration_plan": "迁移策略（全量/增量/双写/停机）+ 字段映射 + 兼容性分析",
+    "rollback_and_validation": "回滚策略 + 验证方法（数量校验/业务关联校验/并行比对）",
+    "risks": ["业务逻辑丢失", "数据不一致", "停机超时"],
+    "user_clarification": "用户在澄清环节填写的具体影响范围（无法判断时留空）"
+  },
+  // ===== v2.1 可选字段（完整映射需求原文） =====
   "api_definitions": [
     {"method": "POST", "path": "/api/v1/auth/login", "summary": "用户登录",
      "request_body": "{\"username\": string, \"password\": string}",
@@ -172,7 +189,7 @@ Level 3: 细化后的 SRR v2 (进入生成流程)
 
 | 字段 | 用途 | 对应文档常见内容 |
 |------|------|----------------|
-| `acceptance_criteria` | 验收标准/验收条件 | 敏捷PRD中的"验收条件"、"Definition of Done" |
+| ~~`acceptance_criteria`~~ | ~~验收标准/验收条件~~ | v2.48 已合并到 `business_rules`（type 用 validation/business），不再独立输出 |
 | `api_definitions` | API接口定义 | 接口文档中的端点、请求/响应结构 |
 | `user_roles` | 用户角色与权限 | 需求中的"谁可以使用"、"权限控制" |
 | `dependencies` | 外部依赖 | 第三方服务、数据库、消息队列等外部系统 |
@@ -223,6 +240,30 @@ LLM 原始输出
 
 **设计理念**：LLM 的 JSON 输出本质上是"近似正确"的，不应该用严格 Schema 去套。采用**"宽松接收 + 智能归一 + 关键字段保障"**策略，既保证数据质量，又不让 LLM 的小偏差阻塞业务流程。
 
+### 2.2.3 SRR 版本变更记录（v2.22 ~ v2.48）⭐
+
+> **v2.53 文档同步**：以下 8 个版本的变更此前未在本文档记录，导致文档与代码实现（[srr.py](file:///d:/git_down/ai-test-gen/backend/app/models/srr.py)）长期存在偏差。本小节补齐变更记录，作为字段演进的权威参考。
+
+| 版本 | 变更类型 | 字段/逻辑 | 说明 |
+|------|---------|----------|------|
+| **v2.22** | 新增 | `fp_summary` | 功能点概要列表（总 SRR 中的 FP 全景视图），仅记录 name/fp_type/priority/summary/module，不展开内部细节。后端基于实际 FunctionalPoint 列表生成，不依赖 LLM 输出 |
+| **v2.28** | 精简 | FP sub_srr 字段 | FP SRR 移除 preconditions/boundary_conditions/test_points_hint/ui_rules/data_model/assumptions/requirement 对象，精简为 6 个核心字段：summary/flows/business_rules/data_constraints/non_functional |
+| **v2.32** | 重构 | 总 SRR 字段下沉 | 总 SRR **移除** boundary_conditions/data_constraints/acceptance_criteria（字段级内容下沉到功能点 SRR，避免重复维护）；**新增** cross_fp_interactions（跨 FP 交互规则，4 子字段）+ legacy_data_impact（历史数据影响分析） |
+| **v2.34** | 移除 | 总 SRR 顶层 `business_rules` | 与 cross_fp_interactions.shared_business_rules 重复，跨 FP 共享规则统一由后者承载 |
+| **v2.40** | 精简 | `legacy_data_impact` | 从 10 个子字段精简为 4 核心维度（impact_scope/migration_plan/rollback_and_validation/user_clarification）+ 2 元数据（is_optimization/risks），含旧数据迁移 validator |
+| **v2.46** | 策略 | ReqAgent 解析策略 | 新增"全面完整分析原则"，替代原增量模式，所有需求按完整独立需求处理 |
+| **v2.47** | 强化 | ReqAgent Prompt | 强化"禁止编造与推断"原则，从 1 句扩展为 7 条细化规则 |
+| **v2.48** | 合并/移除 | `acceptance_criteria` / `test_points_hint` | 验收标准合并到 `business_rules`（type 用 validation/business）；移除 test_points_hint/test_hints（测试提示由用例生成阶段自行推导）；data_constraints.type 中文化；新增"允许字段为空"原则（必须留空数组或空字符串，不得凑数） |
+
+**字段职责分层（SSOT 原则）**：
+
+| 层级 | 承载字段 | 职责 |
+|------|---------|------|
+| 总 SRR（interaction_srr） | requirement / flows / preconditions / non_functional / relationships / fp_summary / cross_fp_interactions / legacy_data_impact / api_definitions / user_roles / dependencies / ui_rules / data_model / assumptions | 跨 FP 全局视角：业务概要、端到端流程、跨 FP 交互规则、全局基线 |
+| FP SRR（sub_srr） | summary / flows / business_rules（含原验收标准）/ data_constraints / non_functional | FP 专属内部细节：该功能点的流程、规则、约束 |
+
+**fp_type 枚举（6 种，v2.32 确定）**：`workflow`（业务流程）/ `constraint`（约束规则）/ `calculation`（计算规则）/ `api_behavior`（API 行为）/ `data_record`（数据记录）/ `config`（系统配置）。功能点拆分原则详见 [doc-08 功能点设计](08-functional-points.md)。
+
 ### 2.3 Level 3: 向量化
 
 将 SRR 的 `title + summary + flows + business_rules` 拼接为语义文本，通过 Embedding 模型生成向量，存入向量数据库用于 MatchAgent 语义检索。
@@ -245,8 +286,6 @@ LLM 原始输出
      ▼
 ⑤ 实体链接 (关联已有需求ID、模块)
      ▼
-⑥ 测试点提示生成 (LLM 推断 test_points_hint)
-     ▼
   SRR JSON 输出
      │
      ▼  ← 不直接进入生成，先经过 ClarifyAgent
@@ -264,7 +303,7 @@ LLM 原始输出
 你是一个专业的软件需求分析师。请将以下需求文本解析为结构化的 JSON 格式。
 严格遵循给定的 JSON Schema，不要遗漏任何字段。
 
-解析策略（按顺序执行）:
+解析策略（按顺序执行，v2.46 全面完整分析原则）:
 1. 识别功能概述——用一句话说清楚这个需求做什么
 2. 提取前置条件——完成此功能需要满足什么
 3. 描述正常流程——按步骤列出 happy path
@@ -274,10 +313,14 @@ LLM 原始输出
 7. 整理数据约束——字段、类型、校验规则
 8. 标注非功能需求——性能、安全、兼容性
 
-注意:
-- 如果需求原文未提及某字段，标注为 null，不要编造
+注意（v2.47 强化禁止编造原则）:
+- 如果需求原文未提及某字段，必须留空数组或空字符串，不得编造或凑数
 - 异常场景需要包含"触发条件"和"预期结果"
-- test_points_hint 是推断的测试关注点，不是最终测试用例
+- 禁止推理用户未表达的意图（如原文写"显示 - 表示空值"，不得推断"提示用户重新选择日期"）
+- 禁止添加需求原文未提及的业务规则，包括但不限于：安全策略、密码规则、锁定机制
+- 验收标准合并到 business_rules 中，使用 type 字段区分（validation/business）
+- 数据类型约束字段使用中文类型名称（字符串/整数/布尔/浮点数/日期/枚举/数组/对象）
+- 禁止编造字段值，留空数组或空字符串优先于编造
 ```
 
 ---
@@ -344,77 +387,104 @@ SRR JSON
 
 ```python
 # 必填字段清单（按测试影响分级）
-COMPLETENESS_CHECKLIST = {
+# v2.34: 总 SRR 移除 business_rules/data_constraints/acceptance_criteria 顶层字段
+# - business_rules → cross_fp_interactions.shared_business_rules
+# - data_constraints/acceptance_criteria → 下沉到功能点 SRR（由 FP 完整性检查覆盖）
+# v2.40: optimization 级别字段精简为 3 个核心维度
+COMPLETENESS_CHECKLIST: dict[str, dict[str, str]] = {
     "critical": {  # 🔴 缺失则无法生成有效用例
-        "summary": "功能概述",
-        "flows.happy_path": "正常流程（至少3个步骤）",
-        "data_constraints": "数据约束（字段定义）",
+        "requirement.summary": "功能概述",
     },
     "important": {  # 🟡 缺失则用例质量下降
-        "preconditions": "前置条件",
-        "flows.alternate_flows": "异常流程",
-        "boundary_conditions": "边界条件",
-        "business_rules": "业务规则",
+        "cross_fp_interactions.shared_business_rules": "跨FP共享业务规则",
+        "flows.happy_path": "正常流程",
+        "flows.alternate_flows": "异常/边界流程",
     },
-    "optional": {  # 🟢 可通过 KB 补全
+    # v2.34: 优化需求（legacy_data_impact.is_optimization=True）的专项检查
+    # 仅当 LLM/关键词检测识别为优化需求时才触发澄清问题生成
+    "optimization": {
+        "legacy_data_impact.impact_scope": "影响范围",
+        "legacy_data_impact.migration_plan": "迁移方案",
+        "legacy_data_impact.rollback_and_validation": "验证与回滚",
+    },
+    "optional": {  # 🟢 可通过 KB 补全，不生成问题，仅用于评分
+        "preconditions": "前置条件",
         "non_functional.performance": "性能需求",
         "non_functional.security": "安全需求",
-        "relationships": "关联需求",
-    }
+        "dependencies": "外部依赖",
+    },
 }
 
 def check_completeness(srr: dict) -> dict:
-    """检查 SRR 完整性，返回缺失字段列表和完整性评分"""
-    result = {"critical_missing": [], "important_missing": [], "optional_missing": []}
+    """检查 SRR 完整性 + 内容质量，返回缺失字段列表和完整性评分。
+
+    v2.8: 增加了 shallow_check（内容质量检测），字段存在但内容空洞也标记为缺失。
+    v2.34: 新增 optimization 级别，仅当 legacy_data_impact.is_optimization=True
+           时才检查迁移/回滚等专项字段，避免对新建需求误报。
+    """
+    result = {
+        "critical_missing": [], "important_missing": [],
+        "optional_missing": [], "optimization_missing": [],
+        "completeness_score": 1.0, "passed": True,
+    }
+    # v2.34: 判断是否为优化需求
+    ldi = srr.get("legacy_data_impact") or {}
+    is_opt = bool(ldi.get("is_optimization")) if isinstance(ldi, dict) else False
+    if not is_opt:
+        title = (srr.get("requirement") or {}).get("title", "")
+        summary = (srr.get("requirement") or {}).get("summary", "")
+        detect_text = f"{title}\n{summary}".lower()
+        OPTIMIZATION_KEYWORDS = ["优化", "改进", "升级", "增强", "重构", "改造"]
+        is_opt = any(kw in detect_text for kw in OPTIMIZATION_KEYWORDS)
+
     for level, fields in COMPLETENESS_CHECKLIST.items():
+        # optimization 级别仅对优化需求检查
+        if level == "optimization" and not is_opt:
+            continue
         for field, desc in fields.items():
-            if not get_nested_value(srr, field):
+            val = get_nested_value(srr, field)
+            if not _has_meaningful_content(field, val):
                 result[f"{level}_missing"].append({"field": field, "description": desc})
-    # 评分: critical缺失×3 + important缺失×1 + optional缺失×0.3
-    missing_weight = (len(result["critical_missing"]) * 3 +
-                      len(result["important_missing"]) * 1 +
-                      len(result["optional_missing"]) * 0.3)
-    total = sum(len(v) for v in COMPLETENESS_CHECKLIST.values())
-    result["completeness_score"] = max(0, 1 - missing_weight / total)
+
+    # 评分（optimization_missing 不计入总分，避免非优化需求被误扣）
+    missing_weight = (
+        len(result["critical_missing"]) * 3 +
+        len(result["important_missing"]) * 1 +
+        len(result["optional_missing"]) * 0.3
+    )
+    total = sum(len(v) for k, v in COMPLETENESS_CHECKLIST.items() if k != "optimization")
+    result["completeness_score"] = max(0.0, 1.0 - missing_weight / total) if total else 1.0
     result["passed"] = len(result["critical_missing"]) == 0
     return result
+
+
+def _has_meaningful_content(field: str, val) -> bool:
+    """检查字段是否有实质性内容（纯存在性守卫）。
+
+    方向A（v2.9）：规则层只做存在性守卫，不再做内容质量/长度阈值判定。
+    """
+    if val is None:
+        return False
+    if isinstance(val, (str, list, dict)):
+        return len(val) > 0
+    return True
 ```
 
 #### 4.3.2 歧义性检测
 
 ```python
-AMBIGUITY_PATTERNS = {
-    "vague_quantifier": {
-        "patterns": ["一些", "若干", "适当", "合理", "多个", "大量", "较快", "较慢"],
-        "question_template": "「{original}」中的「{keyword}」具体指什么？请提供明确数值或范围。"
-    },
-    "vague_condition": {
-        "patterns": ["必要时", "根据情况", "视情况而定", "如果需要", "特殊情况下"],
-        "question_template": "「{original}」中「{keyword}」的具体触发条件是什么？请列举所有情况。"
-    },
-    # 矛盾描述、未定义术语、缺少预期结果 → 需 LLM 语义分析
-}
+async def detect_ambiguity(srr: dict, llm_client) -> list[dict]:
+    """歧义检测已迁移至 LLM（v2.9 方向A）。
 
-async def detect_ambiguity(srr: dict, llm_client) -> dict:
-    """规则检测（快速）+ LLM 检测（深度）"""
-    ambiguities = []
-    # 1. 基于规则: 扫描模糊量词/条件
-    for amb_type, config in AMBIGUITY_PATTERNS.items():
-        for pattern in config["patterns"]:
-            contexts = find_contexts(srr, pattern)
-            for ctx in contexts:
-                ambiguities.append({
-                    "type": amb_type, "location": ctx["location"],
-                    "original_text": ctx["text"], "keyword": pattern,
-                    "suggested_question": config["question_template"].format(
-                        original=ctx["text"], keyword=pattern)
-                })
-    # 2. 基于 LLM: 检测矛盾、逻辑断裂、缺少预期
-    llm_ambiguities = await llm_detect(srr, llm_client)
-    ambiguities.extend(llm_ambiguities)
-    # 评分: 每个歧义 +0.15
-    score = min(1.0, len(ambiguities) * 0.15)
-    return {"ambiguities": ambiguities, "ambiguity_score": score, "passed": score < 0.3}
+    移除规则关键词匹配（AMBIGUITY_PATTERNS），避免「合理」「适当」「等」等词的
+    机械误报与漏报。LLM 在生成澄清问题时基于语义判断「该表述是否导致测试预期
+    不确定」，更准确、能理解上下文。
+    本方法保留签名（供调用点兼容），固定返回空列表。
+
+    返回:
+        list[dict]: 歧义项列表（v2.9 起固定返回空列表）
+    """
+    return []
 ```
 
 #### 4.3.3 遗漏检测（基于需求模式库）
@@ -1233,7 +1303,20 @@ async def apply_answers_batch(
 
 ```python
 class RequirementQualityGate:
-    """在 ClarifyAgent 之后、用例生成之前，执行最终质量检查。"""
+    """在 ClarifyAgent 之后、用例生成之前，执行最终质量检查。
+
+    检查项（6 项，v2.48 移除 test_points_hint 检查）：
+        1. Schema 校验（Blocker）
+        2. 关键字段非空（Blocker）：requirement.title / requirement.summary / flows.happy_path
+        3. 质量评分达标（Blocker）：quality_report.overall_score >= pass_score
+        4. 无未解决的 Critical 问题（Blocker）
+        5. happy_path 步骤数（Warning）：>= 2 步
+        6. 冷启动模式提示（Warning）：阈值已放宽，建议人工审核
+
+    动态阈值：
+        - 冷启动模式（kb_empty=True 或 product_first_requirement=True）→ 0.60
+        - 正常模式 → 0.75
+    """
 
     # 默认阈值与冷启动阈值（冷启动模式下 KB 为空，无法补全，阈值动态调低）
     DEFAULT_PASS_SCORE = 0.75
@@ -1262,10 +1345,11 @@ class RequirementQualityGate:
         if not self._validate_schema(srr):
             blockers.append("SRR 格式不符合 Schema 规范")
 
-        # 2. 关键字段非空
-        for field in ["requirement.title", "requirement.summary", "flows.happy_path"]:
-            if not get_nested_value(srr, field):
-                blockers.append(f"关键字段 {field} 为空")
+        # 2. 关键字段非空（Schema 校验失败时跳过，避免与检查项 1 产生冗余 blocker）
+        if schema_valid:
+            for field in ["requirement.title", "requirement.summary", "flows.happy_path"]:
+                if not get_nested_value(srr, field):
+                    blockers.append(f"关键字段 {field} 为空")
 
         # 3. 质量评分达标（冷启动模式阈值放宽至 0.60）
         if clarify_result.get("quality_report"):
@@ -1278,21 +1362,18 @@ class RequirementQualityGate:
 
         # 4. 无未解决的 Critical 问题
         if clarify_result.get("questions"):
-            critical = [q for q in clarify_result["questions"] if q["priority"] == "critical"]
+            critical = [q for q in clarify_result["questions"]
+                       if q["priority"] == "critical" and not q.get("resolved", False)]
             if critical:
                 blockers.append(f"仍有 {len(critical)} 个 Critical 问题未解决")
 
-        # 5. 验收标准明确性 (警告)
-        hints = srr.get("test_points_hint", [])
-        if not hints or all(len(h.get("point", "")) <= 5 for h in hints):
-            warnings.append("验收标准不够明确")
-
-        # 6. happy_path 步骤数 (警告)
+        # 5. happy_path 步骤数（警告）
+        # v2.48: 移除 test_points_hint 检查（已不再生成测试提示）
         steps = get_nested_value(srr, "flows.happy_path.steps") or []
         if len(steps) < 2:
             warnings.append("正常流程步骤过少")
 
-        # 7. 冷启动模式提示（警告，非阻断）
+        # 6. 冷启动模式提示（警告，非阻断）
         if cold_start:
             warnings.append(
                 "冷启动模式：知识库为空或为该产品首个需求，"

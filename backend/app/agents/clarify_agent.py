@@ -267,9 +267,12 @@ class ClarifyAgent:
     async def clarify(self, srr: dict, session = None) -> dict:
         """对 SRR 执行需求澄清。
 
+        v2.52: 不再长持有外部 session，内部 DB 查询使用短生命周期 session，
+        避免 LLM 调用期间占用连接池。
+
         Args:
             srr: SRR JSON 字典
-            session: PG 异步会话（v2.6: 用于关系型数据增强）
+            session: 已废弃（保留签名兼容性，不再使用）
 
         Returns:
             dict: 澄清结果，格式如下（与 QualityGate §5.2 输入对齐）：
@@ -299,13 +302,15 @@ class ClarifyAgent:
         logger.info("[ClarifyAgent] ▶ 开始澄清: req_id={}, title={}", req_id, title)
 
         # 读取知识库专属 LLM 供应商（若已设置），KB 相关 LLM 调用使用该供应商
+        # v2.52: 使用内部短生命周期 session，不长持有外部连接
         kb_provider: str | None = None
-        if session is not None:
-            try:
-                from app.api.knowledge import get_kb_llm_provider
-                kb_provider = await get_kb_llm_provider(session)
-            except Exception as e:
-                logger.warning("[ClarifyAgent] 读取 KB LLM 供应商失败，回退全局主 LLM: {}", str(e)[:120])
+        try:
+            from app.api.knowledge import get_kb_llm_provider
+            from app.db.database import async_session as _as
+            async with _as() as s:
+                kb_provider = await get_kb_llm_provider(s)
+        except Exception as e:
+            logger.warning("[ClarifyAgent] 读取 KB LLM 供应商失败，回退全局主 LLM: {}", str(e)[:120])
 
         # 初始化 KB 访问日志（v2.1 新增）
         kb_access_log: list[dict] = []
@@ -334,6 +339,9 @@ class ClarifyAgent:
         })
 
         # ② 规则检测：完整性 + 歧义性
+        # v2.54: 先用 LLM 判断是否为优化需求（替代关键词匹配），结果存入 srr 供
+        # _check_completeness 和 _detect_optimization_impact 共用，避免重复调用
+        await self._llm_detect_optimization(srr, kb_provider=kb_provider)
         completeness = self._check_completeness(srr)
         ambiguities = self._detect_ambiguity(srr)
         logger.info("[ClarifyAgent] 规则检测: completeness_score={:.3f}, critical_missing={}, "
@@ -384,25 +392,39 @@ class ClarifyAgent:
         _d_sim = int((time.time() - _t_sim) * 1000)
 
         # ③b PG 关系增强（先跑，供后续 Q&A 查询使用）
+        # v2.52: 使用内部短生命周期 session，不长持有外部连接
         _t_sql = time.time()
-        pg_context = await self._enrich_with_pg(session, srr, global_similar) if session else {}
+        try:
+            from app.db.database import async_session as _as
+            async with _as() as pg_sess:
+                pg_context = await self._enrich_with_pg(pg_sess, srr, global_similar)
+        except Exception as e:
+            logger.warning("[ClarifyAgent] PG 关系增强失败（降级跳过）: {}", str(e)[:150])
+            pg_context = {}
         _d_sql = int((time.time() - _t_sql) * 1000)
 
         _t3 = time.time()
         # ③ KB 查询生成（v2.10）：LLM 动态生成上下文感知的搜索查询。
         #    不再使用固定模板，LLM 失败时直接抛异常上报，确保查询质量。
         #    注入原始需求全文，让 KB 查询生成器能参考原始文档，避免对已有内容的重复提问。
-        if session and not srr.get("_raw_text"):
-            from sqlalchemy import select as _select
-            from app.db.models import Requirement as _ReqModel
-            req_id = srr.get("requirement", {}).get("id", "")
-            if req_id:
-                r = await session.execute(
-                    _select(_ReqModel.raw_text).where(_ReqModel.id == req_id)
-                )
-                raw = r.scalar_one_or_none()
-                if raw:
-                    srr["_raw_text"] = raw
+        # v2.52: 使用局部 raw_text 变量，不污染调用方 srr 字典
+        raw_text_for_query = srr.get("_raw_text", "")
+        if not raw_text_for_query:
+            try:
+                from sqlalchemy import select as _select
+                from app.db.models import Requirement as _ReqModel
+                req_id = srr.get("requirement", {}).get("id", "")
+                if req_id:
+                    from app.db.database import async_session as _as
+                    async with _as() as rt_sess:
+                        r = await rt_sess.execute(
+                            _select(_ReqModel.raw_text).where(_ReqModel.id == req_id)
+                        )
+                        raw = r.scalar_one_or_none()
+                        if raw:
+                            raw_text_for_query = raw
+            except Exception:
+                pass
         kb_questions = await self._generate_kb_queries(
             srr, completeness, srr.get("_is_incremental", False), kb_provider=kb_provider
         )
@@ -413,7 +435,7 @@ class ClarifyAgent:
         # ④ 对每个问题查询 KB + PG，获取答案
         _t4 = time.time()
         kb_answers: list[dict] = await self._query_kb_for_answers(
-            session, srr, kb_questions, global_similar, pg_context,
+            srr, kb_questions, global_similar, pg_context,
         )
         _d4 = int((time.time() - _t4) * 1000)
         logger.info("[ClarifyAgent] KB 回答: answered={}, unanswered={}, duration={}ms",
@@ -423,7 +445,7 @@ class ClarifyAgent:
 
         # ⑤ 应用 KB 答案 → 自动补全 SRR（含字段冲突处理，docs/01 §4.4.1）
         _t5 = time.time()
-        augmented_srr, augmentations, field_conflicts = self._apply_kb_answers(augmented_srr, kb_answers)
+        augmented_srr, augmentations, field_conflicts = await self._apply_kb_answers(augmented_srr, kb_answers)
         _d5 = int((time.time() - _t5) * 1000)
         logger.info("[ClarifyAgent] KB 应用: augmentations={}, field_conflicts={}",
                     len(augmentations), len(field_conflicts))
@@ -564,6 +586,10 @@ class ClarifyAgent:
             )
         questions = self._dedup_questions(questions, stage="final")
 
+        # v2.54: 清理临时字段 _llm_is_optimization，避免持久化到数据库 SRR
+        srr.pop("_llm_is_optimization", None)
+        augmented_srr.pop("_llm_is_optimization", None)
+
         logger.info("[ClarifyAgent] KB已回答: {}, 待人工澄清(LLM精炼): {}",
                     sum(1 for a in kb_answers if a.get("answered")), len(questions))
 
@@ -654,15 +680,32 @@ class ClarifyAgent:
             "passed": True,
         }
 
-        # v2.34: 判断是否为优化需求（is_optimization=True 或关键词命中）
+        # v2.54: 判断是否为优化需求——优先使用 LLM 语义判断结果（srr["_llm_is_optimization"]），
+        # 降级到 legacy_data_impact.is_optimization，最后降级到关键词匹配
         ldi = srr.get("legacy_data_impact") or {}
         is_opt = bool(ldi.get("is_optimization")) if isinstance(ldi, dict) else False
-        # 关键词兜底：LLM 漏判时，若原文含优化关键词也视为优化需求
-        if not is_opt:
+        # v2.54: LLM 判断结果优先于 legacy_data_impact.is_optimization
+        llm_opt = srr.get("_llm_is_optimization")
+        if isinstance(llm_opt, dict):
+            is_opt = bool(llm_opt.get("is_optimization", is_opt))
+        # v2.53: 用户已明确"不影响历史数据" -> 视为非优化需求，跳过 optimization 缺口检查
+        # （避免 _run_clarify_reparse 二次验证时再次报 legacy_data_impact.* 缺失）
+        if is_opt and isinstance(ldi, dict):
+            impact_scope = str(ldi.get("impact_scope", "") or "")
+            user_clarification = str(ldi.get("user_clarification", "") or "")
+            no_impact_markers = ("不影响历史数据", "仅新增功能", "无影响")
+            if any(m in impact_scope or m in user_clarification for m in no_impact_markers):
+                is_opt = False
+                logger.info(
+                    "[ClarifyAgent] 用户已确认不影响历史数据，completeness 跳过 optimization 检查",
+                )
+        # v2.54: 关键词仅作为最终兜底（LLM 未返回结果时），且仅匹配强词
+        # 弱词（完善/增强/调整等）不再作为判断依据——它们在新功能描述中太常见
+        if not is_opt and not isinstance(llm_opt, dict):
             title = (srr.get("requirement") or {}).get("title", "")
             summary = (srr.get("requirement") or {}).get("summary", "")
             detect_text = f"{title}\n{summary}".lower()
-            is_opt = any(kw in detect_text for kw in self.OPTIMIZATION_KEYWORDS)
+            is_opt = any(kw in detect_text for kw in self.OPTIMIZATION_KEYWORDS_STRONG)
 
         for level, fields in prompts.COMPLETENESS_CHECKLIST.items():
             # v2.34: optimization 级别仅对优化需求检查
@@ -742,9 +785,12 @@ class ClarifyAgent:
         product_id = srr.get("requirement", {}).get("product_id", "")
         modules = srr.get("requirement", {}).get("modules", [])
         try:
+            # v2.52: 增加 doc_type="requirement" 过滤，避免 FP 向量混入补全上下文。
+            # FP 向量的 srr_json 结构是单功能点 SRR，与总 SRR 结构不同，
+            # 混入会导致 KB 补全时注入 FP 级字段值，需求分析粒度错乱。
             return vector_store.search_similar_requirements(
                 query=summary, product_id=product_id, modules=modules,
-                top_k=5, status="archived",
+                top_k=5, status="archived", doc_type="requirement",
             )
         except Exception as e:
             logger.warning("[ClarifyAgent] KB 检索相似需求失败（不阻断）: {}", str(e)[:200])
@@ -1123,13 +1169,14 @@ class ClarifyAgent:
 
     async def _query_kb_for_answers(
         self,
-        session,
         srr: dict,
         questions: list[dict],
         all_similar_reqs: list[dict],
         pg_context: dict,
     ) -> list[dict]:
         """对每个问题查询知识库并尝试获取答案。
+
+        v2.52: 不再接收外部 session，内部 DB 查询使用短生命周期 session。
 
         流程:
         1. 用问题文本搜索向量库 → 相似需求
@@ -1138,7 +1185,6 @@ class ClarifyAgent:
         4. 记录 Q&A 对
 
         Args:
-            session: PG 会话
             srr: 当前需求 SRR
             questions: _formulate_kb_questions 生成的问题列表
             all_similar_reqs: 全局搜索的相似需求（复用）
@@ -1175,25 +1221,20 @@ class ClarifyAgent:
 
             # 搜索相关需求 — 使用 hybrid_searcher 混合检索（向量 + BM25 + RRF + 重排）
             # v2.19: 按 module 过滤，防止不同模块的相同功能点产生错误的知识库匹配
+            # v2.52: 使用内部短生命周期 session
+            # v2.53: 增加 doc_type="requirement" 过滤，避免 FP 向量混入补全上下文
+            # （FP 向量的 srr_json 是单功能点 SRR，结构不同，混入会导致补全粒度错乱）
             try:
                 from app.db.hybrid_search import hybrid_searcher
+                from app.db.database import async_session as _as
                 current_modules = srr.get("requirement", {}).get("modules", []) or []
-                # 若无 PG session，临时创建一个供 BM25 使用
-                if session is None:
-                    from app.db.database import async_session
-                    async with async_session() as tmp_session:
-                        matched = await hybrid_searcher.search_requirements(
-                            query=q["question"], top_k=5,
-                            product_id=srr.get("requirement", {}).get("product_id", ""),
-                            modules=current_modules,
-                            status="archived", session=tmp_session,
-                        )
-                else:
+                async with _as() as tmp_session:
                     matched = await hybrid_searcher.search_requirements(
                         query=q["question"], top_k=5,
                         product_id=srr.get("requirement", {}).get("product_id", ""),
                         modules=current_modules,
-                        status="archived", session=session,
+                        status="archived", session=tmp_session,
+                        doc_type="requirement",
                     )
             except Exception as e:
                 # 降级策略：KB 不可用 → 静默跳过 → 继续生成澄清问题 → 人工澄清兜底
@@ -1493,6 +1534,16 @@ class ClarifyAgent:
             for idx, q in enumerate(questions):
                 r = refined_by_idx.get(idx)
                 if not r:
+                    # v2.54: LLM 未返回此问题的精炼结果，使用字段映射表补充默认选项
+                    # 避免"建议答案缺失"——用户期望尽量有可选项降低回答成本
+                    field = q.get("field", "")
+                    if field:
+                        default_q = _build_field_question(field, q.get("description", ""), srr)
+                        if default_q.get("options"):
+                            q["input_type"] = default_q["input_type"]
+                            q["options"] = default_q["options"]
+                            if not q.get("default_answer"):
+                                q["default_answer"] = default_q.get("default_answer", "")
                     continue
                 it = r.get("input_type")
                 if it in ("text", "select", "multi_select"):
@@ -1500,6 +1551,13 @@ class ClarifyAgent:
                 opts = r.get("options") or []
                 if isinstance(opts, list):
                     q["options"] = [str(o) for o in opts][:6]
+                # v2.54: 若 LLM 返回 select/multi_select 但 options 为空，用模板补充
+                if q.get("input_type") in ("select", "multi_select") and not q.get("options"):
+                    field = q.get("field", "")
+                    if field:
+                        default_q = _build_field_question(field, q.get("description", ""), srr)
+                        if default_q.get("options"):
+                            q["options"] = default_q["options"]
                 if r.get("question"):
                     q["question"] = r["question"]
                 if r.get("default_answer"):
@@ -1517,7 +1575,7 @@ class ClarifyAgent:
 
         return questions
 
-    def _resolve_field_conflict(
+    async def _resolve_field_conflict(
         self,
         existing_value: Any,
         existing_source: str,
@@ -1529,6 +1587,8 @@ class ClarifyAgent:
         """字段冲突解决：返回 (final_value, final_source, conflict_record)。
 
         对应 docs/01-requirement-parsing.md §4.4.1 决策矩阵。
+        v2.41（乙任务）：用户输入/人工已答值与 KB 值冲突时，先尝试 LLM 裁决
+        （判断同义/KB更完整/用户优先），仅 LLM 无法裁决时才转人工。
 
         Args:
             existing_value: 字段当前值
@@ -1553,7 +1613,27 @@ class ClarifyAgent:
         # 值不同 → 按优先级处理
         existing_priority = FIELD_PRIORITY.get(existing_source, 0)
         if existing_priority <= FIELD_PRIORITY["HUMAN_ANSWERED"]:
-            # 用户输入或人工回答 → 不覆盖，记录冲突待人工
+            # 用户输入或人工回答 → 先尝试 LLM 裁决（乙任务），无法裁决才转人工
+            llm_resolution = await self._llm_resolve_conflict(
+                existing_value, kb_value, field, kb_similarity,
+            )
+            if llm_resolution is not None:
+                final_value, final_source, resolution_label, reason = llm_resolution
+                # 记录冲突但标记已 LLM 解决（可追溯）
+                conflict = {
+                    "field": field,
+                    "existing_value": existing_value,
+                    "existing_source": existing_source,
+                    "suggested_value": kb_value,
+                    "suggested_source": "KB_INFERRED",
+                    "kb_similarity": kb_similarity,
+                    "kb_source_req_id": kb_source_req_id,
+                    "resolution": f"llm_{resolution_label}",
+                    "llm_reason": reason,
+                    "final_value": final_value,
+                }
+                return final_value, final_source, conflict
+            # LLM 无法裁决 → 转 pending_human
             conflict = {
                 "field": field,
                 "existing_value": existing_value,
@@ -1572,7 +1652,74 @@ class ClarifyAgent:
             # PATTERN_DEFAULT / LLM_INFERRED → KB 优先
             return kb_value, "KB_INFERRED", None
 
-    def _apply_kb_answers(
+    async def _llm_resolve_conflict(
+        self,
+        existing_value: Any,
+        kb_value: Any,
+        field: str,
+        kb_similarity: float,
+    ) -> tuple[Any, str, str, str] | None:
+        """LLM 裁决字段冲突（乙任务）。
+
+        调用 LLM 判断两个候选值是否同义/KB更完整/用户优先/需转人工。
+        仅对"语义可判定"的冲突裁决，无法判定或调用失败时返回 None（回退到 pending_human）。
+
+        Returns:
+            (final_value, final_source, resolution_label, reason) 或 None
+            - resolution_label: same_meaning / kb_more_complete / user_authoritative
+            - final_source: KB_INFERRED（同义/KB更完整）或 原 existing_source（用户优先）
+        """
+        # 防御：值过长或非字符串/数值类型不裁决（避免 LLM 误判复杂结构）
+        try:
+            ev_str = str(existing_value)
+            kv_str = str(kb_value)
+        except Exception:
+            return None
+        if len(ev_str) > 500 or len(kv_str) > 500:
+            return None  # 超长值不裁决
+
+        user_prompt = (
+            f"字段路径: {field}\n"
+            f"用户输入值: {ev_str}\n"
+            f"知识库推断值: {kv_str}\n"
+            f"KB相似度: {kb_similarity:.2f}\n\n"
+            "请判断这两个值是否可以自动裁决。"
+        )
+        try:
+            result = await self._llm.call_json(
+                prompt=user_prompt,
+                system_prompt=prompt_manager.get("clarify_agent", "FIELD_CONFLICT_RESOLVER_SYSTEM_PROMPT"),
+                schema_hint={"resolution": str, "final_value": str, "reason": str},
+                temperature=0.1,
+                agent_name="ClarifyAgent",
+            )
+        except Exception as e:
+            logger.warning("[ClarifyAgent] 冲突裁决 LLM 调用失败(回退人工): field={}, error={}", field, str(e)[:150])
+            return None
+
+        if not isinstance(result, dict):
+            return None
+        resolution = result.get("resolution", "")
+        reason = str(result.get("reason", ""))[:100]
+        final_value_raw = result.get("final_value")
+
+        # LLM 判定需转人工 → 返回 None 让上层走 pending_human
+        if resolution == "pending_human" or final_value_raw is None:
+            return None
+
+        # 保留原有值类型：若原值是字符串，用 LLM 返回的字符串；否则尝试保持原类型
+        if resolution == "user_authoritative":
+            return existing_value, "USER_INPUT", "user_authoritative", reason
+        elif resolution in ("same_meaning", "kb_more_complete"):
+            # final_value 优先用 LLM 建议，但若类型不匹配则用 KB 值
+            if isinstance(existing_value, str) and isinstance(final_value_raw, str):
+                return final_value_raw, "KB_INFERRED", resolution, reason
+            else:
+                return kb_value, "KB_INFERRED", resolution, reason
+        else:
+            return None  # 未知 resolution → 回退人工
+
+    async def _apply_kb_answers(
         self, srr: dict, kb_answers: list[dict]
     ) -> tuple[dict, list[dict], list[dict]]:
         """将 KB 答案应用到 SRR 中（含字段冲突处理）。
@@ -1636,18 +1783,23 @@ class ClarifyAgent:
             existing_source = field_sources.get(field)
             if existing_source is None:
                 existing_source = "LLM_INFERRED" if existing_value else ""
-            final_value, final_source, conflict = self._resolve_field_conflict(
+            final_value, final_source, conflict = await self._resolve_field_conflict(
                 existing_value, existing_source, value, best.get("similarity", 0),
                 field, best.get("id", ""),
             )
 
             if conflict:
-                # 有冲突 → 不覆盖，记录冲突待人工确认
+                # 有冲突 → 记录冲突（pending_human 或 llm_resolved 均记录可追溯）
                 field_conflicts.append(conflict)
-                logger.info("[ClarifyAgent] 字段冲突: field={}, existing={}({}) vs kb={}({:.2f})",
+                resolution_tag = conflict.get("resolution", "pending_human")
+                logger.info("[ClarifyAgent] 字段冲突: field={}, existing={}({}) vs kb={}({:.2f}), resolution={}",
                             field, str(existing_value)[:50], existing_source,
-                            str(value)[:50], best.get("similarity", 0))
-                continue
+                            str(value)[:50], best.get("similarity", 0), resolution_tag)
+                # v2.53: LLM 裁决成功的冲突（llm_*）使用裁决值写入 SRR，不转人工
+                # 仅 pending_human 才 continue（必须人工确认）
+                if not resolution_tag.startswith("llm_"):
+                    continue
+                # llm_* → fall through，使用 final_value/final_source 写入 SRR
 
             try:
                 self._set_nested_value(srr, field, final_value)
@@ -1959,27 +2111,109 @@ class ClarifyAgent:
     # ========================================================================
 
     # 优化类需求关键词——命中任一即视为优化需求
-    OPTIMIZATION_KEYWORDS: tuple[str, ...] = (
-        "优化", "改进", "升级", "重构", "调整", "改造", "迁移",
-        "替换", "增强", "完善", "迭代", "改版", "重做", "提速",
-        "optimize", "improve", "upgrade", "refactor", "enhance",
+    # v2.53: 拆分强/弱优化关键词，避免 UI 描述中的"调整/完善/增强"误判
+    # - STRONG: 明确指向"对已有系统的修改"（重构/迁移/改造/改版/重做/替换/提速）
+    #   无论出现在标题/摘要/正文，都视为优化需求信号
+    # - WEAK: 语义模糊（调整/完善/增强/改进/升级/迭代/优化），常见于新功能细节描述
+    #   仅当出现在标题/摘要时才算优化需求；正文命中不算（如"图标排版调整为水平居中"）
+    OPTIMIZATION_KEYWORDS_STRONG: tuple[str, ...] = (
+        "重构", "迁移", "改造", "改版", "重做", "替换", "提速",
+        "refactor",
     )
+    OPTIMIZATION_KEYWORDS_WEAK: tuple[str, ...] = (
+        "优化", "改进", "升级", "调整", "增强", "完善", "迭代",
+        "optimize", "improve", "upgrade", "enhance",
+    )
+    # 兼容旧引用（部分代码可能仍引用 OPTIMIZATION_KEYWORDS）
+    OPTIMIZATION_KEYWORDS: tuple[str, ...] = (
+        OPTIMIZATION_KEYWORDS_STRONG + OPTIMIZATION_KEYWORDS_WEAK
+    )
+
+    async def _llm_detect_optimization(self, srr: dict, kb_provider: str | None = None) -> None:
+        """用 LLM 语义判断需求是否为优化/改进已有系统类需求。
+
+        v2.54: 替代关键词匹配。LLM 能理解需求本质（"改已有的" vs "建全新的"），
+        避免弱关键词（完善/增强/调整）在新功能描述中误判为优化需求。
+
+        判断结果写入 srr["_llm_is_optimization"] = {
+            "is_optimization": bool,
+            "reason": str,
+            "confidence": str
+        }
+        供 _check_completeness 和 _detect_optimization_impact 同步读取。
+
+        LLM 调用失败时不写入 _llm_is_optimization（下游降级到强词匹配）。
+
+        Args:
+            srr: SRR JSON 字典（会被原地修改）
+            kb_provider: KB 专属 LLM 供应商
+        """
+        # 若已有 LLM 判断结果（如重新生成时上一轮已判断），直接复用
+        if isinstance(srr.get("_llm_is_optimization"), dict):
+            return
+
+        # 用户已明确"不影响历史数据" -> 无需再判断
+        ldi = srr.get("legacy_data_impact") or {}
+        if isinstance(ldi, dict):
+            impact_scope = str(ldi.get("impact_scope", "") or "")
+            user_clarification = str(ldi.get("user_clarification", "") or "")
+            no_impact_markers = ("不影响历史数据", "仅新增功能", "无影响")
+            if any(m in impact_scope or m in user_clarification for m in no_impact_markers):
+                srr["_llm_is_optimization"] = {"is_optimization": False, "reason": "用户已确认不影响历史数据", "confidence": "high"}
+                return
+
+        req = srr.get("requirement", {}) or {}
+        title = req.get("title", "") or ""
+        summary = req.get("summary", "") or ""
+        raw_text = (srr.get("_raw_text", "") or "")[:3000]
+
+        user_prompt = (
+            f"【需求标题】\n{title}\n\n"
+            f"【需求摘要】\n{summary}\n\n"
+            f"【需求原文（前3000字）】\n{raw_text}\n\n"
+            f"请判断这个需求是「新建功能」还是「优化/改进已有系统」。"
+        )
+
+        try:
+            result = await self._llm.call_json(
+                prompt=user_prompt,
+                system_prompt=prompt_manager.get("clarify_agent", "OPTIMIZATION_DETECTOR_SYSTEM_PROMPT"),
+                schema_hint={"is_optimization": bool, "reason": str, "confidence": str},
+                temperature=0.1,
+                provider=kb_provider,
+                agent_name="ClarifyAgent",
+            )
+            is_opt = bool(result.get("is_optimization", False))
+            reason = str(result.get("reason", ""))[:100]
+            confidence = str(result.get("confidence", "medium"))[:10]
+            srr["_llm_is_optimization"] = {
+                "is_optimization": is_opt,
+                "reason": reason,
+                "confidence": confidence,
+            }
+            logger.info(
+                "[ClarifyAgent] LLM 优化需求判断: is_optimization={}, confidence={}, reason={}",
+                is_opt, confidence, reason[:50],
+            )
+        except Exception as e:
+            # LLM 失败时不写入 _llm_is_optimization，下游降级到强词匹配
+            logger.warning(
+                "[ClarifyAgent] LLM 优化需求判断失败，降级到强词匹配: {}",
+                str(e)[:200],
+            )
 
     def _detect_optimization_impact(self, srr: dict) -> list[dict]:
         """检测需求是否为优化/改进类，若是则返回「历史数据影响」问题列表。
 
-        v2.30: 优化类需求（含"优化/改进/升级/重构"等关键词）可能影响已有数据
-        或破坏向后兼容。此方法在 ClarifyAgent 步骤⑨b 调用，生成 critical
-        级别的人工澄清问题，确保用户确认历史数据影响范围。
+        v2.54: 改用 LLM 语义判断（结果存于 srr["_llm_is_optimization"]），
+        替代关键词匹配。LLM 能理解需求本质（"改已有的"vs"建全新的"），
+        避免弱关键词（完善/增强/调整）在新功能描述中误判。
+        LLM 不可用时降级到强关键词匹配（仅重构/迁移/改造等强词）。
 
         v2.32: 扩展为返回两个问题：
         1. multi_select 问题：判断是否影响历史数据及影响类型
         2. text 输入问题：让用户填写具体影响的历史数据范围（受影响的表/字段/数据量等）
            该问题的答案将写入 SRR.legacy_data_impact.user_clarification
-
-        检测维度：
-        1. 需求标题/摘要中是否包含优化关键词
-        2. 原始需求文本中是否包含优化关键词（前 5000 字符）
 
         Args:
             srr: SRR JSON 字典
@@ -1989,26 +2223,48 @@ class ClarifyAgent:
                         否则返回空列表
         """
         req = srr.get("requirement", {}) or {}
-        title = (req.get("title", "") or "").lower()
-        summary = (req.get("summary", "") or "").lower()
-        raw_text = (srr.get("_raw_text", "") or "")[:5000].lower()
 
-        # 合并所有可检测文本
-        detect_text = f"{title}\n{summary}\n{raw_text}"
+        # v2.53: 尊重用户已答结果--若上一轮澄清用户已选择"不影响历史数据"，
+        # 不再重复生成历史数据影响问题（避免重新生成后死循环提问）
+        ldi = srr.get("legacy_data_impact") or {}
+        if isinstance(ldi, dict):
+            impact_scope = str(ldi.get("impact_scope", "") or "")
+            user_clarification = str(ldi.get("user_clarification", "") or "")
+            # 用户已明确"不影响历史数据" -> 跳过优化需求检测
+            no_impact_markers = ("不影响历史数据", "仅新增功能", "无影响")
+            if any(m in impact_scope or m in user_clarification for m in no_impact_markers):
+                logger.info(
+                    "[ClarifyAgent] 用户已确认不影响历史数据，跳过优化需求检测: impact_scope={!r}",
+                    impact_scope[:80],
+                )
+                return []
 
-        # 检测是否包含优化关键词
-        hit_keywords = [kw for kw in self.OPTIMIZATION_KEYWORDS if kw in detect_text]
-        if not hit_keywords:
+        # v2.54: 优先使用 LLM 语义判断结果
+        llm_opt = srr.get("_llm_is_optimization")
+        is_optimization = False
+        detect_source = ""
+        if isinstance(llm_opt, dict):
+            is_optimization = bool(llm_opt.get("is_optimization", False))
+            detect_source = f"LLM({llm_opt.get('reason', '')[:30]})"
+        else:
+            # 降级：LLM 未返回结果时，仅用强词匹配（重构/迁移/改造等）
+            title = (req.get("title", "") or "").lower()
+            summary = (req.get("summary", "") or "").lower()
+            raw_text = (srr.get("_raw_text", "") or "")[:5000].lower()
+            title_summary = f"{title}\n{summary}"
+            strong_hits = [kw for kw in self.OPTIMIZATION_KEYWORDS_STRONG if kw in title_summary or kw in raw_text]
+            is_optimization = bool(strong_hits)
+            detect_source = f"强词兜底({','.join(strong_hits[:3])})" if strong_hits else "无命中"
+
+        if not is_optimization:
+            logger.info("[ClarifyAgent] 优化需求检测: {} -> 非优化需求", detect_source)
             return []
 
-        logger.info(
-            "[ClarifyAgent] 优化需求检测命中: keywords={}",
-            hit_keywords[:5],
-        )
+        logger.info("[ClarifyAgent] 优化需求检测: {} -> 是优化需求，生成历史数据影响问题", detect_source)
 
         # 生成历史数据影响问题
         req_title = req.get("title", "当前需求") or "当前需求"
-        keyword_hint = ", ".join(hit_keywords[:3])
+        keyword_hint = detect_source
 
         # 问题1：multi_select——判断是否影响历史数据及影响类型
         impact_type_question = {

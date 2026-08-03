@@ -9,7 +9,14 @@
       "canvasData": {
         "x": 36,
         "y": -60,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-48e6089d",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/login.html",
@@ -30,7 +37,14 @@
       "canvasData": {
         "x": 564,
         "y": -60,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-7953e367",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/dashboard.html",
@@ -88,7 +102,14 @@
       "canvasData": {
         "x": 1092,
         "y": -60,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-9ac6a920",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/requirements.html",
@@ -142,7 +163,14 @@
       "canvasData": {
         "x": 36,
         "y": 276,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1016,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-e70c9f7b",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/test-cases.html",
@@ -196,7 +224,14 @@
       "canvasData": {
         "x": 564,
         "y": 276,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1094,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-57a3980f",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/knowledge-base.html",
@@ -250,7 +285,14 @@
       "canvasData": {
         "x": 1092,
         "y": 276,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1036,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-5f41f45f",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/knowledge-qa.html",
@@ -304,7 +346,14 @@
       "canvasData": {
         "x": 1620,
         "y": -60,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1109,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-5a96866f",
+          "measuredAt": 1785748262575
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/project-management.html",
@@ -358,7 +407,14 @@
       "canvasData": {
         "x": 1620,
         "y": 276,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-f71d5009",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/module-management.html",
@@ -412,7 +468,14 @@
       "canvasData": {
         "x": 36,
         "y": 612,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 929,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-8d57a78d",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/dependency-graph.html",
@@ -466,7 +529,14 @@
       "canvasData": {
         "x": 564,
         "y": 612,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1305,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-1d0d0284",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/requirement-detail.html",
@@ -523,7 +593,14 @@
       "canvasData": {
         "x": 1092,
         "y": 948,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1297,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-6380faf4",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/tasks.html",
@@ -576,7 +653,14 @@
       "canvasData": {
         "x": 1092,
         "y": 612,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1107,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-fad636e6",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/admin-dashboard.html",
@@ -626,7 +710,14 @@
       "canvasData": {
         "x": 1620,
         "y": 612,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-c46b3846",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/admin-products.html",
@@ -668,6 +759,67 @@
       }
     },
     {
+      "id": "page-admin-projects-modules",
+      "title": "项目与模块管理",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1785745451036,
+      "canvasData": {
+        "x": 1860,
+        "y": 612,
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-7129301b",
+          "measuredAt": 1785748262575
+        }
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/admin-projects-modules.html",
+        "interactions": [
+          {
+            "domId": "nav-admin-dashboard",
+            "targetPageId": "page-admin-dashboard"
+          },
+          {
+            "domId": "nav-admin-products",
+            "targetPageId": "page-admin-products"
+          },
+          {
+            "domId": "nav-admin-prompts",
+            "targetPageId": "page-admin-prompts"
+          },
+          {
+            "domId": "nav-admin-knowledge",
+            "targetPageId": "page-admin-knowledge"
+          },
+          {
+            "domId": "nav-admin-users",
+            "targetPageId": "page-admin-users"
+          },
+          {
+            "domId": "nav-admin-roles",
+            "targetPageId": "page-admin-roles"
+          },
+          {
+            "domId": "nav-admin-logs",
+            "targetPageId": "page-admin-logs"
+          },
+          {
+            "domId": "nav-admin-settings",
+            "targetPageId": "page-admin-settings"
+          },
+          {
+            "domId": "nav-admin-projects-modules",
+            "targetPageId": "page-admin-projects-modules",
+            "hideEdge": true
+          }
+        ]
+      }
+    },
+    {
       "id": "page-admin-prompts",
       "title": "提示词管理",
       "type": "page",
@@ -676,7 +828,14 @@
       "canvasData": {
         "x": 2148,
         "y": -60,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1283,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-078ed219",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/admin-prompts.html",
@@ -726,7 +885,14 @@
       "canvasData": {
         "x": 2148,
         "y": 276,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1588,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-fc87d562",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/admin-knowledge.html",
@@ -776,7 +942,14 @@
       "canvasData": {
         "x": 2148,
         "y": 612,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 900,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-a45793cc",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/admin-users.html",
@@ -826,7 +999,14 @@
       "canvasData": {
         "x": 2676,
         "y": -60,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1255,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-3751a09c",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/admin-roles.html",
@@ -876,7 +1056,14 @@
       "canvasData": {
         "x": 2676,
         "y": 276,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 903,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-c233586c",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/admin-logs.html",
@@ -926,7 +1113,14 @@
       "canvasData": {
         "x": 2676,
         "y": 612,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 1638,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-8865b740",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/admin-settings.html",
@@ -976,7 +1170,14 @@
       "canvasData": {
         "x": 564,
         "y": 948,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 2120,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-a4d6403b",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/requirement-clarify.html",
@@ -1039,7 +1240,14 @@
       "canvasData": {
         "x": 36,
         "y": 948,
-        "group": 0
+        "group": 0,
+        "layoutSnapshot": {
+          "version": 1,
+          "contentHeight": 4286,
+          "viewportWidth": 1440,
+          "sourceHash": "fnv1a-47319e16",
+          "measuredAt": 1785744453277
+        }
       },
       "devMetadata": {
         "htmlSrc": "pages/user-manual.html",

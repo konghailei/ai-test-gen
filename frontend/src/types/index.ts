@@ -307,6 +307,11 @@ export interface Project {
   name: string
   description: string
   version: string
+  // v2.45 新增 / v2.46 三状态机
+  status?: string  // active / pending_archive / archived
+  go_live_date?: string
+  archived_at?: string
+  archived_by?: string
   created_at: string
 }
 
@@ -541,6 +546,9 @@ export interface FPItem {
   vectorization_status: string | null
   status: string  // pending_review / approved / archived
   needs_module?: boolean  // v2.3: 是否未分配模块（用于前端提示）
+  // v2.45: 依赖图谱节点详情字段（归档时从 srr_json 同步）
+  summary?: string  // FP 实现内容概括描述
+  relations_summary?: string  // 与其他 FP 关系概括描述
   created_at: string
 }
 
@@ -557,6 +565,9 @@ export interface FPDependencyItem {
   reviewed_at?: string
   created_by?: string
   created_at?: string
+  // v2.45: 版本管理字段（项目归档时冻结为历史版本）
+  is_active?: boolean  // 是否启用（归档时 False，恢复活动时 True）
+  version_pk?: number | null  // 所属版本快照ID
 }
 
 /** v2.3: FP 依赖关系变动历史记录 */
@@ -627,4 +638,64 @@ export interface FPImpactDescription {
   test_focus: string
   generated_at: string
   is_auto_generated: boolean
+}
+
+// v2.45 依赖版本管理
+export interface DependencyVersion {
+  id: number
+  version_id: string
+  project_id: string
+  project_name: string
+  project_version: string
+  go_live_date: string
+  snapshot_at: string
+  is_active: boolean
+  archived_by: string
+  requirement_count: number
+  fp_count: number
+  dependency_count: number
+  change_summary: string
+}
+
+export interface DependencyVersionItem {
+  id: number
+  source_fp_id: string
+  source_fp_name: string
+  target_fp_id: string
+  target_fp_name: string
+  relation_type: string
+  description: string
+  review_status: string
+  source_req_id: string
+  source_req_title: string
+  // v2.45: target 侧需求字段，支持跨需求双向追溯
+  target_req_id: string
+  target_req_title: string
+}
+
+export interface DependencyVersionDetail extends DependencyVersion {
+  items: DependencyVersionItem[]
+}
+
+export interface VersionDiff {
+  version_1: { id: number; version_id: string; snapshot_at: string }
+  version_2: { id: number; version_id: string; snapshot_at: string }
+  added: Array<{ source_fp_name: string; target_fp_name: string; relation_type: string; description: string }>
+  removed: Array<{ source_fp_name: string; target_fp_name: string; relation_type: string; description: string }>
+  modified: Array<{ source_fp_name: string; target_fp_name: string; relation_type: string; old_description: string; new_description: string; old_review_status: string; new_review_status: string }>
+  summary: { added_count: number; removed_count: number; modified_count: number; unchanged_count: number }
+}
+
+export interface KbProject {
+  id: string
+  name: string
+  version: string
+  description: string
+  status: string
+  go_live_date: string
+  archived_at: string
+  // v2.45: 归档操作人（与后端 list_kb_projects 返回字段对齐）
+  archived_by: string
+  requirement_count: number
+  test_case_count: number
 }

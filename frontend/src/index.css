@@ -94,6 +94,11 @@
   /* select 箭头和下拉样式 */
   select {
     @apply cursor-pointer;
+    /* v2.53 修复：隐藏浏览器原生箭头，避免与下方自定义背景箭头叠加出现"双箭头"。
+       原生 appearance 需带 -webkit/-moz 前缀以兼容各浏览器。 */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 12px center;

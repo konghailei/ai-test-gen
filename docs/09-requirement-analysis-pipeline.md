@@ -217,6 +217,11 @@ LLM 一次性产出两份 SRR
                       upload
                         │
                         ▼
+                    ┌───────────┐
+                    │ analyzing │  ← 初始状态（异步分析中）
+                    └─────┬─────┘
+                          │ 分析完成
+                          ▼
                     ┌───────┐
               ┌─────│ draft │──────────┐
               │     └───┬───┘          │
@@ -230,6 +235,9 @@ LLM 一次性产出两份 SRR
               │  ┌──────────┐│
               │  │confirmed ││
               │  └────┬─────┘│
+              │    ┌──┴──┐   │
+              │    │active│  │  ← confirm 后自动转为 active
+              │    └──┬──┘   │
               │       │      │
               │ archive│     │
               │       ▼      │
@@ -237,10 +245,15 @@ LLM 一次性产出两份 SRR
               │  │ archived ││
               │  └──────────┘│
               │              │
+              │  deprecated  │  ← 可标记废弃（从 archived/active 转入）
+              │              │
+              │  superseded  │  ← 新版替换旧版时自动标记
+              │              │
               │  restore ⭐v2.2 path:
               │  any status → 先快照当前 → 覆盖为目标版本 → pending_review
               │
-              └── 可补充重新生成 (所有非 archived 状态) ⭐ v2.2
+              └── 可补充重新生成 (所有非 archived/deprecated 状态) ⭐ v2.2
+              └── analyzing 状态取消时回退到 draft
 ```
 
 ---

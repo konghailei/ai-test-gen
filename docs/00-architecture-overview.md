@@ -262,7 +262,7 @@ sequenceDiagram
 |-------|------|------|------|----------|
 | **ReqAgent** | 需求解析器 | 原始需求文本/文档 | SRR JSON + interaction_srr + FP列表 | NL理解、实体抽取、格式标准化；⭐v2.0 同时产出交互层SRR |
 | **ClarifyAgent** | 需求澄清器 | SRR JSON + kb_empty 标志 | 细化SRR + 批量问题列表(含冷启动模式) + KB补全记录 | 完整性/歧义性/遗漏检测、KB自动补全；⭐v2.0 基线补全精准化（_detect_baseline_focus）|
-| **QualityGate** | 质量门禁 | 细化SRR + 澄清结果 | 通过/打回 + 质量报告 | Schema校验、质量评分、验收标准检查 |
+| **QualityGate** | 质量门禁 | 细化SRR + 澄清结果 | 通过/打回 + 质量报告 | Schema校验、关键字段非空、质量评分、Critical问题检查、步骤数检查、冷启动提示（6项，v2.48移除test_points_hint检查） |
 | **ImpactAnalysisAgent** | 影响分析器 | 细化SRR + 优化上下文 | 影响范围报告 + 回归推荐 + 用例操作指导 | **模块依赖图 BFS 遍历**、追溯矩阵定位、回归范围推荐 |
 | ~~**MatchAgent**~~ | ~~知识匹配器~~ | ~~v3.1 起已移除~~ | ~~生成阶段不再从KB检索历史用例~~ | ~~SRR 已足够详细，替代为 Few-shot 示例 + FP 定向上下文~~ |
 | **GenAgent** | 用例生成器 | SRR+FP列表+影响指导 | 用例集+追溯链接+related_fp | 多维并行、FP定向、Few-shot示例注入、追溯标注 |

@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  ChevronDown, ChevronRight, Check, AlertTriangle, Sparkles, RefreshCw,
+  ChevronDown, ChevronRight, Check, AlertTriangle,
   Loader2, Edit3, Save, X, Clock, ExternalLink, Layers, GitBranch, Share2, FileCode,
 } from 'lucide-react'
 import { requirements as reqApi, dependencyGraph, products as prodApi } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import type { FPItem } from '../types'
-import { brTypeLabel, fpTypeLabel, acTypeLabel } from '../utils/labels'
+import { brTypeLabel, fpTypeLabel, acTypeLabel, dataTypeLabel } from '../utils/labels'
 import FieldEditor from '../components/FieldEditor'
 
 interface Props {
@@ -19,11 +19,6 @@ interface Props {
 }
 
 interface FPDepEdge { source_fp_id: string; target_fp_id: string; relation_type: string }
-
-const FP_TYPE_LABELS: Record<string, string> = {
-  workflow: '业务流程', constraint: '约束校验', calculation: '计算规则',
-  api_behavior: 'API 行为', data_record: '数据记录', config: '配置项',
-}
 
 const RELATION_LABELS: Record<string, string> = {
   depends_on: '前置依赖', data_flows: '数据流转', invariants: '共享约束',
@@ -80,9 +75,6 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
       window.removeEventListener('scroll', handleScroll, true)
     }
   }, [showFpModulePicker])
-  const [regeneratingId, setRegeneratingId] = useState<string | null>(null)
-  const [showRegenModal, setShowRegenModal] = useState<string | null>(null)
-  const [regenHint, setRegenHint] = useState('')
   const [impactModal, setImpactModal] = useState<any>(null)
   const [impactLoading, setImpactLoading] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -236,22 +228,6 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
     }
   }
 
-  const startRegen = (fpId: string) => {
-    setShowRegenModal(fpId)
-    setRegenHint('')
-  }
-
-  const doRegenerate = async (fpId: string) => {
-    setRegeneratingId(fpId)
-    try {
-      await reqApi.fpRegenerate(reqId, fpId, regenHint)
-      await load()
-      onChanged?.()
-    } catch { }
-    setRegeneratingId(null)
-    setShowRegenModal(null)
-  }
-
   const updateFP = async (fpId: string) => {
     await reqApi.fpUpdate(reqId, fpId, { name: editName || undefined, modules: editModules.length > 0 ? editModules : undefined })
     setFps(prev => prev.map(f => f.id === fpId ? { ...f, name: editName || f.name, modules: editModules.length > 0 ? editModules : f.modules, module_id: editModules.length > 0 ? editModules[0] : f.module_id } : f))
@@ -393,11 +369,7 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                               ))
                             })()}
                           </div>
-                          {fp.test_hints?.length > 0 && (
-                            <p className="text-[11px] text-slate-400 mt-0.5 line-clamp-1">
-                              {fp.test_hints.slice(0, 2).join('；')}
-                            </p>
-                          )}
+                          {/* v2.48: 移除 test_hints 预览（不再生成测试提示） */}
                         </div>
                       </div>
                       <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
@@ -408,15 +380,6 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                             title="审核通过"
                           >
                             <Check className="w-3.5 h-3.5" /> 通过
-                          </button>
-                        )}
-                        {!isArchived && (
-                          <button
-                            onClick={() => startRegen(fp.id)}
-                            className="p-1.5 text-amber-600 hover:bg-amber-50 rounded-lg"
-                            title="AI 重新生成"
-                          >
-                            <RefreshCw className="w-3.5 h-3.5" />
                           </button>
                         )}
                         {/* v2.35: 归档功能点也允许编辑子 SRR（编辑后同步更新总 SRR/向量库/用例） */}
@@ -569,7 +532,7 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                                 </div>
                               )
                             })()}
-                            {/* 3. 业务规则 */}
+                            {/* 3. 业务规则（v2.48: 合并了原验收标准内容） */}
                             <FieldEditor
                               label="业务规则"
                               fieldPath="business_rules"
@@ -591,29 +554,8 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                                 )
                               }}
                             />
-                            {/* 4. 验收标准 */}
-                            <FieldEditor
-                              label="验收标准"
-                              fieldPath="acceptance_criteria"
-                              value={(fp.srr_json as any).acceptance_criteria || []}
-                              valueType="object[]"
-                              onSave={saveFpField(fp.id)}
-                              disabled={false}
-                              render={(v) => {
-                                const acs = Array.isArray(v) ? v : []
-                                if (!acs.length) return <p className="text-xs text-slate-400 italic">暂无</p>
-                                return (
-                                  <ul className="mt-1 space-y-0.5">
-                                    {acs.map((ac: any, i: number) => (
-                                      <li key={i} className="text-xs text-slate-600 pl-3 border-l-2 border-emerald-200">
-                                        {typeof ac === 'string' ? ac : <><span className="text-slate-400">{ac.id}</span> <span className="text-[10px] px-1 bg-emerald-50 rounded">{acTypeLabel(ac.type)}</span> {ac.description}</>}
-                                      </li>
-                                    ))}
-                                  </ul>
-                                )
-                              }}
-                            />
-                            {/* 5. 数据约束 */}
+                            {/* v2.48: 移除验收标准 FieldEditor（已合并到业务规则） */}
+                            {/* 4. 数据约束 */}
                             {(() => {
                               const dc = (fp.srr_json as any).data_constraints || []
                               if (!Array.isArray(dc) || !dc.length) return null
@@ -645,7 +587,7 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                                               {items.map((d: any, i: number) => (
                                                 <tr key={i} className="border-b border-slate-100">
                                                   <td className="py-1 pr-2 text-slate-700 font-medium">{d.field}</td>
-                                                  <td className="py-1 px-2 text-slate-500">{d.type}</td>
+                                                  <td className="py-1 px-2 text-slate-500">{dataTypeLabel(d.type)}</td>
                                                   <td className="py-1 px-2">
                                                     {d.required ? <span className="text-rose-500">必填</span> : <span className="text-slate-400">可选</span>}
                                                   </td>
@@ -690,17 +632,7 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                           </div>
                         )}
 
-                        {/* 测试提示 */}
-                        {fp.test_hints?.length > 0 && (
-                          <div>
-                            <span className="text-[10px] text-slate-400 uppercase tracking-wider">测试提示</span>
-                            <div className="flex flex-wrap gap-1 mt-1">
-                              {fp.test_hints.map((h: string, i: number) => (
-                                <span key={i} className="text-xs px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded">{h}</span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                        {/* v2.48: 移除测试提示展示（不再生成 test_hints） */}
 
                         {/* 依赖关系 */}
                         {depsForFp.length > 0 && (
@@ -743,39 +675,6 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
             </div>
           )
         })
-      )}
-
-      {/* AI 重生成弹窗 */}
-      {showRegenModal && (
-        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setShowRegenModal(null)}>
-          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-slide-up" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-amber-500" /> AI 重新生成
-            </h2>
-            <p className="text-sm text-slate-500 mt-2">
-              输入补充说明来引导 AI 重新生成该功能点的子 SRR（可选）。
-            </p>
-            <textarea
-              value={regenHint}
-              onChange={e => setRegenHint(e.target.value)}
-              className="input-field resize-none mt-3 text-sm"
-              rows={3}
-              placeholder="例如：请重点补充密码复杂度校验的业务规则..."
-            />
-            <div className="flex items-center justify-end gap-3 mt-4">
-              <button onClick={() => setShowRegenModal(null)} className="btn-secondary">取消</button>
-              <button onClick={() => doRegenerate(showRegenModal)}
-                disabled={!!regeneratingId}
-                className="btn-primary flex items-center gap-2 disabled:opacity-50">
-                {regeneratingId === showRegenModal ? (
-                  <><Loader2 className="w-4 h-4 animate-spin" /> 生成中...</>
-                ) : (
-                  <><RefreshCw className="w-4 h-4" /> 重新生成</>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
       )}
 
       {/* 合并弹窗 */}

@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   ReactFlow, useNodesState, useEdgesState, Background, Controls, MiniMap,
-  MarkerType, ReactFlowProvider, Panel, Handle, Position,
-  type Node, type Edge, type Connection, SelectionMode,
+  MarkerType, ReactFlowProvider, Panel, Handle, Position, ConnectionMode,
+  BaseEdge, getSmoothStepPath, EdgeLabelRenderer, useReactFlow,
+  type Node, type Edge, type EdgeProps, type Connection, SelectionMode,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import {
@@ -13,7 +14,11 @@ import {
 } from 'lucide-react'
 import { dependencyGraph, products as prodApi, requirements as reqApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
-import type { Module as ModuleType, FPDependencyHistoryItem } from '../types'
+import type {
+  Module as ModuleType, FPDependencyHistoryItem,
+  DependencyVersion, DependencyVersionDetail, VersionDiff,
+} from '../types'
+import { getEdgeParams, layoutHierarchical, type LayoutDirection } from '../utils/graphLayout'
 
 // ============================================================================
 // v2.3 审核状态样式（FP 依赖图谱）
@@ -22,6 +27,13 @@ const REVIEW_STATUS_STYLES: Record<string, { label: string; stroke: string; dash
   pending: { label: '待审核', stroke: '#f59e0b', dashed: true, bg: 'bg-amber-50', text: 'text-amber-700' },
   approved: { label: '已审核', stroke: '#10b981', dashed: false, bg: 'bg-emerald-50', text: 'text-emerald-700' },
   rejected: { label: '已驳回', stroke: '#ef4444', dashed: true, bg: 'bg-red-50', text: 'text-red-700' },
+}
+
+// v2.45 FP 自身状态样式（pending_review/approved/archived）
+const FP_STATUS_STYLES: Record<string, { label: string; bg: string; text: string }> = {
+  pending_review: { label: '待审核', bg: 'bg-amber-50', text: 'text-amber-700' },
+  approved: { label: '已审核', bg: 'bg-emerald-50', text: 'text-emerald-700' },
+  archived: { label: '已归档', bg: 'bg-slate-100', text: 'text-slate-500' },
 }
 
 // ============================================================================
@@ -41,14 +53,14 @@ function ModuleNode({ data, selected }: any) {
       borderColor: selected ? 'var(--brand-400)' : 'var(--border)',
       ...(selected ? { '--tw-ring-color': 'rgba(0, 122, 255, 0.1)' } as React.CSSProperties : {}),
     }}>
-      <Handle type="target" position={Position.Left}
-        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
-      <Handle type="source" position={Position.Right}
-        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
-      <Handle type="target" position={Position.Top} id="top"
-        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
+      <Handle type="source" position={Position.Left} id="left"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
+      <Handle type="source" position={Position.Right} id="right"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
+      <Handle type="source" position={Position.Top} id="top"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
       <Handle type="source" position={Position.Bottom} id="bottom"
-        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
       <div className="flex items-center gap-2 mb-1">
         <div className="w-8 h-8 flex items-center justify-center flex-shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 122, 255, 0.08)' }}>
           <Puzzle className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
@@ -78,11 +90,26 @@ const FP_TYPE_STYLES: Record<string, { label: string; bg: string; text: string }
   config: { label: '配置', bg: 'bg-slate-100', text: 'text-slate-600' },
 }
 
+// v2.44: 需求状态标签样式（功能点依赖图谱节点状态显示）
+// active 为默认活跃状态不显示标签；archived 已有"已归档"角标，不再重复显示
+const REQ_STATUS_STYLES: Record<string, { label: string; bg: string; text: string }> = {
+  analyzing: { label: '分析中', bg: 'bg-blue-50', text: 'text-blue-600' },
+  draft: { label: '草稿', bg: 'bg-slate-100', text: 'text-slate-500' },
+  pending_review: { label: '待审核', bg: 'bg-amber-50', text: 'text-amber-700' },
+  confirmed: { label: '已确认', bg: 'bg-emerald-50', text: 'text-emerald-700' },
+  superseded: { label: '已替代', bg: 'bg-slate-100', text: 'text-slate-500' },
+  deprecated: { label: '已弃用', bg: 'bg-red-50', text: 'text-red-600' },
+}
+
 function FPNode({ data, selected }: any) {
   const fpStyle = FP_TYPE_STYLES[data.fpType] || FP_TYPE_STYLES.workflow
-  const isArchived = data.reqStatus === 'archived'
+  const isArchived = data.reqStatus === 'archived' || data.fpStatus === 'archived'
   // v2.3: 含未审核依赖时高亮显示（橙色边框 + 脉冲动画）
   const hasPendingReview = data.hasPendingReview === true
+  // v2.44: 需求状态标签（active/archived 不显示）
+  const statusStyle = REQ_STATUS_STYLES[data.reqStatus]
+  // v2.44: 所属模块名列表
+  const moduleNames: string[] = Array.isArray(data.moduleNames) ? data.moduleNames : []
   return (
     <div className={[
       'relative px-4 py-3 border-2 min-w-[140px] transition-all duration-200 group',
@@ -109,14 +136,14 @@ function FPNode({ data, selected }: any) {
           <Clock className="w-2.5 h-2.5" /> 待审核
         </span>
       )}
-      <Handle type="target" position={Position.Left}
-        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
-      <Handle type="source" position={Position.Right}
-        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
-      <Handle type="target" position={Position.Top} id="top"
-        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
+      <Handle type="source" position={Position.Left} id="left"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
+      <Handle type="source" position={Position.Right} id="right"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
+      <Handle type="source" position={Position.Top} id="top"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
       <Handle type="source" position={Position.Bottom} id="bottom"
-        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors" />
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
       <div className="flex items-center gap-2 mb-1">
         <div className="w-8 h-8 flex items-center justify-center flex-shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.08)' }}>
           <Boxes className="w-4 h-4" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }} />
@@ -125,7 +152,7 @@ function FPNode({ data, selected }: any) {
           {data.label}
         </span>
       </div>
-      <div className="flex items-center gap-1.5 pl-10">
+      <div className="flex items-center gap-1.5 pl-10 flex-wrap">
         <span className={`text-[10px] px-1.5 py-0.5 rounded ${isArchived ? '' : fpStyle.bg + ' ' + fpStyle.text} font-medium`} style={isArchived ? { background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' } : undefined}>
           {fpStyle.label}
         </span>
@@ -134,17 +161,110 @@ function FPNode({ data, selected }: any) {
             {data.priority}
           </span>
         )}
+        {statusStyle && !isArchived && (
+          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${statusStyle.bg} ${statusStyle.text}`}>
+            {statusStyle.label}
+          </span>
+        )}
       </div>
-      {data.reqTitle && (
-        <p className="text-[11px] leading-relaxed line-clamp-1 pl-10 mt-0.5" style={{ color: isArchived ? 'var(--foreground-quaternary)' : 'var(--foreground-tertiary)' }}>
-          {data.reqTitle}
-        </p>
+      {/* v2.44: 所属模块名显示 */}
+      {moduleNames.length > 0 && (
+        <div className="flex items-center gap-1 pl-10 mt-0.5">
+          <Puzzle className="w-2.5 h-2.5 flex-shrink-0" style={{ color: 'var(--foreground-quaternary)' }} />
+          <span className="text-[10px] truncate" style={{ color: isArchived ? 'var(--foreground-quaternary)' : 'var(--foreground-tertiary)' }}>
+            {moduleNames.join('、')}
+          </span>
+        </div>
       )}
+      {/* v2.45 修复：功能点节点不显示需求名，避免节点信息冗余；需求归属信息仅在详情抽屉中展示 */}
     </div>
   )
 }
 
 const nodeTypes = { moduleNode: ModuleNode, fpNode: FPNode }
+
+// ============================================================================
+// FloatingEdge — 浮动边组件（v2.43）
+// 根据两节点的相对位置自动计算最佳起止点和方向，不依赖固定 Handle 角色。
+// 同时支持点击选中、选中高亮、自定义标签渲染、扩大命中区域。
+// ============================================================================
+function FloatingEdge({
+  id, source, target, sourceX, sourceY, targetX, targetY,
+  sourcePosition, targetPosition, markerEnd, markerStart, style,
+  selected, label, labelStyle, labelBgStyle,
+}: EdgeProps): React.ReactElement {
+  // 通过 useReactFlow hook 获取节点（在 ReactFlowProvider 内可用）
+  const { getNode } = useReactFlow()
+  const sourceNode = getNode(source)
+  const targetNode = getNode(target)
+
+  // 优先使用浮动参数；若节点未就绪（首次渲染），降级用 EdgeProps 传入的固定坐标
+  let edgeParams: ReturnType<typeof getEdgeParams> | null = null
+  if (sourceNode && targetNode) {
+    edgeParams = getEdgeParams(sourceNode as Node, targetNode as Node)
+  }
+
+  const [edgePath, labelX, labelY] = getSmoothStepPath({
+    sourceX: edgeParams?.sx ?? sourceX,
+    sourceY: edgeParams?.sy ?? sourceY,
+    sourcePosition: edgeParams?.sourcePosition ?? sourcePosition,
+    targetX: edgeParams?.tx ?? targetX,
+    targetY: edgeParams?.ty ?? targetY,
+    targetPosition: edgeParams?.targetPosition ?? targetPosition,
+    borderRadius: 12,
+  })
+
+  // 选中时高亮：提升 strokeWidth + drop-shadow
+  const mergedStyle: React.CSSProperties = {
+    ...(style || {}),
+    strokeWidth: selected ? 4 : (style?.strokeWidth ?? 2.5),
+    filter: selected ? 'drop-shadow(0 1px 3px rgba(0,0,0,0.18))' : undefined,
+    transition: 'stroke-width 0.15s ease',
+  }
+
+  return (
+    <>
+      {/* 透明加粗路径用于扩大点击命中区域 */}
+      <path
+        d={edgePath}
+        fill="none"
+        stroke="transparent"
+        strokeWidth={20}
+        style={{ cursor: 'pointer' }}
+      />
+      <BaseEdge
+        id={id}
+        path={edgePath}
+        markerEnd={markerEnd}
+        markerStart={markerStart}
+        style={mergedStyle}
+      />
+      {label && (
+        <EdgeLabelRenderer>
+          <div
+            style={{
+              position: 'absolute',
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              pointerEvents: 'none',
+              ...(labelStyle || {}),
+              ...(labelBgStyle ? {
+                background: (labelBgStyle as any).fill,
+                padding: '2px 8px',
+                borderRadius: 6,
+              } : {}),
+              ...(selected ? { fontWeight: 700, boxShadow: '0 2px 8px rgba(0,0,0,0.12)' } : {}),
+            } as React.CSSProperties}
+            className="nodrag nopan"
+          >
+            {String(label)}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  )
+}
+
+const edgeTypes = { floating: FloatingEdge }
 
 // ============================================================================
 // Edge Styles (模块 / 功能点 分离)
@@ -162,7 +282,9 @@ const FP_EDGE_STYLES: Record<string, { label: string; stroke: string }> = {
   conflicts_with: { label: '冲突', stroke: '#f87171' },
 }
 
-const EDGE_COMMON = { type: 'smoothstep' as const, animated: true, style: { strokeWidth: 2.5 } }
+// v2.43: 边类型改为 floating（浮动边），自动计算最佳起止点
+// 选中态通过 FloatingEdge 内部处理（提升 strokeWidth + drop-shadow），避免被节点遮挡
+const EDGE_COMMON = { type: 'floating' as const, animated: true, style: { strokeWidth: 2.5 } }
 
 function createEdge(source: string, target: string, eType: string, srcName = source, tgtName = target): any {
   const s = MODULE_EDGE_STYLES[eType] || MODULE_EDGE_STYLES.depends_on
@@ -493,6 +615,472 @@ function ImpactDescriptionModal({
 }
 
 // ============================================================================
+// v2.45 FP 节点详情 Drawer — 双击 FP 节点打开，展示基础信息 + 概括描述
+// ============================================================================
+function FPDetailDrawer({
+  node, onClose, onShowImpact,
+}: {
+  node: Node
+  onClose: () => void
+  onShowImpact: (fpId: string, fpName: string, reqId: string) => void
+}) {
+  const data = node.data as any
+  const fpStyle = FP_TYPE_STYLES[data.fpType] || FP_TYPE_STYLES.workflow
+  const fpStatusStyle = FP_STATUS_STYLES[data.fpStatus] || FP_STATUS_STYLES.pending_review
+  const moduleNames: string[] = Array.isArray(data.moduleNames) ? data.moduleNames : []
+
+  return (
+    <div className="fixed inset-0 z-[65]" onClick={onClose}>
+      <div className="absolute inset-0" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} />
+      <div className="absolute top-0 right-0 bottom-0 w-[420px] flex flex-col"
+        style={{ background: 'var(--background)', boxShadow: 'var(--shadow-apple-xl)' }}
+        onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+          <div className="flex items-center gap-2 min-w-0">
+            <Boxes className="w-5 h-5 shrink-0" style={{ color: 'var(--brand-500)' }} />
+            <h3 className="text-base font-semibold truncate" style={{ color: 'var(--foreground)' }}>{data.label}</h3>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${fpStatusStyle.bg} ${fpStatusStyle.text} shrink-0`}>
+              {fpStatusStyle.label}
+            </span>
+          </div>
+          <button onClick={onClose} className="p-1 shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)' }}>
+            <X className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {/* 基础信息 */}
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--foreground-tertiary)' }}>基础信息</h4>
+            <div className="space-y-1.5 text-sm p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+              <div className="flex items-center gap-2">
+                <span className="text-xs w-20 shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>类型</span>
+                <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${fpStyle.bg} ${fpStyle.text}`}>{fpStyle.label}</span>
+              </div>
+              {data.priority && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs w-20 shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>优先级</span>
+                  <span className="text-xs px-1.5 py-0.5 rounded font-medium" style={{ background: 'var(--background)', color: 'var(--foreground-secondary)' }}>{data.priority}</span>
+                </div>
+              )}
+              {moduleNames.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs w-20 shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>所属模块</span>
+                  <span className="text-xs" style={{ color: 'var(--foreground-secondary)' }}>{moduleNames.join('、')}</span>
+                </div>
+              )}
+              {data.reqTitle && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs w-20 shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>所属需求</span>
+                  <span className="text-xs truncate" style={{ color: 'var(--foreground-secondary)' }}>{data.reqTitle}</span>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <span className="text-xs w-20 shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>状态</span>
+                <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${fpStatusStyle.bg} ${fpStatusStyle.text}`}>{fpStatusStyle.label}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 实现内容概括 */}
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--foreground-tertiary)' }}>实现内容概括</h4>
+            <div className="text-sm leading-relaxed p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-secondary)', minHeight: '40px' }}>
+              {data.summary || <span style={{ color: 'var(--foreground-quaternary)' }}>暂无</span>}
+            </div>
+          </div>
+
+          {/* 与其他功能点关系 */}
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--foreground-tertiary)' }}>与其他功能点关系</h4>
+            <div className="text-sm leading-relaxed p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-secondary)', minHeight: '40px' }}>
+              {data.relationsSummary || <span style={{ color: 'var(--foreground-quaternary)' }}>暂无</span>}
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        {data.reqId && (
+          <div className="flex justify-end gap-2 px-5 py-3 shrink-0" style={{ borderTop: '1px solid var(--border)' }}>
+            <button onClick={() => onShowImpact(node.id, data.label, data.reqId)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white"
+              style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--brand-500)' }}>
+              <GitBranch className="w-3.5 h-3.5" /> 生成影响说明
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// v2.45 版本管理 Drawer — 展示依赖版本快照、详情、对比
+// ============================================================================
+function VersionManagementDrawer({
+  productId, onClose,
+}: {
+  productId: string
+  onClose: () => void
+}) {
+  const [versions, setVersions] = useState<DependencyVersion[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [detail, setDetail] = useState<DependencyVersionDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [diff, setDiff] = useState<VersionDiff | null>(null)
+  const [diffLoading, setDiffLoading] = useState(false)
+  const [view, setView] = useState<'list' | 'detail' | 'diff'>('list')
+
+  const loadVersions = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const data = await prodApi.listDependencyVersionsByProduct(productId)
+      const sorted = [...(data || [])].sort((a, b) =>
+        new Date(b.snapshot_at).getTime() - new Date(a.snapshot_at).getTime()
+      )
+      setVersions(sorted)
+    } catch (e: any) {
+      setError(e?.message || '加载失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [productId])
+
+  useEffect(() => {
+    loadVersions()
+  }, [loadVersions])
+
+  const loadDetail = async (versionPk: number) => {
+    setDetailLoading(true)
+    setDiff(null)
+    setError('')
+    try {
+      const data = await prodApi.getDependencyVersionDetail(versionPk)
+      setDetail(data)
+      setView('detail')
+    } catch (e: any) {
+      setError(e?.message || '加载详情失败')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => {
+      if (prev.includes(id)) return prev.filter(x => x !== id)
+      if (prev.length >= 2) return [prev[1], id]
+      return [...prev, id]
+    })
+  }
+
+  const runDiff = async () => {
+    if (selectedIds.length !== 2) return
+    setDiffLoading(true)
+    setDiff(null)
+    setError('')
+    try {
+      const result = await prodApi.diffDependencyVersions(selectedIds[0], selectedIds[1])
+      setDiff(result)
+      setView('diff')
+    } catch (e: any) {
+      setError(e?.message || '对比失败')
+    } finally {
+      setDiffLoading(false)
+    }
+  }
+
+  const fmtDate = (s: string) => {
+    if (!s) return '—'
+    try { return new Date(s).toLocaleString('zh-CN') } catch { return s }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[65]" onClick={onClose}>
+      <div className="absolute inset-0" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} />
+      <div className="absolute top-0 right-0 bottom-0 w-[560px] max-w-[90vw] flex flex-col"
+        style={{ background: 'var(--background)', boxShadow: 'var(--shadow-apple-xl)' }}
+        onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+          <div className="flex items-center gap-2">
+            <History className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
+            <h3 className="text-base font-semibold" style={{ color: 'var(--foreground)' }}>版本管理</h3>
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>({versions.length})</span>
+          </div>
+          <button onClick={onClose} className="p-1" style={{ borderRadius: 'calc(var(--radius) * 0.5)' }}>
+            <X className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
+          </button>
+        </div>
+
+        {/* Sub-header: back button */}
+        {view !== 'list' && (
+          <div className="px-5 py-2 flex items-center gap-2 shrink-0" style={{ borderBottom: '1px solid var(--border)' }}>
+            <button onClick={() => { setView('list'); setDetail(null); setDiff(null) }}
+              className="text-xs flex items-center gap-1" style={{ color: 'var(--brand-500)' }}>
+              ← 返回列表
+            </button>
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+              {view === 'detail' ? '版本详情' : '版本对比'}
+            </span>
+          </div>
+        )}
+
+        {/* Compare bar */}
+        {view === 'list' && versions.length > 0 && (
+          <div className="px-5 py-2 flex items-center gap-2 shrink-0" style={{ borderBottom: '1px solid var(--border)', background: 'var(--background-muted)' }}>
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+              已选择 {selectedIds.length}/2 个版本进行对比
+            </span>
+            <button onClick={runDiff} disabled={selectedIds.length !== 2 || diffLoading}
+              className="ml-auto flex items-center gap-1 px-3 py-1 text-xs font-medium text-white disabled:opacity-50"
+              style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--brand-500)' }}>
+              <ArrowLeftRight className="w-3 h-3" /> 对比版本
+            </button>
+          </div>
+        )}
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto">
+          {error && (
+            <div className="m-4 px-3 py-2 text-sm" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--state-error-surface)', color: 'var(--state-error)' }}>{error}</div>
+          )}
+
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
+            </div>
+          ) : view === 'list' ? (
+            versions.length === 0 ? (
+              <p className="text-sm text-center py-12" style={{ color: 'var(--foreground-tertiary)' }}>暂无版本记录</p>
+            ) : (
+              <div className="p-3 space-y-2">
+                {versions.map(v => {
+                  const isSelected = selectedIds.includes(v.id)
+                  return (
+                    <div key={v.id}
+                      className="p-3 transition-all"
+                      style={{
+                        background: isSelected ? 'rgba(0, 122, 255, 0.04)' : 'var(--background-muted)',
+                        borderRadius: 'calc(var(--radius) * 0.5)',
+                        border: `1px solid ${isSelected ? 'var(--brand-400)' : 'var(--border)'}`,
+                      }}>
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <input type="checkbox" checked={isSelected}
+                          onChange={() => toggleSelect(v.id)}
+                          className="cursor-pointer shrink-0" />
+                        <button onClick={() => loadDetail(v.id)}
+                          className="text-sm font-medium hover:underline truncate" style={{ color: 'var(--foreground)' }}>
+                          {v.version_id}
+                        </button>
+                        {v.is_active ? (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-emerald-50 text-emerald-700 shrink-0">启用中</span>
+                        ) : (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-slate-100 text-slate-500 shrink-0">未启用</span>
+                        )}
+                        <span className="ml-auto text-[11px] shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>{fmtDate(v.snapshot_at)}</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-[11px] ml-6" style={{ color: 'var(--foreground-tertiary)' }}>
+                        <span>{v.project_name}</span>
+                        {v.go_live_date && <span>上线: {fmtDate(v.go_live_date)}</span>}
+                      </div>
+                      <div className="flex items-center gap-3 text-[11px] ml-6 mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
+                        <span>需求 {v.requirement_count}</span>
+                        <span>FP {v.fp_count}</span>
+                        <span>依赖 {v.dependency_count}</span>
+                      </div>
+                      {v.change_summary && (
+                        <p className="text-[11px] mt-1 ml-6 truncate" style={{ color: 'var(--foreground-tertiary)' }}>{v.change_summary}</p>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          ) : view === 'detail' ? (
+            detailLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
+              </div>
+            ) : detail ? (
+              <div className="p-4 space-y-3">
+                <div className="p-3 text-sm" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="font-medium" style={{ color: 'var(--foreground)' }}>{detail.version_id}</span>
+                    {detail.is_active ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-emerald-50 text-emerald-700">启用中</span>
+                    ) : (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-slate-100 text-slate-500">未启用</span>
+                    )}
+                  </div>
+                  <div className="text-xs space-y-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
+                    <div>项目: {detail.project_name} ({detail.project_version})</div>
+                    <div>快照时间: {fmtDate(detail.snapshot_at)}</div>
+                    {detail.go_live_date && <div>上线时间: {fmtDate(detail.go_live_date)}</div>}
+                    <div>需求/FP/依赖: {detail.requirement_count}/{detail.fp_count}/{detail.dependency_count}</div>
+                    {detail.change_summary && <div>变更摘要: {detail.change_summary}</div>}
+                  </div>
+                </div>
+                <div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--foreground-tertiary)' }}>
+                    依赖关系明细（{detail.items?.length || 0}）
+                  </h4>
+                  {(!detail.items || detail.items.length === 0) ? (
+                    <p className="text-sm text-center py-6" style={{ color: 'var(--foreground-tertiary)' }}>无依赖关系记录</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {detail.items.map(item => {
+                        const relLabel = FP_EDGE_STYLES[item.relation_type]?.label || item.relation_type
+                        const rs = REVIEW_STATUS_STYLES[item.review_status] || REVIEW_STATUS_STYLES.pending
+                        return (
+                          <div key={item.id} className="p-2.5 text-xs" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)', border: '1px solid var(--border)' }}>
+                            <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+                              <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{item.source_fp_name}</span>
+                              <span style={{ color: 'var(--foreground-tertiary)' }}>→</span>
+                              <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{item.target_fp_name}</span>
+                              <span className="px-1.5 py-0.5 rounded" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>{relLabel}</span>
+                              <span className={`ml-auto px-1.5 py-0.5 rounded font-medium ${rs.bg} ${rs.text}`}>{rs.label}</span>
+                            </div>
+                            {item.description && (
+                              <p className="mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>{item.description}</p>
+                            )}
+                            {item.source_req_title && (
+                              <p className="mt-0.5 text-[11px]" style={{ color: 'var(--foreground-quaternary)' }}>所属需求: {item.source_req_title}</p>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null
+          ) : view === 'diff' ? (
+            diffLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--brand-500)' }} />
+              </div>
+            ) : diff ? (
+              <div className="p-4 space-y-3">
+                <div className="p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+                  <div className="text-xs mb-2" style={{ color: 'var(--foreground-tertiary)' }}>对比版本</div>
+                  <div className="flex items-center gap-2 text-sm flex-wrap">
+                    <span className="font-medium" style={{ color: 'var(--foreground)' }}>{diff.version_1.version_id}</span>
+                    <span className="text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>{fmtDate(diff.version_1.snapshot_at)}</span>
+                    <ArrowLeftRight className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
+                    <span className="font-medium" style={{ color: 'var(--foreground)' }}>{diff.version_2.version_id}</span>
+                    <span className="text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>{fmtDate(diff.version_2.snapshot_at)}</span>
+                  </div>
+                  <div className="flex items-center gap-3 mt-2 text-xs">
+                    <span style={{ color: 'var(--state-success)' }}>+{diff.summary.added_count} 新增</span>
+                    <span style={{ color: 'var(--state-error)' }}>-{diff.summary.removed_count} 删除</span>
+                    <span style={{ color: 'var(--state-warning)' }}>~{diff.summary.modified_count} 修改</span>
+                    <span style={{ color: 'var(--foreground-tertiary)' }}>{diff.summary.unchanged_count} 不变</span>
+                  </div>
+                </div>
+
+                {/* 新增 */}
+                {diff.added.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold mb-2" style={{ color: 'var(--state-success)' }}>
+                      新增依赖（{diff.added.length}）
+                    </h4>
+                    <div className="space-y-1.5">
+                      {diff.added.map((d, i) => {
+                        const relLabel = FP_EDGE_STYLES[d.relation_type]?.label || d.relation_type
+                        return (
+                          <div key={i} className="p-2.5 text-xs" style={{ background: 'var(--state-success-surface)', borderRadius: 'calc(var(--radius) * 0.5)', borderLeft: '3px solid var(--state-success)' }}>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{d.source_fp_name}</span>
+                              <span style={{ color: 'var(--foreground-tertiary)' }}>→</span>
+                              <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{d.target_fp_name}</span>
+                              <span className="px-1.5 py-0.5 rounded" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>{relLabel}</span>
+                            </div>
+                            {d.description && <p className="mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>{d.description}</p>}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* 删除 */}
+                {diff.removed.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold mb-2" style={{ color: 'var(--state-error)' }}>
+                      删除依赖（{diff.removed.length}）
+                    </h4>
+                    <div className="space-y-1.5">
+                      {diff.removed.map((d, i) => {
+                        const relLabel = FP_EDGE_STYLES[d.relation_type]?.label || d.relation_type
+                        return (
+                          <div key={i} className="p-2.5 text-xs" style={{ background: 'var(--state-error-surface)', borderRadius: 'calc(var(--radius) * 0.5)', borderLeft: '3px solid var(--state-error)' }}>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{d.source_fp_name}</span>
+                              <span style={{ color: 'var(--foreground-tertiary)' }}>→</span>
+                              <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{d.target_fp_name}</span>
+                              <span className="px-1.5 py-0.5 rounded" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>{relLabel}</span>
+                            </div>
+                            {d.description && <p className="mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>{d.description}</p>}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* 修改 */}
+                {diff.modified.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold mb-2" style={{ color: 'var(--state-warning)' }}>
+                      修改依赖（{diff.modified.length}）
+                    </h4>
+                    <div className="space-y-1.5">
+                      {diff.modified.map((d, i) => {
+                        const relLabel = FP_EDGE_STYLES[d.relation_type]?.label || d.relation_type
+                        return (
+                          <div key={i} className="p-2.5 text-xs" style={{ background: 'var(--state-warning-surface)', borderRadius: 'calc(var(--radius) * 0.5)', borderLeft: '3px solid var(--state-warning)' }}>
+                            <div className="flex items-center gap-1.5 mb-1 flex-wrap">
+                              <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{d.source_fp_name}</span>
+                              <span style={{ color: 'var(--foreground-tertiary)' }}>→</span>
+                              <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{d.target_fp_name}</span>
+                              <span className="px-1.5 py-0.5 rounded" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>{relLabel}</span>
+                            </div>
+                            {d.old_description !== d.new_description && (
+                              <div className="mt-1 text-[11px] space-y-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
+                                <div>旧: {d.old_description || '—'}</div>
+                                <div>新: {d.new_description || '—'}</div>
+                              </div>
+                            )}
+                            {d.old_review_status !== d.new_review_status && (
+                              <div className="mt-1 text-[11px]" style={{ color: 'var(--foreground-tertiary)' }}>
+                                审核状态: {d.old_review_status || '—'} → {d.new_review_status || '—'}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {diff.added.length === 0 && diff.removed.length === 0 && diff.modified.length === 0 && (
+                  <p className="text-sm text-center py-8" style={{ color: 'var(--foreground-tertiary)' }}>两个版本无差异</p>
+                )}
+              </div>
+            ) : null
+          ) : null}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ============================================================================
 // v2.3 依赖关系变动历史面板
 // ============================================================================
 const ACTION_LABELS: Record<string, { label: string; bg: string; text: string }> = {
@@ -775,6 +1363,10 @@ export default function DependencyGraph() {
   // v3.0: FP 影响说明 Modal state
   const [impactModal, setImpactModal] = useState<{ fpId: string; fpName: string; reqId: string } | null>(null)
 
+  // v2.45: FP 节点详情 Drawer + 版本管理 Drawer
+  const [fpDetailNode, setFpDetailNode] = useState<Node | null>(null)
+  const [versionDrawerOpen, setVersionDrawerOpen] = useState(false)
+
   // v2.3: FP 图谱筛选与审核
   const [reviewStatusFilter, setReviewStatusFilter] = useState<string>('')  // '' / pending / approved / rejected
   const [moduleFilter, setModuleFilter] = useState<string>('')  // '' 或 module_id
@@ -791,6 +1383,15 @@ export default function DependencyGraph() {
 
   // ========== Data Loading ==========
   useEffect(() => {
+    // v2.45 修复：任何产品切换（包括 A→B）都先关闭所有 Drawer/Modal，
+    // 避免显示旧产品数据或在错误产品上执行 FP 影响说明/审核操作
+    setFpDetailNode(null)
+    setImpactModal(null)
+    setVersionDrawerOpen(false)
+    setHistoryOpen(false)
+    setReviewModal(null)
+    setCtxMenu(null)
+
     if (selectedProductId) {
       prodApi.listModules(selectedProductId)
         .then(mods => setAllModules(mods || []))
@@ -816,6 +1417,9 @@ export default function DependencyGraph() {
     }
   }, [nodes, focusPendingModule])
 
+  // v2.43: 布局方向状态（TB=自上而下，LR=从左到右），dagre 布局使用
+  const [layoutDirection, setLayoutDirection] = useState<LayoutDirection>('TB')
+
   function autoLayout(index: number, total: number) {
     const cols = Math.ceil(Math.sqrt(total))
     return { x: 80 + (index % cols) * 240, y: 80 + Math.floor(index / cols) * 160 }
@@ -838,7 +1442,18 @@ export default function DependencyGraph() {
       const graphEdges: Edge[] = (data?.edges || []).map((e: any) =>
         createEdge(e.source, e.target, e.type || 'depends_on', nameMap[e.source], nameMap[e.target])
       )
-      setNodes(graphNodes)
+      // v2.43: 应用 dagre 层次布局（若用户已自定义节点位置则保留，否则按依赖关系分层）
+      const hasCustomPos = (data?.nodes || []).some((n: any) => n.position)
+      const finalNodes = hasCustomPos
+        ? graphNodes
+        : layoutHierarchical(graphNodes, graphEdges, {
+            direction: layoutDirection,
+            nodeSep: 60,
+            rankSep: 120,
+            startX: 80,
+            startY: 80,
+          })
+      setNodes(finalNodes)
       setEdges(graphEdges)
     } catch { }
     setLoading(false)
@@ -857,6 +1472,12 @@ export default function DependencyGraph() {
       // v2.3: 保存模块列表供筛选器使用
       if (data?.modules) setGraphModules(data.modules)
 
+      // v2.44: 构建 moduleId → moduleName 映射，用于在节点上显示所属模块名
+      const moduleNameMap: Record<string, string> = {}
+      ;(data?.modules || []).forEach((m: { id: string; name: string }) => {
+        moduleNameMap[m.id] = m.name
+      })
+
       // v2.3: 统计每个节点的 pending 依赖数，用于在节点上显示"待审核"标签
       const pendingDepNodeIds = new Set<string>()
       ;(data?.edges || []).forEach((e: any) => {
@@ -866,22 +1487,33 @@ export default function DependencyGraph() {
         }
       })
 
-      const fpNodes: Node[] = (data?.nodes || []).map((n: any, i: number) => ({
-        id: n.id,
-        type: 'fpNode',
-        position: autoLayout(i, (data?.nodes || []).length),
-        data: {
-          label: n.name,
-          fpType: n.fp_type,
-          reqId: n.req_id,           // 供 onConnect/deleteEdge 确定 POST/DELETE 路径参数
-          reqTitle: n.req_title,
-          reqStatus: n.req_status,   // 归档/active，前端据此切换节点样式
-          priority: n.priority,
-          moduleId: n.module_id,     // v2.3: 模块 ID
-          modules: n.modules,        // v2.3: 多模块关联
-          hasPendingReview: pendingDepNodeIds.has(n.id),  // v2.3: 是否含未审核依赖
-        },
-      }))
+      const fpNodes: Node[] = (data?.nodes || []).map((n: any, i: number) => {
+        // v2.44: 解析所属模块名列表（优先使用 modules 多模块字段，回退到 module_id）
+        const moduleIds: string[] = Array.isArray(n.modules) && n.modules.length > 0
+          ? n.modules
+          : (n.module_id ? [n.module_id] : [])
+        const moduleNames = moduleIds.map(id => moduleNameMap[id]).filter(Boolean)
+        return {
+          id: n.id,
+          type: 'fpNode',
+          position: autoLayout(i, (data?.nodes || []).length),
+          data: {
+            label: n.name,
+            fpType: n.fp_type,
+            reqId: n.req_id,           // 供 onConnect/deleteEdge 确定 POST/DELETE 路径参数
+            reqTitle: n.req_title,
+            reqStatus: n.req_status,   // 归档/active，前端据此切换节点样式
+            priority: n.priority,
+            moduleId: n.module_id,     // v2.3: 模块 ID
+            modules: n.modules,        // v2.3: 多模块关联
+            moduleNames,               // v2.44: 所属模块名列表（用于节点显示）
+            hasPendingReview: pendingDepNodeIds.has(n.id),  // v2.3: 是否含未审核依赖
+            summary: n.summary || '',                    // v2.45: FP 实现内容概括
+            relationsSummary: n.relations_summary || '', // v2.45: 与其他 FP 关系概括
+            fpStatus: n.fp_status || '',                 // v2.45: FP 自身状态
+          },
+        }
+      })
       const nameMap: Record<string, string> = {}
       fpNodes.forEach(n => { nameMap[n.id] = String(n.data.label) })
       const fpEdges: Edge[] = (data?.edges || []).map((e: any) =>
@@ -891,7 +1523,15 @@ export default function DependencyGraph() {
           e.review_status || 'pending',
         )
       )
-      setNodes(fpNodes)
+      // v2.43: FP 图谱应用 dagre 层次布局（FP 节点位置不持久化，每次重新布局）
+      const finalFpNodes = layoutHierarchical(fpNodes, fpEdges, {
+        direction: layoutDirection,
+        nodeSep: 50,
+        rankSep: 110,
+        startX: 80,
+        startY: 80,
+      })
+      setNodes(finalFpNodes)
       setEdges(fpEdges)
     } catch { }
     setLoading(false)
@@ -1036,15 +1676,11 @@ export default function DependencyGraph() {
     try { await dependencyGraph.updateNodePosition(node.id, node.position.x, node.position.y) } catch { }
   }, [graphType])
 
-  // Double-click: 模块模式打开 picker 交换节点；FP 模式打开影响说明 Modal
+  // Double-click: 模块模式打开 picker 交换节点；FP 模式打开节点详情 Drawer
   const onNodeDoubleClick = useCallback((_: any, node: Node) => {
     if (graphType === 'fp') {
-      // FP 模式：打开影响说明 Modal
-      const reqId = (node.data as any)?.reqId as string
-      const fpName = (node.data as any)?.label as string
-      if (reqId && node.id) {
-        setImpactModal({ fpId: node.id, fpName, reqId })
-      }
+      // v2.45: FP 模式双击打开详情 Drawer（影响说明可通过 Drawer 内按钮打开）
+      setFpDetailNode(node)
       return
     }
     setPickerTarget({ nodeId: node.id })
@@ -1082,7 +1718,16 @@ export default function DependencyGraph() {
   // ========== Keyboard ==========
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { setFullscreen(false); setPickerOpen(false) }
+      if (e.key === 'Escape') {
+        // v2.45 增强：Esc 按优先级关闭 Drawer/Modal，最后才关全屏/产品 picker
+        if (ctxMenu) { setCtxMenu(null); return }
+        if (reviewModal) { setReviewModal(null); return }
+        if (impactModal) { setImpactModal(null); return }
+        if (fpDetailNode) { setFpDetailNode(null); return }
+        if (versionDrawerOpen) { setVersionDrawerOpen(false); return }
+        if (historyOpen) { setHistoryOpen(false); return }
+        setFullscreen(false); setPickerOpen(false)
+      }
       if ((e.key === 'Delete' || e.key === 'Backspace') &&
         document.activeElement?.tagName !== 'INPUT' &&
         document.activeElement?.tagName !== 'TEXTAREA') {
@@ -1091,7 +1736,7 @@ export default function DependencyGraph() {
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [nodes, edges])
+  }, [nodes, edges, ctxMenu, reviewModal, impactModal, fpDetailNode, versionDrawerOpen, historyOpen])
 
   const removeSelected = () => {
     const selNodeIds = nodes.filter(n => n.selected).map(n => n.id)
@@ -1327,8 +1972,14 @@ export default function DependencyGraph() {
           </div>
         )}
 
-        {/* 右侧操作组：刷新 + 全屏 — ml-auto 推到行尾，宽度不够时自动换到下一行 */}
+        {/* 右侧操作组：版本管理 + 刷新 + 全屏 — ml-auto 推到行尾，宽度不够时自动换到下一行 */}
         <div className="flex items-center gap-2 ml-auto shrink-0">
+          {selectedProductId && (
+            <button onClick={() => setVersionDrawerOpen(true)} className="btn-ghost text-xs flex items-center gap-1"
+              title="查看依赖版本快照与对比">
+              <History className="w-3.5 h-3.5" /> 版本管理
+            </button>
+          )}
           <button onClick={() => graphType === 'fp' ? loadFPGraph() : loadGraph()} disabled={loading} className="btn-ghost text-xs">
             <Loader2 className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
           </button>
@@ -1379,7 +2030,7 @@ export default function DependencyGraph() {
               <div className="mt-auto pt-3" style={{ borderTop: '1px solid var(--border)' }}>
                 <p className="text-[10px] leading-relaxed" style={{ color: 'var(--foreground-tertiary)' }}>
                   {graphType === 'fp'
-                    ? '双击节点生成影响说明 · 拖拽节点手柄连线 · 右键删除/交换方向 · 位置不持久化'
+                    ? '双击节点查看详情 · 拖拽节点手柄连线 · 右键删除/交换方向 · 位置不持久化'
                     : '从工具栏拖拽模块到画布 · 拖拽节点手柄连线 · 双击节点切换模块'}
                 </p>
               </div>
@@ -1420,11 +2071,16 @@ export default function DependencyGraph() {
                 onEdgeClick={onEdgeClick}
                 onPaneClick={onPaneClick}
                 nodeTypes={nodeTypes}
+                edgeTypes={edgeTypes}
+                // v2.43: Loose 模式允许任意 Handle 互相连接（浮动边核心配置）
+                connectionMode={ConnectionMode.Loose}
+                // v2.43: 选中边时提升 z-index，避免被节点遮挡
+                elevateEdgesOnSelect
                 fitView fitViewOptions={{ padding: 0.3 }}
                 selectionMode={SelectionMode.Partial} selectionOnDrag
                 panOnDrag={[1, 2]} deleteKeyCode={null} multiSelectionKeyCode="Shift"
                 connectionLineStyle={{ stroke: currentEdgeStyles[edgeType]?.stroke || '#818cf8', strokeWidth: 2 }}
-                defaultEdgeOptions={{ type: 'smoothstep', animated: true }}
+                defaultEdgeOptions={{ type: 'floating', animated: true }}
               >
                 <Background color="#e2e8f0" gap={20} size={1} />
                 <Controls showInteractive={false} className="!rounded-xl !shadow-md !border-[var(--border)]" />
@@ -1586,6 +2242,26 @@ export default function DependencyGraph() {
           reqId={reviewModal.reqId}
           onClose={() => setReviewModal(null)}
           onReviewed={onReviewed}
+        />
+      )}
+
+      {/* v2.45: FP 节点详情 Drawer — 双击 FP 节点打开 */}
+      {fpDetailNode && (
+        <FPDetailDrawer
+          node={fpDetailNode}
+          onClose={() => setFpDetailNode(null)}
+          onShowImpact={(fpId, fpName, reqId) => {
+            setFpDetailNode(null)
+            setImpactModal({ fpId, fpName, reqId })
+          }}
+        />
+      )}
+
+      {/* v2.45: 版本管理 Drawer */}
+      {versionDrawerOpen && selectedProductId && (
+        <VersionManagementDrawer
+          productId={selectedProductId}
+          onClose={() => setVersionDrawerOpen(false)}
         />
       )}
     </div>

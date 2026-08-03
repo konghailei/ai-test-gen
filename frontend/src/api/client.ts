@@ -9,6 +9,7 @@ import type {
   ReqVersionSummary, ReqVersionDetail,
   LLMCallLogItem, LLMCallLogDetail, OperationLogItem,
   RequirementRevision,
+  DependencyVersion, DependencyVersionDetail, VersionDiff, KbProject,
 } from '../types'
 
 const BASE = '/api'
@@ -59,38 +60,6 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return json.data as T
 }
 
-async function uploadFile<T = ApiResponse>(url: string, file: File, extra: Record<string, string>, timeoutMs = 300000): Promise<T> {
-  const form = new FormData()
-  form.append('file', file)
-  Object.entries(extra).forEach(([k, v]) => form.append(k, v))
-  const headers: Record<string, string> = {}
-  const token = getToken()
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
-  
-  try {
-    const res = await fetch(`${BASE}${url}`, { 
-      method: 'POST', 
-      body: form, 
-      headers,
-    })
-    if (res.status === 401) { forceLogout(); throw new Error('登录已过期，请重新登录') }
-    const json = await res.json()
-    // FastAPI 错误格式：{detail: "..."}，统一转为 {success: false, message: detail}
-    if (!res.ok && json.detail) {
-      throw new Error(json.detail)
-    }
-    // 标准格式：{success: false, message: "..."}
-    if (json.success === false) {
-      throw new Error(json.message || '请求失败')
-    }
-    return json as T
-  } catch (err: any) {
-    throw err
-  }
-}
-
 // ============================================================
 // 健康检查
 // ============================================================
@@ -120,11 +89,6 @@ export const requirements = {
       method: 'POST',
       body: JSON.stringify({ raw_text: raw, ...meta }),
     }),
-    uploadFile: (file: File, productId = 'PROD-DEFAULT', title = '', projectId = '') => {
-        const extra: Record<string, string> = { product_id: productId, title }
-        if (projectId) extra.project_id = projectId
-        return uploadFile('/requirements/upload/file', file, extra)
-    },
     uploadMultiFiles: (files: File[], productId = 'PROD-DEFAULT', title = '', projectId = '', modules = '') => {
         const form = new FormData()
         files.forEach(f => form.append('files', f))
@@ -359,11 +323,6 @@ export const requirements = {
     request<{ success: boolean }>(`/requirements/${reqId}/fp/${fpId}`, { method: 'DELETE' }),
   fpApprove: (reqId: string, fpId: string) =>
     request<{ message: string }>(`/requirements/${reqId}/fp/${fpId}/approve`, { method: 'PATCH' }),
-  fpRegenerate: (reqId: string, fpId: string, hint?: string) =>
-    request<{ name: string; fp_type: string; srr_json: any; test_hints: any[] }>(
-      `/requirements/${reqId}/fp/${fpId}/regenerate`,
-      { method: 'PATCH', body: JSON.stringify({ hint: hint || '' }) },
-    ),
   fpMerge: (reqId: string, fpIds: string[], mergedName?: string) =>
     request<{ id: string; name: string; fp_type: string }>(
       `/requirements/${reqId}/fp/merge`,
@@ -524,13 +483,14 @@ export const knowledge = {
     if (category) params.set('category', category)
     return request<PaginatedData<TestPattern>>(`/knowledge/patterns?${params}`)
   },
-  listEntries: (productId?: string, type?: string, filters?: { search?: string; vectorized?: string; modules?: string[] }) => {
+  listEntries: (productId?: string, type?: string, filters?: { search?: string; vectorized?: string; modules?: string[]; limit?: number }) => {
     const params = new URLSearchParams()
     if (productId) params.set('product_id', productId)
     if (type) params.set('type', type)
     if (filters?.search) params.set('search', filters.search)
     if (filters?.vectorized) params.set('vectorized', filters.vectorized)
     if (filters?.modules?.length) params.set('modules', filters.modules.join(','))
+    if (filters?.limit) params.set('limit', String(filters.limit))
     return request<{ items: KbEntry[]; total: number }>(`/knowledge/entries?${params}`)
   },
   deleteEntry: (entryId: string, entryType: string) =>
@@ -812,6 +772,44 @@ export const products = {
       method: 'PUT',
       body: JSON.stringify({ name, description, version }),
     }),
+  // v2.45 项目归档
+  archiveProject: (projectId: string, goLiveDate: string, changeSummary?: string) =>
+    request<{ project_id: string; status: string; version_id: string; requirement_count: number; fp_count: number; dependency_count: number; kb_written: number; go_live_date: string }>(
+      `/products/projects/${projectId}/archive`,
+      { method: 'POST', body: JSON.stringify({ go_live_date: goLiveDate, change_summary: changeSummary || '' }) }
+    ),
+  // v2.46 标记项目为待归档（三状态机中间态）
+  markPendingArchive: (projectId: string) =>
+    request<{ project_id: string; status: string; requirement_count: number; unconfirmed_count: number; unconfirmed_titles: string[] }>(
+      `/products/projects/${projectId}/pending-archive`,
+      { method: 'POST' }
+    ),
+  // v2.46 取消待归档（回到活跃）
+  cancelPendingArchive: (projectId: string) =>
+    request<{ project_id: string; status: string }>(
+      `/products/projects/${projectId}/cancel-pending-archive`,
+      { method: 'POST' }
+    ),
+  // v2.45 项目恢复活动
+  reactivateProject: (projectId: string) =>
+    request<{ project_id: string; status: string; requirement_count: number; fp_count: number; versions_deactivated: number }>(
+      `/products/projects/${projectId}/reactivate`,
+      { method: 'POST' }
+    ),
+  // v2.45 依赖版本查询
+  listDependencyVersionsByProduct: (productId: string) =>
+    request<DependencyVersion[]>(`/products/products/${productId}/fp/dependency-versions`),
+  listDependencyVersionsByProject: (projectId: string) =>
+    request<DependencyVersion[]>(`/products/projects/${projectId}/fp/dependency-versions`),
+  getDependencyVersionDetail: (versionPk: number) =>
+    request<DependencyVersionDetail>(`/products/fp/dependency-versions/${versionPk}`),
+  diffDependencyVersions: (v1: number, v2: number) =>
+    request<VersionDiff>(`/products/fp/dependency-versions/${v1}/diff/${v2}`),
+  // v2.45 知识库按项目展示
+  listKbProjects: (productId: string) =>
+    request<KbProject[]>(`/products/products/${productId}/kb/projects`),
+  listKbEntriesByProject: (projectId: string) =>
+    request<{ project: any; requirements: any[]; test_cases: any[] }>(`/products/projects/${projectId}/kb/entries`),
 }
 
 // ============================================================

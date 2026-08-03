@@ -282,10 +282,12 @@ export default function RequirementClarify() {
   }
 
   // ===== 进度计算 =====
+  // v2.55: 进度只统计 critical + important 问题（与页面展示一致），optional 问题不纳入进度
   const { answeredCount, skippedCount, totalCount } = useMemo(() => {
-    const answered = questions.filter(q => (answers[q.id] || '').trim() !== '').length
-    const skip = questions.filter(q => skipped.has(q.id)).length
-    return { answeredCount: answered, skippedCount: skip, totalCount: questions.length }
+    const visibleQs = questions.filter(q => q.priority === 'critical' || q.priority === 'important')
+    const answered = visibleQs.filter(q => (answers[q.id] || '').trim() !== '').length
+    const skip = visibleQs.filter(q => skipped.has(q.id)).length
+    return { answeredCount: answered, skippedCount: skip, totalCount: visibleQs.length }
   }, [questions, answers, skipped])
 
   // ===== 问题分组 =====

@@ -1,17 +1,16 @@
 import { useState, useEffect, useMemo } from 'react'
 import {
   Save, RotateCcw, Loader2, FileText, CheckCircle2, Search, TestTube,
-  Shield, GitBranch, History, X, Eye, Code, Image, Database, Layers,
+  Shield, GitBranch, History, X, Eye, Code, Image, Database,
 } from 'lucide-react'
 import { promptApi } from '../api/client'
 import type { PromptItem, PromptHistoryItem } from '../types'
 
 const TABS = [
-  { key: 'req', label: '需求分析', icon: Search, modules: ['req_agent', 'clarify_agent'], desc: '需求解析与澄清 Agent 提示词' },
+  { key: 'req', label: '需求分析', icon: Search, modules: ['req_agent', 'clarify_agent', 'fp_agent'], desc: '需求解析、澄清与功能点拆分 Agent 提示词' },
   { key: 'gen', label: '用例生成', icon: TestTube, modules: ['gen_agent'], desc: '测试用例自动生成 Agent 提示词' },
   { key: 'review', label: '用例审核', icon: Shield, modules: ['review_agent'], desc: '用例质量审核 Agent 提示词' },
   { key: 'impact', label: '影响分析', icon: GitBranch, modules: ['impact_agent'], desc: '需求变更影响分析 Agent 提示词' },
-  { key: 'fp', label: '功能点拆分', icon: Layers, modules: ['fp_agent'], desc: '功能点拆分与关联分析 Agent 提示词' },
   { key: 'kb', label: '知识库问答', icon: Database, modules: ['knowledge_qa'], desc: '知识库问答与追问 Agent 提示词' },
   { key: 'vision', label: '多模态识别', icon: Image, modules: ['vision'], desc: '图片/流程图/架构图等多模态内容识别提示词' },
 ]

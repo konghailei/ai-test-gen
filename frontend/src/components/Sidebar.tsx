@@ -12,14 +12,19 @@ function navItems(permissions: string[]) {
     { key: 'dashboard', path: '/dashboard', label: '仪表盘', icon: LayoutDashboard },
     { key: 'project_management', path: '/projects', label: '项目管理', icon: FolderOpen },
     { key: 'module_management', path: '/modules', label: '模块管理', icon: Puzzle },
-    { key: 'requirements', path: '/requirements', label: '需求管理', icon: FileText },
     { key: 'testcases', path: '/testcases', label: '测试用例', icon: TestTube },
     { key: 'dependency_graph', path: '/dependency-graph', label: '依赖图谱', icon: Share2 },
     { key: 'knowledge', path: '/knowledge', label: '知识库', icon: Database },
     { key: 'knowledge_qa', path: '/knowledge-qa', label: '知识问答', icon: MessageSquare },
   ]
-  // 兼容旧权限：projects_modules 同时允许访问项目管理/模块管理
-  return items.filter(i => has(i.key) || (i.key === 'project_management' && has('projects_modules')) || (i.key === 'module_management' && has('projects_modules')))
+  // 兼容旧权限映射：
+  // - projects_modules → project_management + module_management
+  // - requirements → project_management（需求已整合到项目管理）
+  return items.filter(i =>
+    has(i.key) ||
+    (i.key === 'project_management' && (has('projects_modules') || has('requirements'))) ||
+    (i.key === 'module_management' && has('projects_modules'))
+  )
 }
 
 export default function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {

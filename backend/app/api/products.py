@@ -31,6 +31,7 @@ from app.db.models import (
     Product, Project, Module, Requirement, ModuleDependency, TestCase, User,
     FunctionalPoint, FPDependency, AnalysisTask, GenerationBatch, ReqDependency,
     Traceability, ErrorCase,
+    FPDependencyVersion, FPDependencyVersionItem, FPDependencyHistory,
 )
 from app.models.api_schemas import ApiResponse
 from app.utils.logger import logger
@@ -296,6 +297,11 @@ async def list_projects(pid: str, session: AsyncSession = Depends(get_session)):
         "id": r.id, "product_id": r.product_id, "name": r.name,
         "description": r.description, "version": r.version or "1.0",
         "created_at": r.created_at.isoformat() if r.created_at else "",
+        # v2.45: 归档状态字段
+        "status": r.status or "active",
+        "go_live_date": r.go_live_date.isoformat() if r.go_live_date else "",
+        "archived_at": r.archived_at.isoformat() if r.archived_at else "",
+        "archived_by": r.archived_by or "",
     } for r in rows])
 
 
@@ -466,6 +472,8 @@ async def delete_project(proj_id: str, session: AsyncSession = Depends(get_sessi
 
     所有引用 requirements.id 的外键均为 RESTRICT，故由 _cascade_delete_requirements
     显式按"先子表后父表"顺序清理，避免外键冲突。
+    v2.45: 补充清理 FPDependencyVersion/FPDependencyVersionItem（旧库可能未生效 ondelete=CASCADE），
+           并使用按 project_id 批量清理向量（含需求向量 + FP 向量 + 用例向量）。
     """
     # 先收该项目下所有需求 ID，用于级联删除与清理向量库
     req_result = await session.execute(
@@ -473,21 +481,918 @@ async def delete_project(proj_id: str, session: AsyncSession = Depends(get_sessi
     )
     req_ids = [r[0] for r in req_result.all()]
 
-    # 应用层级联删除需求及其所有子表（analysis_tasks / traceability 等）
-    await _cascade_delete_requirements(session, req_ids)
-    await session.execute(delete(Project).where(Project.id == proj_id))
-    await session.commit()
+    try:
+        # 应用层级联删除需求及其所有子表（analysis_tasks / traceability 等）
+        await _cascade_delete_requirements(session, req_ids)
+        # v2.45: 显式清理版本快照表（旧库 ondelete=CASCADE 可能未生效）
+        version_pks_subq = select(FPDependencyVersion.id).where(
+            FPDependencyVersion.project_id == proj_id
+        ).scalar_subquery()
+        await session.execute(delete(FPDependencyVersionItem).where(
+            FPDependencyVersionItem.version_pk.in_(version_pks_subq)
+        ))
+        await session.execute(delete(FPDependencyVersion).where(
+            FPDependencyVersion.project_id == proj_id
+        ))
+        await session.execute(delete(Project).where(Project.id == proj_id))
+        await session.commit()
+    except sa_exc.IntegrityError as e:
+        await session.rollback()
+        logger.error("[API/products] 项目删除失败(外键冲突): proj_id={}, error={}", proj_id, str(e)[:200])
+        raise HTTPException(500, f"删除失败（外键冲突）：{str(e.orig)[:200]}")
+    except Exception as e:
+        await session.rollback()
+        logger.error("[API/products] 项目删除失败: proj_id={}, error={}", proj_id, str(e)[:200])
+        raise HTTPException(500, f"删除失败：{str(e)[:200]}")
 
-    # 同步清理向量库
-    for req_id in req_ids:
-        try:
-            from app.db.milvus_store import vector_store
-            await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
-        except Exception as e:
-            logger.warning("[API/products] 向量库删除失败(不阻断): req_id={}, error={}", req_id, str(e)[:100])
+    # 同步清理向量库：按 project_id 批量删除（需求向量 + FP 向量 + 用例向量）
+    # v2.45 修复：原循环单条 delete_requirement_from_kb 只删需求向量，FP 向量（FP-{fp_id}）成孤儿
+    try:
+        from app.db.milvus_store import vector_store
+        deleted_reqs = await asyncio.to_thread(vector_store.delete_requirement_by_project, proj_id)
+        deleted_cases = await asyncio.to_thread(vector_store.delete_test_case_by_project, proj_id)
+        logger.info(
+            "[API/products] 向量库清理完成: proj_id={}, 需求/FP向量={}, 用例向量={}",
+            proj_id, deleted_reqs, deleted_cases,
+        )
+    except Exception as e:
+        logger.warning(
+            "[API/products] 向量库批量清理失败(不阻断): proj_id={}, error={}",
+            proj_id, str(e)[:200],
+        )
+        # 退化策略：按 req_id 逐条清理需求向量
+        for req_id in req_ids:
+            try:
+                await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
+            except Exception as inner_e:
+                logger.warning("[API/products] 单条需求向量清理失败: req_id={}, error={}", req_id, str(inner_e)[:100])
 
     logger.info("[API/products] 项目已删除: id={}, 关联需求 {} 条已清理", proj_id, len(req_ids))
     return ApiResponse(success=True, message="已删除")
+
+
+# ============================================================================
+# v2.45: 项目归档 / 恢复活动（从需求级迁移到项目级）
+# ============================================================================
+
+class ProjectArchiveRequest(BaseModel):
+    """项目归档请求模型。"""
+    go_live_date: str = Field(..., description="上线时间 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM")
+    change_summary: str = Field(default="", max_length=1024, description="变更说明（可选）")
+
+
+async def _build_fp_relations_summary(fp_id: str, deps: list, fp_name_map: dict) -> str:
+    """聚合单个 FP 的所有依赖描述，生成关系概括。"""
+    parts = []
+    for d in deps:
+        if d.source_fp_id == fp_id:
+            other_name = fp_name_map.get(d.target_fp_id, d.target_fp_id)
+            parts.append(f"→ {other_name}（{d.relation_type}）: {d.description or ''}")
+        elif d.target_fp_id == fp_id:
+            other_name = fp_name_map.get(d.source_fp_id, d.source_fp_id)
+            parts.append(f"← {other_name}（{d.relation_type}）: {d.description or ''}")
+    return "\n".join(parts) if parts else ""
+
+
+@router.post("/projects/{proj_id}/archive", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def archive_project(
+    proj_id: str,
+    body: ProjectArchiveRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """项目归档（二状态机：active → archived 直接流转）。
+
+    规则：
+    - 仅 active 状态可归档
+    - 项目下所有需求必须为 confirmed 状态（防止未审核需求进入知识库）
+    - 项目状态 pending_archive → archived
+    - 项目下所有需求按 created_at 排序依次归档（archived + go_live_date + archived_at）
+    - 所有 FP.status → archived，同步 summary/relations_summary
+    - 生成依赖版本快照（fp_dependency_versions + items）
+    - 当前 FPDependency.is_active → False（冻结为历史版本）
+    - 写入向量库（metadata 新增 project_id）
+
+    Args:
+        proj_id: 项目 ID
+        body: 含 go_live_date（上线时间）和 change_summary（变更说明）
+    """
+    # 1. 查询项目
+    project = await session.get(Project, proj_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
+    # 仅活跃状态可归档（active → archived 直接流转）
+    if project.status == "archived":
+        raise HTTPException(status_code=409, detail="项目已归档，无需重复归档")
+    if project.status != "active":
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目当前状态为「{project.status}」，仅活跃状态可归档"
+        )
+
+    # 2. 查询项目下所有需求，校验状态
+    req_result = await session.execute(
+        select(Requirement).where(Requirement.project_id == proj_id).order_by(Requirement.created_at)
+    )
+    requirements = req_result.scalars().all()
+    if not requirements:
+        raise HTTPException(status_code=400, detail="项目下无需求，无法归档")
+
+    non_confirmed = [r for r in requirements if r.status not in ("confirmed", "active")]
+    if non_confirmed:
+        unconfirmed_titles = [r.title or r.id for r in non_confirmed[:5]]
+        # v2.45 修复：错误信息与逻辑一致——代码允许 confirmed 和 active 两种状态归档
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目下有 {len(non_confirmed)} 个需求未确认（仅 confirmed 或 active 可归档）: {', '.join(unconfirmed_titles)}"
+        )
+
+    # 3. 解析上线时间
+    try:
+        parsed_go_live = datetime.fromisoformat(body.go_live_date)
+    except ValueError:
+        try:
+            parsed_go_live = datetime.fromisoformat(body.go_live_date + "T00:00:00")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"上线时间格式不正确: {body.go_live_date}，需为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD",
+            )
+
+    # 4. 更新项目状态
+    now = datetime.now(timezone.utc)
+    project.status = "archived"
+    project.go_live_date = parsed_go_live
+    project.archived_at = now
+    project.archived_by = current_user.username
+
+    # 5. 收集所有 FP 和依赖（用于快照和 summary 同步）
+    req_ids = [r.id for r in requirements]
+    fp_result = await session.execute(
+        select(FunctionalPoint).where(FunctionalPoint.requirement_id.in_(req_ids))
+    )
+    all_fps = fp_result.scalars().all()
+    fp_ids = [f.id for f in all_fps]
+    fp_name_map = {f.id: f.name for f in all_fps}
+
+    dep_result = await session.execute(
+        select(FPDependency).where(
+            (FPDependency.source_fp_id.in_(fp_ids)) | (FPDependency.target_fp_id.in_(fp_ids))
+        )
+    )
+    all_deps = dep_result.scalars().all()
+
+    # 6. 同步 FP.summary 和 relations_summary，更新 FP.status
+    for f in all_fps:
+        # summary 从 srr_json.sub_srr.summary 同步
+        if isinstance(f.srr_json, dict):
+            sub_srr = f.srr_json.get("sub_srr", {})
+            if isinstance(sub_srr, dict) and sub_srr.get("summary"):
+                f.summary = sub_srr["summary"]
+            elif f.srr_json.get("requirement", {}).get("summary"):
+                f.summary = f.srr_json["requirement"]["summary"]
+        # relations_summary 聚合依赖描述
+        f.relations_summary = await _build_fp_relations_summary(f.id, all_deps, fp_name_map)
+        if f.status != "archived":
+            f.status = "archived"
+
+    # 7. 生成版本号（同项目重新归档时后缀递增 -v2/-v3）
+    # v2.45 修复：version_id 是全局唯一约束，需全局查重（非仅当前项目），
+    # 避免不同产品下同名同版本号项目生成相同 version_id 导致 commit 时冲突。
+    base_version_id = f"{project.version}-{project.name}"
+    existing_versions = await session.execute(
+        select(FPDependencyVersion.version_id).where(
+            FPDependencyVersion.version_id.like(f"{base_version_id}%")
+        )
+    )
+    existing_ids = {r[0] for r in existing_versions.all()}
+    version_id = base_version_id
+    suffix = 2
+    while version_id in existing_ids:
+        version_id = f"{base_version_id}-v{suffix}"
+        suffix += 1
+
+    # 8. 创建版本快照
+    version = FPDependencyVersion(
+        version_id=version_id,
+        project_id=proj_id,
+        project_version=project.version,
+        project_name=project.name,
+        go_live_date=parsed_go_live,
+        snapshot_at=now,
+        is_active=True,
+        archived_by=current_user.username,
+        requirement_count=len(requirements),
+        fp_count=len(all_fps),
+        dependency_count=len(all_deps),
+        change_summary=body.change_summary,
+    )
+    session.add(version)
+    await session.flush()  # 获取 version.id
+
+    # 9. 快照所有依赖到 version_items
+    req_title_map = {r.id: r.title or "" for r in requirements}
+    fp_req_map = {f.id: f.requirement_id for f in all_fps}
+    for d in all_deps:
+        item = FPDependencyVersionItem(
+            version_pk=version.id,
+            source_fp_id=d.source_fp_id,
+            source_fp_name=fp_name_map.get(d.source_fp_id, d.source_fp_id),
+            target_fp_id=d.target_fp_id,
+            target_fp_name=fp_name_map.get(d.target_fp_id, d.target_fp_id),
+            relation_type=d.relation_type,
+            description=d.description or "",
+            review_status=d.review_status,
+            source_req_id=fp_req_map.get(d.source_fp_id, ""),
+            source_req_title=req_title_map.get(fp_req_map.get(d.source_fp_id, ""), ""),
+            # v2.45 修复：补充 target 侧需求字段，支持跨需求双向追溯
+            target_req_id=fp_req_map.get(d.target_fp_id, ""),
+            target_req_title=req_title_map.get(fp_req_map.get(d.target_fp_id, ""), ""),
+        )
+        session.add(item)
+
+    # 10. 冻结当前 FPDependency（is_active=False，关联版本快照）
+    # v2.45 修复：同步写入 FPDependencyHistory 审计记录，使用模型已设计的 is_active/version_pk 追踪字段
+    for d in all_deps:
+        old_is_active = d.is_active
+        old_version_pk = d.version_pk
+        d.is_active = False
+        d.version_pk = version.id
+        session.add(FPDependencyHistory(
+            dependency_id=d.id,
+            source_fp_id=d.source_fp_id,
+            target_fp_id=d.target_fp_id,
+            relation_type=d.relation_type,
+            description=d.description or "",
+            action="modified",
+            old_review_status=d.review_status,
+            new_review_status=d.review_status,
+            old_is_active=old_is_active,
+            new_is_active=False,
+            old_version_pk=old_version_pk,
+            new_version_pk=version.id,
+            changed_by=current_user.username,
+            change_reason=f"项目归档: {body.change_summary}" if body.change_summary else "项目归档",
+        ))
+
+    # 11. 更新所有需求状态
+    for r in requirements:
+        r.status = "archived"
+        r.go_live_date = parsed_go_live
+        r.archived_at = now
+
+    try:
+        await session.commit()
+    except sa_exc.IntegrityError as e:
+        await session.rollback()
+        # v2.45: 使用辅助函数检测 version_id 唯一约束冲突（避免宽泛字符串匹配误判）
+        if _is_unique_violation(e, "fp_dependency_versions_version_id_key"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"版本号 '{version_id}' 已存在（可能不同产品下有同名同版本号项目），请修改项目名称或版本后重试"
+            )
+        raise HTTPException(status_code=409, detail=f"归档失败（数据冲突）: {str(e)[:200]}")
+
+    # 12. 写入向量库（异步，不阻断主流程）
+    project_version = project.version
+    kb_count = 0
+    # v2.45 优化：按 requirement_id 分组 FP，避免嵌套循环 O(需求数 × FP数) → O(需求数 + FP数)
+    fp_by_req: dict[str, list] = {}
+    for f in all_fps:
+        fp_by_req.setdefault(f.requirement_id, []).append(f)
+
+    for r in requirements:
+        milvus_meta = {
+            "type": "requirement",
+            "product_id": r.product_id,
+            "project_id": proj_id,  # v2.45: 新增 project_id，支持按项目过滤
+            "modules": ",".join(r.modules or []),
+            "priority": r.priority,
+            "status": "archived",
+            "go_live_date": parsed_go_live.isoformat(),
+            "project_version": project_version,
+        }
+        try:
+            from app.db.milvus_store import vector_store
+            await asyncio.to_thread(
+                vector_store.add_requirement,
+                req_id=r.id,
+                srr_json=r.srr_json or {},
+                metadata=milvus_meta,
+            )
+            kb_count += 1
+        except Exception as e:
+            logger.warning("[ArchiveProject] 需求向量写入失败 req_id={}: {}", r.id, str(e)[:150])
+
+        # FP 向量（从预分组字典读取，O(1) 查找）
+        for f in fp_by_req.get(r.id, []):
+            fp_meta = {
+                "type": "functional_point",
+                "requirement_id": r.id,
+                "project_id": proj_id,  # v2.45: 新增
+                "fp_id": f.id or "",
+                "fp_name": f.name or "",
+                "modules": ",".join(f.modules or []) if f.modules else (f.module_id or ""),
+                "module_id": f.module_id or "",
+                "fp_type": f.fp_type,
+                "product_id": r.product_id,
+                "status": "archived",
+            }
+            embed_srr = dict(f.srr_json) if isinstance(f.srr_json, dict) else {}
+            embed_srr.setdefault("requirement", {})
+            embed_srr["requirement"]["title"] = f.name
+            if f.summary:
+                embed_srr["requirement"]["summary"] = f.summary
+            try:
+                from app.db.milvus_store import vector_store
+                await asyncio.to_thread(
+                    vector_store.add_requirement,
+                    req_id=f"FP-{f.id}",
+                    srr_json=embed_srr,
+                    metadata=fp_meta,
+                )
+            except Exception as e:
+                logger.warning("[ArchiveProject] FP向量写入失败 fp_id={}: {}", f.id, str(e)[:150])
+
+    logger.info(
+        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量写入={}",
+        proj_id, version_id, len(requirements), len(all_fps), len(all_deps), kb_count
+    )
+    return ApiResponse(
+        success=True,
+        message=f"项目已归档，版本号: {version_id}",
+        data={
+            "project_id": proj_id,
+            "status": "archived",
+            "version_id": version_id,
+            "requirement_count": len(requirements),
+            "fp_count": len(all_fps),
+            "dependency_count": len(all_deps),
+            "kb_written": kb_count,
+            "go_live_date": parsed_go_live.isoformat(),
+        },
+    )
+
+
+# ============================================================================
+# v2.46: 项目状态机——标记待归档 / 取消待归档
+# ============================================================================
+
+@router.post("/projects/{proj_id}/pending-archive", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def mark_pending_archive(
+    proj_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """标记项目为「待归档」状态（v2.46 三状态机中间态）。
+
+    规则：
+    - 仅 active 状态可标记为 pending_archive
+    - 标记后项目下需求进入只读状态（编辑接口需校验）
+    - 不写入知识库，不生成版本快照，可随时取消回到 active
+
+    返回未确认需求列表，供前端提示用户在归档前补全。
+    """
+    project = await session.get(Project, proj_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
+    if project.status != "active":
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目当前状态为「{project.status}」，仅 active 可标记为待归档"
+        )
+
+    # 查询项目下需求，统计未确认数量（用于前端提示，但不阻断标记）
+    req_result = await session.execute(
+        select(Requirement).where(Requirement.project_id == proj_id)
+    )
+    requirements = req_result.scalars().all()
+    unconfirmed = [r for r in requirements if r.status not in ("confirmed", "active")]
+
+    project.status = "pending_archive"
+    await session.commit()
+
+    logger.info(
+        "[MarkPendingArchive] 项目标记为待归档: proj_id={}, user={}, 需求={}, 未确认={}",
+        proj_id, current_user.username, len(requirements), len(unconfirmed)
+    )
+    return ApiResponse(
+        success=True,
+        message="项目已标记为待归档，可校验需求后执行归档" if not unconfirmed
+                else f"项目已标记为待归档，但有 {len(unconfirmed)} 个需求未确认",
+        data={
+            "project_id": proj_id,
+            "status": "pending_archive",
+            "requirement_count": len(requirements),
+            "unconfirmed_count": len(unconfirmed),
+            "unconfirmed_titles": [r.title or r.id for r in unconfirmed[:10]],
+        },
+    )
+
+
+@router.post("/projects/{proj_id}/cancel-pending-archive", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def cancel_pending_archive(
+    proj_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """取消「待归档」状态，回到活跃（v2.46 三状态机回滚）。
+
+    规则：
+    - 仅 pending_archive 状态可取消
+    - 不涉及向量库/版本快照操作（中间态未写入）
+    """
+    project = await session.get(Project, proj_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
+    if project.status != "pending_archive":
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目当前状态为「{project.status}」，仅 pending_archive 可取消"
+        )
+
+    project.status = "active"
+    await session.commit()
+
+    logger.info(
+        "[CancelPendingArchive] 取消待归档，项目回到活跃: proj_id={}, user={}",
+        proj_id, current_user.username
+    )
+    return ApiResponse(
+        success=True,
+        message="已取消待归档，项目回到活跃状态",
+        data={"project_id": proj_id, "status": "active"},
+    )
+
+
+@router.post("/projects/{proj_id}/reactivate", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def reactivate_project(
+    proj_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """项目恢复活动（v2.46：支持 pending_archive 和 archived 回到 active）。
+
+    规则：
+    - archived → active：
+      * 删除该项目所有需求向量 + FP 向量（按 project_id 批量）
+      * 对应版本 fp_dependency_versions.is_active → False
+      * FPDependency.is_active → True（当前边重新启用）
+      * Requirement.status: archived → active
+      * FP.status: archived → pending_review（v2.45：需重新审核，避免跳过审核流程）
+      * 清空 go_live_date / archived_at
+    - pending_archive → active：
+      * 仅状态变更，无需向量库/版本操作（中间态未持久化副作用）
+    """
+    # 1. 查询项目
+    project = await session.get(Project, proj_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
+    if project.status == "active":
+        raise HTTPException(status_code=409, detail="项目已为活跃状态，无需恢复")
+    if project.status not in ("archived", "pending_archive"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"项目状态为 {project.status}，仅 archived/pending_archive 可恢复活动"
+        )
+
+    # v2.46: pending_archive → active 的快速路径（无副作用）
+    if project.status == "pending_archive":
+        project.status = "active"
+        await session.commit()
+        logger.info(
+            "[ReactivateProject] 待归档项目回到活跃: proj_id={}, user={}",
+            proj_id, current_user.username
+        )
+        return ApiResponse(
+            success=True,
+            message="项目已取消待归档，回到活跃状态",
+            data={"project_id": proj_id, "status": "active", "fast_path": True},
+        )
+
+    # archived → active 的完整路径（保留 v2.45 原有逻辑）
+
+    # 2. 查询项目下所有需求
+    req_result = await session.execute(
+        select(Requirement).where(Requirement.project_id == proj_id)
+    )
+    requirements = req_result.scalars().all()
+    req_ids = [r.id for r in requirements]
+
+    # 3. 查询所有 FP 和依赖
+    fp_result = await session.execute(
+        select(FunctionalPoint).where(FunctionalPoint.requirement_id.in_(req_ids))
+    )
+    all_fps = fp_result.scalars().all()
+
+    dep_result = await session.execute(
+        select(FPDependency).where(
+            (FPDependency.source_fp_id.in_([f.id for f in all_fps]))
+            | (FPDependency.target_fp_id.in_([f.id for f in all_fps]))
+        )
+    )
+    all_deps = dep_result.scalars().all()
+
+    # 4. 恢复状态
+    project.status = "active"
+    project.go_live_date = None
+    project.archived_at = None
+    project.archived_by = ""
+
+    for r in requirements:
+        r.status = "active"
+        r.go_live_date = None
+        r.archived_at = None
+
+    for f in all_fps:
+        # v2.45: 恢复为 pending_review（需重新审核），而非直接 approved（避免跳过审核流程）
+        if f.status == "archived":
+            f.status = "pending_review"
+
+    for d in all_deps:
+        # v2.45 修复：同步写入 FPDependencyHistory 审计记录，追踪解冻操作
+        old_is_active = d.is_active
+        old_version_pk = d.version_pk
+        d.is_active = True
+        d.version_pk = None
+        session.add(FPDependencyHistory(
+            dependency_id=d.id,
+            source_fp_id=d.source_fp_id,
+            target_fp_id=d.target_fp_id,
+            relation_type=d.relation_type,
+            description=d.description or "",
+            action="modified",
+            old_review_status=d.review_status,
+            new_review_status=d.review_status,
+            old_is_active=old_is_active,
+            new_is_active=True,
+            old_version_pk=old_version_pk,
+            new_version_pk=None,
+            changed_by=current_user.username,
+            change_reason="项目恢复活动",
+        ))
+
+    # 5. 对应版本 is_active → False
+    versions_result = await session.execute(
+        select(FPDependencyVersion).where(
+            FPDependencyVersion.project_id == proj_id,
+            FPDependencyVersion.is_active == True,  # noqa: E712
+        )
+    )
+    active_versions = versions_result.scalars().all()
+    for v in active_versions:
+        v.is_active = False
+
+    await session.commit()
+
+    # 6. 删除向量库（按 project_id 批量，含需求向量 + FP 向量 + 用例向量）
+    # v2.45 修复：原循环单条删除性能差且遗漏用例向量，改用批量方法
+    try:
+        from app.db.milvus_store import vector_store
+        deleted_reqs = await asyncio.to_thread(vector_store.delete_requirement_by_project, proj_id)
+        deleted_cases = await asyncio.to_thread(vector_store.delete_test_case_by_project, proj_id)
+        logger.info(
+            "[ReactivateProject] 向量库清理完成: proj_id={}, 需求/FP向量={}, 用例向量={}",
+            proj_id, deleted_reqs, deleted_cases,
+        )
+    except Exception as e:
+        logger.warning("[ReactivateProject] 批量向量清理失败，降级为单条清理: {}", str(e)[:200])
+        # 退化策略：按 req_id 逐条清理
+        for r in requirements:
+            try:
+                await asyncio.to_thread(vector_store.delete_requirement_from_kb, r.id)
+            except Exception as inner_e:
+                logger.warning("[ReactivateProject] 单条需求向量清理失败 req_id={}: {}", r.id, str(inner_e)[:100])
+        for f in all_fps:
+            try:
+                await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{f.id}")
+            except Exception as inner_e:
+                logger.warning("[ReactivateProject] 单条FP向量清理失败 fp_id={}: {}", f.id, str(inner_e)[:100])
+
+    logger.info(
+        "[ReactivateProject] 项目恢复活动: proj_id={}, 需求={}, FP={}, 依赖={}, 版本停用={}",
+        proj_id, len(requirements), len(all_fps), len(all_deps), len(active_versions)
+    )
+    return ApiResponse(
+        success=True,
+        message="项目已恢复活动状态，向量库已清理",
+        data={
+            "project_id": proj_id,
+            "status": "active",
+            "requirement_count": len(requirements),
+            "fp_count": len(all_fps),
+            "versions_deactivated": len(active_versions),
+        },
+    )
+
+
+# ============================================================================
+# v2.45: 依赖版本查询端点
+# ============================================================================
+
+@router.get("/products/{pid}/fp/dependency-versions", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def list_dependency_versions_by_product(
+    pid: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """查询产品下所有依赖版本快照列表。"""
+    result = await session.execute(
+        select(FPDependencyVersion, Project)
+        .join(Project, FPDependencyVersion.project_id == Project.id)
+        .where(Project.product_id == pid)
+        .order_by(FPDependencyVersion.snapshot_at.desc())
+    )
+    rows = result.all()
+    versions = []
+    for v, p in rows:
+        versions.append({
+            "id": v.id,
+            "version_id": v.version_id,
+            "project_id": v.project_id,
+            "project_name": v.project_name,
+            "project_version": v.project_version,
+            "go_live_date": v.go_live_date.isoformat() if v.go_live_date else "",
+            "snapshot_at": v.snapshot_at.isoformat() if v.snapshot_at else "",
+            "is_active": v.is_active,
+            "archived_by": v.archived_by,
+            "requirement_count": v.requirement_count,
+            "fp_count": v.fp_count,
+            "dependency_count": v.dependency_count,
+            "change_summary": v.change_summary,
+        })
+    return ApiResponse(success=True, message="ok", data=versions)
+
+
+@router.get("/projects/{proj_id}/fp/dependency-versions", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def list_dependency_versions_by_project(
+    proj_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """查询项目的所有依赖版本历史。"""
+    result = await session.execute(
+        select(FPDependencyVersion)
+        .where(FPDependencyVersion.project_id == proj_id)
+        .order_by(FPDependencyVersion.snapshot_at.desc())
+    )
+    rows = result.scalars().all()
+    versions = [{
+        "id": v.id,
+        "version_id": v.version_id,
+        "project_id": v.project_id,
+        "project_version": v.project_version,
+        "project_name": v.project_name,
+        "go_live_date": v.go_live_date.isoformat() if v.go_live_date else "",
+        "snapshot_at": v.snapshot_at.isoformat() if v.snapshot_at else "",
+        "is_active": v.is_active,
+        "archived_by": v.archived_by,
+        "requirement_count": v.requirement_count,
+        "fp_count": v.fp_count,
+        "dependency_count": v.dependency_count,
+        "change_summary": v.change_summary,
+    } for v in rows]
+    return ApiResponse(success=True, message="ok", data=versions)
+
+
+@router.get("/fp/dependency-versions/{version_pk}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_dependency_version_detail(
+    version_pk: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """查询版本详情（含快照明细）。"""
+    version = await session.get(FPDependencyVersion, version_pk)
+    if not version:
+        raise HTTPException(status_code=404, detail=f"版本 {version_pk} 不存在")
+
+    items_result = await session.execute(
+        select(FPDependencyVersionItem)
+        .where(FPDependencyVersionItem.version_pk == version_pk)
+        .order_by(FPDependencyVersionItem.source_fp_name)
+    )
+    items = items_result.scalars().all()
+
+    return ApiResponse(success=True, message="ok", data={
+        "id": version.id,
+        "version_id": version.version_id,
+        "project_id": version.project_id,
+        "project_version": version.project_version,
+        "project_name": version.project_name,
+        "go_live_date": version.go_live_date.isoformat() if version.go_live_date else "",
+        "snapshot_at": version.snapshot_at.isoformat() if version.snapshot_at else "",
+        "is_active": version.is_active,
+        "archived_by": version.archived_by,
+        "requirement_count": version.requirement_count,
+        "fp_count": version.fp_count,
+        "dependency_count": version.dependency_count,
+        "change_summary": version.change_summary,
+        "items": [{
+            "id": it.id,
+            "source_fp_id": it.source_fp_id,
+            "source_fp_name": it.source_fp_name,
+            "target_fp_id": it.target_fp_id,
+            "target_fp_name": it.target_fp_name,
+            "relation_type": it.relation_type,
+            "description": it.description,
+            "review_status": it.review_status,
+            "source_req_id": it.source_req_id,
+            "source_req_title": it.source_req_title,
+            # v2.45 修复：返回 target 侧需求字段，前端可显示跨需求追溯信息
+            "target_req_id": it.target_req_id,
+            "target_req_title": it.target_req_title,
+        } for it in items],
+    })
+
+
+@router.get("/fp/dependency-versions/{v1}/diff/{v2}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def diff_dependency_versions(
+    v1: int,
+    v2: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """对比两个版本的依赖差异。"""
+    ver1 = await session.get(FPDependencyVersion, v1)
+    ver2 = await session.get(FPDependencyVersion, v2)
+    if not ver1 or not ver2:
+        raise HTTPException(status_code=404, detail="版本不存在")
+
+    items1_result = await session.execute(
+        select(FPDependencyVersionItem).where(FPDependencyVersionItem.version_pk == v1)
+    )
+    items2_result = await session.execute(
+        select(FPDependencyVersionItem).where(FPDependencyVersionItem.version_pk == v2)
+    )
+    items1 = items1_result.scalars().all()
+    items2 = items2_result.scalars().all()
+
+    def _edge_key(it):
+        # v2.45 修复：使用 FP ID 而非名称，避免跨需求 FP 重名导致对比错误
+        return (it.source_fp_id, it.target_fp_id, it.relation_type)
+
+    edges1 = {_edge_key(it): it for it in items1}
+    edges2 = {_edge_key(it): it for it in items2}
+
+    added = []
+    removed = []
+    modified = []
+    for key, it2 in edges2.items():
+        if key not in edges1:
+            added.append({
+                "source_fp_name": it2.source_fp_name,
+                "target_fp_name": it2.target_fp_name,
+                "relation_type": it2.relation_type,
+                "description": it2.description,
+            })
+        else:
+            it1 = edges1[key]
+            if (it1.description or "") != (it2.description or "") or it1.review_status != it2.review_status:
+                modified.append({
+                    "source_fp_name": it2.source_fp_name,
+                    "target_fp_name": it2.target_fp_name,
+                    "relation_type": it2.relation_type,
+                    "old_description": it1.description or "",
+                    "new_description": it2.description or "",
+                    "old_review_status": it1.review_status,
+                    "new_review_status": it2.review_status,
+                })
+    for key, it1 in edges1.items():
+        if key not in edges2:
+            removed.append({
+                "source_fp_name": it1.source_fp_name,
+                "target_fp_name": it1.target_fp_name,
+                "relation_type": it1.relation_type,
+                "description": it1.description,
+            })
+
+    return ApiResponse(success=True, message="ok", data={
+        "version_1": {"id": ver1.id, "version_id": ver1.version_id, "snapshot_at": ver1.snapshot_at.isoformat() if ver1.snapshot_at else ""},
+        "version_2": {"id": ver2.id, "version_id": ver2.version_id, "snapshot_at": ver2.snapshot_at.isoformat() if ver2.snapshot_at else ""},
+        "added": added,
+        "removed": removed,
+        "modified": modified,
+        "summary": {
+            "added_count": len(added),
+            "removed_count": len(removed),
+            "modified_count": len(modified),
+            "unchanged_count": len(edges1) - len(removed) - len(modified),
+        },
+    })
+
+
+# ============================================================================
+# v2.45: 知识库按项目展示端点
+# ============================================================================
+
+@router.get("/products/{pid}/kb/projects", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def list_kb_projects(
+    pid: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """知识库列表按项目展示（v2.45）。
+
+    返回产品下所有已归档项目，点击项目后展示该项目的需求和用例向量列表。
+    """
+    result = await session.execute(
+        select(Project).where(
+            Project.product_id == pid,
+            Project.status == "archived",
+        ).order_by(Project.archived_at.desc())
+    )
+    projects = result.scalars().all()
+
+    # 查询每个项目下的需求数量和用例数量
+    proj_ids = [p.id for p in projects]
+    req_counts: dict[str, int] = {}
+    tc_counts: dict[str, int] = {}
+    if proj_ids:
+        req_result = await session.execute(
+            select(Requirement.project_id, func.count(Requirement.id))
+            .where(Requirement.project_id.in_(proj_ids))
+            .group_by(Requirement.project_id)
+        )
+        req_counts = {row[0]: row[1] for row in req_result.all()}
+
+        tc_result = await session.execute(
+            select(Requirement.project_id, func.count(TestCase.id))
+            .join(TestCase, TestCase.req_id == Requirement.id)
+            .where(Requirement.project_id.in_(proj_ids))
+            .group_by(Requirement.project_id)
+        )
+        tc_counts = {row[0]: row[1] for row in tc_result.all()}
+
+    data = [{
+        "id": p.id,
+        "name": p.name,
+        "version": p.version,
+        "description": p.description,
+        "status": p.status,
+        "go_live_date": p.go_live_date.isoformat() if p.go_live_date else "",
+        "archived_at": p.archived_at.isoformat() if p.archived_at else "",
+        # v2.45 修复：补充 archived_by 字段，与 list_projects 返回一致
+        "archived_by": p.archived_by or "",
+        "requirement_count": req_counts.get(p.id, 0),
+        "test_case_count": tc_counts.get(p.id, 0),
+    } for p in projects]
+
+    return ApiResponse(success=True, message="ok", data=data)
+
+
+@router.get("/projects/{proj_id}/kb/entries", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def list_kb_entries_by_project(
+    proj_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """查看项目内的知识和用例向量列表（v2.45）。
+
+    返回该项目下的需求列表和测试用例列表，用于知识库项目展开查看。
+    """
+    project = await session.get(Project, proj_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
+
+    # 查询需求
+    req_result = await session.execute(
+        select(Requirement.id, Requirement.title, Requirement.status, Requirement.go_live_date, Requirement.priority)
+        .where(Requirement.project_id == proj_id)
+        .order_by(Requirement.created_at)
+    )
+    req_rows = req_result.all()
+    req_ids = [row[0] for row in req_rows]
+
+    # 查询用例
+    tc_list = []
+    if req_ids:
+        tc_result = await session.execute(
+            select(TestCase.id, TestCase.title, TestCase.req_id, TestCase.priority)
+            .where(TestCase.req_id.in_(req_ids))
+            .order_by(TestCase.created_at)
+        )
+        for row in tc_result.all():
+            tc_list.append({
+                "id": row[0],
+                "title": row[1],
+                "req_id": row[2],
+                "priority": row[3] or "P2",
+            })
+
+    requirements = [{
+        "id": row[0],
+        "title": row[1] or "",
+        "status": row[2] or "active",
+        "go_live_date": row[3].isoformat() if row[3] else "",
+        "priority": row[4] or "P2",
+    } for row in req_rows]
+
+    return ApiResponse(success=True, message="ok", data={
+        "project": {
+            "id": project.id,
+            "name": project.name,
+            "version": project.version,
+            "status": project.status,
+            "go_live_date": project.go_live_date.isoformat() if project.go_live_date else "",
+            "archived_at": project.archived_at.isoformat() if project.archived_at else "",
+        },
+        "requirements": requirements,
+        "test_cases": tc_list,
+    })
 
 
 # ============================================================================
@@ -735,6 +1640,7 @@ async def get_fp_dependency_graph(
     product_id: str,
     module_id: str | None = Query(default=None, description="v2.3: 按模块筛选，仅返回该模块内 FP 及其依赖"),
     review_status: str | None = Query(default=None, description="v2.3: 按审核状态筛选 (pending/approved/rejected)"),
+    include_inactive: bool = Query(default=False, description="v2.45: 是否包含项目归档后的历史冻结边（is_active=false）"),
     session: AsyncSession = Depends(get_session),
 ):
     """获取产品下所有功能点及其依赖关系（跨需求）。
@@ -761,10 +1667,13 @@ async def get_fp_dependency_graph(
 
     # 2. 查询这些需求下的所有 FunctionalPoint
     # v2.3: 增加 module_id 字段查询，用于按模块筛选和返回模块信息
+    # v2.45: 增加 summary / relations_summary 字段，用于节点点击查看详情
     fp_stmt = select(
         FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.fp_type,
         FunctionalPoint.requirement_id, FunctionalPoint.priority,
         FunctionalPoint.module_id, FunctionalPoint.modules,
+        FunctionalPoint.summary, FunctionalPoint.relations_summary,
+        FunctionalPoint.status,
     ).where(FunctionalPoint.requirement_id.in_(req_id_set))
 
     # v2.3: 按模块筛选
@@ -802,6 +1711,10 @@ async def get_fp_dependency_graph(
             "priority": row[4] or "P2",
             "module_id": mod_id,
             "modules": mods,
+            # v2.45: 新增字段，用于节点点击查看详情
+            "summary": row[7] or "",
+            "relations_summary": row[8] or "",
+            "fp_status": row[9] or "pending_review",
         })
 
     # 查询模块名称映射
@@ -816,10 +1729,14 @@ async def get_fp_dependency_graph(
     # 3. 查询所有 FPDependency（source 或 target 在该产品 FP 集合内）
     # v2.3: 返回 review_status 字段，前端按审核状态区分颜色
     # v2.3: 支持 review_status 筛选
+    # v2.45: 默认仅返回 is_active=True 的边（项目归档后的历史冻结边不展示）
+    #         通过 include_inactive=true 可查看全部历史边
     dep_stmt = select(FPDependency).where(
         FPDependency.source_fp_id.in_(fp_id_set),
         FPDependency.target_fp_id.in_(fp_id_set),
     )
+    if not include_inactive:
+        dep_stmt = dep_stmt.where(FPDependency.is_active == True)  # noqa: E712
     if review_status:
         dep_stmt = dep_stmt.where(FPDependency.review_status == review_status)
 
@@ -838,6 +1755,9 @@ async def get_fp_dependency_graph(
             "reviewed_at": d.reviewed_at.isoformat() if d.reviewed_at else "",
             "created_by": d.created_by or "",
             "created_at": d.created_at.isoformat() if d.created_at else "",
+            # v2.45: 暴露 is_active 字段，前端可区分活跃边和历史冻结边
+            "is_active": d.is_active,
+            "version_pk": d.version_pk,
         }
         for d in deps
     ]
@@ -889,6 +1809,7 @@ async def get_fp_impact(
     dep_result = await session.execute(
         select(FPDependency).where(
             FPDependency.review_status == "approved",  # v2.3: 仅 approved 依赖参与影响分析
+            FPDependency.is_active == True,  # v2.45: 排除项目归档后的历史版本依赖
             FPDependency.source_fp_id.in_(fp_id_set) | FPDependency.target_fp_id.in_(fp_id_set)
         )
     )

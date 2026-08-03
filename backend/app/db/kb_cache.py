@@ -59,17 +59,17 @@ class KbCache:
                     self._redis = None
         return self._redis
 
-    def _cache_key(self, query: str, product_id: str, coll_type: str, modules: str = "") -> str:
-        """生成缓存 key。modules 参与缓存键以避免跨模块缓存污染。"""
-        raw = f"{query}|{product_id}|{modules}|{coll_type}"
+    def _cache_key(self, query: str, product_id: str, coll_type: str, modules: str = "", doc_type: str = "") -> str:
+        """生成缓存 key。modules/doc_type 参与缓存键以避免跨模块/跨类型缓存污染。"""
+        raw = f"{query}|{product_id}|{modules}|{doc_type}|{coll_type}"
         return f"kb_cache:{hashlib.md5(raw.encode()).hexdigest()}"
 
-    async def get(self, query: str, product_id: str, coll_type: str, modules: str = "") -> list[dict] | None:
+    async def get(self, query: str, product_id: str, coll_type: str, modules: str = "", doc_type: str = "") -> list[dict] | None:
         """查询缓存。返回 None 表示未命中。
 
         查询顺序：L2 LRU → L1 Redis。
         """
-        key = self._cache_key(query, product_id, coll_type, modules)
+        key = self._cache_key(query, product_id, coll_type, modules, doc_type)
 
         # L2 LRU
         with self._lru_lock:
@@ -97,11 +97,11 @@ class KbCache:
 
         return None
 
-    async def set(self, query: str, product_id: str, coll_type: str, results: list[dict], modules: str = "") -> None:
+    async def set(self, query: str, product_id: str, coll_type: str, results: list[dict], modules: str = "", doc_type: str = "") -> None:
         """写入缓存（L2 LRU + L1 Redis）。"""
         if not results:
             return
-        key = self._cache_key(query, product_id, coll_type, modules)
+        key = self._cache_key(query, product_id, coll_type, modules, doc_type)
         try:
             value = json.dumps(results, ensure_ascii=False)
         except Exception:

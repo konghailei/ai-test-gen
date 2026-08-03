@@ -95,10 +95,17 @@ export default function Requirements() {
   useEffect(() => {
     // 优先从 URL 读取 project_id（由项目管理页面跳转过来时携带）
     const qProj = searchParams.get('project_id') || ''
+    const qUpload = searchParams.get('upload') === 'true'  // v2.52: 从项目管理页面上传入口跳转
+    const qReqId = searchParams.get('req_id') || ''
     setFilterProject(qProj)
     if (qProj) {
       // 清掉 query 参数，避免后续刷新重复带上
       setSearchParams({}, { replace: true })
+    }
+    // v2.52: 自动打开上传弹窗
+    if (qUpload && !qReqId) {
+      setShowUpload(true)
+      setSelProject(qProj)
     }
     if (selectedProductId) loadProjects(selectedProductId)
     else { setModules([]); setSelModules([]) }
@@ -330,7 +337,8 @@ export default function Requirements() {
     setUploadFiles([])
     setProgress(null)
     setImpactResult(null)
-    if (reqId) navigate(`/requirements/${reqId}`)
+    // v2.55: 使用 replace 替换历史记录，详情页"返回"时跳过列表页，直接回到来源页（如项目管理页）
+    if (reqId) navigate(`/requirements/${reqId}`, { replace: true })
   }
 
   /** 提交上传后的澄清答案并执行影响分析 */
@@ -852,18 +860,22 @@ export default function Requirements() {
             )}
 
             {/* ===== 上传后：澄清问题面板 — Apple 风格 ===== */}
-            {uploadResult && (
+            {uploadResult && (() => {
+              // v2.55: 与澄清页面（RequirementClarify.tsx）保持一致，只显示 critical 和 important 问题
+              // optional 问题不展示给用户（不阻塞 SRR 生成），避免弹窗与澄清页面计数不一致
+              const visibleQuestions = uploadResult.questions.filter(q => q.priority === 'critical' || q.priority === 'important')
+              return (
               <div className="space-y-4">
                 <div className="flex items-center gap-2 py-2"
                   style={{ borderBottom: '1px solid var(--border)' }}>
                   <MessageCircle className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
                   <span className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>
-                    请回答以下问题以完善需求分析（共 {uploadResult.questions.length} 题）
+                    请回答以下问题以完善需求分析（共 {visibleQuestions.length} 题）
                   </span>
                 </div>
 
                 <div className="max-h-[50vh] overflow-y-auto space-y-4 pr-1">
-                  {uploadResult.questions.map((q) => {
+                  {visibleQuestions.map((q) => {
                     const isSelect = q.input_type === 'select' || q.input_type === 'multi_select'
                     const isMulti = q.input_type === 'multi_select'
                     const selOptions = q.options || []
@@ -980,7 +992,8 @@ export default function Requirements() {
                 </div>
                 <p className="text-xs m-0" style={{ color: 'var(--foreground-tertiary)' }}>回答后系统将重新生成更精确的需求分析结果</p>
               </div>
-            )}
+              )
+            })()}
           </div>
         </div>
       )}

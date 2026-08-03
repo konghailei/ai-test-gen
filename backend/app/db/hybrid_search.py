@@ -41,6 +41,7 @@ class HybridSearcher:
         top_k: int = 20,
         status: str | None = None,
         session: AsyncSession | None = None,
+        doc_type: str | None = None,
     ) -> list[dict]:
         """混合检索需求：向量 + BM25 → RRF 融合 → Cross-Encoder 重排 → Top-K。
 
@@ -51,14 +52,19 @@ class HybridSearcher:
             top_k: 返回数量
             status: 按状态过滤
             session: PG 异步会话（有值时启用 BM25 混合检索）
+            doc_type: 按文档类型过滤（v2.53 新增）
+                - "requirement": 仅检索总 SRR 记录（避免 FP 向量混入）
+                - "functional_point": 仅检索功能点 SRR 记录
+                - None: 同时检索两类（默认，向后兼容）
 
         Returns:
             list[dict]: 融合后的检索结果
         """
-        # 0. 缓存查询（modules 参与缓存键，避免跨模块缓存污染）
+        # 0. 缓存查询（modules + doc_type 参与缓存键，避免跨模块/跨类型缓存污染）
         from app.db.kb_cache import kb_cache
         modules_key = ",".join(sorted(modules)) if modules else ""
-        cached = await kb_cache.get(query, product_id or "", "requirements", modules_key)
+        doc_type_key = doc_type or ""
+        cached = await kb_cache.get(query, product_id or "", "requirements", modules_key, doc_type_key)
         if cached is not None:
             logger.debug("[HybridSearch] 缓存命中: query={!r}", query[:60])
             return cached[:top_k]
@@ -69,7 +75,7 @@ class HybridSearcher:
             vector_results = await asyncio.to_thread(
                 vector_store.search_similar_requirements,
                 query=query, product_id=product_id, modules=modules,
-                top_k=top_k * 2, status=status,
+                top_k=top_k * 2, status=status, doc_type=doc_type,
             )
         except Exception as e:
             logger.warning("[HybridSearch] 向量检索失败，仅用 BM25: {}", str(e)[:200])
@@ -103,7 +109,7 @@ class HybridSearcher:
                 logger.warning("[HybridSearch] 重排失败，使用 RRF 排序: {}", str(e)[:200])
 
         # 6. 写入缓存
-        await kb_cache.set(query, product_id or "", "requirements", fused, modules_key)
+        await kb_cache.set(query, product_id or "", "requirements", fused, modules_key, doc_type_key)
 
         return fused[:top_k]
 

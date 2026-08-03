@@ -209,8 +209,7 @@ class GenAgent:
             alt_count = 0
             rule_count = 0
             data_count = 0
-            boundary_count = 0
-            acceptance_count = 0
+            # v2.48: boundary_count / acceptance_count 已移除（boundary 合并到 business_rules/alternate_flows，acceptance 合并到 business_rules）
 
             # 总 SRR
             flows = srr.get("flows", {}) if isinstance(srr, dict) else {}
@@ -229,10 +228,9 @@ class GenAgent:
                 alt_count += len(fp_flows.get("alternate_flows", []))
                 rule_count += len(fp_srr.get("business_rules", []))
                 data_count += len(fp_srr.get("data_constraints", []))
-                boundary_count += len(fp_srr.get("boundary_conditions", []))
-                acceptance_count += len(fp_srr.get("acceptance_criteria", []))
+                # v2.48: acceptance_criteria 已合并到 business_rules，不再单独统计
 
-            total_points = hp_count + alt_count + rule_count + data_count + boundary_count + acceptance_count
+            total_points = hp_count + alt_count + rule_count + data_count
             case_count = len(cases)
 
             # 按 related_fp 统计各功能点的用例数
@@ -245,9 +243,9 @@ class GenAgent:
             coverage_ratio = case_count / max(total_points, 1)
 
             logger.info(
-                "[GenAgent/coverage] SRR 要点统计: total={}, hp={}, alt={}, rules={}, data={}, boundary={}, acceptance={} | "
+                "[GenAgent/coverage] SRR 要点统计: total={}, hp={}, alt={}, rules={}, data={} | "
                 "用例数={}, 覆盖比={:.2f}, FP分布={}",
-                total_points, hp_count, alt_count, rule_count, data_count, boundary_count, acceptance_count,
+                total_points, hp_count, alt_count, rule_count, data_count,
                 case_count, coverage_ratio, fp_coverage,
             )
 

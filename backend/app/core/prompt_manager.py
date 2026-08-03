@@ -83,6 +83,18 @@ _PROMPT_REGISTRY: list[dict] = [
         "default": clarify_agent.KB_ANSWER_VERIFIER_SYSTEM_PROMPT,
         "description": "ClarifyAgent KB 答案校验器 — LLM 审核检索结果的相关性与准确性",
     },
+    {
+        "module": "clarify_agent",
+        "name": "FIELD_CONFLICT_RESOLVER_SYSTEM_PROMPT",
+        "default": clarify_agent.FIELD_CONFLICT_RESOLVER_SYSTEM_PROMPT,
+        "description": "ClarifyAgent 字段冲突裁决 — LLM 判断字段冲突是否可自动裁决",
+    },
+    {
+        "module": "clarify_agent",
+        "name": "OPTIMIZATION_DETECTOR_SYSTEM_PROMPT",
+        "default": clarify_agent.OPTIMIZATION_DETECTOR_SYSTEM_PROMPT,
+        "description": "ClarifyAgent 优化需求检测 — LLM 语义判断需求是否为优化/改进已有系统类",
+    },
     # KnowledgeQA（知识问答）
     {
         "module": "knowledge_qa",

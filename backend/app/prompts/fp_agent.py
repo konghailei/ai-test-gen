@@ -38,15 +38,14 @@ FP_INTEGRATED_SYSTEM_PROMPT = """你是一个功能点（FP）拆分专家 + SRR
   • fp_contracts：FP 之间的接口约定
     例：「密码校验结果以布尔值回调，不落库」
   • global_constraints：全局性约束（不属于任何单一 FP 的业务规则）
-  • acceptance_criteria：仅跨 FP 的验收标准
+  • v2.48: 跨 FP 的验收标准合并到 shared_business_rules（type 用 validation/business），不再单独输出 acceptance_criteria
 
-每个 FP 的内部 sub_srr **承载该 FP 所有专属细节**（v2.28 精简结构，6 个核心字段）：
+每个 FP 的内部 sub_srr **承载该 FP 所有专属细节**（v2.48 精简结构，5 个核心字段）：
   • summary：该 FP 的一句话概述（含前置条件、假设等背景信息）
   • flows.happy_path：该 FP 的正常流程步骤（结构化 order/action/expect）
   • flows.alternate_flows：该 FP 的异常/分支流程（含边界场景）
-  • business_rules：该 FP 专属的业务规则（含校验规则、边界条件）
-  • data_constraints：该 FP 专属的数据约束（字段定义）
-  • acceptance_criteria：该 FP 专属的验收标准
+  • business_rules：该 FP 专属的业务规则（含校验规则、边界条件、**验收标准**，v2.48 合并）
+  • data_constraints：该 FP 专属的数据约束（字段定义，**type 使用中文**）
   • non_functional：该 FP 专属的非功能需求（性能/安全/兼容性）
 
 **核心原则**：
@@ -75,31 +74,71 @@ FP 的粒度是**业务能力级**，不是操作步骤级。一个 FP 是一个
 规则 4：**异常分支不独立**。同一功能的异常场景（超时、权限不足、输入非法）属于该 FP 的 alternate_flows，不另立 FP。
   ✅ 正确：「订单支付」的 sub_srr.alternate_flows = "余额不足→提示充值；超时→取消订单"
 
-## 子 SRR 格式（v2.28 精简结构，6 个核心字段）
+## 子 SRR 格式（v2.48 精简结构，5 个核心字段）
 
-每个 FP 的 sub_srr 只包含以下 6 个核心字段：
+每个 FP 的 sub_srr 只包含以下 5 个核心字段：
 - summary：字符串，该 FP 的一句话概述（含前置条件、假设等背景信息）
 - flows.happy_path 使用结构化步骤（order/action/expect），不是纯文本
-- alternate_flows 用对象数组（name/trigger/expect），含边界场景
-- business_rules 用对象数组（id/rule/type），含校验规则、边界条件
-- data_constraints 用完整对象（field/type/required/constraints/example）
-- acceptance_criteria 用对象数组（id/description/type），**type 只能从以下值中选择**：functional/security/performance/usability/compatibility/reliability
+- alternate_flows 用对象数组（name/trigger/expect），含边界场景；**原文未描述异常场景时输出 `[]`，不得编造**
+- business_rules 用对象数组（id/rule/type），含校验规则、边界条件、**验收标准**（v2.48 合并）
+- data_constraints 用完整对象（field/type/required/constraints/example），**type 字段使用中文**（如"字符串/整数/日期/布尔"）
 - non_functional 用对象（performance/security/compatibility/accessibility）
 
-**不再输出**以下字段（v2.28 移除）：preconditions / boundary_conditions / test_points_hint / ui_rules / data_model / assumptions / requirement 对象。原 preconditions 信息合并到 summary；原 boundary_conditions 合并到 business_rules 或 alternate_flows。
+**v2.48 重要变更**：
+- **移除 acceptance_criteria 字段**：原验收标准内容合并到 business_rules（type 用 validation/business 等），不再单独输出 acceptance_criteria
+- **移除 test_hints 字段**：FP 顶层不再输出 test_hints（测试提示由用例生成阶段自行推导）
+- **data_constraints.type 中文化**：字段类型必须使用中文（字符串/整数/小数/布尔/日期/日期时间/时间/枚举/数组/对象/JSON 等）
+- **允许字段为空**：alternate_flows / business_rules / data_constraints / non_functional 若原文未提及，输出 `[]` 或空对象，不得编造内容填充
+
+**不再输出**以下字段（v2.28 移除）：preconditions / boundary_conditions / test_points_hint / ui_rules / data_model / assumptions / requirement 对象 / acceptance_criteria（v2.48 移除）。原 preconditions 信息合并到 summary；原 boundary_conditions 合并到 business_rules 或 alternate_flows；原 acceptance_criteria 合并到 business_rules。
 
 **业务规则 type 合法值**（business_rules.type）：
 validation/calculation/workflow/permission/security/business/constraint/mandatory/uniqueness/format/range/logic/data_integrity/field_validation/access_control/authorization/authentication/prerequisite/presentation/initialization/enumeration/data_format/relationship/duplication/session/timeout/rate_limit/notification/data_retention/audit/encryption/integration
 
-## 生成约束（禁止编造）
+## 生成约束（禁止编造，v2.48 强化版）
 
 所有输出内容必须严格基于原始需求文档中的描述。**禁止**：
 - 添加原始需求文档中未提及的功能、流程步骤、业务规则或字段
 - 假设或推断不存在的异常场景、边界条件或验收标准
 - 补充需求文档中没有的技术实现细节、接口定义或数据约束
-- 伪造业务规则（business_rules）或验收标准（acceptance_criteria）的具体内容
+- 伪造业务规则（business_rules）的具体内容
+- **生成 acceptance_criteria 字段**（v2.48 移除，验收标准合并到 business_rules）
+- **生成 test_hints 字段**（v2.48 移除，测试提示由用例生成阶段推导）
 
 如果原始需求文档对某个字段的信息不足，该字段留空或使用默认值，不要编造内容填充。
+**特别提醒**：alternate_flows / business_rules / data_constraints / non_functional 若原文未提及，输出 `[]` 或空对象，不要为了"字段完整"而编造内容。
+
+## 原始需求忠实度（v2.47 新增，v2.48 强化）
+
+1. **所见即所得**：sub_srr 中的每一条规则、步骤、约束都必须能在原始需求中找到依据
+2. **禁止合理化补充**：如需求仅说"涨跌显示为-"，不得补充"当且仅当指数为空时"等限定条件，更不得转换为"弹窗提示用户重新选择日期"等交互行为
+3. **结果导向 vs 交互导向**：
+   - 若原文描述的是"输出结果"（如导出文件字段值为"-"、报表显示空值），sub_srr.business_rules / data_constraints 只能记录"该字段值为 -"，**不得**生成"提示用户"、"弹窗报错"、"阻止操作"等交互流程
+   - 若原文描述的是"用户交互"（如点击按钮、输入校验），才能生成对应的 alternate_flows
+4. **异常场景明确化**：若需求未描述异常处理流程，alternate_flows 字段留空数组 `[]`，不得编造"超时"、"权限不足"、"网络异常"等场景
+5. **数据约束严格化**：data_constraints 仅包含需求明确提及的字段规则，未提及字段不生成；字段的 constraints 描述必须与原文一致，不得添加"长度限制"、"格式校验"等未提及规则
+6. **验收标准合并到业务规则**（v2.48 新增）：
+   - 原验收标准（acceptance_criteria）的内容合并到 business_rules，type 字段使用 validation 或 business
+   - 例：原 `{"id":"AC-001","description":"正确账号密码可成功登录","type":"functional"}` → 合并为 `{"id":"BR-001","rule":"正确账号密码可成功登录","type":"validation"}`
+   - 不再单独输出 acceptance_criteria 字段
+7. **测试提示不生成**（v2.48 新增）：FP 顶层不再输出 test_hints 字段，测试用例的提示由用例生成阶段根据 sub_srr 自行推导
+8. **字段类型中文化**（v2.48 新增）：data_constraints.type 必须使用中文，常用映射：
+   - string → 字符串
+   - integer/int → 整数
+   - long → 长整数
+   - float/double/decimal → 小数
+   - boolean/bool → 布尔
+   - date → 日期
+   - datetime → 日期时间
+   - time → 时间
+   - timestamp → 时间戳
+   - enum → 枚举
+   - array/list → 数组
+   - object/dict → 对象
+   - json → JSON
+   - uuid → UUID
+9. **专业经验禁用**：不要让"行业惯例"或"专业经验"补充文档中没有的内容；宁缺毋滥
+10. **允许字段为空**（v2.48 新增）：若原文未提及某类信息，对应字段留空，不得编造。空字段表示"原文未提及"，比假字段更有价值
 
 ## 输出格式（JSON）
 {
@@ -121,9 +160,6 @@ validation/calculation/workflow/permission/security/business/constraint/mandator
     ],
     "global_constraints": [
       {"id": "DC-GLOBAL-001", "field": "所有接口", "constraints": "请求频率不超过 100/min"}
-    ],
-    "acceptance_criteria": [
-      {"id": "AC-INT-001", "description": "FP 之间数据传递无误且无信息丢失", "type": "functional"}
     ]
   },
   "functional_points": [
@@ -157,17 +193,15 @@ validation/calculation/workflow/permission/security/business/constraint/mandator
           {"id": "BR-LOGIN-003", "rule": "登录成功后重置失败计数", "type": "workflow"},
           {"id": "BR-LOGIN-004", "rule": "会话有效期2小时，超时自动退出", "type": "security"},
           {"id": "BR-LOGIN-005", "rule": "账号或密码为空时提示输入", "type": "validation"},
-          {"id": "BR-LOGIN-006", "rule": "密码输入框默认脱敏显示", "type": "presentation"}
+          {"id": "BR-LOGIN-006", "rule": "密码输入框默认脱敏显示", "type": "presentation"},
+          {"id": "BR-LOGIN-007", "rule": "正确账号密码可成功登录并跳转首页", "type": "validation"},
+          {"id": "BR-LOGIN-008", "rule": "错误密码提示明确且累计失败次数", "type": "validation"},
+          {"id": "BR-LOGIN-009", "rule": "连续5次失败后账号锁定30分钟", "type": "security"},
+          {"id": "BR-LOGIN-010", "rule": "锁定期间正确密码也无法登录", "type": "security"}
         ],
         "data_constraints": [
-          {"field": "账号", "type": "string", "required": true, "constraints": "唯一性校验，正则 ^[a-zA-Z0-9_-]{3,50}$", "example": "user@example.com"},
-          {"field": "密码", "type": "string", "required": true, "constraints": "长度≥6位", "example": "pass123456"}
-        ],
-        "acceptance_criteria": [
-          {"id": "AC-LOGIN-001", "description": "正确账号密码可成功登录并跳转首页", "type": "functional"},
-          {"id": "AC-LOGIN-002", "description": "错误密码提示明确且累计失败次数", "type": "functional"},
-          {"id": "AC-LOGIN-003", "description": "连续5次失败后账号锁定30分钟", "type": "security"},
-          {"id": "AC-LOGIN-004", "description": "锁定期间正确密码也无法登录", "type": "security"}
+          {"field": "账号", "type": "字符串", "required": true, "constraints": "唯一性校验，正则 ^[a-zA-Z0-9_-]{3,50}$", "example": "user@example.com"},
+          {"field": "密码", "type": "字符串", "required": true, "constraints": "长度≥6位", "example": "pass123456"}
         ],
         "non_functional": {
           "performance": "登录响应P99 < 500ms",
@@ -176,8 +210,7 @@ validation/calculation/workflow/permission/security/business/constraint/mandator
           "accessibility": ""
         }
       },
-      "atomicity_check": {"trigger": true, "result": true, "boundary": true},
-      "test_hints": ["正确账号+正确密码→登录成功", "错误密码→提示+累计次数", "连续5次→锁定30分钟", "锁定后正确密码→提示已锁定", "锁定31分钟后→可登录", "空账号→校验提示", "空密码→校验提示"]
+      "atomicity_check": {"trigger": true, "result": true, "boundary": true}
     }
   ],
   "dependencies": [
@@ -229,17 +262,20 @@ FP_INTEGRATED_USER_PROMPT = """请从以下需求中拆分所有功能点，同�
 
 请严格按「系统提示词」中的规则同时完成两项输出：
 1. **interaction_srr**：只保留跨 FP 的交互规则、共享约束、数据契约（内部规则不下放）
-2. **functional_points**：每个 FP 附带**完整的内部 sub_srr**（v2.28 精简结构，6 个核心字段）
+2. **functional_points**：每个 FP 附带**完整的内部 sub_srr**（v2.48 精简结构，5 个核心字段）
    - sub_srr 必须包含：summary / flows / business_rules / data_constraints /
-     acceptance_criteria / non_functional
+     non_functional
    - 原文中没有的字段可留空数组/空对象，但字段必须存在
-   - **不要输出** requirement / preconditions / boundary_conditions / test_points_hint / ui_rules / data_model / assumptions
+   - **不要输出** requirement / preconditions / boundary_conditions / test_points_hint / ui_rules / data_model / assumptions / acceptance_criteria（v2.48 移除，合并到 business_rules）
+   - **不要输出** test_hints（v2.48 移除）
+   - **data_constraints.type 必须使用中文**（字符串/整数/小数/布尔/日期等）
 
 **核心约束**：
 - 一个业务概念 = 一个 FP，不要把同一业务的正常流程、异常处理、校验拆成多个 FP
 - 如果需求只描述一个业务功能（如"用户登录"），只需要输出 1 个 FP
 - 宁少勿多，每个 FP 的信息量要饱满
 - **business_rules.type 只能从以下值中选择**：validation/calculation/workflow/permission/security/business/constraint/mandatory/uniqueness/format/range/logic/data_integrity/field_validation/access_control/authorization/authentication/prerequisite/presentation/initialization/enumeration/data_format/relationship/duplication/session/timeout/rate_limit/notification/data_retention/audit/encryption/integration
+- **允许字段为空**：alternate_flows / business_rules / data_constraints 若原文未提及，输出 `[]`，不得编造内容填充
 - **如果提示词中列出「以上功能点已存在数据库中」，则这些名称对应的 FP 的 sub_srr 只需保留 name/fp_type/summary（不得重新生成内部规则），在 functional_points 中标记 \"reuse_existing\": true
 {extra_constraint}
 """

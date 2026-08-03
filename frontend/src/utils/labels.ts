@@ -39,7 +39,7 @@ const BR_TYPE_LABELS: Record<string, string> = {
   enumeration: '枚举',
 }
 
-// 验收标准类型
+// 验收标准类型（v2.48: 字段已合并到业务规则，保留映射兼容历史数据）
 const AC_TYPE_LABELS: Record<string, string> = {
   functional: '功能',
   performance: '性能',
@@ -53,10 +53,46 @@ const AC_TYPE_LABELS: Record<string, string> = {
 const FP_TYPE_LABELS: Record<string, string> = {
   workflow: '业务流程',
   constraint: '约束规则',
-  calculation: '计算公式',
+  calculation: '计算规则',
   api_behavior: 'API 行为',
   data_record: '数据记录',
   config: '系统配置',
+}
+
+// 数据约束字段类型（v2.48: 兼容英文历史数据映射为中文）
+const DATA_TYPE_LABELS: Record<string, string> = {
+  string: '字符串',
+  str: '字符串',
+  text: '文本',
+  integer: '整数',
+  int: '整数',
+  long: '长整数',
+  bigint: '长整数',
+  short: '短整数',
+  float: '小数',
+  double: '双精度小数',
+  decimal: '高精度小数',
+  number: '数字',
+  boolean: '布尔',
+  bool: '布尔',
+  date: '日期',
+  datetime: '日期时间',
+  timestamp: '时间戳',
+  time: '时间',
+  enum: '枚举',
+  array: '数组',
+  list: '数组',
+  object: '对象',
+  dict: '对象',
+  json: 'JSON',
+  uuid: 'UUID',
+  url: 'URL',
+  email: '邮箱',
+  phone: '电话',
+  file: '文件',
+  image: '图片',
+  binary: '二进制',
+  blob: '二进制大对象',
 }
 
 /** 获取业务规则类型的中文名，兜底返回原文 */
@@ -64,7 +100,7 @@ export function brTypeLabel(type: string): string {
   return BR_TYPE_LABELS[type] || type
 }
 
-/** 获取验收标准类型的中文名 */
+/** 获取验收标准类型的中文名（v2.48 兼容历史数据） */
 export function acTypeLabel(type: string): string {
   return AC_TYPE_LABELS[type] || type
 }
@@ -72,6 +108,14 @@ export function acTypeLabel(type: string): string {
 /** 获取功能点类型的中文名 */
 export function fpTypeLabel(type: string): string {
   return FP_TYPE_LABELS[type] || type
+}
+
+/** 获取数据约束字段类型的中文名（v2.48 新增，兼容英文历史数据） */
+export function dataTypeLabel(type: string): string {
+  if (!type) return ''
+  // 若已是中文，直接返回
+  if (/[\u4e00-\u9fa5]/.test(type)) return type
+  return DATA_TYPE_LABELS[type.toLowerCase()] || type
 }
 
 // 测试用例类型

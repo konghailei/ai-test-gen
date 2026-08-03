@@ -755,440 +755,211 @@
 </style>
 
     <style>
-/* ═══════════════════════════════════════════════════════════════
-   Project Management Page Styles — Apple Design Library (dl_builtin_apple)
-   ═══════════════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════════════════════════
+   Project Management Page — Collapsible List with Inner Requirement Table
+   ════════════════════════════════════════════════════════════════════ */
 
-/* ── Page Subtitle ── */
-.page-subtitle {
-  margin: 6px 0 0;
-  font-size: 14px;
-  color: var(--muted-foreground);
-  font-weight: 400;
+/* ── Card Container ── */
+.pm-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
 }
-
-/* ── Pill / Badge (shared component) ── */
-.pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 10px;
-  border-radius: 9999px;
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
+.pm-card-header { margin-bottom: 20px; }
+.pm-card-title {
+  margin: 0; font-size: 18px; font-weight: 600; color: var(--foreground);
+  display: flex; align-items: center; gap: 10px;
 }
-
-.pill-secondary {
-  background: var(--secondary);
-  color: var(--secondary-foreground);
-}
-
-.pill-primary {
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  color: var(--primary);
-}
-
-.pill-success {
-  background: color-mix(in srgb, var(--success) 15%, transparent);
-  color: var(--success);
-}
-
-.pill-muted {
-  background: var(--muted);
-  color: var(--muted-foreground);
-}
-
-.pill-destructive {
-  background: color-mix(in srgb, var(--destructive) 12%, transparent);
-  color: var(--destructive);
-}
+.pm-card-title svg { width: 20px; height: 20px; color: var(--primary); }
+.pm-card-subtitle { font-size: 14px; font-weight: 400; color: var(--muted-foreground); margin-left: 4px; }
 
 /* ── Toolbar ── */
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px 16px;
-  margin-bottom: 24px;
-  box-shadow: var(--shadow-2xs);
+.pm-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+.pm-search { position: relative; flex: 1 1 180px; min-width: 160px; }
+.pm-search svg {
+  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; color: var(--muted-foreground); pointer-events: none;
 }
-
-.toolbar-search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 12px;
-  border: 1px solid var(--input);
-  border-radius: calc(var(--radius) * 0.6);
-  background: var(--background);
-  flex: 1;
-  max-width: 360px;
+.pm-search input {
+  width: 100%; height: 36px; padding: 0 12px 0 36px;
+  border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.5);
+  background: var(--background); color: var(--foreground);
+  font-family: var(--font-sans); font-size: 13px;
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
+.pm-search input:focus {
+  outline: none; border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 15%, transparent);
+}
+.pm-search input::placeholder { color: var(--muted-foreground); }
 
-.toolbar-search:focus-within {
-  border-color: var(--ring);
-  box-shadow: 0 0 0 1px var(--ring);
+.pm-filter-select {
+  height: 36px; padding: 0 28px 0 10px;
+  border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.5);
+  background: var(--background); color: var(--foreground);
+  font-family: var(--font-sans); font-size: 12px; cursor: pointer;
+  transition: border-color 0.18s ease;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+.pm-filter-select:hover { border-color: var(--ring); }
+.pm-filter-select:focus {
+  outline: none; border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 15%, transparent);
 }
 
-.toolbar-search svg {
-  width: 16px;
-  height: 16px;
-  color: var(--muted-foreground);
-  flex-shrink: 0;
+.pm-btn-primary {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 36px; padding: 0 14px;
+  background: var(--primary); color: var(--primary-foreground);
+  border: 0; border-radius: calc(var(--radius) * 0.5);
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+  cursor: pointer; white-space: nowrap; transition: opacity 0.18s ease;
 }
+.pm-btn-primary:hover { opacity: 0.9; }
+.pm-btn-primary:active { transform: scale(0.98); }
+.pm-btn-primary svg { width: 14px; height: 14px; }
 
-.toolbar-search input {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--foreground);
-  font-family: var(--font-sans);
-  font-size: 13px;
-}
-
-.toolbar-search input::placeholder {
-  color: var(--muted-foreground);
-}
-
-/* ── Button ── */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 16px;
-  border: 0;
-  border-radius: calc(var(--radius) * 0.6);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: opacity 0.18s ease, background-color 0.18s ease;
-  flex-shrink: 0;
-}
-
-.btn svg {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-}
-
-.btn-primary {
-  background: var(--primary);
-  color: var(--primary-foreground);
-}
-
-.btn-primary:hover {
-  opacity: 0.88;
-}
-
-/* ── Project Grid ── */
-.project-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
-}
-
-/* ── Project Card ── */
-.project-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  transition: box-shadow 0.18s ease, transform 0.18s ease;
-  box-shadow: var(--shadow-xs);
-}
-
-.project-card:hover {
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
-}
-
-/* ── Card Top: icon + name + status ── */
-.project-card-top {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.project-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.project-icon svg {
-  width: 20px;
-  height: 20px;
-}
-
-.project-icon--brand {
-  background: var(--brand-50);
-  color: var(--brand-600);
-}
-
-.project-icon--orange {
-  background: color-mix(in srgb, var(--chart-3) 14%, var(--card));
-  color: var(--chart-3);
-}
-
-.project-icon--purple {
-  background: color-mix(in srgb, var(--chart-4) 14%, var(--card));
-  color: var(--chart-4);
-}
-
-.project-icon--magenta {
-  background: color-mix(in srgb, var(--chart-5) 14%, var(--card));
-  color: var(--chart-5);
-}
-
-.project-icon--green {
-  background: color-mix(in srgb, var(--state-success) 16%, var(--card));
-  color: var(--state-success);
-}
-
-.project-icon--deep {
-  background: color-mix(in srgb, var(--brand-600) 14%, var(--card));
-  color: var(--brand-700);
-}
-
-.project-name {
-  flex: 1;
-  min-width: 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--foreground);
-  letter-spacing: -0.01em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ── Card Middle: description + meta ── */
-.project-desc {
-  margin: 0 0 12px;
-  font-size: 13px;
-  color: var(--muted-foreground);
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+/* ── Project List ── */
+.pm-project-list { display: flex; flex-direction: column; gap: 6px; }
+.pm-project-item {
+  border: 1px solid var(--border); border-radius: calc(var(--radius) * 0.6);
+  background: var(--card); transition: border-color 0.2s ease, background 0.2s ease;
   overflow: hidden;
 }
+.pm-project-expanded { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); }
+.pm-project-matched { background: color-mix(in srgb, var(--chart-3) 6%, var(--card)); }
 
-.project-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 16px;
+.pm-project-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px;
 }
+.pm-project-left { display: flex; align-items: flex-start; gap: 10px; min-width: 0; flex: 1 1 auto; padding-top: 2px; }
+.pm-chevron {
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border: 0; background: transparent; cursor: pointer;
+  color: var(--muted-foreground); border-radius: calc(var(--radius) * 0.3);
+  transition: background 0.18s ease, color 0.18s ease; flex-shrink: 0;
+  margin-top: 2px;
+}
+.pm-chevron:hover { background: var(--accent); color: var(--foreground); }
+.pm-chevron svg { width: 16px; height: 16px; }
 
-.version-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 10px;
-  border-radius: 9999px;
-  background: var(--accent);
-  color: var(--accent-foreground);
-  font-size: 12px;
-  font-weight: 500;
+.pm-project-icon {
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: calc(var(--radius) * 0.4); flex-shrink: 0;
+  margin-top: 0;
 }
+.pm-project-icon svg { width: 16px; height: 16px; }
+.pm-icon-active { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); }
+.pm-icon-archived { background: var(--muted); color: var(--muted-foreground); }
 
-.module-count {
-  font-size: 12px;
-  color: var(--muted-foreground);
+.pm-project-info { min-width: 0; flex: 1 1 auto; overflow: hidden; }
+.pm-project-name-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; margin-bottom: 2px;
+  white-space: nowrap; overflow: hidden;
 }
+.pm-project-name { font-size: 14px; font-weight: 600; color: var(--foreground); line-height: 1.3; flex-shrink: 0; }
+.pm-version-tag {
+  font-size: 11px; font-weight: 500; padding: 2px 6px;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--primary); border-radius: calc(var(--radius) * 0.25);
+  font-family: var(--font-mono); line-height: 1.4; flex-shrink: 0;
+}
+  font-size: 11px; font-weight: 500; padding: 2px 8px;
+  border-radius: 9999px; line-height: 1.4;
+}
+.pm-status-active { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.pm-status-archived { background: var(--muted); color: var(--muted-foreground); }
+.pm-match-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 11px; font-weight: 500; padding: 2px 7px;
+  background: color-mix(in srgb, var(--chart-3) 15%, transparent);
+  color: var(--chart-3); border-radius: calc(var(--radius) * 0.25); line-height: 1.4;
+}
+.pm-match-badge svg { width: 12px; height: 12px; }
+.pm-project-desc {
+  margin: 0; font-size: 12px; color: var(--muted-foreground); line-height: 1.5;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.pm-golive-date { margin: 2px 0 0; font-size: 11px; color: var(--muted-foreground); line-height: 1.4; }
 
-/* ── Card Bottom: stats row ── */
-.project-stats {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-  margin-bottom: 12px;
-}
+.pm-project-status { display: flex; align-items: center; flex-shrink: 0; margin-right: 4px; }
 
-.project-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+.pm-project-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; opacity: 0.6; transition: opacity 0.2s ease; }
+.pm-project-item:hover .pm-project-actions { opacity: 1; }
+.pm-icon-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border: 0; background: transparent; cursor: pointer;
+  color: var(--muted-foreground); border-radius: calc(var(--radius) * 0.35);
+  transition: background 0.18s ease, color 0.18s ease; flex-shrink: 0;
 }
+.pm-icon-btn:hover { background: var(--accent); color: var(--foreground); }
+.pm-icon-btn svg { width: 14px; height: 14px; }
+.pm-icon-sm { width: 20px; height: 20px; }
+.pm-icon-sm svg { width: 11px; height: 11px; }
+.pm-icon-danger:hover { background: color-mix(in srgb, var(--destructive) 10%, transparent); color: var(--destructive); }
+.pm-divider { width: 1px; height: 16px; background: var(--border); margin: 0 2px; }
 
-.project-stat-value {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--foreground);
-  line-height: 1.2;
+/* ── Expand Content (Requirement Table) ── */
+.pm-expand-content { border-top: 1px solid var(--border); background: var(--muted); }
+.pm-req-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.pm-req-table thead { background: var(--muted); }
+.pm-req-table th {
+  text-align: left; padding: 10px 16px;
+  font-size: 11px; font-weight: 600; color: var(--muted-foreground);
+  text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;
 }
+.pm-req-th-priority, .pm-req-th-status, .pm-req-th-action { text-align: center !important; }
+.pm-req-th-date { text-align: right !important; }
 
-.project-stat-label {
-  font-size: 11px;
-  color: var(--muted-foreground);
-  white-space: nowrap;
-}
+.pm-req-row { background: var(--card); transition: background 0.18s ease; cursor: pointer; }
+.pm-req-row:hover { background: var(--accent); }
+.pm-req-row td { padding: 10px 16px; border-top: 1px solid var(--border); color: var(--foreground); }
 
-/* ── Card Actions ── */
-.project-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 2px;
-}
-
-.action-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 0;
-  border-radius: calc(var(--radius) * 0.4);
-  background: transparent;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease;
-}
-
-.action-btn:hover {
-  background: var(--accent);
-  color: var(--foreground);
-}
-
-.action-btn svg {
-  width: 16px;
-  height: 16px;
-}
-
-/* ── View Toggle ── */
-.view-toggle {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--input);
-  border-radius: calc(var(--radius) * 0.6);
-  overflow: hidden;
-  flex-shrink: 0;
-}
-.view-toggle-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 38px;
-  border: 0;
-  background: var(--background);
-  color: var(--muted-foreground);
-  cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease;
-}
-.view-toggle-btn:hover {
-  background: var(--accent);
-  color: var(--foreground);
-}
-.view-toggle-btn[data-active="true"] {
-  background: var(--primary);
-  color: var(--primary-foreground);
-}
-.view-toggle-btn[data-active="true"]:hover {
-  background: var(--primary);
-  color: var(--primary-foreground);
-}
-.view-toggle-btn svg {
-  width: 16px;
-  height: 16px;
+.pm-req-title-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pm-req-title-cell svg { width: 14px; height: 14px; color: var(--muted-foreground); flex-shrink: 0; }
+.pm-req-title-cell span {
+  font-size: 13px; font-weight: 500; color: var(--foreground);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* ── List View: Project Table ── */
-.project-table-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
+.pm-req-priority { text-align: center; font-size: 12px; font-weight: 600; font-family: var(--font-mono); }
+.pm-priority-p0 { color: var(--destructive); }
+.pm-priority-p1 { color: var(--chart-3); }
+.pm-priority-p2 { color: var(--primary); }
+.pm-priority-p3 { color: var(--muted-foreground); }
+
+.pm-req-status {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 9px; border-radius: 9999px;
+  font-size: 11px; font-weight: 500; line-height: 1.4;
 }
-.project-table-scroll {
-  overflow-x: auto;
+.pm-req-status svg { width: 12px; height: 12px; }
+.pm-status-confirmed { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.pm-status-draft { background: color-mix(in srgb, var(--chart-3) 15%, transparent); color: var(--chart-3); }
+.pm-status-analyzing { background: color-mix(in srgb, var(--primary) 15%, transparent); color: var(--primary); }
+.pm-status-pending { background: color-mix(in srgb, var(--chart-4) 15%, transparent); color: var(--chart-4); }
+.pm-status-archived { background: var(--muted); color: var(--muted-foreground); }
+
+.pm-req-date { text-align: right; font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.pm-req-action { text-align: center; }
+.pm-req-action .pm-icon-btn { opacity: 0; transition: opacity 0.18s ease; }
+.pm-req-row:hover .pm-req-action .pm-icon-btn { opacity: 1; }
+
+.pm-req-footer {
+  padding: 8px 16px; border-top: 1px solid var(--border); background: var(--muted);
 }
-.project-table {
-  width: 100%;
-  border-collapse: collapse;
-  min-width: 900px;
-}
-.project-table th {
-  text-align: left;
-  padding: 12px 16px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--muted-foreground);
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-  background: var(--accent);
-}
-.project-table td {
-  padding: 0 16px;
-  height: 56px;
-  font-size: 13px;
-  color: var(--foreground);
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
-}
-.project-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-.project-table tbody tr {
-  transition: background-color 0.18s ease;
-}
-.project-table tbody tr:hover {
-  background: var(--accent);
-}
-.pt-name-cell {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.pt-name-cell .project-icon {
-  width: 32px;
-  height: 32px;
-}
-.pt-name-cell .project-icon svg {
-  width: 16px;
-  height: 16px;
-}
-.pt-name {
-  font-weight: 500;
-  color: var(--foreground);
-  white-space: nowrap;
-}
-.pt-desc {
-  color: var(--muted-foreground);
-  max-width: 240px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.pt-num {
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-}
-.pt-date {
-  color: var(--muted-foreground);
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
+.pm-req-footer span { font-size: 11px; color: var(--muted-foreground); }
+
+@media (max-width: 768px) {
+  .pm-card { padding: 16px; }
+  .pm-project-actions { gap: 2px; }
+  .pm-project-desc { display: none; }
 }
     </style>
 
@@ -1285,321 +1056,280 @@
           </div>
           <!-- 页面内容插入点 -->
           <div class="page-content" data-slot="pageContent">
-            <!-- 工具栏 -->
-            <div class="toolbar">
-              <div class="toolbar-search">
-                <i data-lucide="search"></i>
-                <input type="text" placeholder="搜索项目名称..." aria-label="搜索项目名称">
+            <!-- 项目列表卡片 -->
+            <div class="pm-card">
+              <div class="pm-card-header">
+                <h2 class="pm-card-title">
+                  <i data-lucide="folder-open"></i>
+                  用户中心产品
+                  <span class="pm-card-subtitle">— 项目列表</span>
+                </h2>
               </div>
-              <!-- 视图切换 -->
-              <div class="view-toggle" role="tablist" aria-label="视图切换">
-                <button class="view-toggle-btn" data-view="card" data-active="true" role="tab" aria-selected="true" type="button" title="卡片视图">
-                  <i data-lucide="layout-grid"></i>
+
+              <!-- 工具栏：搜索 + 筛选 + 添加 -->
+              <div class="pm-toolbar">
+                <div class="pm-search">
+                  <i data-lucide="search"></i>
+                  <input type="text" placeholder="搜索项目名称或需求标题..." aria-label="搜索">
+                </div>
+                <select class="pm-filter-select" title="项目状态">
+                  <option value="">全部状态</option>
+                  <option value="active">活跃</option>
+                  <option value="archived">已归档</option>
+                </select>
+                <select class="pm-filter-select" title="需求状态">
+                  <option value="">需求状态</option>
+                  <option value="analyzing">分析中</option>
+                  <option value="draft">待澄清</option>
+                  <option value="pending_review">待确认</option>
+                  <option value="confirmed">已确认</option>
+                  <option value="archived">已归档</option>
+                </select>
+                <select class="pm-filter-select" title="优先级">
+                  <option value="">优先级</option>
+                  <option value="P0">P0</option>
+                  <option value="P1">P1</option>
+                  <option value="P2">P2</option>
+                  <option value="P3">P3</option>
+                </select>
+                <button class="pm-btn-primary" type="button" data-dom-id="btn-add-project">
+                  <i data-lucide="plus"></i>
+                  <span>添加项目</span>
                 </button>
-                <button class="view-toggle-btn" data-view="list" data-active="false" role="tab" aria-selected="false" type="button" title="列表视图">
-                  <i data-lucide="list"></i>
-                </button>
-              </div>
-              <button class="btn btn-primary" type="button">
-                <i data-lucide="plus"></i>
-                <span>新建项目</span>
-              </button>
-            </div>
-
-            <!-- 卡片视图 -->
-            <div class="project-view-card" data-view-content="card">
-            <!-- 项目卡片网格 -->
-            <div class="project-grid">
-              <!-- 项目 1: 用户中心 -->
-              <div class="project-card">
-                <div class="project-card-top">
-                  <div class="project-icon project-icon--brand"><i data-lucide="folder"></i></div>
-                  <span class="project-name">用户中心</span>
-                  <span class="pill pill-success">活跃</span>
-                </div>
-                <p class="project-desc">统一身份认证、账户安全、个人资料与多端登录会话管理服务，支撑全产品线用户体系。</p>
-                <div class="project-meta">
-                  <span class="version-tag">v2.0</span>
-                  <span class="module-count">8个模块</span>
-                </div>
-                <div class="project-stats">
-                  <div class="project-stat">
-                    <span class="project-stat-value">2024-01-15</span>
-                    <span class="project-stat-label">创建时间</span>
-                  </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">24</span>
-                    <span class="project-stat-label">需求数</span>
-                  </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">156</span>
-                    <span class="project-stat-label">用例数</span>
-                  </div>
-                </div>
-                <div class="project-actions">
-                  <button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
-                  <button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
-                  <button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
-                </div>
               </div>
 
-              <!-- 项目 2: 支付服务 -->
-              <div class="project-card">
-                <div class="project-card-top">
-                  <div class="project-icon project-icon--orange"><i data-lucide="folder"></i></div>
-                  <span class="project-name">支付服务</span>
-                  <span class="pill pill-success">活跃</span>
-                </div>
-                <p class="project-desc">对接多渠道支付、退款对账、资金清结算与交易风控一体化服务，保障资金流转安全。</p>
-                <div class="project-meta">
-                  <span class="version-tag">v1.5</span>
-                  <span class="module-count">5个模块</span>
-                </div>
-                <div class="project-stats">
-                  <div class="project-stat">
-                    <span class="project-stat-value">2024-01-10</span>
-                    <span class="project-stat-label">创建时间</span>
-                  </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">18</span>
-                    <span class="project-stat-label">需求数</span>
-                  </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">92</span>
-                    <span class="project-stat-label">用例数</span>
-                  </div>
-                </div>
-                <div class="project-actions">
-                  <button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
-                  <button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
-                  <button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
-                </div>
-              </div>
+            <!-- 项目列表（折叠式） -->
+              <div class="pm-project-list">
 
-              <!-- 项目 3: 消息推送 -->
-              <div class="project-card">
-                <div class="project-card-top">
-                  <div class="project-icon project-icon--purple"><i data-lucide="folder"></i></div>
-                  <span class="project-name">消息推送</span>
-                  <span class="pill pill-success">活跃</span>
-                </div>
-                <p class="project-desc">支撑 App 推送、短信、邮件及站内信的多通道消息分发服务，支持模板化与精准触达。</p>
-                <div class="project-meta">
-                  <span class="version-tag">v1.0</span>
-                  <span class="module-count">3个模块</span>
-                </div>
-                <div class="project-stats">
-                  <div class="project-stat">
-                    <span class="project-stat-value">2024-01-05</span>
-                    <span class="project-stat-label">创建时间</span>
+                <!-- 项目 1：用户认证中心 — 展开状态 -->
+                <div class="pm-project-item pm-project-expanded">
+                  <div class="pm-project-header">
+                    <div class="pm-project-left">
+                      <button class="pm-chevron" type="button" aria-label="收起项目" data-dom-id="proj-toggle-1">
+                        <i data-lucide="chevron-down"></i>
+                      </button>
+                      <div class="pm-project-icon pm-icon-active">
+                        <i data-lucide="folder-open"></i>
+                      </div>
+                      <div class="pm-project-info">
+                        <div class="pm-project-name-row">
+                          <span class="pm-project-name">用户认证中心</span>
+                          <span class="pm-version-tag">v2.0</span>
+                        </div>
+                        <p class="pm-project-desc">统一身份认证、账户安全、个人资料与多端登录会话管理服务</p>
+                      </div>
+                    </div>
+                    <div class="pm-project-status">
+                      <span class="pm-status-badge pm-status-active">活跃</span>
+                    </div>
+                    <div class="pm-project-actions">
+                      <button class="pm-icon-btn" type="button" title="上传需求文档"><i data-lucide="upload"></i></button>
+                      <button class="pm-icon-btn" type="button" title="在需求页面查看"><i data-lucide="file-text"></i></button>
+                      <button class="pm-icon-btn" type="button" title="查看测试用例"><i data-lucide="test-tube"></i></button>
+                      <button class="pm-icon-btn" type="button" title="归档项目"><i data-lucide="archive"></i></button>
+                      <span class="pm-divider"></span>
+                      <button class="pm-icon-btn" type="button" title="编辑项目"><i data-lucide="edit-3"></i></button>
+                      <button class="pm-icon-btn pm-icon-danger" type="button" title="删除项目"><i data-lucide="trash-2"></i></button>
+                    </div>
                   </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">12</span>
-                    <span class="project-stat-label">需求数</span>
-                  </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">48</span>
-                    <span class="project-stat-label">用例数</span>
+                  <div class="pm-expand-content">
+                    <table class="pm-req-table">
+                      <thead>
+                        <tr>
+                          <th class="pm-req-th-title">需求标题</th>
+                          <th class="pm-req-th-priority">优先级</th>
+                          <th class="pm-req-th-status">状态</th>
+                          <th class="pm-req-th-date">创建时间</th>
+                          <th class="pm-req-th-action">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr class="pm-req-row">
+                          <td><div class="pm-req-title-cell"><i data-lucide="file-text"></i><span>用户登录认证流程优化</span></div></td>
+                          <td class="pm-req-priority pm-priority-p0">P0</td>
+                          <td><span class="pm-req-status pm-status-confirmed">已确认</span></td>
+                          <td class="pm-req-date">2024-03-15</td>
+                          <td class="pm-req-action">
+                            <button class="pm-icon-btn pm-icon-sm" type="button" title="查看详情"><i data-lucide="file-text"></i></button>
+                            <button class="pm-icon-btn pm-icon-sm pm-icon-danger" type="button" title="删除"><i data-lucide="trash-2"></i></button>
+                          </td>
+                        </tr>
+                        <tr class="pm-req-row">
+                          <td><div class="pm-req-title-cell"><i data-lucide="file-text"></i><span>手机号快捷登录功能</span></div></td>
+                          <td class="pm-req-priority pm-priority-p1">P1</td>
+                          <td><span class="pm-req-status pm-status-draft"><i data-lucide="message-circle"></i>待澄清</span></td>
+                          <td class="pm-req-date">2024-03-12</td>
+                          <td class="pm-req-action">
+                            <button class="pm-icon-btn pm-icon-sm" type="button" title="查看详情"><i data-lucide="file-text"></i></button>
+                            <button class="pm-icon-btn pm-icon-sm pm-icon-danger" type="button" title="删除"><i data-lucide="trash-2"></i></button>
+                          </td>
+                        </tr>
+                        <tr class="pm-req-row">
+                          <td><div class="pm-req-title-cell"><i data-lucide="file-text"></i><span>第三方 OAuth 授权登录</span></div></td>
+                          <td class="pm-req-priority pm-priority-p1">P1</td>
+                          <td><span class="pm-req-status pm-status-analyzing">分析中</span></td>
+                          <td class="pm-req-date">2024-03-10</td>
+                          <td class="pm-req-action">
+                            <button class="pm-icon-btn pm-icon-sm" type="button" title="查看详情"><i data-lucide="file-text"></i></button>
+                            <button class="pm-icon-btn pm-icon-sm pm-icon-danger" type="button" title="删除"><i data-lucide="trash-2"></i></button>
+                          </td>
+                        </tr>
+                        <tr class="pm-req-row">
+                          <td><div class="pm-req-title-cell"><i data-lucide="file-text"></i><span>密码安全策略升级</span></div></td>
+                          <td class="pm-req-priority pm-priority-p2">P2</td>
+                          <td><span class="pm-req-status pm-status-pending">待确认</span></td>
+                          <td class="pm-req-date">2024-03-08</td>
+                          <td class="pm-req-action">
+                            <button class="pm-icon-btn pm-icon-sm" type="button" title="查看详情"><i data-lucide="file-text"></i></button>
+                            <button class="pm-icon-btn pm-icon-sm pm-icon-danger" type="button" title="删除"><i data-lucide="trash-2"></i></button>
+                          </td>
+                        </tr>
+                        <tr class="pm-req-row">
+                          <td><div class="pm-req-title-cell"><i data-lucide="file-text"></i><span>多设备登录会话管理</span></div></td>
+                          <td class="pm-req-priority pm-priority-p2">P2</td>
+                          <td><span class="pm-req-status pm-status-confirmed">已确认</span></td>
+                          <td class="pm-req-date">2024-03-05</td>
+                          <td class="pm-req-action">
+                            <button class="pm-icon-btn pm-icon-sm" type="button" title="查看详情"><i data-lucide="file-text"></i></button>
+                            <button class="pm-icon-btn pm-icon-sm pm-icon-danger" type="button" title="删除"><i data-lucide="trash-2"></i></button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <div class="pm-req-footer"><span>共 5 条需求</span></div>
                   </div>
                 </div>
-                <div class="project-actions">
-                  <button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
-                  <button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
-                  <button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
-                </div>
-              </div>
 
-              <!-- 项目 4: 数据导出 -->
-              <div class="project-card">
-                <div class="project-card-top">
-                  <div class="project-icon project-icon--magenta"><i data-lucide="folder"></i></div>
-                  <span class="project-name">数据导出</span>
-                  <span class="pill pill-muted">归档</span>
-                </div>
-                <p class="project-desc">提供报表导出、批量数据下载与异步任务调度的通用能力，支持自定义导出模板配置。</p>
-                <div class="project-meta">
-                  <span class="version-tag">v0.9</span>
-                  <span class="module-count">2个模块</span>
-                </div>
-                <div class="project-stats">
-                  <div class="project-stat">
-                    <span class="project-stat-value">2023-12-20</span>
-                    <span class="project-stat-label">创建时间</span>
+                <!-- 项目 2：支付服务 -->
+                <div class="pm-project-item">
+                  <div class="pm-project-header">
+                    <div class="pm-project-left">
+                      <button class="pm-chevron" type="button" aria-label="展开项目" data-dom-id="proj-toggle-2">
+                        <i data-lucide="chevron-right"></i>
+                      </button>
+                      <div class="pm-project-icon pm-icon-active">
+                        <i data-lucide="folder-open"></i>
+                      </div>
+                      <div class="pm-project-info">
+                        <div class="pm-project-name-row">
+                          <span class="pm-project-name">支付服务</span>
+                          <span class="pm-version-tag">v1.5</span>
+                        </div>
+                        <p class="pm-project-desc">对接多渠道支付、退款对账、资金清结算与交易风控一体化服务</p>
+                      </div>
+                    </div>
+                    <div class="pm-project-status">
+                      <span class="pm-status-badge pm-status-active">活跃</span>
+                    </div>
+                    <div class="pm-project-actions">
+                      <button class="pm-icon-btn" type="button" title="上传需求文档"><i data-lucide="upload"></i></button>
+                      <button class="pm-icon-btn" type="button" title="在需求页面查看"><i data-lucide="file-text"></i></button>
+                      <button class="pm-icon-btn" type="button" title="查看测试用例"><i data-lucide="test-tube"></i></button>
+                      <button class="pm-icon-btn" type="button" title="归档项目"><i data-lucide="archive"></i></button>
+                      <span class="pm-divider"></span>
+                      <button class="pm-icon-btn" type="button" title="编辑项目"><i data-lucide="edit-3"></i></button>
+                      <button class="pm-icon-btn pm-icon-danger" type="button" title="删除项目"><i data-lucide="trash-2"></i></button>
+                    </div>
                   </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">8</span>
-                    <span class="project-stat-label">需求数</span>
-                  </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">32</span>
-                    <span class="project-stat-label">用例数</span>
-                  </div>
                 </div>
-                <div class="project-actions">
-                  <button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
-                  <button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
-                  <button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
-                </div>
-              </div>
 
-              <!-- 项目 5: 认证授权 -->
-              <div class="project-card">
-                <div class="project-card-top">
-                  <div class="project-icon project-icon--green"><i data-lucide="folder"></i></div>
-                  <span class="project-name">认证授权</span>
-                  <span class="pill pill-success">活跃</span>
-                </div>
-                <p class="project-desc">基于 OAuth2.0 的统一授权中心，支持 SSO 单点登录与细粒度权限控制，对接各业务线。</p>
-                <div class="project-meta">
-                  <span class="version-tag">v2.1</span>
-                  <span class="module-count">6个模块</span>
-                </div>
-                <div class="project-stats">
-                  <div class="project-stat">
-                    <span class="project-stat-value">2023-12-15</span>
-                    <span class="project-stat-label">创建时间</span>
+                <!-- 项目 3：消息推送 -->
+                <div class="pm-project-item">
+                  <div class="pm-project-header">
+                    <div class="pm-project-left">
+                      <button class="pm-chevron" type="button" aria-label="展开项目">
+                        <i data-lucide="chevron-right"></i>
+                      </button>
+                      <div class="pm-project-icon pm-icon-active">
+                        <i data-lucide="folder-open"></i>
+                      </div>
+                      <div class="pm-project-info">
+                        <div class="pm-project-name-row">
+                          <span class="pm-project-name">消息推送</span>
+                          <span class="pm-version-tag">v1.0</span>
+                        </div>
+                        <p class="pm-project-desc">支撑 App 推送、短信、邮件及站内信的多通道消息分发服务</p>
+                      </div>
+                    </div>
+                    <div class="pm-project-status">
+                      <span class="pm-status-badge pm-status-active">活跃</span>
+                    </div>
+                    <div class="pm-project-actions">
+                      <button class="pm-icon-btn" type="button" title="上传需求文档"><i data-lucide="upload"></i></button>
+                      <button class="pm-icon-btn" type="button" title="在需求页面查看"><i data-lucide="file-text"></i></button>
+                      <button class="pm-icon-btn" type="button" title="查看测试用例"><i data-lucide="test-tube"></i></button>
+                      <button class="pm-icon-btn" type="button" title="归档项目"><i data-lucide="archive"></i></button>
+                      <span class="pm-divider"></span>
+                      <button class="pm-icon-btn" type="button" title="编辑项目"><i data-lucide="edit-3"></i></button>
+                      <button class="pm-icon-btn pm-icon-danger" type="button" title="删除项目"><i data-lucide="trash-2"></i></button>
+                    </div>
                   </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">20</span>
-                    <span class="project-stat-label">需求数</span>
-                  </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">124</span>
-                    <span class="project-stat-label">用例数</span>
-                  </div>
                 </div>
-                <div class="project-actions">
-                  <button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
-                  <button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
-                  <button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
-                </div>
-              </div>
 
-              <!-- 项目 6: 监控告警 -->
-              <div class="project-card">
-                <div class="project-card-top">
-                  <div class="project-icon project-icon--deep"><i data-lucide="folder"></i></div>
-                  <span class="project-name">监控告警</span>
-                  <span class="pill pill-muted">归档</span>
-                </div>
-                <p class="project-desc">面向基础设施与应用指标的采集、聚合、阈值告警与可视化看板，支持多渠道通知推送。</p>
-                <div class="project-meta">
-                  <span class="version-tag">v1.0</span>
-                  <span class="module-count">4个模块</span>
-                </div>
-                <div class="project-stats">
-                  <div class="project-stat">
-                    <span class="project-stat-value">2023-11-10</span>
-                    <span class="project-stat-label">创建时间</span>
+                <!-- 项目 4：数据导出 — 归档 -->
+                <div class="pm-project-item">
+                  <div class="pm-project-header">
+                    <div class="pm-project-left">
+                      <button class="pm-chevron" type="button" aria-label="展开项目">
+                        <i data-lucide="chevron-right"></i>
+                      </button>
+                      <div class="pm-project-icon pm-icon-archived">
+                        <i data-lucide="folder-open"></i>
+                      </div>
+                      <div class="pm-project-info">
+                        <div class="pm-project-name-row">
+                          <span class="pm-project-name">数据导出</span>
+                          <span class="pm-version-tag">v0.9</span>
+                        </div>
+                        <p class="pm-project-desc">提供报表导出、批量数据下载与异步任务调度的通用能力</p>
+                        <p class="pm-golive-date">上线时间: 2024-01-20</p>
+                      </div>
+                    </div>
+                    <div class="pm-project-status">
+                      <span class="pm-status-badge pm-status-archived">已归档</span>
+                    </div>
+                    <div class="pm-project-actions">
+                      <button class="pm-icon-btn" type="button" title="恢复活动状态"><i data-lucide="rotate-ccw" style="color: var(--chart-3);"></i></button>
+                    </div>
                   </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">10</span>
-                    <span class="project-stat-label">需求数</span>
-                  </div>
-                  <div class="project-stat">
-                    <span class="project-stat-value">40</span>
-                    <span class="project-stat-label">用例数</span>
-                  </div>
                 </div>
-                <div class="project-actions">
-                  <button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button>
-                  <button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button>
-                  <button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button>
-                </div>
-              </div>
-            </div>
-            </div><!-- /卡片视图 -->
 
-            <!-- 列表视图 -->
-            <div class="project-view-list" data-view-content="list" style="display:none;">
-              <div class="project-table-card">
-                <div class="project-table-scroll">
-                  <table class="project-table">
-                    <thead>
-                      <tr>
-                        <th>项目名称</th>
-                        <th>版本</th>
-                        <th>描述</th>
-                        <th>模块数</th>
-                        <th>需求数</th>
-                        <th>用例数</th>
-                        <th>创建时间</th>
-                        <th>状态</th>
-                        <th>操作</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td><div class="pt-name-cell"><div class="project-icon project-icon--brand"><i data-lucide="folder"></i></div><span class="pt-name">用户中心</span></div></td>
-                        <td><span class="version-tag">v2.0</span></td>
-                        <td class="pt-desc">统一身份认证、账户安全、个人资料与多端登录会话管理服务</td>
-                        <td class="pt-num">8</td>
-                        <td class="pt-num">24</td>
-                        <td class="pt-num">156</td>
-                        <td class="pt-date">2024-01-15</td>
-                        <td><span class="pill pill-success">活跃</span></td>
-                        <td><div class="action-cell"><button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button><button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button></div></td>
-                      </tr>
-                      <tr>
-                        <td><div class="pt-name-cell"><div class="project-icon project-icon--orange"><i data-lucide="folder"></i></div><span class="pt-name">支付服务</span></div></td>
-                        <td><span class="version-tag">v1.5</span></td>
-                        <td class="pt-desc">对接多渠道支付、退款对账、资金清结算与交易风控一体化服务</td>
-                        <td class="pt-num">5</td>
-                        <td class="pt-num">18</td>
-                        <td class="pt-num">92</td>
-                        <td class="pt-date">2024-01-10</td>
-                        <td><span class="pill pill-success">活跃</span></td>
-                        <td><div class="action-cell"><button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button><button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button></div></td>
-                      </tr>
-                      <tr>
-                        <td><div class="pt-name-cell"><div class="project-icon project-icon--purple"><i data-lucide="folder"></i></div><span class="pt-name">消息推送</span></div></td>
-                        <td><span class="version-tag">v1.0</span></td>
-                        <td class="pt-desc">支撑 App 推送、短信、邮件及站内信的多通道消息分发服务</td>
-                        <td class="pt-num">3</td>
-                        <td class="pt-num">12</td>
-                        <td class="pt-num">48</td>
-                        <td class="pt-date">2024-01-05</td>
-                        <td><span class="pill pill-success">活跃</span></td>
-                        <td><div class="action-cell"><button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button><button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button></div></td>
-                      </tr>
-                      <tr>
-                        <td><div class="pt-name-cell"><div class="project-icon project-icon--magenta"><i data-lucide="folder"></i></div><span class="pt-name">数据导出</span></div></td>
-                        <td><span class="version-tag">v0.9</span></td>
-                        <td class="pt-desc">提供报表导出、批量数据下载与异步任务调度的通用能力</td>
-                        <td class="pt-num">2</td>
-                        <td class="pt-num">8</td>
-                        <td class="pt-num">32</td>
-                        <td class="pt-date">2023-12-20</td>
-                        <td><span class="pill pill-muted">归档</span></td>
-                        <td><div class="action-cell"><button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button><button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button></div></td>
-                      </tr>
-                      <tr>
-                        <td><div class="pt-name-cell"><div class="project-icon project-icon--green"><i data-lucide="folder"></i></div><span class="pt-name">认证授权</span></div></td>
-                        <td><span class="version-tag">v2.1</span></td>
-                        <td class="pt-desc">基于 OAuth2.0 的统一授权中心，支持 SSO 单点登录与细粒度权限控制</td>
-                        <td class="pt-num">6</td>
-                        <td class="pt-num">20</td>
-                        <td class="pt-num">124</td>
-                        <td class="pt-date">2023-12-15</td>
-                        <td><span class="pill pill-success">活跃</span></td>
-                        <td><div class="action-cell"><button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button><button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button></div></td>
-                      </tr>
-                      <tr>
-                        <td><div class="pt-name-cell"><div class="project-icon project-icon--deep"><i data-lucide="folder"></i></div><span class="pt-name">监控告警</span></div></td>
-                        <td><span class="version-tag">v1.0</span></td>
-                        <td class="pt-desc">面向基础设施与应用指标的采集、聚合、阈值告警与可视化看板</td>
-                        <td class="pt-num">4</td>
-                        <td class="pt-num">10</td>
-                        <td class="pt-num">40</td>
-                        <td class="pt-date">2023-11-10</td>
-                        <td><span class="pill pill-muted">归档</span></td>
-                        <td><div class="action-cell"><button class="action-btn" type="button" aria-label="查看"><i data-lucide="eye"></i></button><button class="action-btn" type="button" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="action-btn" type="button" aria-label="更多"><i data-lucide="more-horizontal"></i></button></div></td>
-                      </tr>
-                    </tbody>
-                  </table>
+                <!-- 项目 5：认证授权 — 搜索匹配高亮 -->
+                <div class="pm-project-item pm-project-matched">
+                  <div class="pm-project-header">
+                    <div class="pm-project-left">
+                      <button class="pm-chevron" type="button" aria-label="展开项目">
+                        <i data-lucide="chevron-right"></i>
+                      </button>
+                      <div class="pm-project-icon pm-icon-active">
+                        <i data-lucide="folder-open"></i>
+                      </div>
+                      <div class="pm-project-info">
+                        <div class="pm-project-name-row">
+                          <span class="pm-project-name">认证授权</span>
+                          <span class="pm-version-tag">v2.1</span>
+                          <span class="pm-match-badge"><i data-lucide="alert-triangle"></i>需求匹配</span>
+                        </div>
+                        <p class="pm-project-desc">基于 OAuth2.0 的统一授权中心，支持 SSO 单点登录</p>
+                      </div>
+                    </div>
+                    <div class="pm-project-status">
+                      <span class="pm-status-badge pm-status-active">活跃</span>
+                    </div>
+                    <div class="pm-project-actions">
+                      <button class="pm-icon-btn" type="button" title="上传需求文档"><i data-lucide="upload"></i></button>
+                      <button class="pm-icon-btn" type="button" title="在需求页面查看"><i data-lucide="file-text"></i></button>
+                      <button class="pm-icon-btn" type="button" title="查看测试用例"><i data-lucide="test-tube"></i></button>
+                      <button class="pm-icon-btn" type="button" title="归档项目"><i data-lucide="archive"></i></button>
+                      <span class="pm-divider"></span>
+                      <button class="pm-icon-btn" type="button" title="编辑项目"><i data-lucide="edit-3"></i></button>
+                      <button class="pm-icon-btn pm-icon-danger" type="button" title="删除项目"><i data-lucide="trash-2"></i></button>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div><!-- /列表视图 -->
+
+              </div><!-- /项目列表 -->
+            </div><!-- /项目列表卡片 -->
           </div>
         </main>
       </div>

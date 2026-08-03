@@ -9,7 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@types/dagre": "^0.7.54",
     "@xyflow/react": "^12.11.1",
+    "dagre": "^0.8.5",
     "lucide-react": "^0.460.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
