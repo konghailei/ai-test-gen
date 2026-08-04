@@ -94,3 +94,21 @@ edit-dialog.yaml
 # ===== 本地临时文件 / 历史离线包（不入库） =====
 dy
 ai-testgen-update-*.zip
+
+# ===== 调试残留文件（防止再次入库） =====
+# 一次性调试 dump / state / json
+clarify_history.txt
+clarify_state.txt
+raw_text_dump.txt
+srr_dump.txt
+req_clarifications.json
+req_detail.json
+req_questions.json
+# 一次性安装环境文件
+install_*.env
+# 根目录散落的一次性脚本（正式脚本应位于 backend/ 或 scripts/ 下）
+/check_srr.py
+/check_*.py
+/test_*.py
+/verify_*.py
+/_*.py

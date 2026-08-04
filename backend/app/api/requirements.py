@@ -33,7 +33,7 @@ from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import Response
-from sqlalchemy import func, select, delete
+from sqlalchemy import func, select, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_admin, require_write, get_current_user, CurrentUser
@@ -278,10 +278,17 @@ def _merge_interaction_srr(base_srr: dict, interaction_srr: dict) -> dict:
 
 async def _save_fps_to_db(
     session: AsyncSession, req_id: str, fps: list[dict], priority: str = "P2",
+    product_id: str = "",
 ) -> int:
     """将 ReqAgent 提取的功能点列表存入 functional_points 表。
 
-    每个 FP 的 sub_srr → srr_json，suggested_module 暂存不解析（用户手动分配模块）。
+    v2.55 修复 Bug A-1：解析 suggested_module（模块名称）-> Module.id（FK），
+    写入 module_id + modules JSON 列，避免 FP 入库后模块信息丢失导致：
+      - FP 复用候选查询命中 0 条
+      - 依赖图谱模块筛选失效
+      - FP 影响分析跳过模块级 BFS
+      - 归档向量 modules 元数据为空
+    每个 FP 的 sub_srr -> srr_json，suggested_module 解析后仍保留在 srr_json 中。
     返回实际入库的 FP 数量。
     """
     if not fps:
@@ -290,6 +297,38 @@ async def _save_fps_to_db(
     saved = 0
     # v2.48: 数据类型中文化兜底（防止 LLM 输出英文类型）
     from app.exporters.req_xmind import _data_type_cn
+
+    # v2.55 Bug A-1：预加载该产品下的 Module 表，构建 name -> id 映射
+    module_name_to_id: dict[str, str] = {}
+    if product_id:
+        try:
+            from app.db.models import Module as _ModuleModel
+            mod_rows = await session.execute(
+                select(_ModuleModel.id, _ModuleModel.name).where(
+                    _ModuleModel.product_id == product_id
+                )
+            )
+            for mid, mname in mod_rows.all():
+                if mname:
+                    module_name_to_id[mname.strip()] = mid
+                    module_name_to_id[mname.strip().lower()] = mid
+        except Exception as mod_e:
+            logger.warning(
+                "[FP-AutoSave] 预加载 Module 映射失败（FP module_id 将留空）: product_id={}, err={}",
+                product_id, str(mod_e)[:150],
+            )
+
+    def _resolve_module_id(suggested: str) -> str | None:
+        """suggested_module 名称 -> Module.id，支持精确/忽略大小写匹配。"""
+        if not suggested or not module_name_to_id:
+            return None
+        s = suggested.strip()
+        if not s:
+            return None
+        if s in module_name_to_id:
+            return module_name_to_id[s]
+        return module_name_to_id.get(s.lower())
+
     for fp in fps:
         fp_id = gen_requirement_id()
         sub_srr = fp.get("sub_srr", {}) if isinstance(fp, dict) else {}
@@ -299,9 +338,18 @@ async def _save_fps_to_db(
                 if isinstance(dc, dict) and dc.get("type"):
                     dc["type"] = _data_type_cn(str(dc["type"]))
 
+        # v2.55 Bug A-1：解析 suggested_module -> module_id
+        suggested_module = (
+            fp.get("suggested_module", "") if isinstance(fp, dict) else ""
+        )
+        resolved_module_id = _resolve_module_id(suggested_module)
+        modules_list: list[str] = [resolved_module_id] if resolved_module_id else []
+
         record = FunctionalPoint(
             id=fp_id,
             requirement_id=req_id,
+            module_id=resolved_module_id,
+            modules=modules_list,
             name=((fp.get("name") or "未命名功能点") if isinstance(fp, dict) else "未命名功能点")[:255],
             fp_type=(
                 fp.get("fp_type", "workflow") if isinstance(fp, dict) else "workflow"
@@ -309,24 +357,23 @@ async def _save_fps_to_db(
             priority=priority,
             srr_json={
                 **sub_srr,
-                # v2.52: 保留 sub_srr 自身的详细 summary（含前置条件/假设），
-                # 仅当 sub_srr 无 summary 时才用顶层简要 summary fallback。
-                # 原实现直接覆盖，导致详细 summary 被空字符串或简要摘要覆盖。
                 "summary": sub_srr.get("summary") or (fp.get("summary", "") if isinstance(fp, dict) else ""),
-                "suggested_module": fp.get("suggested_module", "") if isinstance(fp, dict) else "",
+                "suggested_module": suggested_module,
             },
             atomicity_check=(
                 fp.get("atomicity_check", {}) if isinstance(fp, dict) else {}
             ),
-            # v2.48: test_hints 已移除，不再写入（保留 DB 列兼容历史数据，恒为空列表）
             test_hints=[],
             status="pending_review",
         )
         session.add(record)
         saved += 1
 
-    await session.flush()  # P0-1: 确保 FP 写入 DB，_save_fp_dependencies 可查询到
-    logger.info("[FP-AutoSave] 需求 {} 自动存入 {} 个功能点", req_id, saved)
+    await session.flush()
+    logger.info(
+        "[FP-AutoSave] 需求 {} 自动存入 {} 个功能点 (product_id={}, module 映射表大小={})",
+        req_id, saved, product_id, len(module_name_to_id),
+    )
     return saved
 
 
@@ -1267,7 +1314,7 @@ async def _run_requirement_analysis(
                     raw_text=combined_raw,
                 ))
                 try:
-                    await _save_fps_to_db(save_s, req_id, captured_fps, req_data.get("priority", "P2"))
+                    await _save_fps_to_db(save_s, req_id, captured_fps, req_data.get("priority", "P2"), product_id=product_id)
                     await _save_fp_dependencies(save_s, req_id, captured_fp_deps)
                     await _update_fp_index_in_srr(save_s, req_id)
                     await save_s.commit()
@@ -1410,7 +1457,7 @@ async def _run_requirement_analysis(
                 )
                 await s.execute(stmt)
                 # v1.5.1: 自动保存 ReqAgent 一体式提取的功能点 + 依赖关系
-                await _save_fps_to_db(s, req_id, captured_fps, req_data.get("priority", "P2"))
+                await _save_fps_to_db(s, req_id, captured_fps, req_data.get("priority", "P2"), product_id=product_id)
                 await _save_fp_dependencies(s, req_id, captured_fp_deps)
                 await _update_fp_index_in_srr(s, req_id)  # v2.18: 更新总 SRR 的 fp_index
                 await s.commit()
@@ -2035,19 +2082,87 @@ async def get_clarify_questions(
     saved_questions = clarify_state.get("questions", []) or []
     saved_answers = srr.get("clarify_answers", {}) or {}
 
+    # ⭐ 合并 _clarify_history（多轮澄清历史）：
+    # 历史上 submit_clarify 会把已回答对写入 clarify_history[*].{questions,answers}，
+    # 但顶层 _clarify_state.questions 会被 recheck 阶段清空，前端从该字段读会误以为
+    # "之前澄清过的问题没生成"。这里把历史中每一轮的 questions+answers 扁平化合并，
+    # 保证 UI 看到：已回答过的问题（带着 answer）仍出现，状态应为 answered。
+    merged_questions_map: dict[str, dict] = {}
+    # 先写最终 snapshot（最新一轮），旧的不会覆盖新的
+    for q in saved_questions:
+        qid = str(q.get("id") or f"{q.get('field','')}__{q.get('question','')[:40]}")
+        merged_questions_map[qid] = dict(q)
+    # 再 merge history；若最终 snapshot 没有则补上（旧问过但 snapshot 被清空的）
+    history = srr.get("_clarify_history") or []
+    for h in history:
+        for q in (h.get("questions") or []):
+            qid = str(q.get("id") or f"{q.get('field','')}__{q.get('question','')[:40]}")
+            if qid not in merged_questions_map:
+                merged_questions_map[qid] = dict(q)
+    # 合并 answers：顶层 clarify_answers + history 每轮的 answers
+    merged_answers: dict = dict(saved_answers)
+    for h in history:
+        if isinstance(h.get("answers"), dict):
+            # 旧 answers 覆盖空值；新值优先（history 越后越新，最后一轮要比之前优先）
+            for k, v in h["answers"].items():
+                if not merged_answers.get(k):
+                    merged_answers[k] = v
+    # 为每个 question 注入 answered 状态（便于前端直接展示）
+    merged_questions: list[dict] = []
+    for qid, q in merged_questions_map.items():
+        ans = merged_answers.get(qid)
+        if ans:
+            q2 = dict(q)
+            if not q2.get("answer"):
+                q2["answer"] = ans if isinstance(ans, str) else (ans.get("answer") if isinstance(ans, dict) else "")
+            if q2.get("answered") is None:
+                q2["answered"] = True
+            if "status" not in q2 or not q2.get("status"):
+                q2["status"] = "answered"
+            merged_questions.append(q2)
+        else:
+            merged_questions.append(q)
+    # 保持稳定顺序：已回答的排在前面，未回答按原顺序
+    merged_questions.sort(key=lambda q: (0 if q.get("answered") else 1))
+
+    # ⭐ kb_access_log 合并：_clarify_state.kb_access_log + history 每轮的 kb_access_log
+    kb_access_log_merged: list[dict] = list(clarify_state.get("kb_access_log", []) or [])
+    for h in history:
+        if isinstance(h.get("kb_access_log"), list):
+            kb_access_log_merged.extend(h["kb_access_log"])
+    kb_status = dict(clarify_state.get("kb_status", {}) or {})
+    kb_status["kb_access_log_count"] = len(kb_access_log_merged)
+    kb_status["kb_access_log"] = kb_access_log_merged
+
     return ApiResponse(
         success=True,
         message="ok",
         data={
             "req_id": req_id,
-            "status": "needs_clarification" if saved_questions else "passed",
-            "questions": saved_questions,
-            "previous_answers": saved_answers,
+            "status": (
+                "needs_clarification"
+                if any(not q.get("answered") for q in merged_questions)
+                else "passed"
+            ),
+            "questions": merged_questions,
+            "previous_answers": merged_answers,
             "quality_report": clarify_state.get("quality_report", {}),
-            "kb_status": clarify_state.get("kb_status", {}),
+            "kb_status": kb_status,
             "auto_augmentations": clarify_state.get("auto_augmentations", []),
             # v2.12: 字段冲突列表（docs/01 §4.4.1），供前端展示人工确认
             "field_conflicts": clarify_state.get("field_conflicts", []),
+            # ⭐ 每轮澄清历史摘要（便于调试/UI 多轮展示）
+            "rounds_summary": [
+                {
+                    "round": i + 1,
+                    "questions_count": len(h.get("questions") or []),
+                    "answers_count": len({k: v for k, v in (h.get("answers") or {}).items() if v}),
+                    "kb_access_log_count": len(h.get("kb_access_log") or []),
+                    "created_at": h.get("created_at"),
+                    "note": h.get("note"),
+                }
+                for i, h in enumerate(history)
+            ],
         },
     )
 
@@ -2598,7 +2713,7 @@ async def _run_clarify_reparse(
                     except Exception as e:
                         logger.warning("[Task/Clarify] 旧 FP 向量清理失败(不阻断): {}", str(e)[:200])
 
-                await _save_fps_to_db(s, req_id, captured_fps, priority)
+                await _save_fps_to_db(s, req_id, captured_fps, priority, product_id=product_id)
                 await _save_fp_dependencies(s, req_id, captured_fp_deps)
                 await _update_fp_index_in_srr(s, req_id)  # v2.18: 更新总 SRR 的 fp_index
                 await s.commit()
@@ -2725,7 +2840,7 @@ async def finalize_requirement(
     # v2.52: 同步更新 FP（原 finalize 不更新 FP，导致 SRR 新 / FP 旧）
     if finalize_result.fps:
         try:
-            await _save_fps_to_db(session, req_id, finalize_result.fps, record.priority)
+            await _save_fps_to_db(session, req_id, finalize_result.fps, record.priority, product_id=record.product_id or "")
             await _save_fp_dependencies(session, req_id, finalize_result.fp_deps)
             await _update_fp_index_in_srr(session, req_id)
             # 重新读取 final_data（_update_fp_index_in_srr 可能修改了 srr_json）
@@ -3239,7 +3354,7 @@ async def _run_regenerate_reparse(
                         req_row = (await save_s.execute(
                             select(Requirement.priority).where(Requirement.id == req_id)
                         )).scalar_one_or_none()
-                        await _save_fps_to_db(save_s, req_id, captured_fps, req_row or "P2")
+                        await _save_fps_to_db(save_s, req_id, captured_fps, req_row or "P2", product_id=product_id)
                         await _save_fp_dependencies(save_s, req_id, captured_fp_deps)
                         await _update_fp_index_in_srr(save_s, req_id)
                 except Exception as fp_e:
@@ -3454,7 +3569,7 @@ async def _run_regenerate_reparse(
                             )
                             await fp_split_sess.execute(sa_delete(FP).where(FP.requirement_id == req_id))
                             await fp_split_sess.flush()
-                        await _save_fps_to_db(fp_split_sess, req_id, captured_fps, record2.priority)
+                        await _save_fps_to_db(fp_split_sess, req_id, captured_fps, record2.priority, product_id=product_id)
                         await _save_fp_dependencies(fp_split_sess, req_id, captured_fp_deps)
                         await _update_fp_index_in_srr(fp_split_sess, req_id)
                         await fp_split_sess.commit()
@@ -5052,8 +5167,19 @@ class ImpactDescriptionUpdateRequest(BaseModel):
 # ============================================================================
 
 class ImpactConfirmRequest(BaseModel):
-    """人工审核确认受影响的 FP 列表。"""
-    confirmed_fp_ids: list[str]  # 确认影响的 FP ID 列表
+    """人工审核确认受影响的 FP 列表。
+
+    修复 H5：
+    - 新增 unconfirmed_fp_ids：用户明确确认"不受影响"的 FP，写入
+      impact_analysis 时标记 is_affected=False + confirmed_at，避免
+      confirm_requirement 守卫认为它"未确认"而产生死锁。
+    - 新增 removed_fp_ids：用户从候选列表移除（不关心 / 认为不需要验证）
+      的 FP，直接从 impact_analysis 中移除对应条目。
+    """
+
+    confirmed_fp_ids: list[str] = []  # 确认「受影响」的 FP ID 列表
+    unconfirmed_fp_ids: list[str] = []  # 确认「不受影响」的 FP ID 列表
+    removed_fp_ids: list[str] = []  # 从 impact_analysis 中彻底移除的 FP ID 列表
     edited_descriptions: dict[str, str] = {}  # fp_id → 编辑后的影响说明
 
 
@@ -5084,53 +5210,94 @@ async def confirm_impact_analysis(
     body: ImpactConfirmRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """人工审核确认受影响 FP，写入 SRR impact_analysis。
+    """人工审核确认受影响/不受影响 FP，写入 SRR impact_analysis。
 
-    操作：
-        1. 校验 FP 存在
-        2. 将确认的 FP 写入 SRR.impact_analysis，标记 is_affected=true
-        3. 已存在的同 fp_id 条目覆盖
+    操作（修复 H5 死锁）：
+        1. 先把 removed_fp_ids 中的条目从 impact_analysis 移除。
+        2. 对 confirmed_fp_ids：标记 is_affected=True + confirmed_at。
+        3. 对 unconfirmed_fp_ids：标记 is_affected=False + confirmed_at，
+           这样 confirm_requirement 的「所有条目都要有 confirmed_at」守卫
+           也会放行（显式"确认不受影响"也算确认）。
+        4. 重复/不存在 FP 忽略；存在则覆盖旧条目。
+        5. 修复 M1 竞态：PG advisory lock + SELECT FOR UPDATE 行锁，避免双写丢失。
     """
     req = await _load_active_requirement(req_id, session)
+    # 行锁：避免并发 confirm_impact_analysis 双写互相覆盖
+    lock_req = await session.execute(
+        text("SELECT id FROM requirements WHERE id = :rid FOR UPDATE"),
+        {"rid": req_id},
+    )
+    if not lock_req.fetchone():
+        raise HTTPException(status_code=404, detail="需求不存在（行锁获取失败）")
     # v2.52: 使用 dict() 创建新字典，确保 SQLAlchemy 检测到 JSON 字段变更
-    # （原实现 srr = req.srr_json or {} 获取同一对象引用，原地修改后重新赋值，
-    #   SQLAlchemy 可能因对象 identity 未变而不检测到变更，导致 impact_analysis 不持久化）
     srr = dict(req.srr_json or {})
 
-    impact_list = list(srr.get("impact_analysis", []))
-    confirmed_fps = []
+    removed_set = set(body.removed_fp_ids or [])
+    confirmed_set = set(body.confirmed_fp_ids or [])
+    unaffected_set = set(body.unconfirmed_fp_ids or [])
+    # 冲突处理优先级：removed > confirmed > unaffected（同一 FP 在多个集合）
+    unaffected_set -= removed_set
+    confirmed_set -= removed_set
+    unaffected_set -= confirmed_set
 
-    for fp_id in body.confirmed_fp_ids:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    impact_list: list[dict] = [
+        e for e in list(srr.get("impact_analysis", []) or [])
+        if e.get("fp_id") not in removed_set
+    ]
+
+    written_entries: list[dict] = []
+
+    async def _write_entry(fp_id: str, is_affected_flag: bool) -> None:
         fp = await session.get(FunctionalPoint, fp_id)
-        if not fp:
-            continue
+        if fp is None:
+            return  # FP 已删除，跳过（修复 C3：确认时忽略被删除 FP，避免写出空字段条目）
         entry = {
             "fp_id": fp.id,
             "fp_name": fp.name,
             "fp_type": fp.fp_type,
             "module_id": fp.module_id,
             "source_req_id": fp.requirement_id,
-            "is_affected": True,
-            "impact_description": body.edited_descriptions.get(fp_id, f"受需求[{req.title}]影响"),
-            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+            "is_affected": is_affected_flag,
+            "impact_description": body.edited_descriptions.get(
+                fp_id,
+                f"受需求[{req.title}]影响" if is_affected_flag else f"确认不受需求[{req.title}]影响",
+            ),
+            "confirmed_at": now_iso,
         }
         # 覆盖旧条目
-        impact_list = [e for e in impact_list if e.get("fp_id") != fp_id]
-        impact_list.append(entry)
-        confirmed_fps.append(entry)
+        for i, e in enumerate(impact_list):
+            if e.get("fp_id") == fp_id:
+                impact_list[i] = entry
+                break
+        else:
+            impact_list.append(entry)
+        written_entries.append(entry)
+
+    for fp_id in confirmed_set:
+        await _write_entry(fp_id, True)
+    for fp_id in unaffected_set:
+        await _write_entry(fp_id, False)
 
     srr["impact_analysis"] = impact_list
     req.srr_json = srr
 
-    # v2.48: 移除向 test_hints 写入 "回归测试" 的逻辑
-    # 回归用例的生成已由 impact_analysis 数据驱动（gen_agent 读取 impact_analysis_section），
-    # 不再依赖已废弃的 test_hints 字段
-
     await session.commit()
-    logger.info("[ImpactAnalysis] 确认: req={}, confirmed_fps={}", req_id, len(confirmed_fps))
+    logger.info(
+        "[ImpactAnalysis] 确认完成: req=%s affected=%s unaffected=%s removed=%s",
+        req_id,
+        len([e for e in written_entries if e.get("is_affected")]),
+        len([e for e in written_entries if not e.get("is_affected")]),
+        len(removed_set),
+    )
     return ApiResponse(
         success=True,
-        data={"confirmed_count": len(confirmed_fps), "impact_analysis": impact_list},
+        data={
+            "confirmed_count": len([e for e in written_entries if e.get("is_affected")]),
+            "unconfirmed_count": len([e for e in written_entries if not e.get("is_affected")]),
+            "removed_count": len(removed_set),
+            "impact_analysis": impact_list,
+        },
     )
 
 
@@ -5598,11 +5765,62 @@ async def fp_delete(
     session: AsyncSession = Depends(get_session),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
-    """删除功能点。归档后不可用。"""
-    await _load_active_requirement(req_id, session)
+    """删除功能点。归档后不可用。
+
+    修复 C3（跨需求引用泄漏）：
+    删除 FP 时，除了清除本需求的 SRR.impact_analysis 引用，
+    还要级联清理「其他所有需求」SRR 中 impact_analysis 对该 fp_id 的引用，
+    否则 confirm_requirement 的守卫会让别的需求卡在"有未确认条目"。
+    同时删除 Traceability 表中 src_fp_id / dest_fp_id 关联。
+    """
+    req = await _load_active_requirement(req_id, session)
     fp = await session.get(FunctionalPoint, fp_id)
     if not fp or fp.requirement_id != req_id:
         raise HTTPException(status_code=404, detail="功能点不存在")
+
+    # ---- C3 修复：级联清理跨需求 SRR.impact_analysis 中的 fp_id 引用 ----
+    try:
+        # JSONB 清理：impact_analysis = filter(item where item.fp_id != fp_id)
+        cleanup_stmt = text(
+            """
+            UPDATE requirements
+               SET srr_json = jsonb_set(
+                   COALESCE(srr_json, '{}'::jsonb),
+                   '{impact_analysis}',
+                   COALESCE(
+                       (SELECT jsonb_agg(elem)
+                          FROM jsonb_array_elements(
+                                   COALESCE(srr_json->'impact_analysis', '[]'::jsonb)
+                               ) AS elem
+                         WHERE elem->>'fp_id' <> :fp_id),
+                       '[]'::jsonb
+                   )
+               )
+             WHERE COALESCE(srr_json->'impact_analysis', '[]'::jsonb) @>
+                   jsonb_build_array(jsonb_build_object('fp_id', :fp_id::text))
+            """
+        )
+        res = await session.execute(cleanup_stmt, {"fp_id": fp_id})
+        logger.info(
+            "[FP-Delete] 级联清理 SRR.impact_analysis 引用: fp=%s 行=%s",
+            fp_id, res.rowcount,
+        )
+    except Exception as e:  # pragma: no cover - 保护型清理，失败不应阻断删除
+        logger.warning(
+            "[FP-Delete] 级联清理 SRR.impact_analysis 引用失败: fp=%s error=%s",
+            fp_id, str(e)[:200],
+        )
+
+    # ---- 清理可追溯性矩阵中的 FP 关联 ----
+    try:
+        from app.db.models import Traceability  # 局部导入，避免循环依赖
+        tr_cleanup = delete(Traceability).where(
+            (Traceability.src_fp_id == fp_id) | (Traceability.dest_fp_id == fp_id)
+        )
+        await session.execute(tr_cleanup)
+    except Exception:
+        pass
+
     # 删除关联依赖
     dep_result = await session.execute(
         select(FPDependency).where(
@@ -5612,6 +5830,17 @@ async def fp_delete(
     for dep in dep_result.scalars().all():
         await session.delete(dep)
     await session.delete(fp)
+
+    # ---- 同步删除本需求 SRR.impact_analysis 中该 fp 的条目（再兜底一次）----
+    if isinstance(req.srr_json, dict) and "impact_analysis" in req.srr_json:
+        srr = dict(req.srr_json)
+        before = len(srr.get("impact_analysis") or [])
+        srr["impact_analysis"] = [
+            e for e in (srr["impact_analysis"] or []) if e.get("fp_id") != fp_id
+        ]
+        if before != len(srr["impact_analysis"]):
+            req.srr_json = srr
+
     await session.commit()
     # v2.22: 删除 FP 后更新总 SRR 的 fp_index 和 fp_summary
     try:

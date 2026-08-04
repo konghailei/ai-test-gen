@@ -60,11 +60,14 @@ class HybridSearcher:
         Returns:
             list[dict]: 融合后的检索结果
         """
-        # 0. 缓存查询（modules + doc_type 参与缓存键，避免跨模块/跨类型缓存污染）
+        # 0. 缓存查询（modules + doc_type + status + top_k 参与缓存键，避免跨筛选/跨长度缓存污染）
         from app.db.kb_cache import kb_cache
         modules_key = ",".join(sorted(modules)) if modules else ""
         doc_type_key = doc_type or ""
-        cached = await kb_cache.get(query, product_id or "", "requirements", modules_key, doc_type_key)
+        cached = await kb_cache.get(
+            query, product_id or "", "requirements", modules_key, doc_type_key,
+            status=status or "", top_k=top_k,
+        )
         if cached is not None:
             logger.debug("[HybridSearch] 缓存命中: query={!r}", query[:60])
             return cached[:top_k]
@@ -108,8 +111,14 @@ class HybridSearcher:
             except Exception as e:
                 logger.warning("[HybridSearch] 重排失败，使用 RRF 排序: {}", str(e)[:200])
 
-        # 6. 写入缓存
-        await kb_cache.set(query, product_id or "", "requirements", fused, modules_key, doc_type_key)
+        # 6. 写入缓存（只有两路检索至少一路有效，避免降级结果污染长 TTL 缓存；同时写入 status/top_k）
+        cacheable = bool(vector_results) or bool(bm25_results)
+        if cacheable:
+            await kb_cache.set(
+                query, product_id or "", "requirements", fused,
+                modules_key, doc_type_key,
+                status=status or "", top_k=top_k,
+            )
 
         return fused[:top_k]
 
@@ -124,11 +133,17 @@ class HybridSearcher:
     ) -> list[dict]:
         """PostgreSQL BM25 全文检索（优先 zhparser 中文分词，回退 simple）。
 
+        安全修复（C1）：不再用 f-string 拼接 ts_config 到 SQL 文本中，改用
+        `plainto_tsquery(CAST(:ts_config AS regconfig), ...)` 参数绑定。
+        PostgreSQL 的 CAST(... AS regconfig) 会对配置名做严格标识符校验，
+        非法值直接报错，无法闭合字符串或注入后续 SQL 语句。
+        CAST(... AS BIGINT) 限制 top_k 为整数范围，避免绕过 LIMIT 类型。
+
         Args:
             session: PG 会话
             query: 查询文本
             product_id: 按产品过滤
-            top_k: 返回数量
+            top_k: 返回数量（强转 BIGINT 正数）
             status: 按状态过滤
             modules: 按模块过滤（只匹配 modules 数组有交集的记录）
 
@@ -138,30 +153,32 @@ class HybridSearcher:
         ts_config = await self._get_ts_config(session)
         # modules 过滤：传入逗号分隔字符串，SQL 中用 string_to_array + && (数组交集) 过滤
         module_filter = ",".join(modules) if modules else None
-        # 使用 CAST 显式指定参数类型，避免 asyncpg AmbiguousParameterError
-        sql = text(f"""
+        # 强校验 top_k 为正整数（防止 SQL 注入/异常值绕过 LIMIT 语义）
+        safe_top_k = max(1, int(top_k))
+        sql = text("""
             SELECT id,
-                   ts_rank(search_vec, plainto_tsquery('{ts_config}', :q)) AS rank,
+                   ts_rank(search_vec, plainto_tsquery(CAST(:ts_config AS regconfig), :q)) AS rank,
                    title,
                    srr_json,
                    status,
                    product_id
             FROM requirements
-            WHERE search_vec @@ plainto_tsquery('{ts_config}', :q)
+            WHERE search_vec @@ plainto_tsquery(CAST(:ts_config AS regconfig), :q)
               AND (CAST(:product_id AS VARCHAR) IS NULL OR product_id = :product_id)
               AND (CAST(:status AS VARCHAR) IS NULL OR status = :status)
-              AND (CAST(:module_filter AS VARCHAR) IS NULL OR EXISTS (SELECT 1 FROM json_array_elements_text(modules) AS m WHERE m = ANY(string_to_array(:module_filter, ','))))
+              AND (CAST(:module_filter AS VARCHAR) IS NULL OR EXISTS (SELECT 1 FROM json_array_elements_text(COALESCE(modules, '[]'::jsonb)) AS m WHERE m = ANY(string_to_array(:module_filter, ','))))
             ORDER BY rank DESC
-            LIMIT :top_k
+            LIMIT CAST(:top_k AS BIGINT)
         """)
         # 使用 savepoint 隔离 BM25 失败，避免污染外层事务
         async with session.begin_nested():
             result = await session.execute(sql, {
                 "q": query,
+                "ts_config": ts_config,
                 "product_id": product_id,
                 "status": status,
                 "module_filter": module_filter,
-                "top_k": top_k,
+                "top_k": safe_top_k,
             })
             rows = result.all()
         return [

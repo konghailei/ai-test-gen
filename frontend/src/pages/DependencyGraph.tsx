@@ -308,30 +308,33 @@ function createEdge(source: string, target: string, eType: string, srcName = sou
 function createFPEdge(
   depId: number, source: string, target: string, relationType: string,
   srcName = source, tgtName = target, description = '', reviewStatus = 'pending',
+  isActive: boolean = true,
 ): any {
   const s = FP_EDGE_STYLES[relationType] || FP_EDGE_STYLES.depends_on
   const rs = REVIEW_STATUS_STYLES[reviewStatus] || REVIEW_STATUS_STYLES.pending
   // v2.3: 审核状态优先决定颜色；approved 时使用 relation_type 原色（保留语义信息）
   const stroke = reviewStatus === 'approved' ? s.stroke : rs.stroke
   const isDashed = rs.dashed
+  // v2.46: 归档冻结边视觉降级（灰色、虚线、低透明度），但仍可追溯（不会"消失"）
+  const frozenBadge = isActive ? '' : '[冻结]'
   const label = `${srcName} ${s.label} ${tgtName}`
   const edge: any = {
     id: `e-${depId}`,
     source, target, ...EDGE_COMMON,
     style: {
       ...EDGE_COMMON.style,
-      stroke,
-      strokeDasharray: isDashed ? '6 4' : undefined,
-      opacity: reviewStatus === 'rejected' ? 0.55 : 1,
+      stroke: isActive ? stroke : '#94a3b8',
+      strokeDasharray: isDashed ? '6 4' : (isActive ? undefined : '3 5'),
+      opacity: reviewStatus === 'rejected' ? 0.55 : (isActive ? 1 : 0.55),
     },
-    markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 18, height: 18 },
-    label: reviewStatus === 'approved' ? label : `${label} [${rs.label}]`,
-    labelStyle: { fill: stroke, fontSize: 11, fontWeight: reviewStatus === 'pending' ? 700 : 400 },
+    markerEnd: { type: MarkerType.ArrowClosed, color: isActive ? stroke : '#94a3b8', width: 18, height: 18 },
+    label: reviewStatus === 'approved' ? `${label}${frozenBadge ? ' ' + frozenBadge : ''}` : `${label}${frozenBadge ? ' ' + frozenBadge : ''} [${rs.label}]`,
+    labelStyle: { fill: isActive ? stroke : '#64748b', fontSize: 11, fontWeight: reviewStatus === 'pending' && isActive ? 700 : 400 },
     labelBgStyle: { fill: '#fff', fillOpacity: 0.9 },
-    data: { label, eType: relationType, description, depId, reviewStatus },
+    data: { label, eType: relationType, description, depId, reviewStatus, isActive },
   }
   if (relationType === 'invariants' || relationType === 'lifecycle_scenarios') {
-    edge.markerStart = { type: MarkerType.ArrowClosed, color: stroke, width: 18, height: 18 }
+    edge.markerStart = { type: MarkerType.ArrowClosed, color: isActive ? stroke : '#94a3b8', width: 18, height: 18 }
   }
   return edge
 }
@@ -1371,6 +1374,8 @@ export default function DependencyGraph() {
   const [reviewStatusFilter, setReviewStatusFilter] = useState<string>('')  // '' / pending / approved / rejected
   const [moduleFilter, setModuleFilter] = useState<string>('')  // '' 或 module_id
   const [graphModules, setGraphModules] = useState<{ id: string; name: string }[]>([])
+  // v2.46: 是否包含已归档项目的「冻结历史边」（is_active=false）。默认打开，保证用户查看已归档项目（如 REQ-1785813815766-7531 所属项目）的依赖关系可见
+  const [includeArchivedEdges, setIncludeArchivedEdges] = useState<boolean>(true)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyItems, setHistoryItems] = useState<FPDependencyHistoryItem[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -1407,7 +1412,7 @@ export default function DependencyGraph() {
     if (selectedProductId && graphType === 'fp') {
       loadFPGraph()
     }
-  }, [reviewStatusFilter, moduleFilter])
+  }, [reviewStatusFilter, moduleFilter, includeArchivedEdges])
 
   // 节点加载后尝试聚焦 pendingFocusModuleId
   useEffect(() => {
@@ -1468,6 +1473,7 @@ export default function DependencyGraph() {
         selectedProductId,
         moduleFilter || undefined,
         reviewStatusFilter || undefined,
+        includeArchivedEdges,
       )
       // v2.3: 保存模块列表供筛选器使用
       if (data?.modules) setGraphModules(data.modules)
@@ -1521,6 +1527,8 @@ export default function DependencyGraph() {
           e.id, e.source, e.target, e.relation_type,
           nameMap[e.source], nameMap[e.target], e.description,
           e.review_status || 'pending',
+          // v2.46: 归档冻结边 → 灰 + 虚线 + [冻结] 标签；用户通过"包含归档冻结边"开关控制是否加载。
+          typeof e.is_active === 'boolean' ? e.is_active : true,
         )
       )
       // v2.43: FP 图谱应用 dagre 层次布局（FP 节点位置不持久化，每次重新布局）
@@ -1902,6 +1910,18 @@ export default function DependencyGraph() {
                 <option value="approved">仅已审核</option>
                 <option value="rejected">仅已驳回</option>
               </select>
+              {/* v2.46: 归档冻结边开关 — 解决项目归档后（如 REQ-1785813815766-7531 所属项目）依赖边 is_active=false 默认隐藏导致的图缺失问题 */}
+              <label className="inline-flex items-center gap-1.5 text-xs px-2 py-1 border cursor-pointer select-none"
+                style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--background)', color: 'var(--foreground-secondary)' }}
+                title="关闭后仅查看当前活跃边（新分析、新编辑使用）；开启则同时显示已归档项目的冻结历史边">
+                <input
+                  type="checkbox"
+                  className="w-3.5 h-3.5 cursor-pointer"
+                  checked={includeArchivedEdges}
+                  onChange={e => setIncludeArchivedEdges(e.target.checked)}
+                />
+                包含归档冻结边
+              </label>
             </div>
             <div className="w-px h-5" style={{ background: 'var(--border)' }} />
             <button onClick={toggleHistory}

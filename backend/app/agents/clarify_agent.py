@@ -319,23 +319,25 @@ class ClarifyAgent:
         product_id = srr.get("requirement", {}).get("product_id", "PROD-DEFAULT")
         import time
         _t0 = time.time()
-        kb_empty = await asyncio.to_thread(self._safe_is_empty)
+        kb_empty, kb_empty_err = await asyncio.to_thread(self._safe_is_empty)
         _d1 = int((time.time() - _t0) * 1000)
-        product_first = await asyncio.to_thread(self._safe_is_product_first, product_id)
+        product_first, product_first_err = await asyncio.to_thread(self._safe_is_product_first, product_id)
         _d2 = int((time.time() - _t0) * 1000) - _d1
-        cold_start = kb_empty or product_first
-        logger.info("[ClarifyAgent] KB 状态: kb_empty={}, product_first={}, cold_start={}, product_id={}",
-                    kb_empty, product_first, cold_start, product_id)
+        # v2.55 Bug C-2: 区分真空与故障——KB 不可用时不触发冷启动
+        kb_unavailable = kb_empty_err or product_first_err
+        cold_start = (not kb_unavailable) and (kb_empty or product_first)
+        logger.info("[ClarifyAgent] KB 状态: kb_empty={}, product_first={}, kb_unavailable={}, cold_start={}, product_id={}",
+                    kb_empty, product_first, kb_unavailable, cold_start, product_id)
         kb_access_log.append({
             "action": "check_kb_status",
             "type": "check_kb_status",
             "label": "KB 状态检查",
             "query": "知识库中是否存在同类需求可以辅助分析当前需求？是否需要启用冷启动模式？",
-            "query_detail": f"向量库{'为空' if kb_empty else '正常'}，当前产品{'首个需求（冷启动）' if product_first else '已有历史数据'}",
-            "result_count": 0 if (kb_empty or product_first) else 1,
+            "query_detail": f"向量库{'不可用' if kb_unavailable else ('为空' if kb_empty else '正常')}，当前产品{'不可用' if kb_unavailable else ('首个需求（冷启动）' if product_first else '已有历史数据')}",
+            "result_count": 0 if (kb_unavailable or kb_empty or product_first) else 1,
             "product_first_requirement": product_first,
             "duration_ms": _d1 + _d2,
-            "status": "success",
+            "status": "error" if kb_unavailable else "success",
         })
 
         # ② 规则检测：完整性 + 歧义性
@@ -432,6 +434,39 @@ class ClarifyAgent:
         _d3 = int((time.time() - _t3) * 1000)
         logger.info("[ClarifyAgent] 生成 KB 问题: count={}", len(kb_questions))
 
+        # ⭐ 记录「KB 查询生成」阶段（无论是否为空，避免前端 0 条查询误以为漏做）
+        if not kb_questions:
+            kb_access_log.append({
+                "action": "kb_query_gen",
+                "type": "kb_query_gen_empty",
+                "label": "KB 查询生成（无缺口）",
+                "query": "根据完整性/歧义性/模式库检测，当前需求无可由 KB 自动补全的缺口维度，因此未生成 KB 查询。",
+                "query_detail": (
+                    f"critical_missing={len(completeness.get('critical_missing', []))}, "
+                    f"important_missing={len(completeness.get('important_missing', []))}, "
+                    f"optimization_missing={len(completeness.get('optimization_missing', []))}, "
+                    f"pattern_gaps={len([m for m in completeness.get('important_missing', []) if (m.get('field') or '').startswith('pattern_gap.')])}"
+                ),
+                "result_count": 0,
+                "answered": False,
+                "duration_ms": _d3,
+                "status": "success",
+            })
+        else:
+            kb_access_log.append({
+                "action": "kb_query_gen",
+                "type": "kb_query_gen",
+                "label": "KB 查询生成",
+                "query": f"基于缺口分析生成 {len(kb_questions)} 条 KB 查询，用于检索同类需求补全 SRR。",
+                "query_detail": (
+                    f"fields={sorted(set(q.get('field', '') for q in kb_questions))[:15]}"
+                ),
+                "result_count": len(kb_questions),
+                "answered": False,
+                "duration_ms": _d3,
+                "status": "success",
+            })
+
         # ④ 对每个问题查询 KB + PG，获取答案
         _t4 = time.time()
         kb_answers: list[dict] = await self._query_kb_for_answers(
@@ -442,6 +477,38 @@ class ClarifyAgent:
                     sum(1 for a in kb_answers if a.get("answered")),
                     sum(1 for a in kb_answers if not a.get("answered")),
                     _d4)
+        # ⭐ 记录「全局相似需求检索 & PG 关系增强」（之前只记录了 KB Q&A，导致前端总 KB 查询数看起来只有 check_kb_status 1 条）
+        kb_access_log.append({
+            "action": "global_similar_search",
+            "type": "vector_similarity",
+            "label": "全局相似需求检索",
+            "query": srr.get("requirement", {}).get("summary", "")[:200],
+            "query_detail": "向量库检索相似需求（doc_type=requirement，status=archived），复用作为 PG 增强 & Q&A 的上下文。",
+            "result_count": len(global_similar),
+            "sources": [
+                {"id": r.get("id"), "similarity": r.get("similarity"), "req_id": (r.get("metadata") or {}).get("req_id")}
+                for r in (global_similar or [])[:8]
+            ],
+            "answered": len(global_similar) > 0,
+            "duration_ms": _d_sim,
+            "status": "success",
+        })
+        if pg_context:
+            kb_access_log.append({
+                "action": "pg_enrich",
+                "type": "pg_enrich",
+                "label": "PG 关系增强",
+                "query": "同产品/项目/模块的关系数据查询（需求、测试用例、模块依赖、追溯矩阵等）",
+                "query_detail": f"keys={sorted(pg_context.keys())[:20]}",
+                "result_count": sum(
+                    len(v) for v in pg_context.values() if isinstance(v, list)
+                ) + sum(
+                    1 for v in pg_context.values() if isinstance(v, dict)
+                ),
+                "answered": bool(pg_context),
+                "duration_ms": _d_sql,
+                "status": "success",
+            })
 
         # ⑤ 应用 KB 答案 → 自动补全 SRR（含字段冲突处理，docs/01 §4.4.1）
         _t5 = time.time()
@@ -622,6 +689,7 @@ class ClarifyAgent:
             "kb_status": {
                 "kb_empty": kb_empty,
                 "product_first_requirement": product_first,
+                "kb_unavailable": kb_unavailable,
             },
             # ⭐ v2.8：暴露真实 KB 计数，供 API 正确展示（避免用 questions.answered 误算）
             "kb_answered_count": kb_answered_count,
@@ -765,19 +833,31 @@ class ClarifyAgent:
     # KB 检索
     # ========================================================================
 
-    def _safe_is_empty(self) -> bool:
-        """安全判断向量库是否为空（模型未就绪时返回 True）。"""
-        try:
-            return vector_store.is_empty()
-        except Exception:
-            return True
+    def _safe_is_empty(self) -> tuple[bool, bool]:
+        """v2.55 Bug C-2: 判断向量库是否为空。
 
-    def _safe_is_product_first(self, product_id: str) -> bool:
-        """安全判断是否为产品首个需求（模型未就绪时返回 True）。"""
+        Returns:
+            (is_empty, is_error): 当 KB 不可用时返回 (False, True)，
+            避免异常被误判为真空导致冷启动误判。
+        """
         try:
-            return vector_store.is_product_first_requirement(product_id)
-        except Exception:
-            return True
+            return vector_store.is_empty(), False
+        except Exception as e:
+            logger.warning("[ClarifyAgent] KB is_empty 调用异常（标记为不可用）: {}", str(e)[:150])
+            return False, True
+
+    def _safe_is_product_first(self, product_id: str) -> tuple[bool, bool]:
+        """v2.55 Bug C-2: 判断是否为产品首个需求。
+
+        Returns:
+            (is_first, is_error): 当 KB 不可用时返回 (False, True)，
+            避免异常被误判为首个需求导致冷启动误判。
+        """
+        try:
+            return vector_store.is_product_first_requirement(product_id), False
+        except Exception as e:
+            logger.warning("[ClarifyAgent] KB is_product_first 调用异常（标记为不可用）: {}", str(e)[:150])
+            return False, True
 
     def _search_similar_requirements(self, srr: dict) -> list[dict]:
         """检索同类需求（供遗漏检测和 KB 补全）。"""

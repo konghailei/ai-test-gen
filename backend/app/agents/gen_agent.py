@@ -201,6 +201,7 @@ class GenAgent:
         """统计 SRR 要点数 vs 生成用例数，输出覆盖率日志。
 
         不阻断流水线，仅用于监控和可观测性。
+        v3.4 增强：新增测试设计技术覆盖率分析（等价类/边界值/决策表/状态迁移/场景法/错误推测）
         """
         try:
             # 统计 SRR 要点总数
@@ -242,11 +243,26 @@ class GenAgent:
             # 覆盖率 = 用例数 / SRR要点数（粗略估计，>1.0 表示平均每个要点有多个用例）
             coverage_ratio = case_count / max(total_points, 1)
 
+            # v3.4：测试设计技术覆盖率分析
+            type_dist: dict[str, int] = {}
+            for c in cases:
+                t = c.get("type", "unknown")
+                type_dist[t] = type_dist.get(t, 0) + 1
+
+            # 分析测试设计技术覆盖情况
+            technique_analysis = self._analyze_technique_coverage(
+                srr, functional_points, cases, type_dist
+            )
+
             logger.info(
                 "[GenAgent/coverage] SRR 要点统计: total={}, hp={}, alt={}, rules={}, data={} | "
                 "用例数={}, 覆盖比={:.2f}, FP分布={}",
                 total_points, hp_count, alt_count, rule_count, data_count,
                 case_count, coverage_ratio, fp_coverage,
+            )
+            logger.info(
+                "[GenAgent/coverage] 测试设计技术分析: type_dist={}, techniques={}",
+                type_dist, technique_analysis,
             )
 
             # 覆盖率过低时告警
@@ -256,8 +272,119 @@ class GenAgent:
                     "建议检查 prompt 或增加 max_tokens",
                     total_points, case_count, coverage_ratio,
                 )
+
+            # v3.4：测试设计技术覆盖缺口告警
+            missing_techniques = [t for t, covered in technique_analysis.items() if not covered]
+            if missing_techniques:
+                logger.warning(
+                    "[GenAgent/coverage] ⚠️ 测试设计技术覆盖缺口: {} 未覆盖，"
+                    "建议在后续迭代中补充",
+                    missing_techniques,
+                )
         except Exception as e:
             logger.debug("[GenAgent/coverage] 覆盖率统计失败（不阻断）: {}", str(e)[:120])
+
+    def _analyze_technique_coverage(
+        self, srr: dict, functional_points: list[dict], cases: list[dict], type_dist: dict[str, int]
+    ) -> dict[str, bool]:
+        """分析测试设计技术的覆盖情况（v3.4）。
+
+        基于 ISTQB 黑盒测试设计技术，检查生成的用例集是否充分应用了
+        各类测试设计技术。
+
+        Args:
+            srr: SRR JSON 字典
+            functional_points: 功能点列表
+            cases: 生成的用例列表
+            type_dist: 用例类型分布
+
+        Returns:
+            dict[str, bool]: 各测试设计技术是否已覆盖
+                - equivalence_partitioning: 等价类划分
+                - boundary_value: 边界值分析
+                - decision_table: 决策表法
+                - state_transition: 状态迁移法
+                - scenario: 场景法
+                - error_guessing: 错误推测法
+        """
+        result = {
+            "equivalence_partitioning": False,
+            "boundary_value": False,
+            "decision_table": False,
+            "state_transition": False,
+            "scenario": False,
+            "error_guessing": False,
+        }
+
+        # 边界值分析：检查是否有 boundary 类型用例，或用例标题/步骤含边界关键词
+        if type_dist.get("boundary", 0) > 0:
+            result["boundary_value"] = True
+        else:
+            boundary_keywords = ["边界", "临界", "最小", "最大", "上限", "下限", "boundary", "limit"]
+            for c in cases:
+                title = str(c.get("title", "")).lower()
+                notes = str(c.get("notes", "")).lower()
+                if any(kw in title or kw in notes for kw in boundary_keywords):
+                    result["boundary_value"] = True
+                    break
+
+        # 等价类划分：检查 data_constraints 是否有范围型约束且有对应用例
+        has_range_constraints = False
+        all_fps = [{"srr_json": srr}] + [{"srr_json": fp.get("srr_json", {})} for fp in functional_points]
+        for fp in all_fps:
+            fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+            for dc in fp_srr.get("data_constraints", []):
+                if isinstance(dc, dict):
+                    cons_str = str(dc.get("constraints", dc.get("constraint", "")))
+                    if any(kw in cons_str for kw in ["-", "~", "至", "范围", "min", "max"]):
+                        has_range_constraints = True
+                        break
+        if has_range_constraints and result["boundary_value"]:
+            result["equivalence_partitioning"] = True
+
+        # 决策表法：检查 business_rules 是否有多条规则组合，且有 functional/integration 用例
+        has_multi_rules = False
+        for fp in all_fps:
+            fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+            rules = fp_srr.get("business_rules", [])
+            multi_rules = [r for r in rules if isinstance(r, dict) and r.get("type") in ("validation", "business", "workflow")]
+            if len(multi_rules) >= 2:
+                has_multi_rules = True
+                break
+        if has_multi_rules and (type_dist.get("functional", 0) >= 2 or type_dist.get("integration", 0) > 0):
+            result["decision_table"] = True
+
+        # 状态迁移法：检查 alternate_flows 是否有状态变更，且有 exception 用例
+        has_state_flows = False
+        for fp in all_fps:
+            fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+            alt_flows = fp_srr.get("flows", {}).get("alternate_flows", [])
+            for af in alt_flows:
+                if isinstance(af, dict):
+                    flow_name = str(af.get("name", af.get("trigger", "")))
+                    if any(kw in flow_name for kw in ["状态", "锁定", "禁用", "过期", "取消", "撤销", "超时", "失败"]):
+                        has_state_flows = True
+                        break
+        if has_state_flows and type_dist.get("exception", 0) > 0:
+            result["state_transition"] = True
+
+        # 场景法：检查有 functional 类型用例覆盖 happy_path
+        if type_dist.get("functional", 0) > 0:
+            result["scenario"] = True
+
+        # 错误推测法：检查有 exception/security 类型用例，或用例含错误场景关键词
+        if type_dist.get("exception", 0) > 0 or type_dist.get("security", 0) > 0:
+            result["error_guessing"] = True
+        else:
+            error_keywords = ["空值", "null", "超长", "特殊字符", "并发", "超时", "越权", "注入", "重复"]
+            for c in cases:
+                title = str(c.get("title", "")).lower()
+                notes = str(c.get("notes", "")).lower()
+                if any(kw in title or kw in notes for kw in error_keywords):
+                    result["error_guessing"] = True
+                    break
+
+        return result
 
     # ========================================================================
     # 用例解析与后处理
@@ -317,7 +444,52 @@ class GenAgent:
         now = datetime.now().isoformat()
         processed: list[dict] = []
 
+        # ---- H2 修复：预取 UTCF 合法枚举（仅一次），在 Pydantic 校验前做值域规范化 ----
+        from app.models.utcf import TestCase
+        from pydantic import ValidationError as PydanticValidationError
+
+        # 从 TestCase.model_fields 提取合法枚举集合
+        type_field = TestCase.model_fields.get("type")
+        priority_field = TestCase.model_fields.get("priority")
+        try:
+            # type: 直接取 Literal 枚举 args
+            valid_types = set(type_field.annotation.__args__) if type_field and hasattr(type_field.annotation, "__args__") else {
+                "functional", "boundary", "exception", "security", "performance",
+                "integration", "exploratory", "regression",
+            }
+            valid_priorities = (
+                set(priority_field.annotation.__args__)
+                if priority_field and hasattr(priority_field.annotation, "__args__")
+                else {"P0", "P1", "P2", "P3"}
+            )
+        except Exception:
+            valid_types = {
+                "functional", "boundary", "exception", "security", "performance",
+                "integration", "exploratory", "regression",
+            }
+            valid_priorities = {"P0", "P1", "P2", "P3"}
+
+        # 非法 type 到合法 type 的启发式映射（避免简单丢弃用例）
+        TYPE_MAP = {
+            "基本流": "functional", "备选流": "functional", "正常": "functional", "正例": "functional", "功能": "functional",
+            "边界值": "boundary", "边界": "boundary", "极端": "boundary",
+            "异常流": "exception", "异常": "exception", "错误": "exception", "反例": "exception",
+            "安全": "security",
+            "性能": "performance", "压力": "performance", "负载": "performance",
+            "集成": "integration",
+            "探索": "exploratory", "探索性": "exploratory",
+            "回归": "regression",
+        }
+        PRIORITY_MAP = {
+            "高": "P1", "中": "P2", "低": "P3", "紧急": "P0", "致命": "P0", "重要": "P1", "一般": "P2",
+            "P4": "P3", "P5": "P3",  # 超出枚举的降级
+        }
+
         for case in cases:
+            if not isinstance(case, dict):
+                # LLM 可能生成非字典（字符串/数组），直接跳过并在 review 层补
+                logger.warning("[GenAgent] 生成非字典 case 已跳过: {!r}", str(case)[:200])
+                continue
             # ⚠️ 始终覆盖 LLM 生成的占位 ID（如 TC-AUTH-0001-0001），
             # 避免同模块重复生成时 UniqueViolationError
             case["id"] = gen_test_case_id(module_prefix)
@@ -329,6 +501,7 @@ class GenAgent:
             case.setdefault("title", "未命名用例")
             case.setdefault("type", "functional")
             case.setdefault("priority", "P1")
+            case.setdefault("description", "")
             case.setdefault("preconditions", [])
             case.setdefault("steps", [])
             case.setdefault("assertions", [])
@@ -338,23 +511,141 @@ class GenAgent:
             case.setdefault("execution", {})
             case.setdefault("related_fp", "")  # v2.0.1: FP 追溯（LLM 可能漏写）
 
+            # --- H2: 值域规范化（枚举/类型/优先级），修复 LLM 偶尔输出 "功能"/"高" 等非标准值 ---
+            ctype = str(case.get("type") or "functional").strip()
+            if ctype not in valid_types:
+                mapped = TYPE_MAP.get(ctype) or TYPE_MAP.get(ctype.lower())
+                case["type"] = mapped if mapped in valid_types else "functional"
+            cprio = str(case.get("priority") or "P1").strip()
+            if cprio not in valid_priorities:
+                mapped = PRIORITY_MAP.get(cprio) or PRIORITY_MAP.get(cprio.upper())
+                case["priority"] = mapped if mapped in valid_priorities else "P1"
+            # confidences 归一化到 [0,1]
+            if "confidence" in case:
+                try:
+                    c = float(case["confidence"])
+                    case["confidence"] = max(0.0, min(1.0, c))
+                except (TypeError, ValueError):
+                    case.pop("confidence", None)
+            case.setdefault("confidence", 0.6)
+
+            # --- H2: steps / assertions 规范化（Pydantic 要求的字段强制对齐）---
+            def _normalize_step(s: object) -> dict | None:
+                if not isinstance(s, dict):
+                    return None
+                # 数字字符串（如 "1"/"2"）可强转；非法或缺失则用占位序号
+                step_raw = s.get("step")
+                try:
+                    step_no = int(step_raw) if step_raw is not None and step_raw != "" else 0
+                except (TypeError, ValueError):
+                    step_no = 0
+                return {
+                    "step": step_no,
+                    "action": str(s.get("action") or "").strip(),
+                    "expected": str(s.get("expected") or "").strip(),
+                    "data": s.get("data") if isinstance(s.get("data"), dict) else None,
+                }
+            steps_in = case.get("steps") or []
+            if isinstance(steps_in, list):
+                normalized = [_normalize_step(s) for s in steps_in]
+                valid_steps = [x for x in normalized if x is not None]
+                # 重新编号 step 序号（Pydantic Step.step 要求从 1 开始且为 int）
+                for idx, s in enumerate(valid_steps, 1):
+                    if s["step"] <= 0:
+                        s["step"] = idx
+                case["steps"] = valid_steps
+            else:
+                case["steps"] = []
+            # assertions：确保每个断言都有合法 type（required，没有则默认 equal）
+            assertions_in = case.get("assertions") or []
+            if isinstance(assertions_in, list):
+                normalized_assertions = []
+                for a in assertions_in:
+                    if not isinstance(a, dict):
+                        continue
+                    if a.get("type") not in {
+                        "equal", "not_equal", "greater", "less", "contains", "not_contains",
+                        "regex", "exists", "not_exists", "status_code",
+                    }:
+                        a["type"] = "equal"
+                    a.setdefault("target", "")
+                    a.setdefault("expected_value", None)
+                    a.setdefault("message", "")
+                    normalized_assertions.append(a)
+                case["assertions"] = normalized_assertions
+            else:
+                case["assertions"] = []
+            # 顶层 expected 可能非字符串：转 str
+            if "expected" in case and not isinstance(case["expected"], (str, type(None))):
+                case["expected"] = str(case["expected"])
+
             # ⚠️ gen_confidence 必须放在 gen_metadata 内（修复问题5）
             # 如果 LLM 把 gen_confidence 放在了顶层，移入 gen_metadata
             top_level_conf = case.pop("gen_confidence", None)
-            gen_metadata = case.setdefault("gen_metadata", {})
+            gm_raw = case.get("gen_metadata")
+            gen_metadata = gm_raw if isinstance(gm_raw, dict) else {}
+            if gen_metadata is not gm_raw:  # 原值为非 dict（字符串/None/数字），覆写
+                case["gen_metadata"] = gen_metadata
             if top_level_conf is not None:
+                try:
+                    top_level_conf = float(top_level_conf)
+                    top_level_conf = max(0.0, min(1.0, top_level_conf))
+                except (TypeError, ValueError):
+                    top_level_conf = 0.7
                 gen_metadata.setdefault("gen_confidence", top_level_conf)
-            gen_metadata.setdefault("gen_confidence", 0.7)  # 默认置信度
+            if "gen_confidence" in gen_metadata:
+                try:
+                    c = float(gen_metadata["gen_confidence"])
+                    gen_metadata["gen_confidence"] = max(0.0, min(1.0, c))
+                except (TypeError, ValueError):
+                    gen_metadata["gen_confidence"] = 0.7
+            else:
+                gen_metadata.setdefault("gen_confidence", 0.7)  # 默认置信度
             gen_metadata.setdefault("gen_model", gen_model)
             gen_metadata.setdefault("gen_at", now)
 
+            # execution: 保证 int 类型（LLM 可能生成字符串 "3"）
+            execution = case.get("execution") or {}
+            if isinstance(execution, dict):
+                try:
+                    execution["timeout_seconds"] = int(execution.get("timeout_seconds") or 15)
+                except (TypeError, ValueError):
+                    execution["timeout_seconds"] = 15
+                try:
+                    execution["retry_count"] = int(execution.get("retry_count") or 0)
+                except (TypeError, ValueError):
+                    execution["retry_count"] = 0
+                if not isinstance(execution.get("depends_on"), list):
+                    execution["depends_on"] = []
+                if not isinstance(execution.get("skip_conditions"), list):
+                    execution["skip_conditions"] = []
+                case["execution"] = execution
+
             # source_pattern 同步到 gen_metadata 和顶层
             if "source_pattern" in case:
-                gen_metadata.setdefault("source_pattern", case["source_pattern"])
+                sp = case["source_pattern"]
+                if isinstance(sp, str):
+                    gen_metadata.setdefault("source_pattern", sp)
             else:
                 case.setdefault("source_pattern", "")
 
-            processed.append(case)
+            # ---- H2: Pydantic UTCF 强校验（最后一道关卡），失败则 construct 兜底 ----
+            try:
+                validated = TestCase.model_validate(case)
+                processed.append(validated.model_dump(mode="json"))
+            except PydanticValidationError as e:
+                logger.warning(
+                    "[GenAgent] UTCF 校验失败，construct 兜底: case_id={}, errors={}",
+                    case.get("id"), str(e)[:500],
+                )
+                # 记录到 gen_metadata.validation_warnings 便于 review 报告
+                gen_metadata["validation_warnings"] = [
+                    {"loc": ".".join(str(x) for x in err["loc"]), "msg": err["msg"]}
+                    for err in (e.errors() if hasattr(e, "errors") else [])[:10]
+                ]
+                # 用 construct 跳过校验，保证最终可写库（但标记为低置信度 0.2）
+                case["confidence"] = min(float(case.get("confidence") or 0.6), 0.2)
+                processed.append(case)
 
         return processed
 

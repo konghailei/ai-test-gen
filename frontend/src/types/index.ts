@@ -611,13 +611,19 @@ export interface FPNameSuggestion {
 }
 
 /** v3.0: FP 影响功能说明（存于 SRR impact_analysis 数组）
- * v2.35: 移除 affected_requirements（不再分析受影响的需求） */
+ * v2.35: 移除 affected_requirements（不再分析受影响的需求）
+ * v3.1: 新增 is_affected 和 confirmed_at（用户确认受影响后写入），
+ *       以及 impact_description、source_req_id（来自 confirm_impact_analysis 端点） */
 export interface FPImpactDescription {
   fp_id: string
   fp_name: string
   fp_type?: string
   module_id?: string
   req_id?: string
+  source_req_id?: string
+  is_affected?: boolean
+  confirmed_at?: string
+  impact_description?: string
   affected_fps: {
     fp_id: string
     fp_name: string
@@ -638,6 +644,50 @@ export interface FPImpactDescription {
   test_focus: string
   generated_at: string
   is_auto_generated: boolean
+}
+
+/** 需求级影响分析结果（GET /:req_id/impact 返回结构） */
+export interface RequirementImpactResult {
+  requirement: { id: string; title: string; modules: string[]; fp_count: number }
+  module_impact: {
+    direct: { id: string; name: string }[]
+    indirect: { id: string; name: string; reason: string; depth: number }[]
+  }
+  affected_fps: {
+    fp_id: string
+    fp_name: string
+    fp_status: string
+    module_id: string
+    module_name: string
+    impact_reason: string
+    depth: number
+    source_fp_name: string
+    kb_context: string
+    existing_cases_count: number
+  }[]
+  total_affected: number
+}
+
+/** confirm_impact_analysis 接口请求 body
+ *
+ * 修复 H5（取消确认死锁）：
+ * - confirmed_fp_ids：用户勾选的"受影响"FP（生成回归用例）
+ * - unconfirmed_fp_ids：用户确认"不受影响"的 FP（不算回归，但要打 confirmed_at 让守卫放行）
+ * - removed_fp_ids：从 impact_analysis 中完全移除的 FP（候选错误、已删除 FP 等）
+ */
+export interface ImpactConfirmPayload {
+  confirmed_fp_ids?: string[]
+  unconfirmed_fp_ids?: string[]
+  removed_fp_ids?: string[]
+  edited_descriptions?: Record<string, string>
+}
+
+/** confirm_impact_analysis 接口响应 data */
+export interface ImpactConfirmResult {
+  confirmed_count: number
+  unconfirmed_count: number
+  removed_count: number
+  impact_analysis: FPImpactDescription[]
 }
 
 // v2.45 依赖版本管理

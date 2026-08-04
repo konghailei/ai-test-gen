@@ -551,6 +551,96 @@ async def analyze_requirement_impact(self, req_id: str) -> dict:
 | **性能测试** | 负载模型推断 | SRR.non_functional 转换 | 低 |
 | **组合测试** | Pairwise/正交表 | 参数交互组合 | 中 |
 
+### 2.1.0 系统化测试设计方法论（v3.4 新增，已实现）
+
+> **背景**：原方案仅列出 6 种测试类型，但未系统化应用经典测试设计技术，导致 LLM 生成时缺乏明确的"该用哪种技术、测哪些点"的指导。业界实践（[华为 CodeArts TestPlan](https://support.huaweicloud.com/intl/en-us/bestpractice-testman/cloudtest_14_0003.html)、[ISTQB 黑盒测试设计技术](https://www.istqb.org/)）表明，系统化应用测试设计技术可显著提升覆盖率和缺陷检测率。
+>
+> **参考案例**：
+> - [用LLM自动生成测试用例的完整实践指南](https://cloud.tencent.com/developer/article/2655099) - 从"批量生成"到"精准补全"，问题驱动 > 工具驱动
+> - [7个测试用例设计方法](https://segmentfault.com/a/1190000047028442) - 等价类/边界值/决策表/状态转换/正交/场景/错误推测
+> - [TestCase-Eval (arXiv:2506.12278)](https://openreview.net/forum?id=gXYKRnqDJ9) - LLM 测试用例生成的 Fault Coverage + Fault Exposure 评估
+
+**8 种测试设计技术及 SRR 映射**：
+
+| 技术编号 | 技术名称 | SRR 映射字段 | 应用场景 | 覆盖要求 |
+|---------|---------|-------------|---------|---------|
+| 1 | 等价类划分法 | data_constraints | 每个字段划分有效/无效等价类 | 每类取 1 个代表值 |
+| 2 | 边界值分析法 | data_constraints（范围型） | min-1/min/min+1/max-1/max/max+1 | 每个范围字段 6 个边界值 |
+| 3 | 决策表法 | business_rules（多条件组合） | 2^n 条件组合 -> 合并简化 | 每种组合 1 个用例 |
+| 4 | 状态迁移法 | alternate_flows（状态变更类） | 正向（合法转换）+ 反向（非法转换） | 覆盖所有合法路径 + 关键非法路径 |
+| 5 | 场景法 | flows（happy_path + alternate_flows） | 基本流 + 备选流组合 | 每个步骤 + 每个分支 |
+| 6 | 正交实验法 | data_constraints（多参数组合） | 两两组合覆盖 | 用最少用例覆盖 pair |
+| 7 | 错误推测法 | data_constraints（字段特征推断） | 空值/超长/特殊字符/并发/超时等 | 10 类常见错误场景 |
+| 8 | 因果图法 | business_rules（约束关系） | E/I/O/R/M 约束 | 条件间约束逻辑 |
+
+**技术选择决策树**（LLM 内部决策逻辑）：
+
+```
+SRR 输入分析
+    │
+    ├── data_constraints 有范围型字段？
+    │   ├── 是 -> 应用技术 1（等价类）+ 技术 2（边界值）
+    │   └── 否 -> 跳过
+    │
+    ├── business_rules 有多条件组合（≥2条）？
+    │   ├── 是 -> 应用技术 3（决策表）
+    │   └── 否 -> 跳过
+    │
+    ├── alternate_flows 有状态变更类分支？
+    │   ├── 是 -> 应用技术 4（状态迁移，正向+反向）
+    │   └── 否 -> 跳过
+    │
+    ├── flows 有 happy_path + alternate_flows？
+    │   ├── 是 -> 应用技术 5（场景法）
+    │   └── 否 -> 跳过
+    │
+    ├── data_constraints 有多个独立字段？
+    │   ├── 是 -> 应用技术 6（正交实验）
+    │   └── 否 -> 跳过
+    │
+    ├── data_constraints 有必填/长度/金额类字段？
+    │   ├── 是 -> 应用技术 7（错误推测）
+    │   └── 否 -> 跳过
+    │
+    └── business_rules 有条件间约束？
+        ├── 是 -> 应用技术 8（因果图）
+        └── 否 -> 跳过
+```
+
+**Prompt 注入机制**（`_build_test_design_guidance` 函数）：
+
+系统在构建 GenAgent 的用户提示词时，自动扫描 SRR 结构，分析可应用的测试设计技术，并生成定向指导文本注入 prompt：
+
+1. 扫描 `data_constraints` -> 识别范围型字段 -> 注入等价类+边界值指导
+2. 扫描 `business_rules` -> 识别多条件组合 -> 注入决策表法指导
+3. 扫描 `alternate_flows` -> 识别状态变更分支 -> 注入状态迁移法指导
+4. 扫描 `data_constraints` -> 识别必填/长度/金额字段 -> 注入错误推测法指导
+5. 扫描 `cross_fp_interactions` -> 识别跨FP共享规则 -> 注入场景法集成指导
+
+**覆盖率分析**（`_analyze_technique_coverage` 方法）：
+
+GenAgent 在生成用例后，自动分析 6 种测试设计技术的覆盖情况，输出到日志：
+
+- `boundary_value`: 有 boundary 类型用例 OR 标题含"边界/临界/最小/最大"
+- `equivalence_partitioning`: SRR 有范围型约束 AND boundary_value=True
+- `decision_table`: SRR 有≥2条组合规则 AND functional≥2 OR integration>0
+- `state_transition`: SRR 有状态变更分支 AND exception>0
+- `scenario`: functional>0
+- `error_guessing`: exception>0 OR security>0 OR 标题含错误关键词
+
+未覆盖的技术会输出告警日志，指导后续迭代补充。
+
+**业界实践对标**：
+
+| 实践要点 | 本系统实现 | 业界参考 |
+|---------|-----------|---------|
+| 精准补全 vs 批量生成 | 基于 SRR 分析定向注入技术指导 | [LLM 测试生成实践](https://cloud.tencent.com/developer/article/2655099)：问题驱动 > 工具驱动 |
+| 等价类 + 边界值 | 范围型字段自动识别 + 6 点边界 | [华为 CodeArts](https://support.huaweicloud.com/intl/en-us/bestpractice-testman/cloudtest_14_0003.html)：等价类 + 边界值联合使用 |
+| 决策表法 | 多条件组合自动检测 + 组合用例 | [SegmentFault](https://segmentfault.com/a/1190000047028442)：2^n 组合 -> 合并简化 |
+| 状态迁移法 | 状态变更分支检测 + 正反向覆盖 | [ONES](https://ones.com.cn/knowledge/10-practical-test-case-methods-to-improve-software-quality)：合法+非法转换 |
+| 错误推测法 | 10 类常见错误场景检查清单 | [CSDN](https://ask.csdn.net/questions/8890371)：历史缺陷驱动增强 |
+| 覆盖率可视化 | 6 种技术覆盖缺口告警 | [MDPI MAKE](https://www.mdpi.com/2504-4990/7/3/97)：覆盖率动态监控 |
+
 ### 2.1.1 FP 定向生成机制（v1.4 增强，已实现）
 
 > **背景**：原方案基于完整 SRR 整体生成用例，难以保证每个功能点都被覆盖。v1.4 引入 FP（功能点）定向生成，按功能点拆分生成用例，并在用例中标注 `related_fp` 字段，建立 test_case↔functional_point 追溯关系。

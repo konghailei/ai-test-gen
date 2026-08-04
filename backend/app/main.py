@@ -280,12 +280,14 @@ def _check_vector_store() -> dict:
         "model_ready": False,
         "collections": {},
         "kb_empty": True,
+        "kb_unavailable": False,
     }
     try:
         result["connected"] = True
         result["model_ready"] = vector_store.is_model_ready()
         counts = {}
         all_empty = True
+        any_coll_error = False
         for coll_key in ("requirements", "test_cases", "patterns", "req_pats", "errors"):
             try:
                 collection = vector_store._get_collection(coll_key)
@@ -295,10 +297,15 @@ def _check_vector_store() -> dict:
                     all_empty = False
             except Exception:
                 counts[coll_key] = -1
+                any_coll_error = True
         result["collections"] = counts
-        result["kb_empty"] = all_empty
+        # 当有连接/查询错误时标记 kb_unavailable；若集合查询全部成功且全部为 0 才是 kb_empty=True
+        result["kb_unavailable"] = (not result["connected"]) or (not result["model_ready"]) or any_coll_error
+        result["kb_empty"] = (not result["kb_unavailable"]) and all_empty
     except Exception as e:
         result["error"] = str(e)[:200]
+        result["kb_unavailable"] = True
+        result["kb_empty"] = False
     return result
 
 
@@ -321,7 +328,8 @@ async def health_check() -> ApiResponse:
             "llm_provider": settings.LLM_PROVIDER,
             "llm_configured": _check_llm_configured(),
             "kb_empty": vs_status["kb_empty"],
-            "cold_start_mode": vs_status["kb_empty"],
+            "kb_unavailable": vs_status["kb_unavailable"],
+            "cold_start_mode": (not vs_status["kb_unavailable"]) and vs_status["kb_empty"],
             "db_type": "postgresql",
             "vector_store": os.getenv("VECTOR_STORE", "milvus"),
             "vector_db": {

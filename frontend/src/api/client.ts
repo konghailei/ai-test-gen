@@ -114,8 +114,10 @@ export const requirements = {
         })
     },
   /** 影响分析：基于模块依赖图谱 + FP 依赖图谱分析需求变更的影响范围 */
-  impactAnalysis: (id: string) =>
-    request<{
+  impactAnalysis: async (id: string) => {
+    // 修复 H9：统一走 POST 新端点（v3.1 RequirementImpactResult），避免双结构漂移；
+    // 再把新结构映射回前端 state 字段（与 handleReRunImpact 使用的字段一致）
+    type _OldShape = {
       req_id: string
       req_title: string
       direct_modules: { id: string; name: string }[]
@@ -133,7 +135,36 @@ export const requirements = {
         existing_cases_count: number
       }[]
       total_affected: number
-    }>(`/requirements/${id}/impact`),
+    }
+    const r = await request<import('../types').RequirementImpactResult>(`/requirements/${id}/impact-analysis`, { method: 'POST' })
+    return {
+      req_id: r.requirement?.id || id,
+      req_title: r.requirement?.title || '',
+      direct_modules: (r.module_impact?.direct || []).map((m: any) => ({
+        id: m.id || m.module_id || '',
+        name: m.name || m.module_name || m.module_id || '',
+      })),
+      indirect_modules: (r.module_impact?.indirect || []).map((m: any) => ({
+        id: m.id || m.module_id || '',
+        name: m.name || m.module_name || m.module_id || '',
+        reason: m.reason || '',
+        depth: typeof m.depth === 'number' ? m.depth : 1,
+      })),
+      affected_fps: (r.affected_fps || []).map((fp: any) => ({
+        fp_id: fp.fp_id || fp.id || '',
+        fp_name: fp.fp_name || fp.name || '',
+        fp_status: fp.fp_status || fp.review_status || fp.status || '',
+        module_id: fp.module_id || '',
+        module_name: fp.module_name || '',
+        impact_reason: fp.impact_reason || fp.impact_description || fp.description || '',
+        depth: typeof fp.depth === 'number' ? fp.depth : 1,
+        source_fp_name: fp.source_fp_name || '',
+        kb_context: fp.kb_context || '',
+        existing_cases_count: Number(fp.existing_cases_count || fp.case_count || 0),
+      })),
+      total_affected: Number(r.total_affected || 0),
+    } as _OldShape
+  },
 
   // 后端返回 { req_id, status, questions[], quality_report, kb_status, auto_augmentations }
   // 此处解包出 questions 数组，避免调用方误把整个对象当数组使用
@@ -308,6 +339,15 @@ export const requirements = {
   saveImpactDescription: (reqId: string, fpId: string, payload: { description: string; test_focus?: string }) =>
     request(`/requirements/${reqId}/impact-description/${fpId}`, {
       method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  /** v3.1: 全量影响分析（POST /impact-analysis，返回 RequirementImpactResult 结构） */
+  runImpactAnalysis: (reqId: string) =>
+    request<import('../types').RequirementImpactResult>(`/requirements/${reqId}/impact-analysis`, { method: 'POST' }),
+  /** v3.1: 用户确认勾选的受影响 FP（写入 SRR.impact_analysis，is_affected=True + confirmed_at） */
+  confirmImpactAnalysis: (reqId: string, payload: import('../types').ImpactConfirmPayload) =>
+    request<import('../types').ImpactConfirmResult>(`/requirements/${reqId}/impact-analysis/confirm`, {
+      method: 'POST',
       body: JSON.stringify(payload),
     }),
   fpUpdate: (reqId: string, fpId: string, updates: { name?: string; module_id?: string; modules?: string[]; fp_type?: string; srr_json?: any }) =>
@@ -862,10 +902,14 @@ export const dependencyGraph = {
   analyzeProject: (projectId: string) =>
     request<import('../types').ProjectImpact>(`/products/projects/${projectId}/impact`),
   // 功能点依赖图谱（跨需求）v2.3: 支持 module_id 和 review_status 筛选
-  fpGraph: (productId: string, moduleId?: string, reviewStatus?: string) => {
+  // v2.46: 新增 includeInactive，默认为 true（项目归档后 is_active=false 的冻结边也要展示给用户查看历史依赖；用户可主动关闭仅看活跃边）
+  fpGraph: (productId: string, moduleId?: string, reviewStatus?: string, includeInactive: boolean = true) => {
     const params = new URLSearchParams()
     if (moduleId) params.append('module_id', moduleId)
     if (reviewStatus) params.append('review_status', reviewStatus)
+    // include_inactive=false: 只展示 is_active=true 的活跃边（新分析/新编辑用）
+    // include_inactive=true (默认): 展示所有边，含项目归档后的冻结历史边
+    params.append('include_inactive', includeInactive ? 'true' : 'false')
     const qs = params.toString() ? `?${params.toString()}` : ''
     return request<{ nodes: any[]; edges: any[]; modules: { id: string; name: string }[] }>(
       `/products/${productId}/fp/dependency-graph${qs}`

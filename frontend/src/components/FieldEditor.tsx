@@ -36,9 +36,10 @@ const FIELD_TYPE_OPTIONS = [
 
 // v2.22: 功能点子 SRR 新增字段的下拉选项
 const TEST_POINT_CATEGORY_OPTIONS = [
-  { value: 'functional', label: '功能' }, { value: 'boundary', label: '边界' },
-  { value: 'exception', label: '异常' }, { value: 'security', label: '安全' },
-  { value: 'performance', label: '性能' },
+  { value: 'functional', label: '功能测试' }, { value: 'boundary', label: '边界测试' },
+  { value: 'exception', label: '异常测试' }, { value: 'security', label: '安全测试' },
+  { value: 'performance', label: '性能测试' }, { value: 'regression', label: '回归测试' },
+  { value: 'integration', label: '集成测试' },
 ]
 const ASSUMPTION_TYPE_OPTIONS = [
   { value: 'assumption', label: '假设' },

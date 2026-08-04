@@ -1163,6 +1163,26 @@ class Orchestrator:
             import traceback
 
             logger.debug("[Orchestrator] 异常堆栈:\n{}", traceback.format_exc())
+
+            # L4 数据层防护：主流水线异常写入 DLQ，支持事后审计与手动重试
+            # 对应 docs/00 §2 L4 防护承诺，闭合 orchestrator 主流水线死信兜底
+            try:
+                from app.core.dlq import dlq
+                dlq.push(
+                    task_type="pipeline",
+                    payload={
+                        "req_id": final_state.get("req_id", ""),
+                        "channel": final_state.get("channel", ""),
+                        "stage": final_state.get("_last_node", "unknown"),
+                    },
+                    error=str(e)[:2000],
+                    max_retries=3,
+                )
+            except Exception as dlq_e:
+                logger.warning(
+                    "[Orchestrator] DLQ 写入失败（不阻断）: {}", str(dlq_e)[:120]
+                )
+
             yield make_sse_event(
                 "error",
                 f"流水线异常: {str(e)[:200]}",

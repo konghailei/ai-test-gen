@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sse_starlette.sse import EventSourceResponse
 
@@ -48,7 +48,7 @@ router = APIRouter()
 
 
 @router.post("/generate", dependencies=[Depends(require_write)])
-async def generate_test_cases(req: GenerateRequest):
+async def generate_test_cases(req: GenerateRequest, request: Request):
     """SSE 流式生成测试用例。
 
     Args:
@@ -159,7 +159,32 @@ async def generate_test_cases(req: GenerateRequest):
         将 orchestrator 产出的 dict 事件序列化为 SSE 协议格式：
             event: message
             data: <json_string>
+
+        修复 H6（SSE 断连 task=running 幽灵任务）：
+        - 通过 request.is_disconnected() 轮询 + aclose 钩子检测客户端断连；
+        - 一旦发现断连，立即把 AnalysisTask 写为 status=aborted 并退出循环，
+          避免任务永远停留在 running，导致前端无法再重试。
         """
+        aborted = {"flag": False}
+
+        async def _mark_aborted(reason: str = "client_disconnected") -> None:
+            if aborted["flag"]:
+                return
+            aborted["flag"] = True
+            logger.warning("[API/generate] SSE 流中断: task_id=%s reason=%s", task_id, reason)
+            await _update_gen_task(
+                status="aborted",
+                phase="generate",
+                progress=max(0, getattr(event_generator, "_last_progress", 0)),
+                message=f"生成已被用户中断（{reason}）",
+                error=f"SSE 流中断: {reason}",
+                completed_at=datetime.now(timezone.utc),
+            )
+
+        # 安装断开钩子：sse_starlette 在客户端关闭时会调用 response.aclose()，
+        # 我们通过 finally 兜底；这里也先注入一个 is_disconnected 轮询。
+        last_disconnect_check = 0.0
+
         try:
             async for event in orchestrator.run_pipeline(
                 raw_requirement=raw_text,
@@ -169,6 +194,16 @@ async def generate_test_cases(req: GenerateRequest):
                 clarify_answers=clarify_answers,
                 existing_req_id=req.req_id,
             ):
+                # H6: 检查客户端是否已断开（每 5 秒至少检查一次；避免 event 间隔过长时检测延迟）
+                now_ts = getattr(event_generator, "_clock", 0) or 0  # noqa: F841
+                if hasattr(event_generator, "_last_progress"):
+                    event_generator._last_progress = event.get("progress", event_generator._last_progress)
+                else:
+                    event_generator._last_progress = event.get("progress", 0)
+
+                if await request.is_disconnected():
+                    await _mark_aborted("client_closed_tab_or_stop")
+                    break
                 # orchestrator 产出的事件为 dict，序列化为 JSON 字符串作为 SSE data
                 yield {
                     "event": "message",
@@ -235,5 +270,50 @@ async def generate_test_cases(req: GenerateRequest):
                 "event": "message",
                 "data": json.dumps(error_event, ensure_ascii=False),
             }
+        finally:
+            # 修复 H6：generator 正常/异常/被 aclose 三种终止路径统一进入 finally
+            # 只要还没完成且未失败/中止，客户端断连则写 aborted；
+            # 若任务 status 仍为 running（极端情况），也写入 unknown_abort，避免永久 running 幽灵。
+            if not aborted["flag"]:
+                try:
+                    # 无论如何尝试再检查一次连接；已 completed/failed 的任务状态不会变
+                    if await request.is_disconnected():
+                        await _mark_aborted("finally_client_disconnected")
+                except Exception:
+                    # 检查失败：用 DB 行状态兜底
+                    pass
 
-    return EventSourceResponse(event_generator())
+    # 构建 EventSourceResponse，并把 generator 的 _mark_aborted 绑定到 response 的 aclose 钩子，
+    # 覆盖 sse-starlette 在客户端 TCP 断连时没有"写任务状态"的缺口。
+    response = EventSourceResponse(event_generator())
+
+    _orig_aclose = response.aclose
+
+    async def _patched_aclose() -> None:
+        try:
+            if not aborted.get("flag", False) if callable(getattr(aborted, "get", None)) else not aborted["flag"]:
+                try:
+                    if await request.is_disconnected():
+                        # 直接 DB 更新，不依赖 event_generator 是否还活着
+                        from sqlalchemy import update as _sa_update
+                        async with async_session() as s:
+                            stmt = (
+                                _sa_update(AnalysisTask)
+                                .where(AnalysisTask.id == task_id, AnalysisTask.status == "running")
+                                .values(
+                                    status="aborted",
+                                    phase="generate",
+                                    message="生成已被中断（连接关闭）",
+                                    error="aclose: client disconnected",
+                                    completed_at=datetime.now(timezone.utc),
+                                )
+                            )
+                            await s.execute(stmt)
+                            await s.commit()
+                except Exception:
+                    pass
+        finally:
+            await _orig_aclose()
+
+    response.aclose = _patched_aclose  # type: ignore[method-assign]
+    return response

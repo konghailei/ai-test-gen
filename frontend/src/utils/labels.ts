@@ -120,16 +120,16 @@ export function dataTypeLabel(type: string): string {
 
 // 测试用例类型
 const CASE_TYPE_LABELS: Record<string, string> = {
-  functional: '功能',
-  boundary: '边界',
-  exception: '异常',
-  security: '安全',
-  performance: '性能',
-  regression: '回归',
-  integration: '集成',
-  ui: '界面',
-  api: '接口',
-  data: '数据',
+  functional: '功能测试',
+  boundary: '边界测试',
+  exception: '异常测试',
+  security: '安全测试',
+  performance: '性能测试',
+  regression: '回归测试',
+  integration: '集成测试',
+  ui: '界面测试',
+  api: '接口测试',
+  data: '数据测试',
 }
 
 /** 获取测试用例类型的中文名 */

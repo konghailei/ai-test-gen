@@ -353,15 +353,38 @@ class ImpactAnalysisAgent:
         affected_fps = await self._bfs_fp_reverse(fp_id, session)
 
         # 3. 模块级影响分析（复用现有方法）
+        # v2.55 Bug B-2: 不仅分析起始 FP 的模块，还要分析所有受影响 FP 的模块
         affected_modules_raw: list[dict] = []
+        
+        # 收集所有相关模块 ID（起始 FP + 所有受影响 FP）
+        all_module_ids: set[str] = set()
         if fp_info["module_id"]:
-            module_impact = await self._analyze_module_impact([fp_info["module_id"]], session)
+            all_module_ids.add(fp_info["module_id"])
+        for affected_fp in affected_fps:
+            # 从 affected_fps 中获取 module_id（需要从数据库查询）
+            pass
+        
+        # 批量查询受影响 FPs 的 module_id
+        if affected_fps:
+            affected_fp_ids = [fp["fp_id"] for fp in affected_fps]
+            mod_query = await session.execute(
+                select(FunctionalPoint.module_id).where(
+                    FunctionalPoint.id.in_(affected_fp_ids),
+                    FunctionalPoint.module_id.isnot(None),
+                )
+            )
+            for (mod_id,) in mod_query.all():
+                if mod_id:
+                    all_module_ids.add(mod_id)
+        
+        if all_module_ids:
+            module_impact = await self._analyze_module_impact(list(all_module_ids), session)
             # 查询模块名称
             mod_names: dict[str, str] = {}
-            all_mod_ids = module_impact.get("all_affected_modules", [])
-            if all_mod_ids:
+            all_mod_ids_from_impact = module_impact.get("all_affected_modules", [])
+            if all_mod_ids_from_impact:
                 mod_result = await session.execute(
-                    select(Module.id, Module.name).where(Module.id.in_(all_mod_ids))
+                    select(Module.id, Module.name).where(Module.id.in_(all_mod_ids_from_impact))
                 )
                 mod_names = {row[0]: row[1] for row in mod_result.all()}
 

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import {
   Upload, FileText, Database, FolderTree, Settings, Search,
   BookOpen, ArrowLeft, Workflow, Cpu, GitBranch, ShieldCheck,
-  Layers, Zap, Image, TestTube,
+  Layers, Zap, Image, TestTube, Server, Activity,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { health } from '../api/client'
@@ -203,7 +203,11 @@ const SECTIONS: ManualSection[] = [
       { label: '四级去重', desc: '生成阶段四级去重：精确匹配 → 语义去重(cosine>0.92) → 子集检测 → LLM 等价判定' },
       { label: '一致性检查', desc: 'ConsistencyChecker 对比历史生成任务：用例数方差、类型分布 Jaccard 相似度、语义相似度' },
       { label: '向量库时序', desc: '生成阶段不写入向量库（避免污染），审核后由 ReviewAgent 统一写入 Milvus' },
-      { label: '存储分层', desc: 'PostgreSQL（关系型数据库）+ Milvus（向量数据库）+ MinIO（对象存储）+ etcd（元数据服务）+ Redis（缓存）' },
+      { label: '存储分层', desc: 'PostgreSQL（关系型数据库）+ Milvus（向量数据库）+ MinIO（对象存储）+ etcd（元数据服务）+ Redis（缓存 + DLQ 死信队列）' },
+      { label: 'L1 接入层防护', desc: 'JWT 认证 + RBAC 权限控制（require_admin/require_write 装饰器）+ 基于 IP 的 Token Bucket 限流（默认 60 RPM，超限 429）' },
+      { label: 'L2 编排层防护', desc: 'LLM 调用断路器（三状态机：CLOSED/OPEN/HALF_OPEN）+ 指数退避全抖动重试 + 多提供商故障转移' },
+      { label: 'L3 Agent 层防护', desc: 'ClarifyLoopGuard 澄清回环上限 3 轮 + ConsistencyChecker 一致性检查 + QualityGate 质量门禁' },
+      { label: 'L4 数据层防护', desc: 'KB 静默跳过（KB 不可用时返回空，不阻断主流水线）+ DLQ 死信队列（主流水线异常写入 Redis，支持事后重试）+ 幂等守卫' },
     ],
     logic: [
       {
@@ -234,6 +238,10 @@ const SECTIONS: ManualSection[] = [
       { key: '异步队列', value: 'Celery + Redis', note: '归档向量计算异步化' },
       { key: '需求状态', value: 'draft / pending_review / confirmed / archived', note: '只有 confirmed 可生成用例' },
       { key: '去重策略', value: '四级（精确/语义/子集/LLM）', note: 'cosine > 0.92 视为语义重复' },
+      { key: '限流', value: 'Token Bucket 60 RPM', note: '基于 IP，超限返回 429 + Retry-After' },
+      { key: '断路器', value: '三状态机 + 指数退避', note: 'CLOSED/OPEN/HALF_OPEN，LLM 调用专属' },
+      { key: 'DLQ 死信队列', value: 'Redis List，上限 10000 条', note: '主流水线 + 异步任务异常写入，TTL 7 天' },
+      { key: 'KB 降级', value: '静默跳过 + 人工澄清兜底', note: 'KB 不可用时返回空，不阻断生成' },
     ],
     diagram: <DagPipelineDiagram />,
   },
@@ -606,8 +614,8 @@ const SECTIONS: ManualSection[] = [
         detail: 'Milvus 检索时 expr="status == \\"archived\\""（注意 expr 必须是字符串，不能是 None，否则 DataTypeNotMatchException）→ 草稿状态（active/draft）的需求不参与检索',
       },
       {
-        step: '降级策略',
-        detail: 'KB 完全不可用时（Milvus 连接失败）→ 静默跳过 KB 检索，正常生成内容，人工澄清兜底 → 向量检索失败时仅用 BM25 → BM25 失败时仅用向量 → CrossEncoder 重排失败时回退 RRF 排序 → 不向用户注入诊断信息，不影响内容生成质量',
+        step: '降级策略（三层兜底）',
+        detail: '第 1 层（hybrid_searcher 内部）：向量检索与 BM25 互为兜底，任一路失败仅 logger.warning，另一路继续；两路都失败返回空列表 []。第 2 层（ClarifyAgent 调用方）：外层再包 try/except 捕获所有异常，matched = []，不向 Prompt 注入诊断信息。第 3 层（KB 状态预检）：_safe_is_empty/_safe_is_product_first 异常时返回 (False, True) 标记 KB 不可用，避免误触发冷启动。核心原则：KB 是增强项不是阻断项，绝不因 KB 降级污染生成结果，人工澄清 3 轮兜底',
       },
     ],
     config: [
@@ -732,6 +740,73 @@ const SECTIONS: ManualSection[] = [
       { title: '重新生成', desc: '筛选了具体需求时显示「重新生成」快捷按钮，一键对该需求重新生成用例（会追加新用例，不覆盖旧的）。', img: 'testcases.png' },
     ],
   },
+  {
+    id: 'stability',
+    icon: ShieldCheck,
+    title: '稳定性与运维',
+    subtitle: 'L1-L4 四层防护 + DLQ 死信队列 + CI 持续集成',
+    color: 'text-emerald-600 bg-emerald-50',
+    features: [
+      { label: 'L1 接入层防护', desc: 'JWT 认证（密钥启动校验，禁止弱默认值）+ RBAC 权限控制（require_admin/require_write 装饰器，20+ 写端点全覆盖）+ Token Bucket 限流（基于 IP，默认 60 RPM，超限返回 429 + Retry-After 头）' },
+      { label: 'L2 编排层防护', desc: 'LLM 调用断路器（三状态机：CLOSED → OPEN → HALF_OPEN）+ 指数退避全抖动重试 + 多 LLM 提供商故障转移（主供应商故障自动切换备用）' },
+      { label: 'L3 Agent 层防护', desc: 'ClarifyLoopGuard 澄清回环上限 3 轮（超过强制降级 optional 并 pending_review）+ ConsistencyChecker 一致性检查（用例数方差/类型分布 Jaccard/语义相似度）+ QualityGate 质量门禁' },
+      { label: 'L4 数据层防护', desc: 'KB 静默跳过（KB 不可用时返回空，不阻断主流水线）+ DLQ 死信队列（主流水线异常写入 Redis，支持事后重试）+ 幂等守卫（防并发重复操作）' },
+      { label: 'DLQ 死信队列', desc: 'Redis List 实现，上限 10000 条 + TTL 7 天防 OOM；覆盖 Celery 异步任务（embedding）和 orchestrator 主流水线两类异常；写入失败不阻断主流程' },
+      { label: '错误可见性原则', desc: '关键步骤失败（ClarifyAgent/FP 保存/SRR 生成/FP 拆分）必须中断流水线 + 标记 failed + 携带 error 字段；非关键路径（一致性检查/覆盖率）用 logger.debug 跳过' },
+      { label: 'CI 持续集成', desc: 'GitHub Actions：Python 3.11/3.12 矩阵 + py_compile 全量语法检查 + pytest + 前端 tsc 类型检查 + Vite 构建；防止语法回归与类型错误' },
+      { label: '工程治理', desc: '一次性脚本归档到 scripts/legacy/，废弃设计稿归档到 archive/，根目录 .gitignore 防止调试残留再次入库' },
+    ],
+    logic: [
+      {
+        step: 'L1 接入层（认证 + 权限 + 限流）',
+        detail: '请求到达 → JWT 认证（APP_SECRET_KEY 启动时 validate_security() 强校验，空值拒绝启动）→ CurrentUser 注入 request.state → require_admin/require_write 装饰器校验角色 → rate_limit_middleware 基于 IP 的 Token Bucket 限流（API_RPM_LIMIT=60）→ 超限返回 429 + Retry-After 头。/api/health 跳过限流',
+      },
+      {
+        step: 'L2 编排层（断路器 + 重试 + 故障转移）',
+        detail: 'LLM 调用经过 CircuitBreaker（三状态机）：CLOSED（正常）→ 连续失败 5 次跳 OPEN（快速失败，不等待）→ 30 秒后跳 HALF_OPEN（放 1 个探测请求）→ 成功回 CLOSED，失败回 OPEN。指数退避全抖动重试（base=1s, max=60s, jitter 随机化避免雪崩）。主 LLM 提供商故障自动切换备用',
+      },
+      {
+        step: 'L3 Agent 层（回环上限 + 一致性检查）',
+        detail: 'ClarifyLoopGuard 限制澄清回环最多 3 轮（防止死循环）→ 超过 3 轮未解决问题降级为 optional 并强制 pending_review → ConsistencyChecker 对比历史生成任务三维度：用例数方差（>20% 异常）、类型分布 Jaccard 相似度（<0.7 异常）、语义相似度（标题 Embedding cosine <0.7 异常）→ 异常标记 is_inconsistent=true 但不阻断',
+      },
+      {
+        step: 'L4 数据层（KB 静默跳过 + DLQ）',
+        detail: 'KB 静默跳过三层降级（详见「KB 检索规则」章节）→ KB 不可用时返回空，由人工澄清兜底。DLQ 死信队列：主流水线 except 分支调用 dlq.push(task_type="pipeline", ...) 写入 Redis List；Celery 异步任务重试 3 次耗尽后写入 dlq（task_type="embedding"）；DLQ 写入本身用 try/except 包裹，失败仅 logger.warning 不阻断',
+      },
+      {
+        step: '错误可见性原则（v2.18 强化）',
+        detail: '关键路径失败：ClarifyAgent 异常 / FP 保存失败 / SRR 生成失败 / FP 拆分失败 → 中断流水线 + 标记 task.status=failed + error 字段 + SSE error 事件。非关键路径失败：一致性检查 / FP 覆盖率 / 原始用例检索 → logger.debug 跳过，不影响主流程',
+      },
+      {
+        step: 'CI 持续集成（GitHub Actions）',
+        detail: '.github/workflows/test.yml：push/PR 触发 → 后端 Python 3.11/3.12 矩阵 → pip install + py_compile 全量语法检查 + pytest（允许失败，因依赖 PG/Redis/torch）→ 前端 Node 20 + npm ci + tsc -b 类型检查 + Vite build → 产物上传归档 7 天',
+      },
+      {
+        step: '工程治理（v2.8.0 强化）',
+        detail: '一次性脚本（_*.py/check_*.py/test_e2e*.py 等 59 个）归档到 scripts/legacy/；废弃设计稿（ai-test-redesign/_design_mockups）归档到 archive/；.gitignore 增加 clarify_*.txt/srr_dump.txt/install_*.env 等模式防止调试残留入库；根目录保持整洁',
+      },
+    ],
+    config: [
+      { key: 'JWT 密钥', value: 'APP_SECRET_KEY（空默认值）', note: '生产环境启动时 validate_security() 强校验' },
+      { key: 'RBAC 角色', value: 'admin / user / viewer', note: 'require_admin / require_write / get_current_user' },
+      { key: '限流', value: 'Token Bucket 60 RPM', note: 'API_RPM_LIMIT，基于 IP，超限 429' },
+      { key: '断路器阈值', value: '失败 5 次 → OPEN', note: '30 秒后 HALF_OPEN 探测' },
+      { key: '重试策略', value: '指数退避全抖动', note: 'base=1s, max=60s, jitter 随机化' },
+      { key: 'DLQ 上限', value: '10000 条 + TTL 7 天', note: 'Redis List，LTRIM + EXPIRE 防 OOM' },
+      { key: 'CI 矩阵', value: 'Python 3.11/3.12 + Node 20', note: 'GitHub Actions，push/PR 触发' },
+      { key: '澄清回环上限', value: '3 轮', note: '超过强制降级 optional + pending_review' },
+    ],
+    terms: [
+      { term: 'DLQ', desc: 'Dead Letter Queue（死信队列）— 主流水线或异步任务失败时将错误记录写入 Redis List，支持事后审计与手动重试。上限 10000 条，TTL 7 天。' },
+      { term: 'CircuitBreaker', desc: '断路器 — 三状态机（CLOSED/OPEN/HALF_OPEN），连续失败达阈值后快速失败避免雪崩，恢复期放探测请求试探。' },
+      { term: 'Token Bucket', desc: '令牌桶限流 — 基于 IP 的全局限流算法，按速率补充令牌，请求消耗令牌，桶空时返回 429。' },
+      { term: 'ClarifyLoopGuard', desc: '澄清回环守卫 — 限制澄清流程最多 3 轮，防止死循环；超过后降级为 optional 强制 pending_review。' },
+      { term: 'ConsistencyChecker', desc: '一致性检查器 — 对比历史生成任务的三维度（用例数方差/类型分布 Jaccard/语义相似度），异常时标记但不阻断。' },
+      { term: 'QualityGate', desc: '质量门禁 — 对澄清后的 SRR 做完整性/歧义/遗漏检查，达标才允许进入下一阶段。' },
+      { term: 'RRF', desc: 'Reciprocal Rank Fusion（倒数排名融合）— 融合向量检索与 BM25 检索结果的算法，k=60。' },
+      { term: 'KB 静默跳过', desc: '知识库不可用时返回空列表，不抛异常、不阻断主流水线、不向 Prompt 注入诊断信息，由人工澄清兜底。' },
+    ],
+  },
 ]
 
 /* ===================== 章节图标色映射（Apple 设计系统 CSS 变量） ===================== */
@@ -745,6 +820,7 @@ const SECTION_COLOR_STYLES: Record<string, { color: string; background: string }
   'text-red-600 bg-red-50': { color: 'var(--state-error)', background: 'var(--state-error-surface)' },
   'text-teal-600 bg-teal-50': { color: 'var(--state-success)', background: 'var(--state-success-surface)' },
   'text-cyan-600 bg-cyan-50': { color: 'var(--brand-500)', background: 'rgba(0, 122, 255, 0.08)' },
+  'text-emerald-600 bg-emerald-50': { color: 'var(--state-success)', background: 'var(--state-success-surface)' },
 }
 const getSectionColorStyle = (color: string) => SECTION_COLOR_STYLES[color] || { color: 'var(--foreground-secondary)', background: 'var(--background-muted)' }
 

@@ -265,9 +265,13 @@ async def init_db() -> None:
             # Step 5: BM25 全文检索 — zhparser 中文分词 + tsvector + GIN 索引
             # 为 requirements 和 test_cases 表添加 search_vec 列（docs/02 §3.1 混合检索）
             # 安全策略：检测 text search config 是否可用，不可用时跳过（不影响启动）
-            BM25_SETUPS: list[tuple[str, str, str]] = [
-                ("requirements", "search_vec", "title || ' ' || COALESCE(raw_text, '')"),
-                ("test_cases", "search_vec", "title || ' ' || COALESCE(case_json::text, '')"),
+            BM25_SETUPS: list[tuple[str, str, str, str]] = [
+                ("requirements", "search_vec",
+                 "title || ' ' || COALESCE(raw_text, '')",
+                 "NEW.title || ' ' || COALESCE(NEW.raw_text, '')"),
+                ("test_cases", "search_vec",
+                 "title || ' ' || COALESCE(case_json::text, '')",
+                 "NEW.title || ' ' || COALESCE(NEW.case_json::text, '')"),
             ]
 
             # 检测可用的中文分词配置：优先 chinese(zhparser)，回退 simple
@@ -285,7 +289,7 @@ async def init_db() -> None:
             except Exception:
                 ts_config = "simple"
 
-            for table, vec_col, ts_expr in BM25_SETUPS:
+            for table, vec_col, ts_expr, ts_expr_new in BM25_SETUPS:
                 if not inspector.has_table(table):
                     continue
                 existing_cols = {c["name"] for c in inspector.get_columns(table)}
@@ -308,6 +312,39 @@ async def init_db() -> None:
                         sp.rollback()
                         logger.warning("DB 迁移: {}.{} BM25 设置失败（已跳过，不影响启动）: {}",
                                        table, vec_col, str(mig_e)[:120])
+
+                # v2.55 Bug C-1: 创建触发器，INSERT/UPDATE 时自动维护 search_vec
+                # 之前仅有一次性 UPDATE，后续新增/修改的数据 search_vec 为 NULL，BM25 检索失效
+                try:
+                    sp_trig = conn_sync.begin_nested()
+                    fn_name = f"search_vec_update_{table}"
+                    trig_name = f"trg_{table}_search_vec"
+                    conn_sync.execute(text(f"""
+                        CREATE OR REPLACE FUNCTION {fn_name}() RETURNS trigger AS $$
+                        BEGIN
+                            NEW.{vec_col} := to_tsvector('{ts_config}', {ts_expr_new});
+                            RETURN NEW;
+                        END;
+                        $$ LANGUAGE plpgsql
+                    """))
+                    conn_sync.execute(text(f"DROP TRIGGER IF EXISTS {trig_name} ON {table}"))
+                    conn_sync.execute(text(f"""
+                        CREATE TRIGGER {trig_name}
+                        BEFORE INSERT OR UPDATE ON {table}
+                        FOR EACH ROW EXECUTE FUNCTION {fn_name}()
+                    """))
+                    # 回填历史 NULL 行（触发器仅对后续 INSERT/UPDATE 生效）
+                    conn_sync.execute(text(
+                        f"UPDATE {table} SET {vec_col} = to_tsvector('{ts_config}', {ts_expr}) "
+                        f"WHERE {vec_col} IS NULL"
+                    ))
+                    sp_trig.commit()
+                    logger.info("DB 迁移: {}.{} 触发器 {} 已创建（自动维护 search_vec）",
+                                table, vec_col, trig_name)
+                except Exception as trig_e:
+                    sp_trig.rollback()
+                    logger.warning("DB 迁移: {}.{} 触发器创建失败（已跳过）: {}",
+                                   table, vec_col, str(trig_e)[:120])
 
             # Step 6: go_live_date 列类型升级（DATE/TIMESTAMP → TIMESTAMP WITH TIME ZONE）
             if inspector.has_table("requirements"):

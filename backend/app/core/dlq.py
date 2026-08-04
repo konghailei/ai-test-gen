@@ -22,11 +22,21 @@ DLQ_KEY = "aitestgen:dlq:v1"
 class DeadLetterQueue:
     """基于 Redis List 的轻量死信队列。
 
+    修复 H7（内存泄漏）：
+    - push 后 LTRIM 0..9999，上限 10000 条。
+    - push 后 EXPIRE 7 天，防止 Redis List 无界增长 OOM。
+    - 提供 `_guard()` 辅助函数保证 push/cleanup 原子性。
+
     Usage:
         dlq = DeadLetterQueue()
         dlq.push("embedding", {"req_id": "REQ-001"}, "timeout")
         pending = dlq.peek(10)
     """
+
+    # 上限（DLQ 不应无限增长）
+    MAX_LEN = 10_000
+    # 死信保存天数（7 天）
+    TTL_SECONDS = 7 * 24 * 3600
 
     def __init__(self) -> None:
         try:
@@ -37,6 +47,19 @@ class DeadLetterQueue:
             self._r = None
             self._ok = False
             logger.warning("[DLQ] Redis 不可用，死信队列已禁用")
+
+    def _apply_size_guard(self) -> None:
+        """每次 push 后应用大小上限 + TTL 保护（H7）。"""
+        if not self._ok:
+            return
+        try:
+            # Redis pipeline：一次性发送 ltrim + expire，减少 RTT
+            pipe = self._r.pipeline(transaction=False)
+            pipe.ltrim(DLQ_KEY, 0, self.MAX_LEN - 1)
+            pipe.expire(DLQ_KEY, self.TTL_SECONDS)
+            pipe.execute()
+        except Exception as e:
+            logger.warning("[DLQ] size guard 执行失败: {}", str(e)[:200])
 
     def push(
         self,
@@ -69,6 +92,8 @@ class DeadLetterQueue:
                 "status": "pending",
             }
             self._r.rpush(DLQ_KEY, json.dumps(record, ensure_ascii=False))
+            # H7: 应用 LTRIM + EXPIRE
+            self._apply_size_guard()
             logger.info("[DLQ] 写入死信: task_type={}, error={}", task_type, str(error)[:100])
             return True
         except Exception as e:

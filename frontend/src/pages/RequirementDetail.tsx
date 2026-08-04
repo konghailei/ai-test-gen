@@ -229,6 +229,7 @@ export default function RequirementDetail() {
 
   // 影响分析
   const [impactLoading, setImpactLoading] = useState(false)
+  const [confirmImpactLoading, setConfirmImpactLoading] = useState(false)
   const [impactData, setImpactData] = useState<{
     req_title: string
     direct_modules: { id: string; name: string }[]
@@ -247,6 +248,29 @@ export default function RequirementDetail() {
     }[]
     total_affected: number
   } | null>(null)
+  // 用户勾选的受影响 FP（将用于生成回归测试用例）
+  const [confirmedFpIds, setConfirmedFpIds] = useState<Set<string>>(new Set())
+
+  // 从 SRR.impact_analysis 恢复已确认的 fp_id
+  useEffect(() => {
+    const srr = req?.srr_json as Record<string, unknown> | undefined
+    const ia = srr?.impact_analysis as Array<{ fp_id?: string; is_affected?: boolean; confirmed_at?: string }> | undefined
+    if (Array.isArray(ia)) {
+      // 修复 M5：严格按后端 SRR 同步。只同步 is_affected=true + confirmed_at 的项。
+      // 如果后端某 FP 被取消确认（is_affected=false + confirmed_at）或被移除，
+      // 这里会自动从前端 confirmedFpIds 去掉，保证双向一致性。
+      const set = new Set<string>()
+      for (const item of ia) {
+        if (item.fp_id && item.is_affected === true && item.confirmed_at) {
+          set.add(item.fp_id)
+        }
+      }
+      setConfirmedFpIds(set)
+    } else if (!ia && (req?.id || id)) {
+      // SRR 中不再有 impact_analysis（被后端 removed 清空了），同步清空前端勾选
+      setConfirmedFpIds(prev => (prev.size === 0 ? prev : new Set()))
+    }
+  }, [req?.srr_json, req?.id, id])
 
   // ---- v1.6.1: 泛化 SRR 字段保存（FieldEditor 用） ----
   const saveSrrField = async (fieldPath: string, newValue: unknown) => {
@@ -408,6 +432,94 @@ export default function RequirementDetail() {
       setImpactData(result)
     } catch (e: any) {
       alert('影响分析失败: ' + (e?.message || '未知错误'))
+    } finally {
+      setImpactLoading(false)
+    }
+  }
+
+  const toggleFpConfirm = (fpId: string) => {
+    setConfirmedFpIds(prev => {
+      const next = new Set(prev)
+      if (next.has(fpId)) next.delete(fpId)
+      else next.add(fpId)
+      return next
+    })
+  }
+
+  const toggleAllFps = () => {
+    if (!impactData) return
+    const all = impactData.affected_fps.map(x => x.fp_id)
+    const allSelected = all.every(id => confirmedFpIds.has(id))
+    const next = new Set<string>()
+    if (!allSelected) all.forEach(id => next.add(id))
+    setConfirmedFpIds(next)
+  }
+
+  const handleConfirmImpact = async () => {
+    if (!id) return
+    // 修复 H5：按"三集合"提交
+    // - confirmed_fp_ids：当前前端勾选的（视为「受影响」，生成回归用例）
+    // - unconfirmed_fp_ids：候选 FP 中未勾选的（视为「用户确认不受影响」，打 confirmed_at 放行守卫）
+    // - 不在候选中的旧条目（例如之前已勾选过，本次重新分析后 candidate 里不再出现）：放入 removed_fp_ids 移除
+    const candidateIds = impactData?.affected_fps.map(x => x.fp_id).filter(Boolean) as string[]
+    const candidateSet = new Set(candidateIds || [])
+
+    const confirmed: string[] = Array.from(confirmedFpIds).filter(x => candidateSet.has(x))
+    const unaffected: string[] = Array.from(candidateSet).filter(x => !confirmedFpIds.has(x))
+
+    // 需要移除的旧条目：SRR.impact_analysis 中出现但本次候选中没有的 FP
+    const srr = req?.srr_json as Record<string, unknown> | undefined
+    const ia = srr?.impact_analysis as Array<{ fp_id?: string }> | undefined
+    const oldIds = new Set((Array.isArray(ia) ? ia : []).map(x => x.fp_id).filter(Boolean) as string[])
+    const removed: string[] = Array.from(oldIds).filter(x => !candidateSet.has(x))
+
+    if (confirmed.length === 0 && unaffected.length === 0 && removed.length === 0) {
+      alert('请先勾选或取消勾选受影响的功能点')
+      return
+    }
+    setConfirmImpactLoading(true)
+    try {
+      const res = await reqApi.confirmImpactAnalysis(id, {
+        confirmed_fp_ids: confirmed,
+        unconfirmed_fp_ids: unaffected,
+        removed_fp_ids: removed,
+      })
+      // 刷新 detail（最新 SRR.impact_analysis）
+      const detailRes = await reqApi.get(id)
+      if (detailRes) setReq(detailRes)
+      const totalHandled =
+        Number(res.confirmed_count || 0) +
+        Number(res.unconfirmed_count || 0) +
+        Number(res.removed_count || 0)
+      alert(
+        `已确认 ${res.confirmed_count || 0} 个受影响功能点，` +
+        `标记 ${res.unconfirmed_count || 0} 个不受影响，` +
+        `移除 ${res.removed_count || 0} 个过期条目。\n` +
+        '后续生成用例时，受影响的功能点将生成对应的「回归测试用例」。' +
+        (totalHandled === 0 ? '\n\n（提示：本次提交未匹配到数据库中有效的功能点 ID，可能是 FP 已被删除）' : ''),
+      )
+    } catch (e: any) {
+      alert('确认受影响功能点失败: ' + (e?.message || '未知错误'))
+    } finally {
+      setConfirmImpactLoading(false)
+    }
+  }
+
+  const handleReRunImpact = async () => {
+    if (!id) return
+    setImpactLoading(true)
+    try {
+      const result = await reqApi.runImpactAnalysis(id)
+      // 将 v3 POST 返回结构映射到前端现有 state 结构
+      setImpactData({
+        req_title: result.requirement?.title || '',
+        direct_modules: result.module_impact?.direct || [],
+        indirect_modules: result.module_impact?.indirect || [],
+        affected_fps: result.affected_fps || [],
+        total_affected: result.total_affected || 0,
+      })
+    } catch (e: any) {
+      alert('重新分析失败: ' + (e?.message || '未知错误'))
     } finally {
       setImpactLoading(false)
     }
@@ -1491,49 +1603,101 @@ export default function RequirementDetail() {
         {/* 受影响的功能点（基于 FP 依赖图谱 BFS 分析） */}
         {impactData.affected_fps.length > 0 ? (
           <div>
-            <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--foreground-secondary)' }}>
-              受影响的功能点
-              <span className="text-xs font-normal ml-2" style={{ color: 'var(--foreground-tertiary)' }}>（{impactData.total_affected} 个，基于功能点依赖图谱 BFS 分析）</span>
-            </h3>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>
+                受影响的功能点
+                <span className="text-xs font-normal ml-2" style={{ color: 'var(--foreground-tertiary)' }}>（{impactData.total_affected} 个，基于功能点依赖图谱 BFS 分析）</span>
+              </h3>
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none" style={{ color: 'var(--foreground-secondary)' }}>
+                  <input
+                    type="checkbox"
+                    checked={impactData.affected_fps.length > 0 && impactData.affected_fps.every(fp => confirmedFpIds.has(fp.fp_id))}
+                    onChange={toggleAllFps}
+                    style={{ accentColor: 'var(--brand-500)' }}
+                  />
+                  全选
+                </label>
+              </div>
+            </div>
             <div className="space-y-3">
-              {impactData.affected_fps.map(fp => (
-                <div key={fp.fp_id} className="px-4 py-3 transition-colors" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 0.6)', border: '1px solid var(--border)' }}>
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <p className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }}>{fp.fp_name}</p>
-                      {fp.fp_status === 'archived' && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0" style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>已归档</span>
-                      )}
-                      {fp.fp_status && fp.fp_status !== 'archived' && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0" style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }}>{fp.fp_status}</span>
-                      )}
-                    </div>
-                    <span className="text-xs flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>{fp.depth}跳</span>
-                  </div>
-                  <div className="flex items-center gap-2 mb-1">
-                    {fp.module_name && (
-                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>{fp.module_name}</span>
-                    )}
-                    {fp.existing_cases_count > 0 && (
-                      <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>已有 {fp.existing_cases_count} 条用例</span>
-                    )}
-                  </div>
-                  <p className="text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>{fp.impact_reason}</p>
-                  {fp.source_fp_name && (
-                    <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>来源：依赖「{fp.source_fp_name}」</p>
-                  )}
-                  {/* KB 知识库说明（仅已归档 FP 有值） */}
-                  {fp.kb_context && (
-                    <div className="mt-2 p-2.5" style={{ background: 'rgba(0, 122, 255, 0.05)', borderRadius: 'calc(var(--radius) * 0.5)', border: '1px solid rgba(0, 122, 255, 0.15)' }}>
-                      <div className="flex items-center gap-1 mb-1">
-                        <Database className="w-3 h-3" style={{ color: 'var(--brand-500)' }} />
-                        <span className="text-xs font-medium" style={{ color: 'var(--brand-700)' }}>知识库说明</span>
+              {impactData.affected_fps.map(fp => {
+                const checked = confirmedFpIds.has(fp.fp_id)
+                return (
+                  <div key={fp.fp_id} className="px-4 py-3 transition-all cursor-pointer" onClick={() => toggleFpConfirm(fp.fp_id)}
+                    style={{
+                      background: checked ? 'rgba(0, 122, 255, 0.06)' : 'var(--background)',
+                      borderRadius: 'calc(var(--radius) * 0.6)',
+                      border: checked ? '1px solid var(--brand-400)' : '1px solid var(--border)',
+                      boxShadow: checked ? '0 0 0 1px var(--brand-300) inset' : 'none',
+                    }}>
+                    <div className="flex items-center justify-between mb-1 gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={e => { e.stopPropagation(); toggleFpConfirm(fp.fp_id) }}
+                          onClick={e => e.stopPropagation()}
+                          className="flex-shrink-0 mt-0.5"
+                          style={{ accentColor: 'var(--brand-500)', width: 15, height: 15 }}
+                        />
+                        <p className="text-sm font-medium truncate" style={{ color: checked ? 'var(--brand-700)' : 'var(--foreground-secondary)' }}>{fp.fp_name}</p>
+                        {fp.fp_status === 'archived' && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0" style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>已归档</span>
+                        )}
+                        {fp.fp_status && fp.fp_status !== 'archived' && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0" style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }}>{fp.fp_status}</span>
+                        )}
                       </div>
-                      <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--foreground-secondary)' }}>{fp.kb_context}</p>
+                      <span className="text-xs flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>{fp.depth}跳</span>
                     </div>
-                  )}
-                </div>
-              ))}
+                    <div className="flex items-center gap-2 mb-1 ml-[23px]">
+                      {fp.module_name && (
+                        <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>{fp.module_name}</span>
+                      )}
+                      {fp.existing_cases_count > 0 && (
+                        <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>已有 {fp.existing_cases_count} 条用例</span>
+                      )}
+                    </div>
+                    <p className="text-xs mb-1 ml-[23px]" style={{ color: 'var(--foreground-tertiary)' }}>{fp.impact_reason}</p>
+                    {fp.source_fp_name && (
+                      <p className="text-xs ml-[23px]" style={{ color: 'var(--foreground-tertiary)' }}>来源：依赖「{fp.source_fp_name}」</p>
+                    )}
+                    {/* KB 知识库说明（仅已归档 FP 有值） */}
+                    {fp.kb_context && (
+                      <div className="mt-2 p-2.5 ml-[23px]" style={{ background: 'rgba(0, 122, 255, 0.05)', borderRadius: 'calc(var(--radius) * 0.5)', border: '1px solid rgba(0, 122, 255, 0.15)' }} onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center gap-1 mb-1">
+                          <Database className="w-3 h-3" style={{ color: 'var(--brand-500)' }} />
+                          <span className="text-xs font-medium" style={{ color: 'var(--brand-700)' }}>知识库说明</span>
+                        </div>
+                        <p className="text-xs whitespace-pre-wrap" style={{ color: 'var(--foreground-secondary)' }}>{fp.kb_context}</p>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+            {/* 确认操作栏 */}
+            <div className="mt-4 flex items-center justify-between px-4 py-3"
+              style={{
+                background: 'var(--background-muted)',
+                borderRadius: 'calc(var(--radius) * 0.6)',
+                border: '1px solid var(--border)',
+                position: 'sticky', bottom: 8, backdropFilter: 'blur(6px)',
+              }}>
+              <div className="text-xs" style={{ color: 'var(--foreground-secondary)' }}>
+                已勾选 <span className="font-semibold" style={{ color: 'var(--brand-700)' }}>{confirmedFpIds.size}</span> / {impactData.affected_fps.length} 个受影响功能点
+                <span className="ml-2" style={{ color: 'var(--foreground-tertiary)' }}>（勾选后将生成对应的回归测试用例）</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={e => { e.stopPropagation(); handleReRunImpact() }} disabled={impactLoading} className="btn-ghost text-xs">
+                  <Loader2 className={`w-3.5 h-3.5 ${impactLoading ? 'animate-spin' : ''}`} /> 重新分析
+                </button>
+                <button onClick={e => { e.stopPropagation(); handleConfirmImpact() }} disabled={confirmImpactLoading || confirmedFpIds.size === 0} className="btn-primary text-xs">
+                  {confirmImpactLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                  确认选中为受影响
+                </button>
+              </div>
             </div>
           </div>
         ) : (
@@ -1543,9 +1707,9 @@ export default function RequirementDetail() {
           </div>
         )}
 
-        {/* 重新分析按钮 */}
+        {/* 重新分析按钮（无受影响 FP 时也可见） */}
         <div className="flex justify-center pt-2">
-          <button onClick={loadImpact} disabled={impactLoading} className="btn-ghost text-xs">
+          <button onClick={handleReRunImpact} disabled={impactLoading || confirmImpactLoading} className="btn-ghost text-xs">
             <Loader2 className={`w-3.5 h-3.5 ${impactLoading ? 'animate-spin' : ''}`} /> 重新分析
           </button>
         </div>

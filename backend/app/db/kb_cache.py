@@ -59,17 +59,51 @@ class KbCache:
                     self._redis = None
         return self._redis
 
-    def _cache_key(self, query: str, product_id: str, coll_type: str, modules: str = "", doc_type: str = "") -> str:
-        """生成缓存 key。modules/doc_type 参与缓存键以避免跨模块/跨类型缓存污染。"""
-        raw = f"{query}|{product_id}|{modules}|{doc_type}|{coll_type}"
-        return f"kb_cache:{hashlib.md5(raw.encode()).hexdigest()}"
+    def _cache_key(
+        self,
+        query: str,
+        product_id: str,
+        coll_type: str,
+        modules: str = "",
+        doc_type: str = "",
+        status: str = "",
+        top_k_bucket: int = 0,
+    ) -> str:
+        """生成缓存 key。
+        - 修复 H8：把 status / top_k_bucket（top_k 分桶）纳入 key，防止不同筛选条件/返回数量的结果相互串扰。
+        - top_k_bucket 分桶（如 10/20/40/80）：避免 top_k=11 与 top_k=12 各存一份缓存，控制缓存膨胀。
+        """
+        raw = f"{query}|{product_id}|{modules}|{doc_type}|{coll_type}|{status}|{top_k_bucket}"
+        # v2.55 Bug A-2: product_id 作为 key 前缀，支持按产品 SCAN 失效缓存
+        return f"kb_cache:{product_id}:{hashlib.md5(raw.encode()).hexdigest()}"
 
-    async def get(self, query: str, product_id: str, coll_type: str, modules: str = "", doc_type: str = "") -> list[dict] | None:
+    @staticmethod
+    def _bucket_top_k(top_k: int) -> int:
+        """把任意 top_k 映射到 {10, 20, 40, 80} 桶，避免因 top_k 微小差异导致缓存命中率过低。"""
+        if top_k <= 10:
+            return 10
+        if top_k <= 20:
+            return 20
+        if top_k <= 40:
+            return 40
+        return 80
+
+    async def get(
+        self,
+        query: str,
+        product_id: str,
+        coll_type: str,
+        modules: str = "",
+        doc_type: str = "",
+        status: str = "",
+        top_k: int = 40,
+    ) -> list[dict] | None:
         """查询缓存。返回 None 表示未命中。
 
         查询顺序：L2 LRU → L1 Redis。
         """
-        key = self._cache_key(query, product_id, coll_type, modules, doc_type)
+        bucket = self._bucket_top_k(top_k)
+        key = self._cache_key(query, product_id, coll_type, modules, doc_type, status or "", bucket)
 
         # L2 LRU
         with self._lru_lock:
@@ -97,11 +131,22 @@ class KbCache:
 
         return None
 
-    async def set(self, query: str, product_id: str, coll_type: str, results: list[dict], modules: str = "", doc_type: str = "") -> None:
+    async def set(
+        self,
+        query: str,
+        product_id: str,
+        coll_type: str,
+        results: list[dict],
+        modules: str = "",
+        doc_type: str = "",
+        status: str = "",
+        top_k: int = 40,
+    ) -> None:
         """写入缓存（L2 LRU + L1 Redis）。"""
         if not results:
             return
-        key = self._cache_key(query, product_id, coll_type, modules, doc_type)
+        bucket = self._bucket_top_k(top_k)
+        key = self._cache_key(query, product_id, coll_type, modules, doc_type, status or "", bucket)
         try:
             value = json.dumps(results, ensure_ascii=False)
         except Exception:
@@ -120,6 +165,39 @@ class KbCache:
                 redis.setex(key, self.CACHE_TTL, value)
             except Exception as e:
                 logger.debug("[KbCache] Redis 写入失败: {}", str(e)[:80])
+
+    async def invalidate_by_product(self, product_id: str) -> int:
+        """v2.55 Bug A-2: 按产品失效缓存。
+
+        归档项目时调用，防止 KB augmentation 使用过期缓存（24h TTL 内）。
+        返回失效的缓存条目数。
+        """
+        count = 0
+        prefix = f"kb_cache:{product_id}:"
+
+        # L2 LRU: 遍历删除匹配前缀的 key
+        with self._lru_lock:
+            keys_to_del = [k for k in self._lru if k.startswith(prefix)]
+            for k in keys_to_del:
+                del self._lru[k]
+            count += len(keys_to_del)
+
+        # L1 Redis: SCAN + DELETE
+        redis = self._get_redis()
+        if redis:
+            try:
+                deleted = 0
+                for key in redis.scan_iter(match=f"{prefix}*", count=500):
+                    redis.delete(key)
+                    deleted += 1
+                count += deleted
+            except Exception as e:
+                logger.warning("[KbCache] Redis 失效缓存失败: product_id={}, err={}",
+                               product_id, str(e)[:100])
+
+        logger.info("[KbCache] 按产品失效缓存: product_id={}, 清理 {} 条",
+                    product_id, count)
+        return count
 
 
 kb_cache = KbCache()

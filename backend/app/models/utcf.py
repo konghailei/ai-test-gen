@@ -86,7 +86,7 @@ class TestCase(BaseModel):
     title: str = Field(..., description="用例标题")
     type: Literal[
         "functional", "boundary", "exception", "security",
-        "performance", "integration", "exploratory"
+        "performance", "integration", "exploratory", "regression"
     ] = Field(..., description="用例类型")
     priority: Literal["P0", "P1", "P2", "P3"] = Field(
         default="P1", description="优先级：P0=核心流程 / P1=重要分支 / P2=边界异常 / P3=探索性"

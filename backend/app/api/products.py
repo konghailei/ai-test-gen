@@ -814,6 +814,15 @@ async def archive_project(
             except Exception as e:
                 logger.warning("[ArchiveProject] FP向量写入失败 fp_id={}: {}", f.id, str(e)[:150])
 
+    # v2.55 Bug A-2: 失效该产品的 KB 检索缓存，防止 24h 内 augmentation 使用归档前旧数据
+    product_id_for_cache = requirements[0].product_id if requirements else ""
+    if product_id_for_cache:
+        try:
+            from app.db.kb_cache import kb_cache
+            await kb_cache.invalidate_by_product(product_id_for_cache)
+        except Exception as cache_e:
+            logger.warning("[ArchiveProject] KB 缓存失效失败（不阻断）: {}", str(cache_e)[:150])
+
     logger.info(
         "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量写入={}",
         proj_id, version_id, len(requirements), len(all_fps), len(all_deps), kb_count
@@ -1640,7 +1649,7 @@ async def get_fp_dependency_graph(
     product_id: str,
     module_id: str | None = Query(default=None, description="v2.3: 按模块筛选，仅返回该模块内 FP 及其依赖"),
     review_status: str | None = Query(default=None, description="v2.3: 按审核状态筛选 (pending/approved/rejected)"),
-    include_inactive: bool = Query(default=False, description="v2.45: 是否包含项目归档后的历史冻结边（is_active=false）"),
+    include_inactive: bool = Query(default=True, description="v2.45: 是否包含项目归档后的历史冻结边（is_active=false）"),
     session: AsyncSession = Depends(get_session),
 ):
     """获取产品下所有功能点及其依赖关系（跨需求）。
@@ -1817,13 +1826,18 @@ async def get_fp_impact(
 
     # 构建邻接表
     # depends_on: target 是被依赖方 → 修改 target 影响 source（反向传播）
-    # data_flows / lifecycle_scenarios: source 是来源 → 修改 source 影响 target（正向传播）
+    # data_flows: source 是来源 → 修改 source 影响 target（正向传播）
+    # lifecycle_scenarios / conflicts_with / invariants: 双向关系，两个方向都传播
     adj: dict[str, set[str]] = {}
     for d in deps:
         if d.relation_type == "depends_on":
             adj.setdefault(d.target_fp_id, set()).add(d.source_fp_id)
-        elif d.relation_type in ("data_flows", "lifecycle_scenarios"):
+        elif d.relation_type == "data_flows":
             adj.setdefault(d.source_fp_id, set()).add(d.target_fp_id)
+        elif d.relation_type in ("lifecycle_scenarios", "conflicts_with", "invariants"):
+            # v2.55 Bug B-3: 双向关系——两个方向都传播影响
+            adj.setdefault(d.source_fp_id, set()).add(d.target_fp_id)
+            adj.setdefault(d.target_fp_id, set()).add(d.source_fp_id)
 
     # 3. BFS 遍历
     from collections import deque

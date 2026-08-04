@@ -29,7 +29,7 @@ SYSTEM_PROMPT = """你是一位资深测试工程师。请根据以下结构化�
 - 阅读 SRR 全文后，先判断：哪些部分信息充分可直接生成用例？哪些部分描述模糊需要保守处理？
 - 对 SRR 中明确描述的场景，生成完整的 Given-When-Then 用例
 - 对 SRR 中未明确但可推断的边界情况（如字段长度限制），生成时可标注较低置信度
-- **严禁凭空发明 SRR 中不存在的新功能或新场景**——只基于 SRR 已有内容生成用例
+- **严禁凭空发明 SRR 中不存在的新功能或新场景**--只基于 SRR 已有内容生成用例
 
 ### 2. 只做被要求的（Only what's asked）
 - 每个用例必须能从 SRR 中找到对应依据（字段、规则、流程步骤）
@@ -41,14 +41,101 @@ SYSTEM_PROMPT = """你是一位资深测试工程师。请根据以下结构化�
 - 在用例的 notes 字段中标注"信息不足，建议补充 SRR"
 - **宁可多生成低置信度用例，也不遗漏潜在风险场景**
 
-## 生成策略（按测试类型）
+## 测试设计方法论（系统化应用经典测试设计技术）
 
-1. 功能测试 — 覆盖 happy_path 每个步骤 + alternate_flows 每个分支，至少生成 5 个用例
-2. 边界值测试 — 等价类+边界分析，对 data_constraints 中每个约束至少生成 1 个用例
-3. 异常测试 — 故障注入+防御推理，对 alternate_flows 中每个异常至少生成 1 个用例
-4. 安全测试 — OWASP 检查清单（始终生成至少 1 个安全检查用例）
-5. 性能测试 — 负载模型推断（仅当 SRR 含 non_functional.performance 时生成）
-6. 组合测试 — Pairwise/正交表，参数交互组合（SRR 含多参数交互时生成）
+> 参考：ISTQB 黑盒测试设计技术 + 华为 CodeArts TestPlan 最佳实践 + 业界 LLM 测试生成实践
+
+### 技术 1：等价类划分法（Equivalence Partitioning）
+- 将输入数据划分为有效等价类和无效等价类，每类取一个代表值
+- **划分原则**：
+  - 取值范围 -> 1 个有效类 + 2 个无效类（超出上下限）
+  - 特定值集合 -> 1 个有效类 + 1 个无效类（不在集合内）
+  - 布尔型 -> 1 个有效类 + 1 个无效类
+  - 规则约束 -> 1 个有效类 + 多角度违规无效类
+- **应用场景**：对 data_constraints 中每个字段，划分等价类并取代表值
+- **示例**：密码长度 6-20 -> 有效类「长度10」，无效类「长度5」「长度21」
+
+### 技术 2：边界值分析法（Boundary Value Analysis）
+- 等价类划分的补充，聚焦边界点（经验表明大量缺陷存在于边界）
+- **取值原则**：对范围 [min, max]，取 min-1, min, min+1, max-1, max, max+1
+- **扩展边界**：
+  - 数量限制：取最小值、最大值及 ±1
+  - 有序集合：取首尾元素
+  - 输出边界：输出范围的边界值
+  - 隐藏边界：内部数据结构边界（如数组索引、缓冲区大小）
+- **应用场景**：对 data_constraints 中每个带范围的字段，生成边界值用例
+
+### 技术 3：决策表法（Decision Table Testing）
+- 适用于多条件组合的复杂业务逻辑
+- **构建步骤**：
+  1. 识别所有条件（conditions）和动作（actions）
+  2. 列出所有条件组合（2^n 种，n=条件数）
+  3. 确定每种组合对应的动作
+  4. 合并相似规则简化表格
+- **应用场景**：对 business_rules 中多条规则组合生效的场景，构建决策表生成用例
+- **示例**：理赔审批规则（金额阈值 + 次数阈值 + 保单额度）-> 组合判定用例
+
+### 技术 4：状态迁移法（State Transition Testing）
+- 适用于有明确状态流转的系统（订单、审批、会话等）
+- **实施步骤**：
+  1. 识别所有状态（states）
+  2. 识别触发转换的事件（events/triggers）
+  3. 绘制状态迁移图
+  4. 覆盖所有合法转换 + 非法转换尝试
+- **应用场景**：对 alternate_flows 中的状态变更、happy_path 中的状态推进，生成状态转换用例
+- **覆盖要求**：
+  - 正向：覆盖所有合法状态转换路径
+  - 反向：尝试非法状态转换（如已支付订单再次支付），验证系统拒绝
+
+### 技术 5：场景法（Scenario Testing）
+- 模拟用户真实操作流程，区分基本流和备选流
+- **基本流（Basic Flow）**：理想执行路径（happy_path）
+- **备选流（Alternative Flow）**：异常分支路径（alternate_flows）
+- **实施步骤**：
+  1. 梳理基本流（happy_path 每个步骤）
+  2. 梳理备选流（每个 alternate_flow 的触发条件和处理）
+  3. 组合生成测试场景（基本流 + 各备选流的不同组合）
+  4. 构建测试用例矩阵
+- **应用场景**：对 SRR 的 flows 结构，生成端到端场景用例
+
+### 技术 6：正交实验法（Orthogonal Array Testing）
+- 适用于多参数组合测试，用最少用例覆盖两两组合
+- **实施步骤**：
+  1. 识别关键因素（factors）和每个因素的水平（levels）
+  2. 选择合适的正交表
+  3. 映射因素到正交表列，映射水平到表中数字
+  4. 生成测试用例
+- **应用场景**：当 data_constraints 有多个独立字段需要组合测试时
+
+### 技术 7：错误推测法（Error Guessing）
+- 基于经验推测潜在缺陷场景
+- **常见错误场景检查清单**：
+  - 空值/null/undefined 输入
+  - 超长字符串（SQL 注入、缓冲区溢出）
+  - 特殊字符（引号、尖括号、emoji、零宽字符）
+  - 并发操作（重复提交、竞态条件）
+  - 超时/网络中断/服务降级
+  - 权限越权（水平/垂直越权）
+  - 数据一致性（部分成功、回滚失败）
+  - 时区/时间边界（跨天、跨月、闰年）
+  - 编码问题（UTF-8/GBK 混淆、BOM 头）
+  - 重复操作（重复点击、重复请求）
+- **应用场景**：在常规用例之外，基于检查清单补充易错场景用例
+
+### 技术 8：因果图法（Cause-Effect Graphing）
+- 分析输入条件（因）与输出结果（果）的逻辑关系
+- **约束关系**：E（互斥）、I（包含）、O（唯一）、R（要求）、M（强制）
+- **应用场景**：当 business_rules 存在条件间的约束关系时
+
+## 生成策略（按测试类型，结合上述设计技术）
+
+1. 功能测试 - 场景法 + 状态迁移法，覆盖 happy_path 每个步骤 + alternate_flows 每个分支，至少生成 5 个用例
+2. 边界值测试 - 等价类划分 + 边界值分析，对 data_constraints 中每个约束生成边界用例（min-1/min/min+1/max-1/max/max+1）
+3. 异常测试 - 错误推测法 + 故障注入，覆盖空值/超长/特殊字符/并发/超时/权限等异常场景
+4. 安全测试 - OWASP 检查清单 + 错误推测，SQL注入/XSS/越权/脱敏/重复提交
+5. 性能测试 - 负载模型推断（仅当 SRR 含 non_functional.performance 时生成）
+6. 组合测试 - 正交实验法/决策表法，多参数交互组合（SRR 含多参数交互时生成）
+7. 集成测试 - 场景法，跨 FP 交互验证（当 cross_fp_interactions 存在时生成）
 
 ## 输出要求
 
@@ -170,7 +257,7 @@ UTCF_CASE_SCHEMA = """每个用例的 JSON 结构：
 {
   "id": "TC-AUTH-0001-0001",
   "title": "用例标题（动词+对象+场景）",
-  "type": "functional|boundary|exception|security|performance|integration|exploratory",
+  "type": "functional|boundary|exception|security|performance|integration|exploratory|regression",
   "priority": "P0|P1|P2|P3",
   "description": "用例描述",
   "tags": [],
@@ -328,6 +415,165 @@ def _build_coverage_checklist(srr: dict, functional_points: list[dict]) -> str:
 
 
 # ============================================================================
+# 测试设计技术分析（v3.4：系统化测试设计方法论注入）
+# ============================================================================
+
+def _build_test_design_guidance(srr: dict, functional_points: list[dict]) -> str:
+    """从 SRR 中分析可应用的测试设计技术，生成定向指导。
+
+    基于 ISTQB 黑盒测试设计技术，结合 SRR 的具体结构，
+    为 LLM 提供明确的"该用哪种技术、测哪些点"的指导。
+
+    Args:
+        srr: SRR JSON 字典
+        functional_points: 功能点列表
+
+    Returns:
+        str: 测试设计技术指导文本（注入 prompt）
+    """
+    guidance_items: list[str] = []
+
+    # ── 技术 1+2：等价类划分 + 边界值分析 ──
+    boundary_targets: list[str] = []
+    all_fps = [{"srr_json": srr, "id": "total", "name": "总SRR"}] + [
+        {"srr_json": fp.get("srr_json", {}), "id": fp.get("id", ""), "name": fp.get("name", "")}
+        for fp in functional_points
+    ]
+    for fp in all_fps:
+        fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+        fp_id = fp.get("id", "")
+        fp_name = fp.get("name", "")
+        data_constraints = fp_srr.get("data_constraints", [])
+        for dc in data_constraints:
+            if not isinstance(dc, dict):
+                continue
+            field = dc.get("field", "")
+            cons = dc.get("constraints", dc.get("constraint", ""))
+            cons_str = str(cons)
+            # 检测范围型约束（如 6-20、1-100、min/max）
+            has_range = any(kw in cons_str for kw in ["-", "~", "至", "范围", "min", "max", "≤", "≥", "<", ">"])
+            if has_range and field:
+                boundary_targets.append(f"  - [{fp_id}] {fp_name}.{field}: {cons_str}")
+
+    if boundary_targets:
+        guidance_items.append("### 等价类划分 + 边界值分析（对以下字段生成边界用例）")
+        guidance_items.append("对每个带范围的字段，生成以下用例：")
+        guidance_items.append("  - 有效等价类代表值（范围内一个典型值）")
+        guidance_items.append("  - 无效等价类代表值（范围外两个值：低于下限、高于上限）")
+        guidance_items.append("  - 边界值：min-1, min, min+1, max-1, max, max+1")
+        guidance_items.extend(boundary_targets)
+
+    # ── 技术 3：决策表法 ──
+    decision_table_targets: list[str] = []
+    for fp in all_fps:
+        fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+        fp_id = fp.get("id", "")
+        fp_name = fp.get("name", "")
+        rules = fp_srr.get("business_rules", [])
+        # 多条规则可能存在组合逻辑
+        multi_rules = [r for r in rules if isinstance(r, dict) and r.get("type") in ("validation", "business", "workflow")]
+        if len(multi_rules) >= 2:
+            decision_table_targets.append(f"  - [{fp_id}] {fp_name}: {len(multi_rules)} 条可组合规则")
+
+    if decision_table_targets:
+        guidance_items.append("\n### 决策表法（以下功能点存在多条件组合逻辑）")
+        guidance_items.append("对以下功能点，构建决策表生成组合用例：")
+        guidance_items.append("  1. 识别所有条件和动作")
+        guidance_items.append("  2. 列出条件组合（2^n 种）")
+        guidance_items.append("  3. 合并相似规则")
+        guidance_items.append("  4. 每种组合生成一个用例")
+        guidance_items.extend(decision_table_targets)
+
+    # ── 技术 4：状态迁移法 ──
+    state_targets: list[str] = []
+    for fp in all_fps:
+        fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+        fp_id = fp.get("id", "")
+        fp_name = fp.get("name", "")
+        flows = fp_srr.get("flows", {})
+        alt_flows = flows.get("alternate_flows", [])
+        # 检测状态变更类异常分支
+        state_flows = [
+            af for af in alt_flows
+            if isinstance(af, dict) and any(kw in str(af.get("name", af.get("trigger", "")))
+                for kw in ["状态", "锁定", "禁用", "过期", "取消", "撤销", "回退", "超时", "失败"])
+        ]
+        if state_flows:
+            state_targets.append(f"  - [{fp_id}] {fp_name}: {len(state_flows)} 个状态变更分支")
+
+    if state_targets:
+        guidance_items.append("\n### 状态迁移法（以下功能点存在状态流转）")
+        guidance_items.append("对以下功能点，生成状态转换用例：")
+        guidance_items.append("  - 正向：覆盖所有合法状态转换路径")
+        guidance_items.append("  - 反向：尝试非法状态转换（如已锁定账号再次登录），验证系统拒绝")
+        guidance_items.extend(state_targets)
+
+    # ── 技术 7：错误推测法 ──
+    error_guess_hints: list[str] = []
+    for fp in all_fps:
+        fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+        fp_id = fp.get("id", "")
+        fp_name = fp.get("name", "")
+        data_constraints = fp_srr.get("data_constraints", [])
+        # 检测需要错误推测的字段（检查 field 名 + constraints 值）
+        for dc in data_constraints:
+            if not isinstance(dc, dict):
+                continue
+            field = dc.get("field", "")
+            cons_str = str(dc.get("constraints", dc.get("constraint", "")))
+            combined = field + " " + cons_str
+            if any(kw in combined for kw in ["必填", "required", "非空", "not null"]):
+                error_guess_hints.append(f"  - [{fp_id}] {fp_name}.{field}: 空值/null 输入测试")
+            if any(kw in combined for kw in ["长度", "length", "字符", "max", "min", "-"]) and any(c.isdigit() for c in cons_str):
+                error_guess_hints.append(f"  - [{fp_id}] {fp_name}.{field}: 超长字符串 + 特殊字符测试")
+            if any(kw in combined for kw in ["金额", "数量", "price", "amount", "count"]):
+                error_guess_hints.append(f"  - [{fp_id}] {fp_name}.{field}: 负数/零值/精度溢出测试")
+        # 也检查 business_rules 中的必填规则
+        for rule in fp_srr.get("business_rules", []):
+            if isinstance(rule, dict):
+                rule_str = str(rule.get("rule", rule.get("description", "")))
+                if any(kw in rule_str for kw in ["必填", "required", "非空", "不能为空"]):
+                    error_guess_hints.append(f"  - [{fp_id}] {fp_name}: 空值输入测试（规则: {rule_str[:30]}）")
+
+    if error_guess_hints:
+        guidance_items.append("\n### 错误推测法（基于字段特征补充易错场景）")
+        guidance_items.append("除常规用例外，对以下字段补充错误场景用例：")
+        guidance_items.extend(error_guess_hints[:15])  # 限制数量避免 prompt 过长
+
+    # ── 技术 5：场景法（端到端流程覆盖） ──
+    # 单 FP：happy_path + alternate_flows 组合场景
+    # 多 FP：跨 FP 集成场景
+    scenario_hints: list[str] = []
+    for fp in all_fps:
+        fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
+        fp_id = fp.get("id", "")
+        fp_name = fp.get("name", "")
+        flows = fp_srr.get("flows", {})
+        hp_steps = flows.get("happy_path", {}).get("steps", []) if isinstance(flows.get("happy_path"), dict) else []
+        alt_flows = flows.get("alternate_flows", [])
+        if hp_steps and alt_flows:
+            scenario_hints.append(f"  - [{fp_id}] {fp_name}: {len(hp_steps)} 个基本流步骤 + {len(alt_flows)} 个备选流")
+
+    cfi = srr.get("cross_fp_interactions", {}) if isinstance(srr, dict) else {}
+    shared_rules = cfi.get("shared_business_rules", [])
+    if shared_rules and len(functional_points) >= 2:
+        scenario_hints.append(f"  - [跨FP集成] {len(shared_rules)} 条共享规则，{len(functional_points)} 个功能点")
+
+    if scenario_hints:
+        guidance_items.append("\n### 场景法（端到端流程覆盖）")
+        guidance_items.append("对以下功能点，生成场景用例覆盖基本流+备选流组合：")
+        guidance_items.append("  - 基本流（happy_path）：理想执行路径")
+        guidance_items.append("  - 备选流（alternate_flows）：异常分支路径")
+        guidance_items.append("  - 组合场景：基本流 + 各备选流的不同组合")
+        guidance_items.extend(scenario_hints)
+
+    if not guidance_items:
+        return ""
+
+    return "## 测试设计技术指导（基于 SRR 分析，定向应用设计技术）\n\n" + "\n".join(guidance_items)
+
+
+# ============================================================================
 # 用户指令构建函数
 # ============================================================================
 
@@ -429,8 +675,14 @@ def build_user_prompt(
 
     # v3.0：注入 SRR 中的影响功能说明（来自依赖图谱 FP 节点点击生成）
     impact_analysis_section = ""
+    confirmed_affected_count = 0
     srr_impact = srr.get("impact_analysis", []) if isinstance(srr, dict) else []
     if srr_impact:
+        filtered_impact = [
+            item for item in srr_impact
+            if item.get("is_affected") is True and item.get("confirmed_at")
+        ]
+        confirmed_affected_count = len(filtered_impact)
         impact_brief = [
             {
                 "fp_id": item.get("fp_id", ""),
@@ -447,9 +699,10 @@ def build_user_prompt(
                 "description": item.get("description", ""),
                 "test_focus": item.get("test_focus", ""),
             }
-            for item in srr_impact
+            for item in filtered_impact
         ]
-        impact_analysis_section = f"""
+        if impact_brief:
+            impact_analysis_section = f"""
 
 ## 影响功能说明（来自依赖图谱分析，指导回归用例生成）
 {json.dumps(impact_brief, ensure_ascii=False, indent=2)}
@@ -459,22 +712,29 @@ def build_user_prompt(
 - test_focus 列出的场景必须全部覆盖
 - 受影响 FP 的 happy_path 必须生成回归用例
 - 受影响模块下的关键需求，至少生成 1 个跨模块影响验证用例
-- 在回归用例的 related_fp 字段中标注受影响的 fp_id"""
+- 在回归用例的 related_fp 字段中标注受影响的 fp_id
+- 对每个用户确认受影响的功能点，生成独立回归用例，type必须为"regression"
+- 回归用例标题加前缀[回归]，related_fp标注源FP，priority默认P1"""
 
     # v3.3：SRR 覆盖率检查清单——从 SRR 中显式提取所有必须覆盖的要点
     # 让 LLM 清楚知道需要覆盖多少个点，提高覆盖率和稳定性
     coverage_checklist = _build_coverage_checklist(srr, functional_points or [])
 
+    # v3.4：测试设计技术指导--从 SRR 中分析可应用的设计技术，定向指导生成
+    test_design_guidance = _build_test_design_guidance(srr, functional_points or [])
+
     if enable_multi_type:
-        gen_requirements = """## 生成要求
+        regression_line = f"\n7. **回归测试** (根据确认的影响功能点数生成)" if confirmed_affected_count > 0 else ""
+        gen_requirements = f"""## 生成要求
 1. **功能测试** (≥ 3个) — 覆盖 happy_path 和 alternate_flows
 2. **边界值测试** (≥ 2个) — 覆盖 data_constraints 中的边界
 3. **异常测试** (≥ 2个) — 覆盖可预见的异常场景
-4. **安全测试** (≥ 1个) — 覆盖安全关注点"""
+4. **安全测试** (≥ 1个) — 覆盖安全关注点{regression_line}"""
     else:
-        gen_requirements = """## 生成要求
+        regression_line = f"\n7. **回归测试** (根据确认的影响功能点数生成)" if confirmed_affected_count > 0 else ""
+        gen_requirements = f"""## 生成要求
 - 生成核心测试用例（覆盖正常流程和主要异常场景），数量 3-5 个
-- 不需要按类型分类，聚焦 happy_path 和关键 alternate_flows"""
+- 不需要按类型分类，聚焦 happy_path 和关键 alternate_flows{regression_line}"""
 
     return f"""请根据以下需求，生成完整的测试用例集。
 
@@ -487,6 +747,8 @@ def build_user_prompt(
 
 {coverage_checklist}
 
+{test_design_guidance}
+
 ## 当前需求
 {json.dumps(srr, ensure_ascii=False, indent=2)}
 
@@ -494,12 +756,15 @@ def build_user_prompt(
 {fp_requirements}
 
 ## 覆盖率自检（生成前必读）
-在生成用例之前，请先对照上面的「SRR 覆盖率检查清单」：
+在生成用例之前，请先对照上面的「SRR 覆盖率检查清单」和「测试设计技术指导」：
 1. 确认每个 happy_path 步骤都有对应的用例覆盖
 2. 确认每个 alternate_flow 分支都有对应的异常/功能用例
 3. 确认每条 business_rule 都有验证用例（含原验收标准，type=validation/business）
-4. 确认每条 data_constraint 都有边界值用例
-5. 生成完成后，在 notes 字段中标注该用例覆盖了检查清单中的哪些条目（如 "覆盖: happy_path.step1, happy_path.step2"）
+4. 确认每条 data_constraint 都有边界值用例（等价类划分 + 边界值分析）
+5. 确认多条件组合规则已用决策表法覆盖
+6. 确认状态变更场景已用状态迁移法覆盖（正向 + 反向）
+7. 确认错误推测检查清单中的场景已覆盖
+8. 生成完成后，在 notes 字段中标注该用例覆盖了检查清单中的哪些条目，以及使用了哪种测试设计技术（如 "覆盖: happy_path.step1, 技术: 场景法"）
 
 ## 输出格式
 输出 JSON 数组，每个元素为一个测试用例（符合上述 UTCF_CASE_SCHEMA）。

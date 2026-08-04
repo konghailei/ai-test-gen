@@ -857,31 +857,156 @@ class ReqAgent:
         modules_str = ", ".join(modules)
 
         # ── v1.6: 查询同模块已有 FP，跳过 LLM 生成 ──
+        #   - v1.6b: 除 module_id 列外，也查 JSON 的 modules 列（@> 包含运算符，PG 原生支持 JSONB）
+        #            否则大量模块名存在 modules JSON 中但 module_id=None 的 FP 无法被识别为复用候选。
+        #   - v1.6c: 同产品 + 同项目下的 FP 即使 module 字段为空，也作为「弱候选」列出（标注 weak=True），
+        #            由 LLM 基于名称/描述判断是否真正复用，避免跨模块误复用时被硬性约束限制。
         existing_names: list[str] = []
+        existing_names_meta: list[dict] = []
         extra_constraint = ""
         try:
             from app.db.database import async_session
             from app.db.models import FunctionalPoint
-            from sqlalchemy import select as sa_select
+            from sqlalchemy import select as sa_select, or_ as _sa_or, and_ as _sa_and, func as _sa_func
+            import difflib as _difflib
+
+            req_meta = srr.get("requirement", {}) if isinstance(srr, dict) else {}
+            product_id = req_meta.get("product_id", "")
+            project_id = req_meta.get("project_id", "")
+
             async with async_session() as s:
-                mod_fps = await s.execute(
-                    sa_select(FunctionalPoint.name).where(
-                        FunctionalPoint.module_id.in_(modules)
-                    ).distinct()
+                # --- ① 强候选：module_id 或 modules JSON 命中 ---
+                where_clauses_strong = []
+                if modules:
+                    where_clauses_strong.append(FunctionalPoint.module_id.in_(modules))
+                    # PostgreSQL JSONB @> 运算符：modules 列表包含任意目标模块
+                    # 注意：若 modules 列是 JSON 而非 JSONB，我们使用 func.jsonb 转换兜底
+                    try:
+                        import sqlalchemy as _sa
+                        for _m in modules:
+                            where_clauses_strong.append(
+                                _sa.func.jsonb(FunctionalPoint.modules).op("@>")(
+                                    _sa.func.jsonb(f'["{_m}"]')
+                                )
+                            )
+                    except Exception:
+                        pass
+                q_strong = (
+                    sa_select(
+                        FunctionalPoint.name,
+                        FunctionalPoint.id,
+                        FunctionalPoint.module_id,
+                        FunctionalPoint.summary,
+                    )
+                    .where(_sa_or(*where_clauses_strong) if where_clauses_strong else False)
+                    .distinct()
+                    .limit(60)
                 )
-                existing_names = [r[0] for r in mod_fps.fetchall() if r[0]]
-        except Exception:
+                mod_fps = await s.execute(q_strong)
+                for r in mod_fps.fetchall():
+                    if not r.name:
+                        continue
+                    existing_names_meta.append({
+                        "name": r.name,
+                        "match": "module_hard",
+                        "module_id": r.module_id,
+                        "summary": (r.summary or "")[:80],
+                    })
+                    if r.name not in existing_names:
+                        existing_names.append(r.name)
+
+                # --- ② 弱候选：同产品/项目，且名称与「本次需求已生成的功能点摘要/flow 名」相似 ---
+                #   （只对明显相似的 FP 列出，避免 LLM 被无关 FP 干扰）
+                weak_candidate_keywords: set[str] = set()
+                # 从 flows / cross_fp_interactions / fp_summary 中提取功能名词
+                for flow_name in list((srr.get("flows") or {}).get("alternate_flows") or []) or []:
+                    if isinstance(flow_name, dict) and flow_name.get("name"):
+                        weak_candidate_keywords.add(str(flow_name["name"])[:30])
+                for fp_item in (srr.get("fp_summary") or [])[:20]:
+                    if isinstance(fp_item, dict) and fp_item.get("name"):
+                        weak_candidate_keywords.add(str(fp_item["name"])[:40])
+                # 从 raw_text 中提取粗粒度名词（前 2000 字的中文短语，简单分词即可）
+                if raw_text:
+                    import re as _re
+                    for chunk in _re.findall(r"[【「\"](.{2,20})[」】\"]", raw_text[:2000]):
+                        weak_candidate_keywords.add(chunk)
+                    for chunk in _re.findall(r"(?:功能|模块|流程|接口|页面|组件)[:：]\s*(.{2,30})", raw_text[:2000]):
+                        weak_candidate_keywords.add(chunk.strip())
+
+                if weak_candidate_keywords:
+                    where_weak = []
+                    if product_id:
+                        where_weak.append(FunctionalPoint.product_id == product_id)
+                    if project_id:
+                        where_weak.append(FunctionalPoint.project_id == project_id)
+                    if where_weak:
+                        q_weak = (
+                            sa_select(
+                                FunctionalPoint.name,
+                                FunctionalPoint.id,
+                                FunctionalPoint.module_id,
+                                FunctionalPoint.summary,
+                            )
+                            .where(_sa_and(*where_weak))
+                            .distinct()
+                            .limit(200)
+                        )
+                        weak_rows = await s.execute(q_weak)
+                        for r in weak_rows.fetchall():
+                            if not r.name or r.name in existing_names:
+                                continue
+                            # 名称相似度 ≥ 0.68 或关键词中包含该名称（子串匹配）
+                            name = r.name
+                            matched_kw = next(
+                                (kw for kw in weak_candidate_keywords if kw and (kw in name or name in kw)),
+                                None,
+                            )
+                            score_by_kw = 0.82 if matched_kw else 0.0
+                            score_by_sim = max(
+                                (_difflib.SequenceMatcher(None, name, kw).ratio() for kw in weak_candidate_keywords if kw),
+                                default=0.0,
+                            )
+                            best_score = max(score_by_kw, score_by_sim)
+                            if best_score >= 0.68:
+                                existing_names_meta.append({
+                                    "name": name,
+                                    "match": "name_similarity",
+                                    "module_id": r.module_id,
+                                    "summary": (r.summary or "")[:80],
+                                    "similarity": round(best_score, 3),
+                                    "matched_keyword": matched_kw,
+                                })
+                                existing_names.append(name)
+
+        except Exception as _fp_match_err:
+            from app.utils.logger import logger as _fp_logger
+            _fp_logger.warning("[ReqAgent] 复用 FP 候选查询失败（已降级）: {}", str(_fp_match_err)[:200])
             pass
 
         if existing_names:
+            # 强候选（module 匹配）与弱候选（名称相似）分开标注，LLM 可据此选择严格度
+            hard_names = [m["name"] for m in existing_names_meta if m.get("match") == "module_hard"]
+            weak_names_meta = [m for m in existing_names_meta if m.get("match") != "module_hard"]
+            hard_lines = "\n".join(
+                f"- {n}（module={next((x.get('module_id','') for x in existing_names_meta if x['name']==n), '')}，summary={next((x.get('summary','') for x in existing_names_meta if x['name']==n), '')[:60]}）"
+                for n in hard_names[:30]
+            ) if hard_names else ""
+            weak_lines = "\n".join(
+                f"- {m['name']}（similarity={m.get('similarity','')}，matched_keyword={m.get('matched_keyword','')[:20]}，summary={m.get('summary','')[:60]}）"
+                for m in weak_names_meta[:30]
+            ) if weak_names_meta else ""
+
             existing_fp_hint = (
                 "\n\n## 以下功能点已存在数据库中——请勿重新生成，只需保留名称和类型"
                 "（在 functional_points 中标记 \"reuse_existing\": true，sub_srr 留空）：\n"
-                + "\n".join(f"- {n}" for n in existing_names[:30])
+                + (f"\n### 强匹配（同模块）\n{hard_lines}" if hard_lines else "")
+                + (f"\n### 弱匹配（名称相似，请确认语义是否一致后再复用）\n{weak_lines}" if weak_lines else "")
             )
             extra_constraint = (
-                "\n\n**硬性约束**：以上已存在的功能点名称，禁止在 functional_points 中重新生成内部 sub_srr。"
+                "\n\n**硬性约束**：以上【强匹配】功能点名称，禁止在 functional_points 中重新生成内部 sub_srr。"
                 "只需输出 name/fp_type/summary 并标记 \"reuse_existing\": true，sub_srr 必须为空对象 {{}}。"
+                "【弱匹配】仅当你确认其语义与当前需求某功能点**完全一致**时才标记 reuse_existing=true，"
+                "若只是名字相似但语义不同，应仍然正常新建功能点（不要标记 reuse_existing）。"
             )
         else:
             existing_fp_hint = ""
