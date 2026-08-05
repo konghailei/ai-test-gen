@@ -452,21 +452,43 @@ class ClarifyAgent:
 
         # ⭐ 记录「KB 查询生成」阶段（无论是否为空，避免前端 0 条查询误以为漏做）
         if not kb_questions:
-            kb_access_log.append({
-                "action": "kb_query_gen",
-                "type": "kb_query_gen_empty",
-                "label": "KB 查询生成（无缺口）",
-                "query": "根据完整性/歧义性/模式库检测，当前需求无可由 KB 自动补全的缺口维度，因此未生成 KB 查询。",
-                "query_detail": (
-                    f"关键缺失 {len(completeness.get('critical_missing', []))} 项，"
-                    f"重要缺失 {len(completeness.get('important_missing', []))} 项，"
-                    f"优化建议缺失 {len(completeness.get('optimization_missing', []))} 项"
-                ),
-                "result_count": 0,
-                "answered": False,
-                "duration_ms": _d3,
-                "status": "success",
-            })
+            # v2.8.8: 区分"规则层无缺口+LLM语义检测"和"规则层有缺口但都已覆盖"
+            _rule_gaps = (
+                len(completeness.get("critical_missing", []))
+                + len(completeness.get("important_missing", []))
+                + len(completeness.get("optimization_missing", []))
+            )
+            if _rule_gaps == 0:
+                kb_access_log.append({
+                    "action": "kb_query_gen",
+                    "type": "kb_query_gen_empty",
+                    "label": "KB 查询生成（语义检测通过）",
+                    "query": "核心字段均存在，LLM 基于 SRR 全文进行语义遗漏检测后，未发现需要 KB 补全的维度。",
+                    "query_detail": (
+                        f"规则层完整性检测通过（关键缺失 0 项，重要缺失 0 项），"
+                        f"LLM 语义遗漏检测通过（无输入校验/权限/边界/异常/数据约束等遗漏）"
+                    ),
+                    "result_count": 0,
+                    "answered": False,
+                    "duration_ms": _d3,
+                    "status": "success",
+                })
+            else:
+                kb_access_log.append({
+                    "action": "kb_query_gen",
+                    "type": "kb_query_gen_empty",
+                    "label": "KB 查询生成（无缺口）",
+                    "query": "根据完整性/歧义性/模式库检测，当前需求无可由 KB 自动补全的缺口维度，因此未生成 KB 查询。",
+                    "query_detail": (
+                        f"关键缺失 {len(completeness.get('critical_missing', []))} 项，"
+                        f"重要缺失 {len(completeness.get('important_missing', []))} 项，"
+                        f"优化建议缺失 {len(completeness.get('optimization_missing', []))} 项"
+                    ),
+                    "result_count": 0,
+                    "answered": False,
+                    "duration_ms": _d3,
+                    "status": "success",
+                })
         else:
             # v2.8.2: query_detail 用可读描述代替内部字段名 pattern_gap.xxx
             _gap_descs = []
@@ -1030,6 +1052,38 @@ class ClarifyAgent:
                     ],
                 })
 
+        # v2.8.8: 当规则层无缺口时，切换到语义遗漏检测模式
+        # 让 LLM 基于 SRR 全文检测"字段存在但内容不充分"的语义遗漏
+        if not gaps:
+            return (
+                f"【原始需求文档（最权威参考，请优先据此判断是否有语义遗漏）】\n"
+                f"{srr.get('_raw_text', '')[:3000]}\n"
+                f"\n"
+                f"【当期需求上下文（SRR 草稿）】\n"
+                f"- 标题: {title}\n"
+                f"- 摘要: {summary}\n"
+                f"{chr(10).join(context_snippets) if context_snippets else '（草稿SRR中暂无可提取的上下文特征）'}\n"
+                f"\n"
+                f"【语义遗漏检测模式（v2.8.8）】\n"
+                f"当前需求的核心字段（summary/flows/cross_fp_interactions）均已存在，规则层完整性检测通过。\n"
+                f"但字段存在不代表内容充分——请基于 SRR 全文和原始需求文档，检测是否存在以下语义遗漏：\n"
+                f"  1. 有输入但未提输入校验规则（如格式、长度、特殊字符、必填性）\n"
+                f"  2. 有操作但未提权限要求（如谁可以执行、需要什么角色）\n"
+                f"  3. 有流程但未提边界条件（如并发上限、超时、最大数量、分页）\n"
+                f"  4. 有正常流程但未提异常处理（如错误码、失败重试、异常输出）\n"
+                f"  5. 有数据但未提数据约束（如字段类型、取值范围、唯一性）\n"
+                f"  6. 模糊表述（如「适当」「合理」「必要时」「视情况而定」等）\n"
+                f"\n"
+                f"‼️ 核心规则：\n"
+                f"- 先在「原始需求文档」中搜索是否已描述过该维度——语义相同即视为已覆盖，跳过。\n"
+                f"- 如果原始需求文档明确排除该功能（如「不涉及」「无需」），跳过。\n"
+                f"- 只对原始文档和 SRR 都未充分覆盖的维度生成 KB 查询（以「？」结尾，8-25字）。\n"
+                f"- 如果 SRR 内容已充分，无语义遗漏，返回空列表 []。\n"
+                f"- 最多生成 5 条查询。\n"
+                f"\n"
+                f"输出格式：{{\"queries\": [{{\"field\": \"semantic_gap.维度名\", \"question\": \"自然语言问句？\", \"priority\": \"important\"}}]}}"
+            )
+
         return (
             f"【原始需求文档（最权威参考，请优先据此判断缺口是否已覆盖）】\n"
             f"{srr.get('_raw_text', '')[:3000]}\n"
@@ -1070,6 +1124,8 @@ class ClarifyAgent:
         """用 LLM 动态生成上下文感知的 KB 搜索查询。
 
         v2.18: LLM 失败时降级为使用缺口 field 名生成简单查询，避免整个 KB 查询流程失效。
+        v2.8.8: completeness 无字段缺失时仍调用 LLM，让 LLM 基于 SRR 全文检测语义遗漏
+                （如缺少异常处理、输入校验、边界条件等），不再直接返回空列表。
         """
         gaps_count = (
             len(completeness.get("critical_missing", []))
@@ -1083,8 +1139,9 @@ class ClarifyAgent:
             else:
                 gaps_count += 5  # 默认 baseline_gaps 数量
 
-        if gaps_count == 0:
-            return []
+        # v2.8.8: 不再在 gaps_count==0 时直接返回空列表。
+        # 字段存在不代表内容充分——LLM 能基于 SRR 全文检测语义遗漏
+        # （如缺少异常处理、输入校验、边界条件等），这些是规则层无法发现的。
 
         user_prompt = self._build_kb_query_user_prompt(srr, completeness, is_incremental)
 
@@ -1117,6 +1174,10 @@ class ClarifyAgent:
                                    "登录错误提示规范", "验证码发送与校验规则"]:
                             valid_fields.add(f"baseline.{g}")
 
+                # v2.8.8: 语义遗漏检测模式下，valid_fields 为空，
+                # 允许 LLM 生成的 semantic_gap.* field 通过
+                _semantic_mode = gaps_count == 0
+
                 validated: list[dict] = []
                 # v2.31: 源头去重——按 field+question 双重去重，防止 LLM 返回重复查询
                 # 同 field 不同 question 保留（不同维度的查询），相同 field+question 只保留一条
@@ -1125,12 +1186,16 @@ class ClarifyAgent:
                     if not isinstance(q, dict) or not q.get("question"):
                         continue
                     field = q.get("field", "")
+                    # v2.8.8: 语义遗漏检测模式下允许 semantic_gap.* field
                     if field and field not in valid_fields:
-                        logger.info(
-                            "[ClarifyAgent] 丢弃编造查询: field={} (不在缺口列表中)",
-                            field,
-                        )
-                        continue
+                        if _semantic_mode and field.startswith("semantic_gap."):
+                            pass  # 允许通过
+                        else:
+                            logger.info(
+                                "[ClarifyAgent] 丢弃编造查询: field={} (不在缺口列表中)",
+                                field,
+                            )
+                            continue
                     # 源头去重：field+question 前 40 字符
                     q_text = q["question"][:40]
                     query_dedup_key = f"{field}::{q_text}"
