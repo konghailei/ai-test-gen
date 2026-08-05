@@ -517,18 +517,23 @@ class ClarifyAgent:
             "status": "success",
         })
         if pg_context:
+            # v2.8.5: result_count 只统计 KB 数据（list 长度），不统计 product_context（dict）。
+            #   product_context 是产品元信息（id/name/description），非 KB 检索结果，
+            #   之前被 dict 计为 1，导致产品无归档需求时仍显示"找到 1 条"但无内容展示。
+            _pg_kb_count = sum(
+                len(v) for v in pg_context.values() if isinstance(v, list)
+            )
             kb_access_log.append({
                 "action": "pg_enrich",
                 "type": "pg_enrich",
                 "label": "PG 关系增强",
                 "query": "同产品/项目/模块的关系数据查询（需求、测试用例、模块依赖、追溯矩阵等）",
-                "query_detail": f"keys={sorted(pg_context.keys())[:20]}",
-                "result_count": sum(
-                    len(v) for v in pg_context.values() if isinstance(v, list)
-                ) + sum(
-                    1 for v in pg_context.values() if isinstance(v, dict)
+                "query_detail": (
+                    f"keys={sorted(pg_context.keys())[:20]}"
+                    + (f"（KB 关系数据 {_pg_kb_count} 条）" if _pg_kb_count else "（无 KB 关系数据，仅产品元信息）")
                 ),
-                "answered": bool(pg_context),
+                "result_count": _pg_kb_count,
+                "answered": _pg_kb_count > 0,
                 "duration_ms": _d_sql,
                 "status": "success",
             })
@@ -1123,12 +1128,17 @@ class ClarifyAgent:
                         )
                         continue
                     seen_query_keys.add(query_dedup_key)
+                    # v2.8.5: missing_desc 兜底不再用内部字段名（如 pattern_gap.xxx），
+                    #   从 field 提取可读后缀；若无 pattern_gap. 前缀则直接用 field。
+                    _raw_field = q.get('field', '')
+                    _fallback_desc = (
+                        _raw_field.split('.', 1)[-1]
+                        if _raw_field.startswith('pattern_gap.')
+                        else _raw_field
+                    )
                     validated.append({
-                        "field": q.get("field", ""),
-                        "missing_desc": q.get(
-                            "missing_desc",
-                            f"LLM生成的查询: {q.get('field','')}",
-                        ),
+                        "field": _raw_field,
+                        "missing_desc": q.get("missing_desc") or _fallback_desc,
                         "priority": q.get("priority", "important"),
                         "question": q["question"],
                         "_is_baseline": q.get("_is_baseline", False),

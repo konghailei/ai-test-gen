@@ -974,17 +974,23 @@ class MilvusVectorStore:
         except Exception:
             return False
 
-    def count_requirements(self, product_id: str | None = None) -> int:
+    def count_requirements(self, product_id: str | None = None, status: str | None = None) -> int:
         """统计需求数量。
 
         Args:
             product_id: 按产品过滤（可选）
+            status: 按状态过滤（可选，如 "archived"）；v2.8.5 新增
         """
         try:
             self._ensure_connected()
             collection = self._get_collection("requirements")
+            conditions = []
             if product_id:
-                expr = f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"'
+                conditions.append(f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"')
+            if status:
+                conditions.append(f'metadata["status"] == "{_safe_id(status, "status")}"')
+            if conditions:
+                expr = " and ".join(conditions)
                 results = collection.query(expr=expr, output_fields=["id"], limit=16384)
                 return len(results)
             return collection.num_entities
@@ -1002,10 +1008,14 @@ class MilvusVectorStore:
     def is_product_first_requirement(self, product_id: str) -> bool:
         """判断是否为该产品的首个需求（冷启动判断）。
 
+        v2.8.5: 按 status=archived 过滤——KB 只检索已归档需求，
+        若产品有需求向量但均为非 archived 状态（如 analyzing/draft），
+        仍应判定为冷启动（KB 无法提供任何补全）。
+
         Args:
             product_id: 产品 ID
         """
-        return self.count_requirements(product_id) == 0
+        return self.count_requirements(product_id, status="archived") == 0
 
     def _srr_for_metadata(self, srr_json: dict) -> dict:
         """为 Milvus metadata 构建轻量化 SRR（metadata 总上限 65536 字节）。
