@@ -2060,6 +2060,11 @@ class ClarifyAgent:
         current_modules = srr.get("requirement", {}).get("modules", []) or []
         product_id = srr.get("requirement", {}).get("product_id", "")
 
+        # v2.8.4: PG 关系增强仅查询 KB（已归档）数据，未归档需求不参与。
+        # 原因：PG 增强为 KB 自动补全提供上下文，KB 仅含 archived 需求；
+        #       若产品尚无归档需求，以下查询应全部返回空，避免误导。
+        _ARCHIVED = "archived"
+
         # 1. 查询当前需求的 PG 记录，获取 project_id 和 tags
         try:
             stmt = select(Requirement).where(Requirement.id == current_req_id)
@@ -2070,12 +2075,14 @@ class ClarifyAgent:
 
         project_id = current_record.project_id if current_record else None
 
-        # 2. 同项目下的其他需求
+        # 2. 同项目下的其他需求（仅归档状态，显式 product_id 隔离）
         if project_id:
             try:
                 stmt = select(Requirement.id, Requirement.title, Requirement.priority).where(
                     Requirement.project_id == project_id,
+                    Requirement.product_id == product_id,
                     Requirement.id != current_req_id,
+                    Requirement.status == _ARCHIVED,
                 ).limit(10)
                 rows = (await session.execute(stmt)).all()
                 context["same_project_reqs"] = [
@@ -2084,13 +2091,13 @@ class ClarifyAgent:
             except Exception:
                 pass
 
-        # 3. 同模块下的其他需求（用 modules JSON 字段匹配）
+        # 3. 同模块下的其他需求（仅归档状态，已按 product_id 过滤）
         if current_modules:
             try:
-                # 查询所有需求，在 Python 中做模块交集匹配
                 stmt = select(Requirement.id, Requirement.title, Requirement.modules).where(
                     Requirement.id != current_req_id,
                     Requirement.product_id == product_id,
+                    Requirement.status == _ARCHIVED,
                 ).limit(50)
                 rows = (await session.execute(stmt)).all()
                 for r in rows:
@@ -2105,12 +2112,13 @@ class ClarifyAgent:
             except Exception:
                 pass
 
-        # 4. 共享标签
+        # 4. 共享标签（仅归档状态，已按 product_id 过滤）
         if current_record and current_record.tags:
             try:
                 stmt = select(Requirement.id, Requirement.title, Requirement.tags).where(
                     Requirement.id != current_req_id,
                     Requirement.product_id == product_id,
+                    Requirement.status == _ARCHIVED,
                 ).limit(50)
                 rows = (await session.execute(stmt)).all()
                 for r in rows:
@@ -2125,28 +2133,61 @@ class ClarifyAgent:
                 pass
 
         # 5. 模块依赖链（找出当前模块的上下游依赖）
-        if current_modules:
+        # v2.8.4: 通过 Module 表按 product_id 过滤，确保产品隔离。
+        #   原 bug：current_modules 可能是模块名称（非 ID），直接 .in_(source_module_id) 匹配失败
+        #          或匹配到其他产品的同名模块。现先解析为当前产品的模块 ID 再查询。
+        if current_modules and product_id:
             try:
-                stmt = select(ModuleDependency).where(
-                    ModuleDependency.source_module_id.in_(current_modules)
-                    | ModuleDependency.target_module_id.in_(current_modules)
-                ).limit(20)
-                deps = (await session.execute(stmt)).scalars().all()
-                context["module_deps"] = [
-                    {
-                        "source": d.source_module_id,
-                        "target": d.target_module_id,
-                        "relation_type": d.relation_type,
-                        "strength": d.strength,
-                    }
-                    for d in deps
-                ]
+                # 查询当前产品的所有模块，建立 id/name 双向映射
+                mod_stmt = select(Module.id, Module.name).where(Module.product_id == product_id)
+                mod_rows = (await session.execute(mod_stmt)).all()
+                product_module_ids = {r[0] for r in mod_rows}
+                name_to_id = {r[1]: r[0] for r in mod_rows}
+
+                # 将 current_modules（可能是名称或 ID）解析为当前产品的模块 ID
+                matched_module_ids: set[str] = set()
+                for m in current_modules:
+                    if m in product_module_ids:
+                        matched_module_ids.add(m)  # 已经是 ID
+                    if m in name_to_id:
+                        matched_module_ids.add(name_to_id[m])  # 名称 → ID
+
+                if matched_module_ids:
+                    stmt = select(ModuleDependency).where(
+                        ModuleDependency.source_module_id.in_(matched_module_ids)
+                        | ModuleDependency.target_module_id.in_(matched_module_ids)
+                    ).limit(20)
+                    deps = (await session.execute(stmt)).scalars().all()
+                    # 二次过滤：仅保留源和目标都在当前产品内的依赖（严格产品隔离）
+                    context["module_deps"] = [
+                        {
+                            "source": d.source_module_id,
+                            "target": d.target_module_id,
+                            "relation_type": d.relation_type,
+                            "strength": d.strength,
+                        }
+                        for d in deps
+                        if d.source_module_id in product_module_ids
+                        and d.target_module_id in product_module_ids
+                    ]
             except Exception:
                 pass
 
         # 6. 已有的追溯矩阵条目（检索历史用例与需求的关联）
+        # v2.8.3: JOIN Requirement 按 product_id 过滤
+        # v2.8.4: 增加 status='archived' 过滤，仅返回 KB 已归档需求的追溯记录；
+        #          排除当前需求自身（未归档，不应出现在 KB 上下文中）
         try:
-            stmt = select(Traceability).limit(50)
+            stmt = (
+                select(Traceability)
+                .join(Requirement, Traceability.requirement_id == Requirement.id)
+                .where(
+                    Requirement.product_id == product_id,
+                    Requirement.status == _ARCHIVED,
+                    Requirement.id != current_req_id,
+                )
+                .limit(50)
+            )
             traces = (await session.execute(stmt)).scalars().all()
             context["existing_traces"] = [
                 {"test_case_id": t.test_case_id, "requirement_id": t.requirement_id,
@@ -2156,7 +2197,7 @@ class ClarifyAgent:
         except Exception:
             pass
 
-        # 7. 产品上下文
+        # 7. 产品上下文（产品元信息，非 KB 数据，无需 status 过滤）
         try:
             from app.db.models import Product
             stmt = select(Product).where(Product.id == product_id)
