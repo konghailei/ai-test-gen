@@ -390,12 +390,7 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                         >
                           <FileCode className="w-3.5 h-3.5" />
                         </button>
-                        {editingId === fp.id ? (
-                          <>
-                            <button onClick={() => updateFP(fp.id)} className="p-1 text-emerald-600"><Save className="w-3.5 h-3.5" /></button>
-                            <button onClick={() => setEditingId(null)} className="p-1 text-slate-400"><X className="w-3.5 h-3.5" /></button>
-                          </>
-                        ) : (
+                        {editingId === fp.id ? null : (
                           <button
                             onClick={() => { setEditingId(fp.id); setEditName(fp.name); setEditModules((fp.modules || (fp.module_id ? [fp.module_id] : [])) as string[]) }}
                             className="p-1.5 text-slate-400 hover:text-primary-500 rounded-lg"
@@ -450,6 +445,17 @@ export default function FPSRRViewer({ reqId, productId, status, onChanged }: Pro
                             <span className="text-slate-400 ml-auto">▾</span>
                           </button>
                         </div>
+                        {/* v2.8.1: 保存/取消按钮移到下拉框旁，选完模块直接保存，无需上移视线 */}
+                        <button onClick={() => updateFP(fp.id)}
+                          className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg flex items-center gap-1 text-xs font-medium"
+                          title="保存">
+                          <Save className="w-3.5 h-3.5" /> 保存
+                        </button>
+                        <button onClick={() => { setEditingId(null); setShowFpModulePicker(false); setFpPickerPos(null) }}
+                          className="p-1.5 text-slate-400 hover:bg-slate-100 rounded-lg"
+                          title="取消">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     )}
 
