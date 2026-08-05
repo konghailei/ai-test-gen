@@ -333,7 +333,12 @@ class ClarifyAgent:
             "type": "check_kb_status",
             "label": "KB 状态检查",
             "query": "知识库中是否存在同类需求可以辅助分析当前需求？是否需要启用冷启动模式？",
-            "query_detail": f"向量库{'不可用' if kb_unavailable else ('为空' if kb_empty else '正常')}，当前产品{'不可用' if kb_unavailable else ('首个需求（冷启动）' if product_first else '已有历史数据')}",
+            "query_detail": (
+                f"全局向量库{'不可用' if kb_unavailable else ('为空' if kb_empty else '有数据（含其他产品）')}，"
+                f"当前产品{'不可用' if kb_unavailable else ('无历史需求（冷启动）' if product_first else '已有历史需求')}"
+                if not kb_unavailable
+                else "向量库不可用"
+            ),
             "result_count": 0 if (kb_unavailable or kb_empty or product_first) else 1,
             "product_first_requirement": product_first,
             "duration_ms": _d1 + _d2,
@@ -453,10 +458,9 @@ class ClarifyAgent:
                 "label": "KB 查询生成（无缺口）",
                 "query": "根据完整性/歧义性/模式库检测，当前需求无可由 KB 自动补全的缺口维度，因此未生成 KB 查询。",
                 "query_detail": (
-                    f"critical_missing={len(completeness.get('critical_missing', []))}, "
-                    f"important_missing={len(completeness.get('important_missing', []))}, "
-                    f"optimization_missing={len(completeness.get('optimization_missing', []))}, "
-                    f"pattern_gaps={len([m for m in completeness.get('important_missing', []) if (m.get('field') or '').startswith('pattern_gap.')])}"
+                    f"关键缺失 {len(completeness.get('critical_missing', []))} 项，"
+                    f"重要缺失 {len(completeness.get('important_missing', []))} 项，"
+                    f"优化建议缺失 {len(completeness.get('optimization_missing', []))} 项"
                 ),
                 "result_count": 0,
                 "answered": False,
@@ -464,13 +468,21 @@ class ClarifyAgent:
                 "status": "success",
             })
         else:
+            # v2.8.2: query_detail 用可读描述代替内部字段名 pattern_gap.xxx
+            _gap_descs = []
+            for q in kb_questions:
+                _field = q.get('field', '')
+                if _field.startswith('pattern_gap.'):
+                    _gap_descs.append(q.get('missing_desc') or q.get('description') or _field.split('.', 1)[-1])
+                else:
+                    _gap_descs.append(q.get('missing_desc') or q.get('description') or _field)
             kb_access_log.append({
                 "action": "kb_query_gen",
                 "type": "kb_query_gen",
                 "label": "KB 查询生成",
                 "query": f"基于缺口分析生成 {len(kb_questions)} 条 KB 查询，用于检索同类需求补全 SRR。",
                 "query_detail": (
-                    f"fields={sorted(set(q.get('field', '') for q in kb_questions))[:15]}"
+                    f"查询维度：{'；'.join(_gap_descs[:10])}" if _gap_descs else "无具体维度"
                 ),
                 "result_count": len(kb_questions),
                 "answered": False,
@@ -1018,6 +1030,12 @@ class ClarifyAgent:
             f"SRR 已覆盖的也跳过。\n"
             f"只对原始文档和 SRR 都未覆盖的缺口生成自然语言查询（以「？」结尾，8-25字）。\n"
             f"宁可漏查也不要重复提问——不确定是否覆盖的，一律跳过。\n"
+            f"\n"
+            f"🚫 明确排除判断（v2.8.2 新增）：如果原始需求文档中明确声明「不涉及」「无需」「不需要」"
+            f"「暂不支持」某功能（如『本需求不涉及会话管理』『无需密码重试锁定』），"
+            f"则该缺口是**设计选择而非缺失**，**跳过不生成查询**。\n"
+            f"模式库检测出的『缺失维度』可能只是该需求类型常见的全集，不代表当前需求必须包含——"
+            f"需求边界以原始文档为准。\n"
             f"\n"
             f"⚠️ 增量文档特殊规则：如果缺口标记了 _is_baseline=true，说明该缺口是"
             f"增量文档声明需要从历史版本（知识库）补全的基础维度。增量文档可能只是"
@@ -1614,7 +1632,8 @@ class ClarifyAgent:
                 f"【需补充回答形式与候选选项的澄清问题】\n"
                 f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
                 f"请为每个问题判断最合适的回答形式（text/select/multi_select），"
-                f"若 select 则给出 2-4 个候选选项，并尽量给出建议默认答案。\n"
+                f"若 select 则给出 2-4 个候选选项，若 multi_select 则给出 3-6 个候选选项。\n"
+                f"⚠️ 必须为每个问题给出 default_answer 建议答案（不能为空）。\n"
                 f"⚠️ 必须为每个问题返回对应的精炼结果，使用相同的 index 标识。只输出 JSON。"
             )
             result = await self._llm.call_json(
@@ -1642,8 +1661,12 @@ class ClarifyAgent:
                         if default_q.get("options"):
                             q["input_type"] = default_q["input_type"]
                             q["options"] = default_q["options"]
-                            if not q.get("default_answer"):
-                                q["default_answer"] = default_q.get("default_answer", "")
+                    # v2.8.2: default_answer 兜底
+                    if not q.get("default_answer"):
+                        if q.get("input_type") in ("select", "multi_select") and q.get("options"):
+                            q["default_answer"] = q["options"][0] if q["options"] else ""
+                        else:
+                            q["default_answer"] = "（请根据实际需求填写）"
                     continue
                 it = r.get("input_type")
                 if it in ("text", "select", "multi_select"):
@@ -1660,8 +1683,16 @@ class ClarifyAgent:
                             q["options"] = default_q["options"]
                 if r.get("question"):
                     q["question"] = r["question"]
-                if r.get("default_answer"):
-                    q["default_answer"] = r["default_answer"]
+                # v2.8.2: default_answer 强制兜底——LLM 返回了就用，没返回则根据 input_type 生成
+                _llm_da = r.get("default_answer", "")
+                if _llm_da:
+                    q["default_answer"] = _llm_da
+                elif not q.get("default_answer"):
+                    # LLM 未返回建议答案，根据 input_type 和 options 兜底
+                    if q.get("input_type") in ("select", "multi_select") and q.get("options"):
+                        q["default_answer"] = q["options"][0] if q["options"] else ""
+                    else:
+                        q["default_answer"] = "（请根据实际需求填写）"
             logger.info("[ClarifyAgent] 未答问题选项精炼完成: {} 题", len(questions))
         except Exception as e:
             # v2.26: 不再降级——LLM 精炼失败直接抛异常，由上层中断流水线。
