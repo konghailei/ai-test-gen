@@ -506,7 +506,7 @@ class ClarifyAgent:
             "type": "vector_similarity",
             "label": "全局相似需求检索",
             "query": srr.get("requirement", {}).get("summary", "")[:200],
-            "query_detail": "向量库检索相似需求（doc_type=requirement，status=archived），复用作为 PG 增强 & Q&A 的上下文。",
+            "query_detail": "从向量库检索当前产品已归档的相似需求，结果用于关系增强与知识库问答的参考上下文。",
             "result_count": len(global_similar),
             "sources": [
                 {"id": r.get("id"), "similarity": r.get("similarity"), "req_id": (r.get("metadata") or {}).get("req_id")}
@@ -520,8 +520,21 @@ class ClarifyAgent:
             # v2.8.5: result_count 只统计 KB 数据（list 长度），不统计 product_context（dict）。
             #   product_context 是产品元信息（id/name/description），非 KB 检索结果，
             #   之前被 dict 计为 1，导致产品无归档需求时仍显示"找到 1 条"但无内容展示。
+            # v2.8.7: 内部字段名映射为中文可读描述，不展示 Python 变量名
+            _pg_key_labels = {
+                "existing_traces": "追溯矩阵",
+                "module_deps": "模块依赖",
+                "product_context": "产品元信息",
+                "same_module_reqs": "同模块需求",
+                "same_project_reqs": "同项目需求",
+                "shared_tags": "共享标签",
+            }
             _pg_kb_count = sum(
                 len(v) for v in pg_context.values() if isinstance(v, list)
+            )
+            _pg_key_desc = "、".join(
+                _pg_key_labels.get(k, k) for k in sorted(pg_context.keys())[:20]
+                if not (k == "product_context" and _pg_kb_count == 0)
             )
             kb_access_log.append({
                 "action": "pg_enrich",
@@ -529,8 +542,8 @@ class ClarifyAgent:
                 "label": "PG 关系增强",
                 "query": "同产品/项目/模块的关系数据查询（需求、测试用例、模块依赖、追溯矩阵等）",
                 "query_detail": (
-                    f"keys={sorted(pg_context.keys())[:20]}"
-                    + (f"（KB 关系数据 {_pg_kb_count} 条）" if _pg_kb_count else "（无 KB 关系数据，仅产品元信息）")
+                    f"查询维度：{_pg_key_desc}"
+                    + (f"（找到 KB 关系数据 {_pg_kb_count} 条）" if _pg_kb_count else "（无 KB 关系数据）")
                 ),
                 "result_count": _pg_kb_count,
                 "answered": _pg_kb_count > 0,
