@@ -1368,6 +1368,10 @@ export default function RequirementDetail() {
       kb_augment: BookOpen,
       kb_query: Search,
       kb_unresolved: AlertCircle,
+      // v2.8.1: 补全后端新增 type 的图标映射
+      kb_query_gen: Search,
+      kb_query_gen_empty: Search,
+      vector_similarity: BookOpen,
     }
 
     return (
@@ -1439,10 +1443,12 @@ export default function RequirementDetail() {
                       <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>参考来源（{log.sources.length}条）：</span>
                       {log.sources.map((s: any, si: number) => {
                         const valueStr = formatSourceValue(s.value)
+                        // v2.8.1: 相似度统一为百分比显示，兼容 0-1 浮点数
+                        const simPct = typeof s.similarity === 'number' ? (s.similarity * 100).toFixed(0) : '—'
                         return (
                           <details key={si} className="group">
                             <summary className="cursor-pointer text-[11px] px-2 py-0.5 rounded-full inline-flex items-center gap-1 transition-colors" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
-                              {s.id} · 相似度 {s.similarity}
+                              {s.id} · 相似度 {simPct}%
                               <span className="group-open:hidden" style={{ color: 'var(--foreground-quaternary)' }}>▸</span>
                               <span className="hidden group-open:inline" style={{ color: 'var(--foreground-quaternary)' }}>▾</span>
                             </summary>
@@ -1479,33 +1485,42 @@ export default function RequirementDetail() {
                   </div>
                 )}
 
-                {/* 匹配结果列表 */}
-                {hasResults && log.results && log.results.length > 0 && (
+                {/* 匹配结果列表（v2.8.1: 统一使用 sources 字段，兼容旧 results） */}
+                {hasResults && (() => {
+                  const results = log.sources || log.results || []
+                  if (results.length === 0) return null
+                  return (
                   <div>
                     <span className="text-xs font-medium" style={{ color: 'var(--foreground-tertiary)' }}>匹配结果：</span>
                     <div className="mt-1.5 space-y-1.5">
-                      {log.results.map((r, j) => {
-                        const simStyle: React.CSSProperties = r.similarity >= 0.8
+                      {results.map((r: any, j: number) => {
+                        const sim = typeof r.similarity === 'number' ? r.similarity : 0
+                        const simStyle: React.CSSProperties = sim >= 0.8
                           ? { background: 'var(--state-success-surface)', color: 'var(--state-success)' }
-                          : r.similarity >= 0.6
+                          : sim >= 0.6
                             ? { background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }
                             : { background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }
+                        // v2.8.1: 后端 sources 含 req_id（全局检索）或 id（其他），统一显示
+                        const displayId = r.req_id || r.id || '—'
                         return (
                           <div key={j} className="flex items-center justify-between p-2.5" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
                             <div className="min-w-0 flex-1">
                               <p className="text-xs font-medium truncate" style={{ color: 'var(--foreground-secondary)' }}>
-                                {r.title || r.name || r.id}
+                                {r.title || r.name || displayId}
                               </p>
                               {r.summary && (
                                 <p className="text-xs truncate mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>{r.summary}</p>
                               )}
-                              {r.category && (
-                                <span className="text-[10px] mt-0.5 inline-block" style={{ color: 'var(--foreground-tertiary)' }}>{r.category}</span>
+                              {r.go_live_date && (
+                                <span className="text-[10px] mt-0.5 inline-block mr-1" style={{ color: 'var(--foreground-tertiary)' }}>上线: {r.go_live_date}</span>
+                              )}
+                              {r.project_version && (
+                                <span className="text-[10px] mt-0.5 inline-block" style={{ color: 'var(--foreground-tertiary)' }}>v{r.project_version}</span>
                               )}
                             </div>
                             <div className="ml-3 flex-shrink-0">
                               <span className="text-xs px-2 py-0.5 rounded-full" style={{ fontFamily: 'var(--font-mono)', ...simStyle }}>
-                                {(r.similarity * 100).toFixed(0)}%
+                                {(sim * 100).toFixed(0)}%
                               </span>
                             </div>
                           </div>
@@ -1513,7 +1528,8 @@ export default function RequirementDetail() {
                       })}
                     </div>
                   </div>
-                )}
+                  )
+                })()}
 
                 {/* 无结果 */}
                 {!hasResults && !log.error && (

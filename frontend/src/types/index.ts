@@ -52,9 +52,11 @@ export interface KbQueryLog {
   answered?: boolean
   auto_filled?: boolean
   result_count: number
-  results: KbQueryResult[]
+  results?: KbQueryResult[]
   error?: string | null
   timestamp: string
+  duration_ms?: number
+  status?: string
 }
 
 export interface KbQueryResult {
@@ -65,6 +67,13 @@ export interface KbQueryResult {
   type?: string
   category?: string
   similarity: number
+  // v2.8.1: 后端 sources 实际写入的扩展字段
+  req_id?: string
+  field?: string
+  value?: any
+  document_full?: string
+  go_live_date?: string
+  project_version?: string
 }
 
 export interface ClarifyQuestion {

@@ -431,6 +431,17 @@ class ClarifyAgent:
             srr, completeness, srr.get("_is_incremental", False), kb_provider=kb_provider
         )
 
+        # v2.8.1: KB 问题数量上限，防 token 累积超限
+        # 系统庞大时 LLM 可能生成 8-10 个问题，每个注入 3×1500 字符到 LLM 校验，
+        # 累积 token 可能超出小上下文模型限制。按优先级保留前 5 个。
+        MAX_KB_QUERIES = 5
+        _kb_q_total = len(kb_questions)
+        if _kb_q_total > MAX_KB_QUERIES:
+            _priority_order = {"critical": 0, "important": 1, "optional": 2}
+            kb_questions.sort(key=lambda q: _priority_order.get(q.get("priority", "important"), 1))
+            kb_questions = kb_questions[:MAX_KB_QUERIES]
+            logger.info("[ClarifyAgent] KB 问题上限截断: {} → {}", _kb_q_total, MAX_KB_QUERIES)
+
         _d3 = int((time.time() - _t3) * 1000)
         logger.info("[ClarifyAgent] 生成 KB 问题: count={}", len(kb_questions))
 
@@ -1351,11 +1362,11 @@ class ClarifyAgent:
             answer_text = ""
             sources = []
             for m in matched:
-                # 问题→文档语义匹配阈值 0.40。
+                # 问题→文档语义匹配阈值 0.50（v2.8.1: 从 0.40 提升，防同模块不同功能误匹配）。
                 # bge-large-zh 归一化向量下，具体问题与整篇 SRR 文本的余弦相似度
-                # 天然偏低（典型 0.40-0.65），0.85/0.70 会误杀几乎所有有效结果。
+                # 天然偏低（典型 0.45-0.65），0.85/0.70 会误杀几乎所有有效结果。
                 # 后续有 _verify_kb_answers 的 LLM 校验作为第二道质量关卡。
-                if m.get("similarity", 0) < 0.40:
+                if m.get("similarity", 0) < 0.50:
                     continue
                 doc = m.get("document", "") or ""
                 meta = m.get("metadata", {}) or {}
@@ -1497,62 +1508,71 @@ class ClarifyAgent:
                 "documents": docs,
             })
 
-        user_prompt = (
-            f"【当期需求】\n"
-            f"标题: {req_title}\n"
-            f"摘要: {req_summary}\n"
-            f"\n"
-            f"【待审核的查询与检索结果】\n"
-            f"{json.dumps(verification_items, ensure_ascii=False, indent=2)}\n"
-            f"\n"
-            f"请逐条审核：检索到的文档内容是否真正与查询相关、且在当期需求范围内。\n"
-            f"仅输出 JSON，不要包含其他解释。"
-        )
+        # v2.8.1: 批次大小限制，防 LLM token 超限
+        # 每批最多 5 个问题 × 3 来源 × 1500 字符 ≈ 5,600 tokens，加 prompt 约 7K，安全。
+        KB_VERIFY_BATCH = 5
+        if len(verification_items) > KB_VERIFY_BATCH:
+            logger.info("[ClarifyAgent] KB 校验分批: total={}, batch={}", len(verification_items), KB_VERIFY_BATCH)
 
-        try:
-            result = await self._llm.call_json(
-                prompt=user_prompt,
-                system_prompt=prompt_manager.get("clarify_agent", "KB_ANSWER_VERIFIER_SYSTEM_PROMPT"),
-                schema_hint={"verifications": list},
-                temperature=0.1,
-                provider=kb_provider,
-                agent_name="ClarifyAgent",
+        # 分批校验，合并结果
+        for batch_start in range(0, len(verification_items), KB_VERIFY_BATCH):
+            batch_items = verification_items[batch_start:batch_start + KB_VERIFY_BATCH]
+            batch_num = batch_start // KB_VERIFY_BATCH + 1
+            user_prompt = (
+                f"【当期需求】\n"
+                f"标题: {req_title}\n"
+                f"摘要: {req_summary}\n"
+                f"\n"
+                f"【待审核的查询与检索结果】（第 {batch_num} 批）\n"
+                f"{json.dumps(batch_items, ensure_ascii=False, indent=2)}\n"
+                f"\n"
+                f"请逐条审核：检索到的文档内容是否真正与查询相关、且在当期需求范围内。\n"
+                f"仅输出 JSON，不要包含其他解释。"
             )
-            verifications = result.get("verifications", []) or []
-            for v in verifications:
-                idx = v.get("index")
-                if idx is None or idx >= len(answers):
-                    continue
-                if v.get("relevant"):
-                    # 基线补全：answer 已是精准维度摘要，不再用整篇文档覆盖（修复「全量回答」）
-                    if answers[idx].get("_is_baseline"):
-                        pass
+
+            try:
+                result = await self._llm.call_json(
+                    prompt=user_prompt,
+                    system_prompt=prompt_manager.get("clarify_agent", "KB_ANSWER_VERIFIER_SYSTEM_PROMPT"),
+                    schema_hint={"verifications": list},
+                    temperature=0.1,
+                    provider=kb_provider,
+                    agent_name="ClarifyAgent",
+                )
+                verifications = result.get("verifications", []) or []
+                for v in verifications:
+                    idx = v.get("index")
+                    if idx is None or idx >= len(answers):
+                        continue
+                    if v.get("relevant"):
+                        # 基线补全：answer 已是精准维度摘要，不再用整篇文档覆盖（修复「全量回答」）
+                        if answers[idx].get("_is_baseline"):
+                            pass
+                        else:
+                            # LLM 确认相关：用 LLM 提取的答案替换机械答案
+                            extracted = v.get("extracted_answer", "")
+                            if extracted:
+                                answers[idx]["answer"] = extracted
+                        # 保留 answered=True
                     else:
-                        # LLM 确认相关：用 LLM 提取的答案替换机械答案
-                        extracted = v.get("extracted_answer", "")
-                        if extracted:
-                            answers[idx]["answer"] = extracted
-                    # 保留 answered=True
-                else:
-                    # LLM 判定不相关：拒收
-                    logger.info(
-                        "[ClarifyAgent] KB 答案校验拒绝: query={} reason={}",
-                        answers[idx].get("question", "")[:80],
-                        v.get("reason", "")[:100],
-                    )
-                    answers[idx]["answered"] = False
-                    answers[idx]["answer"] = (
-                        f"知识库检索结果不相关，已拒绝: {v.get('reason', '')}"
-                    )
-                    answers[idx]["sources"] = []
-                    answers[idx]["auto_filled"] = False
-
-        except Exception as e:
-            logger.error(
-                "[ClarifyAgent] KB 答案校验 LLM 调用失败，保留原始答案: {}",
-                str(e)[:200],
-            )
-            # LLM 失败时不改变答案（降级为原有机械答案，避免全丢弃）
+                        # LLM 判定不相关：拒收
+                        logger.info(
+                            "[ClarifyAgent] KB 答案校验拒绝: query={} reason={}",
+                            answers[idx].get("question", "")[:80],
+                            v.get("reason", "")[:100],
+                        )
+                        answers[idx]["answered"] = False
+                        answers[idx]["answer"] = (
+                            f"知识库检索结果不相关，已拒绝: {v.get('reason', '')}"
+                        )
+                        answers[idx]["sources"] = []
+                        answers[idx]["auto_filled"] = False
+            except Exception as e:
+                logger.error(
+                    "[ClarifyAgent] KB 答案校验 LLM 调用失败（第 {} 批），保留原始答案: {}",
+                    batch_num, str(e)[:200],
+                )
+                # LLM 失败时不改变答案（降级为原有机械答案，避免全丢弃）
 
         return answers
 
