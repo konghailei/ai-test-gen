@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, memo } from 'react'
-import { FileText, TestTube, Trash2, Loader2, CheckCircle2, AlertTriangle, RefreshCw, Calendar, X, Save, XCircle, ArrowLeft, ChevronRight, Archive, RotateCcw } from 'lucide-react'
+import { FileText, TestTube, Trash2, Loader2, CheckCircle2, AlertTriangle, RefreshCw, Calendar, X, Save, XCircle, ArrowLeft, ChevronRight, Archive } from 'lucide-react'
 import { knowledge, requirements as reqApi, products as prodApi } from '../api/client'
 import type { KbEntry, KbModelStatus, KbProject } from '../types'
 import { useProduct } from '../store/ProductContext'
@@ -253,17 +253,17 @@ export default function KnowledgeBase() {
     loadProjects()
   }
 
-  // 恢复项目活动状态（从知识库移除，回到活跃可编辑状态）
+  // 从知识库删除项目（项目从归档状态恢复为活跃可编辑状态）
   // 对应后端 POST /products/projects/{id}/reactivate：批量删除项目向量 + 解冻依赖 + 需求/FP 状态回归
-  const handleReactivateProject = async (project: KbProject) => {
-    if (!confirm(`确认恢复项目「${project.name || project.id}」为活跃状态？\n\n这将：\n• 从知识库删除该项目的所有需求与用例向量\n• 对应版本的依赖关系标记为未启用\n• 需求和功能点状态回归活跃\n• 新需求影响分析不再考虑该版本\n\n此操作可逆，后续可重新归档。`)) return
+  const handleDeleteProject = async (project: KbProject) => {
+    if (!confirm(`确定从知识库删除项目「${project.name || project.id}」吗？\n\n删除后该项目将：\n• 从知识库移除所有需求与用例向量\n• 依赖关系解冻，可继续编辑\n• 需求和功能点状态回归活跃\n• 新需求影响分析不再考虑该版本\n\n项目数据不会丢失，后续可重新归档。`)) return
     setReactivating(project.id)
     try {
       await prodApi.reactivateProject(project.id)
-      setToast({ type: 'success', msg: `项目「${project.name || project.id}」已恢复活动状态` })
+      setToast({ type: 'success', msg: `项目「${project.name || project.id}」已从知识库删除` })
       await loadProjects()
     } catch (e: any) {
-      setToast({ type: 'error', msg: `恢复失败：${e?.message || '未知错误'}` })
+      setToast({ type: 'error', msg: `删除失败：${e?.message || '未知错误'}` })
     } finally {
       setReactivating(null)
     }
@@ -486,30 +486,30 @@ export default function KnowledgeBase() {
                       tabIndex={0}
                       onClick={(e) => {
                         e.stopPropagation()
-                        if (reactivating !== project.id) handleReactivateProject(project)
+                        if (reactivating !== project.id) handleDeleteProject(project)
                       }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault()
                           e.stopPropagation()
-                          if (reactivating !== project.id) handleReactivateProject(project)
+                          if (reactivating !== project.id) handleDeleteProject(project)
                         }
                       }}
-                      title="恢复活动（从知识库删除，回到活跃状态）"
+                      title="从知识库删除（项目恢复为活跃可编辑状态）"
                       className="p-1.5 rounded-lg transition-colors flex items-center"
                       style={{
                         background: 'var(--background-muted)',
-                        color: 'var(--brand-500)',
+                        color: 'var(--state-danger)',
                         opacity: reactivating === project.id ? 0.5 : 1,
                         cursor: reactivating === project.id ? 'not-allowed' : 'pointer',
                       }}
-                      onMouseEnter={e => { if (reactivating !== project.id) { e.currentTarget.style.background = 'var(--brand-500)'; e.currentTarget.style.color = '#fff' } }}
-                      onMouseLeave={e => { e.currentTarget.style.background = 'var(--background-muted)'; e.currentTarget.style.color = 'var(--brand-500)' }}
+                      onMouseEnter={e => { if (reactivating !== project.id) { e.currentTarget.style.background = 'var(--state-danger)'; e.currentTarget.style.color = '#fff' } }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'var(--background-muted)'; e.currentTarget.style.color = 'var(--state-danger)' }}
                     >
                       {reactivating === project.id ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       ) : (
-                        <RotateCcw className="w-3.5 h-3.5" />
+                        <Trash2 className="w-3.5 h-3.5" />
                       )}
                     </span>
                     <ChevronRight className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />
