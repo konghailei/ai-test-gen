@@ -332,7 +332,7 @@ export default function RequirementDetail() {
 
   useEffect(() => {
     if (!id) return
-    reqApi.get(id).then(setReq).catch(() => navigate('/requirements')).finally(() => setLoading(false))
+    reqApi.get(id).then(setReq).catch(() => navigate('/projects')).finally(() => setLoading(false))
   }, [id])
 
   useEffect(() => { prodApi.list().then(list => setProducts(list || [])) }, [])

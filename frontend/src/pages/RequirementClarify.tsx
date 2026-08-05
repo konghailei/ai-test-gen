@@ -1181,6 +1181,20 @@ function QuestionCard({ question: q, answer, isSkipped, onAnswer, onSkip, onUseD
             {q.context}
           </p>
         )}
+        {/* v2.8.6: LLM 未返回精炼结果提示 */}
+        {q._llm_refine_missing && (
+          <p
+            className="text-xs mt-1 px-2 py-1 inline-flex items-center gap-1"
+            style={{
+              color: 'var(--state-warning)',
+              background: 'var(--state-warning-surface)',
+              borderRadius: 'calc(var(--radius) * 0.5)',
+            }}
+          >
+            <AlertCircle className="w-3 h-3" />
+            LLM 未返回精炼结果，需人工澄清
+          </p>
+        )}
         {/* 分类标签 */}
         {q.category && (
           <span

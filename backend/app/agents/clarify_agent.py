@@ -1663,20 +1663,15 @@ class ClarifyAgent:
             for idx, q in enumerate(questions):
                 r = refined_by_idx.get(idx)
                 if not r:
-                    # v2.54: LLM 未返回此问题的精炼结果，使用字段映射表补充默认选项
-                    # 避免"建议答案缺失"——用户期望尽量有可选项降低回答成本
-                    field = q.get("field", "")
-                    if field:
-                        default_q = _build_field_question(field, q.get("description", ""), srr)
-                        if default_q.get("options"):
-                            q["input_type"] = default_q["input_type"]
-                            q["options"] = default_q["options"]
-                    # v2.8.2: default_answer 兜底
-                    if not q.get("default_answer"):
-                        if q.get("input_type") in ("select", "multi_select") and q.get("options"):
-                            q["default_answer"] = q["options"][0] if q["options"] else ""
-                        else:
-                            q["default_answer"] = "（请根据实际需求填写）"
+                    # v2.8.6: LLM 未返回此问题的精炼结果——不兜底，保持原样。
+                    # input_type 保持 text，options=[]，default_answer 留空，
+                    # 前端展示"LLM 未返回精炼结果，需人工澄清"。
+                    # 旧逻辑用 _build_field_question + "（请根据实际需求填写）" 兜底，
+                    # 但用户明确要求：LLM 未返回就提示未返回，不要用兜底降低回答质量。
+                    q.setdefault("input_type", "text")
+                    q.setdefault("options", [])
+                    q["default_answer"] = ""  # 显式置空，前端据此展示"需人工澄清"
+                    q["_llm_refine_missing"] = True  # 标记 LLM 未返回，供前端展示
                     continue
                 it = r.get("input_type")
                 if it in ("text", "select", "multi_select"):
@@ -1684,25 +1679,14 @@ class ClarifyAgent:
                 opts = r.get("options") or []
                 if isinstance(opts, list):
                     q["options"] = [str(o) for o in opts][:6]
-                # v2.54: 若 LLM 返回 select/multi_select 但 options 为空，用模板补充
-                if q.get("input_type") in ("select", "multi_select") and not q.get("options"):
-                    field = q.get("field", "")
-                    if field:
-                        default_q = _build_field_question(field, q.get("description", ""), srr)
-                        if default_q.get("options"):
-                            q["options"] = default_q["options"]
+                # v2.8.6: LLM 返回 select/multi_select 但 options 为空时不再用模板补充，
+                #        保持空选项，前端展示原始 text 输入。
                 if r.get("question"):
                     q["question"] = r["question"]
-                # v2.8.2: default_answer 强制兜底——LLM 返回了就用，没返回则根据 input_type 生成
+                # v2.8.6: default_answer 直接用 LLM 返回值，不兜底。
+                #        LLM 未返回 default_answer 时留空，前端展示"需人工澄清"。
                 _llm_da = r.get("default_answer", "")
-                if _llm_da:
-                    q["default_answer"] = _llm_da
-                elif not q.get("default_answer"):
-                    # LLM 未返回建议答案，根据 input_type 和 options 兜底
-                    if q.get("input_type") in ("select", "multi_select") and q.get("options"):
-                        q["default_answer"] = q["options"][0] if q["options"] else ""
-                    else:
-                        q["default_answer"] = "（请根据实际需求填写）"
+                q["default_answer"] = _llm_da if _llm_da else ""
             logger.info("[ClarifyAgent] 未答问题选项精炼完成: {} 题", len(questions))
         except Exception as e:
             # v2.26: 不再降级——LLM 精炼失败直接抛异常，由上层中断流水线。

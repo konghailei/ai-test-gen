@@ -87,6 +87,7 @@ export interface ClarifyQuestion {
   input_type?: 'text' | 'select' | 'multi_select'
   options?: string[]
   source?: string  // cold_start_xxx 等
+  _llm_refine_missing?: boolean  // v2.8.6: LLM 未返回精炼结果标记
 }
 
 export interface KbAugmentation {

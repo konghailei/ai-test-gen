@@ -5,7 +5,6 @@ import Layout from './components/Layout'
 import AdminLayout from './components/AdminLayout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
-import Requirements from './pages/Requirements'
 import RequirementDetail from './pages/RequirementDetail'
 import RequirementClarify from './pages/RequirementClarify'
 import TestCases from './pages/TestCases'
@@ -85,7 +84,8 @@ export default function App() {
           </AuthGuard>
         }>
           <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/requirements" element={<Requirements />} />
+          {/* 独立需求列表页已下线，需求列表整合到项目管理页 — 旧链接重定向到项目管理 */}
+          <Route path="/requirements" element={<Navigate to="/projects" replace />} />
           <Route path="/requirements/:id" element={<RequirementDetail />} />
           <Route path="/requirements/:id/clarify" element={<RequirementClarify />} />
           <Route path="/requirements/:id/generate" element={<Generate />} />

@@ -1,14 +1,15 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Plus, Trash2, FolderOpen, Loader2, Edit3, Save, X, Search, FileText,
   TestTube, Archive, RotateCcw, ChevronRight, ChevronDown, AlertTriangle,
-  Upload, Filter, MessageCircle,
+  Upload, MessageCircle,
 } from 'lucide-react'
 import { products as prodApi, requirements as reqApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Project, Requirement } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS } from '../utils'
+import UploadRequirementModal from '../components/UploadRequirementModal'
 
 // v2.45 修复：本地时区日期格式化，避免 slice(0,10) 在带时区 ISO 字符串上截取到 UTC 日期
 function formatDateOnly(iso: string | undefined | null): string {
@@ -190,6 +191,8 @@ function ArchiveModal({ projId, projName, onClose, onArchived }: {
 export default function ProjectManagementPage() {
   const { products, selectedProductId, selectedProduct } = useProduct()
   const navigate = useNavigate()
+  // 读取 URL query 参数（支持 ?upload=true&project_id=xxx 直接打开上传弹窗）
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [projects, setProjects] = useState<Record<string, Project[]>>({})
   const [loading, setLoading] = useState(false)
@@ -217,6 +220,11 @@ export default function ProjectManagementPage() {
   // 搜索模式：匹配需求的项目 ID 集合（用于在搜索时额外显示项目名不匹配但需求匹配的项目）
   const [searchMatchedProjectIds, setSearchMatchedProjectIds] = useState<Set<string> | null>(null)
 
+  // 上传需求弹窗状态
+  const [showUpload, setShowUpload] = useState(false)
+  // 上传弹窗预选的项目 ID（从项目卡片点击「上传需求文档」时携带）
+  const [uploadProjectId, setUploadProjectId] = useState('')
+
   useEffect(() => {
     setActiveProductId(selectedProductId)
     // v2.45 修复：切换产品时关闭所有 Modal/AddForm，避免显示旧数据
@@ -229,6 +237,18 @@ export default function ProjectManagementPage() {
     setSearchMatchedProjectIds(null)
     if (selectedProductId) loadData(selectedProductId)
   }, [selectedProductId])
+
+  // 读取 URL query：?upload=true&project_id=xxx 时自动打开上传弹窗（支持外部直接链接）
+  useEffect(() => {
+    const qUpload = searchParams.get('upload') === 'true'
+    const qProj = searchParams.get('project_id') || ''
+    if (qUpload) {
+      setUploadProjectId(qProj)
+      setShowUpload(true)
+      // 清掉 query 参数，避免后续刷新重复打开
+      setSearchParams({}, { replace: true })
+    }
+  }, [searchParams])
 
   // v2.45 增强：EditModal/ArchiveModal 支持 Esc 关闭
   useEffect(() => {
@@ -592,21 +612,13 @@ export default function ProjectManagementPage() {
 
                       {/* 右侧：操作按钮 v2.53: 默认半透明 + hover 完全显示 */}
                       <div className="flex items-center gap-0.5 flex-shrink-0 opacity-[0.6] transition-opacity duration-200 group-hover:opacity-100">
-                        {/* 上传需求文档 */}
+                        {/* 上传需求文档：直接打开内嵌上传弹窗，不再跳转 */}
                         <button
-                          onClick={() => navigate(`/requirements?project_id=${encodeURIComponent(proj.id)}&upload=true`)}
+                          onClick={() => { setUploadProjectId(proj.id); setShowUpload(true) }}
                           className="btn-ghost p-1.5"
                           title="上传需求文档"
                         >
                           <Upload className="w-3.5 h-3.5" />
-                        </button>
-                        {/* 在需求页面查看 */}
-                        <button
-                          onClick={() => navigate(`/requirements?project_id=${encodeURIComponent(proj.id)}`)}
-                          className="btn-ghost p-1.5"
-                          title="在需求页面查看"
-                        >
-                          <FileText className="w-3.5 h-3.5" />
                         </button>
                         {/* 查看测试用例 */}
                         <button
@@ -786,6 +798,22 @@ export default function ProjectManagementPage() {
           }}
         />
       )}
+
+      {/* 上传需求弹窗：上传成功后刷新对应项目的需求列表 */}
+      <UploadRequirementModal
+        open={showUpload}
+        onClose={() => setShowUpload(false)}
+        productId={activeProductId}
+        preselectedProjectId={uploadProjectId}
+        onUploaded={(reqId) => {
+          // 上传成功：刷新该项目下的需求列表并展开该项目，提示成功
+          if (uploadProjectId) {
+            setExpandedIds(prev => new Set(prev).add(uploadProjectId))
+            loadProjectReqs(uploadProjectId, search.trim() || undefined, filterReqStatus || undefined, filterReqPriority || undefined)
+          }
+          setToast({ type: 'success', msg: `需求已上传成功（${reqId}）` })
+        }}
+      />
 
     </div>
   )

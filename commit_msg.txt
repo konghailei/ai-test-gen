@@ -1,0 +1,15 @@
+fix: 澄清问题不兜底+删除需求列表页（v2.8.6）
+
+1. 澄清问题 LLM 未返回时不兜底（backend）
+   - _refine_unresolved_to_questions: LLM 未返回精炼结果时不再用模板补充选项
+   - default_answer 不再用"（请根据实际需求填写）"兜底，留空由前端展示"需人工澄清"
+   - 新增 _llm_refine_missing 标记，前端据此展示"LLM 未返回精炼结果"提示
+   - UNRESOLVED_REFINER_SYSTEM_PROMPT: 移除"default_answer 必填"强制要求
+
+2. 删除需求列表页面（frontend）
+   - /requirements 路由重定向到 /projects
+   - 上传弹窗抽成独立组件 UploadRequirementModal
+   - ProjectManagement 内嵌上传弹窗，不再跳转
+   - 删除"在需求页面查看"按钮（已集成到项目管理）
+   - 删除 Requirements.tsx 文件
+   - 保留 /requirements/:id 详情页等子路由
