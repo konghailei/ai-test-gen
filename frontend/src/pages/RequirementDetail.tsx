@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Eye, Database, Search, BookOpen, GitBranch, Share2, History, RefreshCw, Layers, Clock, Download, FilePlus, Image as ImageIcon, ChevronDown } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Database, Search, BookOpen, GitBranch, Share2, History, RefreshCw, Layers, Download, FilePlus, Image as ImageIcon, ChevronDown } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product, RequirementRevision } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
@@ -11,7 +11,6 @@ import FunctionalPoints from '../components/FunctionalPoints'
 import FPSRRViewer from '../components/FPSRRViewer'
 import FieldEditor from '../components/FieldEditor'
 import VersionHistoryPanel from '../components/VersionHistoryPanel'
-import { brTypeLabel, acTypeLabel } from '../utils/labels'
 
 // ============================================================================
 // Markdown 自定义渲染组件
@@ -428,6 +427,35 @@ export default function RequirementDetail() {
     setImpactLoading(true)
     setImpactData(null)
     try {
+      // 归档需求：只读展示历史影响分析记录（srr_json.impact_analysis），
+      // 不调用重新分析端点（后端对归档需求返回 409「仅支持查看」）。
+      if (detail?.status === 'archived') {
+        const srr = detail.srr_json as Record<string, unknown> | undefined
+        const ia = srr?.impact_analysis as Array<{
+          fp_id?: string; fp_name?: string; is_affected?: boolean
+          impact_description?: string; confirmed_at?: string
+        }> | undefined
+        const items = Array.isArray(ia) ? ia : []
+        setImpactData({
+          req_title: detail.title || id,
+          direct_modules: [],
+          indirect_modules: [],
+          affected_fps: items.map(item => ({
+            fp_id: item.fp_id || '',
+            fp_name: item.fp_name || item.fp_id || '',
+            fp_status: 'archived',
+            module_id: '',
+            module_name: '',
+            impact_reason: item.impact_description || (item.is_affected ? '受需求影响' : '确认不受影响'),
+            depth: 0,
+            source_fp_name: '',
+            kb_context: '',
+            existing_cases_count: 0,
+          })),
+          total_affected: items.length,
+        })
+        return
+      }
       const result = await reqApi.impactAnalysis(id)
       setImpactData(result)
     } catch (e: any) {
@@ -726,16 +754,14 @@ export default function RequirementDetail() {
           }}>{STATUS_LABELS[detail.status] || detail.status}</span></div>
         </div>
 
-        {/* v1.5.2: FP 审核（元信息下方、SRR 详情上方） */}
-        {detail.status !== 'archived' && (
-          <div className="p-4" style={{ border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.6)', background: 'var(--background)' }}>
-            <h3 className="text-sm font-semibold mb-3 flex items-center gap-2" style={{ color: 'var(--foreground-secondary)' }}>
-              <Layers className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
-              功能点（FP）审核
-            </h3>
-            <FPSRRViewer reqId={id!} productId={detail.product_id} status={detail.status} onChanged={refreshRevisionBaseline} />
-          </div>
-        )}
+        {/* v1.5.2: FP 审核（元信息下方、SRR 详情上方）。v?: 归档态也展示功能点 SRR（只读），由 FPSRRViewer 内部 isArchived 处理，避免归档后功能点 SRR 被隐藏 */}
+        <div className="p-4" style={{ border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.6)', background: 'var(--background)' }}>
+          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2" style={{ color: 'var(--foreground-secondary)' }}>
+            <Layers className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+            功能点（FP）审核
+          </h3>
+          <FPSRRViewer reqId={id!} productId={detail.product_id} status={detail.status} onChanged={refreshRevisionBaseline} />
+        </div>
 
         {/* 功能概述 */}
         {reqData.summary && (
@@ -1347,7 +1373,11 @@ export default function RequirementDetail() {
   // 渲染：知识库查询记录
   // ==========================================================================
   function renderKbLogs() {
-    const logs = detail.kb_query_logs || []
+    // v2.8.67: 过滤掉 kb_query_gen / kb_query_gen_empty 汇总条目--
+    // 这两类是「本次共生成 N 条查询」的统计占位，并非真实 KB 问答，展示在查询页面会误导用户。
+    // 知识库查询页面只展示真实问答（kb_query 已解答 / kb_unresolved 未解决）及状态检查等有意义的记录。
+    const _HIDDEN_TYPES = new Set(['kb_query_gen', 'kb_query_gen_empty'])
+    const logs = (detail.kb_query_logs || []).filter((l: any) => !_HIDDEN_TYPES.has(l?.type))
 
     if (logs.length === 0) {
       return (

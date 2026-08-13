@@ -138,7 +138,7 @@ async def list_menus() -> ApiResponse:
     menu_labels = {
         "dashboard": "仪表盘", "requirements": "需求管理", "generate": "用例生成",
         "testcases": "测试用例", "dependency_graph": "依赖图谱",
-        "knowledge": "知识库", "knowledge_qa": "知识问答",
+        "knowledge": "知识库", "knowledge_qa": "知识问答", "correction_review": "纠正审核",
         "projects_modules": "项目与模块", "admin": "管理后台",
         "admin_products": "产品管理", "admin_prompts": "提示词管理", "admin_settings": "系统设置",
         "admin_dashboard": "管理首页", "admin_users": "用户管理", "admin_roles": "角色管理",

@@ -326,11 +326,13 @@ export default function UploadRequirementModal({
     }
   }
 
-  /** 完成上传流程：清理状态，通知父组件刷新 */
+  /** 完成上传流程：清理状态，通知父组件刷新，跳转到需求详情页 */
   const finishUpload = (reqId: string) => {
     resetState()
     onUploaded?.(reqId)
     onClose()
+    // v2.8.66: 上传分析完成后跳转到需求详情页，而非停在项目管理
+    navigate(`/requirements/${encodeURIComponent(reqId)}`)
   }
 
   /** 重置弹窗内部状态 */
@@ -708,7 +710,7 @@ export default function UploadRequirementModal({
 
           {/* ===== 上传后：澄清问题面板 — Apple 风格 ===== */}
           {uploadResult && (() => {
-            // v2.55: 与澄清页面（RequirementClarify.tsx）保持一致，只显示 critical 和 important 问题
+            // v2.8.55: 与澄清页面（RequirementClarify.tsx）保持一致，只显示 critical 和 important 问题
             // optional 问题不展示给用户（不阻塞 SRR 生成），避免弹窗与澄清页面计数不一致
             const visibleQuestions = uploadResult.questions.filter(q => q.priority === 'critical' || q.priority === 'important')
             return (
@@ -823,7 +825,7 @@ export default function UploadRequirementModal({
               <div className="flex items-center justify-end gap-3 pt-3"
                 style={{ borderTop: '1px solid var(--border)' }}>
                 <button
-                  onClick={() => { resetState(); onClose() }}
+                  onClick={() => { if (uploadResult) finishUpload(uploadResult.req_id) }}
                   className="btn-secondary"
                 >
                   暂不处理

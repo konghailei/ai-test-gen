@@ -310,7 +310,7 @@ async def seed_admin_user() -> None:
         if user_role is None:
             user_menus = [
                 "dashboard", "requirements", "generate", "testcases",
-                "knowledge", "knowledge_qa", "projects_modules",
+                "knowledge", "knowledge_qa", "correction_review", "projects_modules",
             ]
             user_role = Role(name="user", label="普通用户", menus=user_menus)
             session.add(user_role)

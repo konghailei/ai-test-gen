@@ -982,7 +982,7 @@ class LLMClient:
         try:
             from app.db.database import async_session
             from app.db.models import LLMCallLog
-            from app.config import settings
+            # settings 已在顶部导入，无需重复导入
 
             # v2.27: 优先使用实际供应商 key，回退到全局主供应商
             # provider_used 格式为 "provider_name:model_name"，提取供应商名

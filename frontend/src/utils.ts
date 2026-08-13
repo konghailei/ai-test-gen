@@ -42,6 +42,34 @@ export const CASE_STATUS_LABELS: Record<string, string> = {
   rejected: '已驳回',
 }
 
+/** 优先级中文后缀（用于向量化需求条目、用例条目等显示） */
+export const PRIORITY_LABEL_SUFFIX: Record<string, string> = {
+  P0: '紧急',
+  P1: '高',
+  P2: '中',
+  P3: '低',
+}
+
+export function priorityLabel(p: string | undefined | null): string {
+  if (!p) return ''
+  const suffix = PRIORITY_LABEL_SUFFIX[p.toUpperCase()] || ''
+  return suffix ? `${p} ${suffix}` : p
+}
+
+/** 归档 / 纠正类型中文映射（archived_type / correction_target_type） */
+export const ARCHIVED_TYPE_LABELS: Record<string, string> = {
+  requirement: '需求',
+  test_case: '测试用例',
+  functional_point: '功能点',
+  'single-fp': '单个功能点',
+  'full-req': '整篇需求',
+}
+
+export function archivedTypeLabel(t: string | undefined | null): string {
+  if (!t) return ''
+  return ARCHIVED_TYPE_LABELS[t] || t
+}
+
 export function confidenceColor(c: number): string {
   if (c >= 0.85) return 'text-emerald-600'
   if (c >= 0.6) return 'text-amber-600'

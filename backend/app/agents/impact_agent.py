@@ -147,7 +147,7 @@ class ImpactAnalysisAgent:
         indirect = []
 
         # 加载所有模块依赖边构建完整邻接表
-        # v2.51 修复：原实现仅加载与 direct 相关的边，导致 BFS 只能遍历 1 跳，
+        # v2.8.51 修复：原实现仅加载与 direct 相关的边，导致 BFS 只能遍历 1 跳，
         # 2-3 跳的间接受影响模块被漏掉，回归测试范围被低估。
         # 模块数量通常有限，全表加载性能可接受。
         # v2.2: 模块 ID 含产品前缀（如 "auth_PROD-001"），天然形成产品范围，无需额外 product_id 过滤
@@ -353,7 +353,7 @@ class ImpactAnalysisAgent:
         affected_fps = await self._bfs_fp_reverse(fp_id, session)
 
         # 3. 模块级影响分析（复用现有方法）
-        # v2.55 Bug B-2: 不仅分析起始 FP 的模块，还要分析所有受影响 FP 的模块
+        # v2.8.55 Bug B-2: 不仅分析起始 FP 的模块，还要分析所有受影响 FP 的模块
         affected_modules_raw: list[dict] = []
         
         # 收集所有相关模块 ID（起始 FP + 所有受影响 FP）
@@ -428,20 +428,25 @@ class ImpactAnalysisAgent:
         }
 
     async def _bfs_fp_reverse(self, fp_id: str, session) -> list[dict]:
-        """反向 BFS FPDependency 图，找到谁依赖此 FP。
+        """双向 BFS FPDependency 图，找到受影响功能点（含"被依赖功能点"）。
 
         规则：
-        - 从 fp_id 出发，沿反向边遍历（target=fp_id → source 依赖它）
-        - depends_on / data_flows / invariants / lifecycle_scenarios / conflicts_with 均遍历
-        - 最大深度 3 跳
-        - v2.3: 仅遍历 review_status='approved' 的依赖边（未审核依赖不参与影响分析）
+        - 反向遍历（target=fp_id → source 依赖它）：找"谁依赖此 FP"（下游调用方）
+        - 正向遍历（source=fp_id → target）：找"此 FP 依赖谁"（被依赖功能点/上游）
+        - 所有 relation_type 均遍历；最大深度 3 跳
+        - v2.3: 仅遍历 review_status='approved' 且 is_active=True 的依赖边
+          （未审核依赖不参与影响分析；归档后的历史版本依赖也不参与）
+        - v3.1: 修复——原实现对单向关系（depends_on/data_flows）不遍历正向边，
+          导致"被依赖功能点"（此 FP 依赖的 target）漏出影响范围。现放开正向遍历，
+          并在返回项标记 direction 以区分"被依赖"（outgoing）与"依赖者"（incoming）。
 
         Returns:
-            list[dict]: 每项含 {fp_id, fp_name, relation_type, req_id, req_title, depth}
+            list[dict]: 每项含 {fp_id, fp_name, relation_type, relation_cn,
+                                 req_id, req_title, depth, description, direction}
         """
         # v2.45: 仅遍历 review_status='approved' 且 is_active=True 的依赖边
         # （未审核依赖不参与影响分析；项目归档后的历史版本依赖也不参与）
-        # v2.52: 修复 BFS 只能 1 跳的问题——原实现仅加载与起始 fp_id 直接相连的边，
+        # v2.8.52: 修复 BFS 只能 1 跳的问题——原实现仅加载与起始 fp_id 直接相连的边，
         # 导致 2-3 跳的间接受影响 FP 全部漏掉，回归测试范围被严重低估。
         # 改为加载所有 approved + active 边构建完整邻接表（与模块 BFS 一致）。
         result = await session.execute(
@@ -472,26 +477,28 @@ class ImpactAnalysisAgent:
 
         # 收集所有受影响 FP ID（用于名称查询）
         affected_fp_ids: set[str] = set()
-        bfs_results: list[tuple[str, str, int, str]] = []  # (fp_id, relation_type, depth, description)
+        bfs_results: list[tuple[str, str, int, str, str]] = []  # (fp_id, relation_type, depth, description, direction)
 
         while queue:
             current, depth = queue.popleft()
             if depth >= 3:
                 continue
-            # 反向边：谁依赖当前 FP
+            # 反向边：谁依赖当前 FP（下游调用方，direction=incoming）
             for neighbor, rtype, desc in reverse_adj.get(current, []):
                 if neighbor not in visited:
                     visited.add(neighbor)
                     queue.append((neighbor, depth + 1))
                     affected_fp_ids.add(neighbor)
-                    bfs_results.append((neighbor, rtype, depth + 1, desc))
-            # 正向边（仅双向关系）：conflicts_with / invariants / lifecycle_scenarios
+                    bfs_results.append((neighbor, rtype, depth + 1, desc, "incoming"))
+            # 正向边：此 FP 依赖谁（被依赖功能点/上游，direction=outgoing）
+            # v3.1: 放开——原仅遍历双向关系，导致 depends_on/data_flows 的单向
+            # "被依赖功能点"漏出影响范围。现对所有 rtype 沿正向边遍历。
             for neighbor, rtype, desc in forward_adj.get(current, []):
-                if rtype in ("conflicts_with", "invariants", "lifecycle_scenarios") and neighbor not in visited:
+                if neighbor not in visited:
                     visited.add(neighbor)
                     queue.append((neighbor, depth + 1))
                     affected_fp_ids.add(neighbor)
-                    bfs_results.append((neighbor, rtype, depth + 1, desc))
+                    bfs_results.append((neighbor, rtype, depth + 1, desc, "outgoing"))
 
         if not affected_fp_ids:
             return []
@@ -522,7 +529,7 @@ class ImpactAnalysisAgent:
             "conflicts_with": "冲突",
         }
 
-        for fp_id_found, rtype, depth, desc in bfs_results:
+        for fp_id_found, rtype, depth, desc, direction in bfs_results:
             info = fp_map.get(fp_id_found, {})
             req_id = info.get("req_id", "")
             affected.append({
@@ -534,6 +541,8 @@ class ImpactAnalysisAgent:
                 "req_title": req_title_map.get(req_id, ""),
                 "depth": depth,
                 "description": desc,
+                # v3.1: 方向标记——incoming=谁依赖此FP（下游），outgoing=此FP依赖谁（被依赖功能点）
+                "direction": direction,
             })
 
         return affected

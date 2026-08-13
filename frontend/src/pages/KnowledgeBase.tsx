@@ -4,6 +4,7 @@ import { knowledge, requirements as reqApi, products as prodApi } from '../api/c
 import type { KbEntry, KbModelStatus, KbProject } from '../types'
 import { useProduct } from '../store/ProductContext'
 import LoadingSpinner from '../components/LoadingSpinner'
+import { STATUS_LABELS, priorityBadge, priorityLabel } from '../utils'
 
 function formatDateTime(iso?: string): string {
   if (!iso) return ''
@@ -605,13 +606,13 @@ export default function KnowledgeBase() {
                         <div className="flex items-center gap-2 flex-wrap">
                           <FileText className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--brand-500)' }} />
                           <p className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }}>{entry.title || entry.id}</p>
-                          {/* 状态徽标：v2.45 修复，归档状态用中性灰，避免绿色语义错误 */}
+                          {/* 状态徽标：v2.8.66 修复，使用 STATUS_LABELS 翻译英文枚举，避免显示 archived/active/draft 英文 */}
                           <span className="text-[10px] px-1.5 py-0.5 rounded font-medium" style={{ background: 'var(--background)', color: 'var(--foreground-tertiary)' }}>
-                            {entry.status || '已归档'}
+                            {STATUS_LABELS[entry.status as keyof typeof STATUS_LABELS] || entry.status || '已归档'}
                           </span>
                           {entry.priority && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded font-medium" style={{ background: 'var(--background)', color: 'var(--foreground-secondary)' }}>
-                              {entry.priority}
+                              {priorityLabel(entry.priority)}
                             </span>
                           )}
                           {/* 向量化状态徽标（从 kbEntryIndex 补字段后展示） */}

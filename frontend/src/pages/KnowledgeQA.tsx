@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import {
   MessageSquare, Send, Bot, User, CheckCircle2, Pencil,
   X, Loader2, BookOpen, FileText, TestTube, AlertCircle, History,
-  PenSquare, Save, CornerDownRight, Layers,
+  PenSquare, Save, CornerDownRight, Layers, ClipboardCheck,
 } from 'lucide-react'
 import { knowledgeQA, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
@@ -45,6 +46,10 @@ export default function KnowledgeQA() {
   const [correctText, setCorrectText] = useState('')
   const [correctNotes, setCorrectNotes] = useState('')
   const [archiveLoading, setArchiveLoading] = useState(false)
+  // v2.8.56: 纠正审核流程字段
+  const [correctModule, setCorrectModule] = useState('')
+  const [correctTargetType, setCorrectTargetType] = useState<'requirement' | 'functional_point'>('requirement')
+  const [correctTargetId, setCorrectTargetId] = useState('')
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -242,17 +247,26 @@ export default function KnowledgeQA() {
     setCorrectingId(msg.id)
     setCorrectText(msg.correctedContent || msg.content)
     setCorrectNotes(msg.correctionNotes || '')
+    // v2.8.56: 默认模块取当前选中的第一个模块；颗粒度默认 requirement
+    setCorrectModule(selectedModules[0] || '')
+    setCorrectTargetType('requirement')
+    setCorrectTargetId('')
   }
 
   const submitCorrect = async (msg: ChatMessage) => {
     if (!msg.recordId || !correctText.trim()) return
     try {
-      await knowledgeQA.correct(msg.recordId, correctText.trim(), correctNotes.trim())
+      await knowledgeQA.correct(msg.recordId, correctText.trim(), correctNotes.trim(), {
+        correction_module: correctModule,
+        correction_target_type: correctTargetType,
+        correction_target_id: correctTargetId,
+      })
       setMessages(prev => prev.map(m => m.id === msg.id ? {
         ...m, isCorrected: true, correctedContent: correctText.trim(), correctionNotes: correctNotes.trim(),
       } : m))
       setCorrectingId(null)
-    } catch (e: any) { alert('纠错保存失败: ' + (e?.message || '')) }
+      alert('纠错已提交审核，请在「纠正审核」页面查看审核进度')
+    } catch (e: any) { alert('纠错提交失败: ' + (e?.message || '')) }
   }
 
   const cancelStreaming = () => {
@@ -272,9 +286,14 @@ export default function KnowledgeQA() {
           <h1 className="page-title flex items-center gap-2"><MessageSquare className="w-5 h-5" style={{ color: 'var(--brand-500)' }} /> 知识问答</h1>
           <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>基于知识库的智能问答 — 输入问题获取 AI 分析</p>
         </div>
-        <button onClick={() => { setShowHistory(true); loadHistory(1) }} className="btn-secondary text-sm">
-          <History className="w-4 h-4" /> 问答历史
-        </button>
+        <div className="flex items-center gap-2">
+          <Link to="/corrections" className="btn-secondary text-sm flex items-center gap-1.5">
+            <ClipboardCheck className="w-4 h-4" /> 纠正审核
+          </Link>
+          <button onClick={() => { setShowHistory(true); loadHistory(1) }} className="btn-secondary text-sm">
+            <History className="w-4 h-4" /> 问答历史
+          </button>
+        </div>
       </div>
 
       {/* 模块多选 chips — 限定问答范围 */}
@@ -497,15 +516,62 @@ export default function KnowledgeQA() {
             <div className="flex items-center gap-2 mb-4">
               <PenSquare className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
               <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>纠错回答</h2>
+              <span className="text-xs px-2 py-0.5 rounded ml-auto"
+                style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }}>
+                提交后进入审核
+              </span>
             </div>
             <textarea value={correctText} onChange={e => setCorrectText(e.target.value)}
               className="w-full input-field text-sm min-h-[150px]" />
             <input value={correctNotes} onChange={e => setCorrectNotes(e.target.value)}
               className="w-full input-field text-sm mt-2" placeholder="纠错说明（可选）" />
+
+            {/* v2.8.56: 颗粒度选择 */}
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs mb-1 block" style={{ color: 'var(--foreground-tertiary)' }}>
+                  纠正颗粒度
+                </label>
+                <select
+                  value={correctTargetType}
+                  onChange={e => setCorrectTargetType(e.target.value as 'requirement' | 'functional_point')}
+                  className="w-full input-field text-sm"
+                >
+                  <option value="requirement">整篇需求</option>
+                  <option value="functional_point">单个功能点</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs mb-1 block" style={{ color: 'var(--foreground-tertiary)' }}>
+                  关联模块
+                </label>
+                <input
+                  value={correctModule}
+                  onChange={e => setCorrectModule(e.target.value)}
+                  className="w-full input-field text-sm"
+                  placeholder="模块名（用于按模块筛选审核）"
+                  list="module-list-correct"
+                />
+                <datalist id="module-list-correct">
+                  {availableModules.map(m => (
+                    <option key={m.id} value={m.name}>{m.name}</option>
+                  ))}
+                </datalist>
+              </div>
+            </div>
+            {correctTargetType === 'functional_point' && (
+              <input
+                value={correctTargetId}
+                onChange={e => setCorrectTargetId(e.target.value)}
+                className="w-full input-field text-sm mt-2"
+                placeholder="功能点 ID（FP-xxx，纠正后将替换原 FP 向量）"
+              />
+            )}
+
             <div className="flex justify-end gap-3 mt-4">
               <button onClick={() => setCorrectingId(null)} className="btn-secondary text-sm">取消</button>
               <button onClick={() => submitCorrect(messages.find(m => m.id === correctingId)!)} disabled={!correctText.trim()}
-                className="btn-primary text-sm"><Save className="w-4 h-4" /> 保存纠错</button>
+                className="btn-primary text-sm"><Save className="w-4 h-4" /> 提交审核</button>
             </div>
           </div>
         </div>

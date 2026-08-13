@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Plus, Trash2, FolderOpen, Loader2, Edit3, Save, X, Search, FileText,
@@ -24,7 +24,7 @@ function formatDateOnly(iso: string | undefined | null): string {
 }
 
 // 项目状态标签配置（二状态：active → archived）
-// v2.53: 对齐设计稿配色 — 活跃使用 emerald 绿色系，归档使用 slate 灰色系
+// v2.8.53: 对齐设计稿配色 — 活跃使用 emerald 绿色系，归档使用 slate 灰色系
 const PROJECT_STATUS_STYLES: Record<string, { label: string; bg: string; text: string; iconBg: string; iconColor: string }> = {
   active: { label: '活跃', bg: 'bg-emerald-50', text: 'text-emerald-700', iconBg: 'bg-blue-50', iconColor: 'text-blue-500' },
   archived: { label: '已归档', bg: 'bg-slate-100', text: 'text-slate-500', iconBg: 'bg-slate-100', iconColor: 'text-slate-400' },
@@ -116,7 +116,9 @@ function ArchiveModal({ projId, projName, onClose, onArchived }: {
   const handleArchive = async () => {
     setArchiving(true); setError('')
     try {
-      await prodApi.archiveProject(projId, goLiveDate, changeSummary)
+      const res = await prodApi.archiveProject(projId, goLiveDate, changeSummary)
+      // v2.8.58: 后端改为 Celery 异步派发，归档立即返回，不再阻塞
+      // 异步模式下向量化在后台进行，vectorization_status=pending 由 Celery 回写
       onArchived()
     } catch (e: any) {
       setError(e.message || '归档失败')
@@ -206,7 +208,7 @@ export default function ProjectManagementPage() {
   const [reactivating, setReactivating] = useState<string | null>(null)
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'warning'; msg: string } | null>(null)
 
-  // v2.52: 条件筛选
+  // v2.8.52: 条件筛选
   const [filterProjStatus, setFilterProjStatus] = useState('')   // 项目状态: ''/active/archived
   const [filterReqStatus, setFilterReqStatus] = useState('')     // 需求状态: ''/analyzing/draft/pending_review/confirmed/archived
   const [filterReqPriority, setFilterReqPriority] = useState('') // 需求优先级: ''/P0/P1/P2/P3
@@ -219,6 +221,9 @@ export default function ProjectManagementPage() {
   const [loadingReqs, setLoadingReqs] = useState<Set<string>>(new Set())
   // 搜索模式：匹配需求的项目 ID 集合（用于在搜索时额外显示项目名不匹配但需求匹配的项目）
   const [searchMatchedProjectIds, setSearchMatchedProjectIds] = useState<Set<string> | null>(null)
+  // v2.8.57: analyzing 需求的实时任务进度（req_id → { progress, phase, message }）
+  const [reqTaskProgress, setReqTaskProgress] = useState<Record<string, { progress: number; phase: string; message: string }>>({})
+  const taskProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // 上传需求弹窗状态
   const [showUpload, setShowUpload] = useState(false)
@@ -277,12 +282,13 @@ export default function ProjectManagementPage() {
       const projs = await prodApi.listProjects(pid)
       setProjects(p => ({ ...p, [pid]: projs || [] }))
     } catch (e: any) {
-      // v2.45 修复：列表加载失败时弹出 alert 提示，避免用户误以为"无项目"
-      alert('加载项目列表失败：' + (e?.message || '网络错误'))
+      // v2.45 修复：列表加载失败时弹出 alert 提示，避免用户误以为"无项目"；
+      // 导航导致的主动 abort 属正常取消，不弹窗
+      if (!e?._aborted) alert('加载项目列表失败：' + (e?.message || '网络错误'))
     } finally { setLoading(false) }
   }
 
-  // v2.52 加载项目下的需求列表（带搜索 + 状态/优先级过滤）
+  // v2.8.52 加载项目下的需求列表（带搜索 + 状态/优先级过滤）
   const loadProjectReqs = useCallback(async (projectId: string, keyword?: string, reqStatus?: string, reqPriority?: string) => {
     setLoadingReqs(prev => new Set(prev).add(projectId))
     try {
@@ -332,13 +338,58 @@ export default function ProjectManagementPage() {
     return () => { cancelled = true; clearTimeout(t) }
   }, [search, activeProductId, filterReqStatus, filterReqPriority])
 
-  // v2.52 搜索/筛选变化时，重新加载已展开项目的需求
+  // v2.8.52 搜索/筛选变化时，重新加载已展开项目的需求
   useEffect(() => {
     if (expandedIds.size === 0) return
     for (const pid of expandedIds) {
       loadProjectReqs(pid, search.trim() || undefined, filterReqStatus || undefined, filterReqPriority || undefined)
     }
   }, [search, filterReqStatus, filterReqPriority])
+
+  // v2.8.57: 轮询 analyzing 需求的实时任务进度，展示迷你进度条
+  useEffect(() => {
+    if (taskProgressTimerRef.current) {
+      clearInterval(taskProgressTimerRef.current)
+      taskProgressTimerRef.current = null
+    }
+    // 收集所有展开项目中的 analyzing 需求 ID
+    const analyzingReqIds: string[] = []
+    for (const pid of expandedIds) {
+      const reqs = projectReqs[pid] || []
+      for (const r of reqs) {
+        if (r.status === 'analyzing') analyzingReqIds.push(r.id)
+      }
+    }
+    if (analyzingReqIds.length === 0) {
+      setReqTaskProgress({})
+      return
+    }
+    // 立即查询一次
+    const pollOnce = async () => {
+      const updates: Record<string, { progress: number; phase: string; message: string }> = {}
+      await Promise.all(analyzingReqIds.map(async (rid) => {
+        try {
+          const task = await reqApi.getTaskByReq(rid)
+          if (task && (task.status === 'running' || task.status === 'pending')) {
+            updates[rid] = {
+              progress: task.progress || 0,
+              phase: task.phase || '',
+              message: task.message || '',
+            }
+          }
+        } catch { /* 静默失败 */ }
+      }))
+      setReqTaskProgress(updates)
+    }
+    pollOnce()
+    taskProgressTimerRef.current = setInterval(pollOnce, 3000)
+    return () => {
+      if (taskProgressTimerRef.current) {
+        clearInterval(taskProgressTimerRef.current)
+        taskProgressTimerRef.current = null
+      }
+    }
+  }, [expandedIds, projectReqs])
 
   const handleAdd = async (name: string, desc: string, version: string) => {
     if (!activeProductId || !name.trim()) return
@@ -378,7 +429,7 @@ export default function ProjectManagementPage() {
     } catch (e: any) { setToast({ type: 'error', msg: '恢复失败: ' + e.message }) } finally { setReactivating(null) }
   }
 
-  // v2.52: 需求删除（在项目管理页面直接操作）
+  // v2.8.52: 需求删除（在项目管理页面直接操作）
   const handleDeleteReq = async (reqId: string, reqTitle: string, projectId: string) => {
     if (!confirm(`确认删除需求「${reqTitle}」？此操作不可恢复，关联的测试用例也将被清除。`)) return
     try {
@@ -408,7 +459,7 @@ export default function ProjectManagementPage() {
     })
   }
 
-  // v2.52 统一搜索 + 条件筛选
+  // v2.8.52 统一搜索 + 条件筛选
   const filtered = useMemo(() => {
     const all = projects[activeProductId || ''] || []
     let result = all
@@ -487,7 +538,7 @@ export default function ProjectManagementPage() {
                 placeholder="搜索项目名称或需求标题..."
               />
             </div>
-            {/* v2.52: 项目状态筛选 */}
+            {/* v2.8.52: 项目状态筛选 */}
             <select
               value={filterProjStatus}
               onChange={e => setFilterProjStatus(e.target.value)}
@@ -498,7 +549,7 @@ export default function ProjectManagementPage() {
               <option value="active">活跃</option>
               <option value="archived">已归档</option>
             </select>
-            {/* v2.52: 需求状态筛选 */}
+            {/* v2.8.52: 需求状态筛选 */}
             <select
               value={filterReqStatus}
               onChange={e => setFilterReqStatus(e.target.value)}
@@ -512,7 +563,7 @@ export default function ProjectManagementPage() {
               <option value="confirmed">已确认</option>
               <option value="archived">已归档</option>
             </select>
-            {/* v2.52: 需求优先级筛选 */}
+            {/* v2.8.52: 需求优先级筛选 */}
             <select
               value={filterReqPriority}
               onChange={e => setFilterReqPriority(e.target.value)}
@@ -562,7 +613,7 @@ export default function ProjectManagementPage() {
                       background: isMatchedByReq ? 'var(--state-warning-surface)' : 'var(--background)',
                     }}
                   >
-                    {/* 项目头部（可点击展开） v2.53: 对齐设计稿布局 */}
+                    {/* 项目头部（可点击展开） v2.8.53: 对齐设计稿布局 */}
                     <div className="flex items-center justify-between px-4 py-3.5 group">
                       {/* 左侧：折叠按钮 + 图标 + 信息 */}
                       <div className="flex items-start gap-2.5 min-w-0 flex-1 cursor-pointer" onClick={() => toggleExpand(proj.id)}>
@@ -572,7 +623,7 @@ export default function ProjectManagementPage() {
                         ) : (
                           <ChevronRight className="w-4 h-4 flex-shrink-0 mt-0.5" style={{ color: 'var(--foreground-tertiary)' }} />
                         )}
-                        {/* 项目图标 v2.53: 对齐设计稿 — 活跃使用蓝色背景，归档使用灰色背景 */}
+                        {/* 项目图标 v2.8.53: 对齐设计稿 — 活跃使用蓝色背景，归档使用灰色背景 */}
                         <div
                           className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 ${statusStyle.iconBg}`}
                         >
@@ -603,14 +654,14 @@ export default function ProjectManagementPage() {
                         </div>
                       </div>
 
-                      {/* 中间：状态徽章 v2.53: 独立于项目信息显示 */}
+                      {/* 中间：状态徽章 v2.8.53: 独立于项目信息显示 */}
                       <div className="flex items-center flex-shrink-0 mr-3">
                         <span className={`text-[11px] px-2 py-0.5 font-medium ${statusStyle.bg} ${statusStyle.text}`} style={{ borderRadius: '9999px' }}>
                           {statusStyle.label}
                         </span>
                       </div>
 
-                      {/* 右侧：操作按钮 v2.53: 默认半透明 + hover 完全显示 */}
+                      {/* 右侧：操作按钮 v2.8.53: 默认半透明 + hover 完全显示 */}
                       <div className="flex items-center gap-0.5 flex-shrink-0 opacity-[0.6] transition-opacity duration-200 group-hover:opacity-100">
                         {/* 上传需求文档：直接打开内嵌上传弹窗，不再跳转 */}
                         <button
@@ -666,7 +717,7 @@ export default function ProjectManagementPage() {
                       </div>
                     </div>
 
-                    {/* v2.52 折叠面板内容：项目下的需求列表 — 直接嵌入卡片，border-t 分隔 */}
+                    {/* v2.8.52 折叠面板内容：项目下的需求列表 — 直接嵌入卡片，border-t 分隔 */}
                     {isExpanded && (
                       <div className="overflow-hidden" style={{ borderTop: '1px solid var(--border)', borderBottomLeftRadius: 'calc(var(--radius) * 0.6)', borderBottomRightRadius: 'calc(var(--radius) * 0.6)' }}>
                         {isLoadingReqs ? (
@@ -730,7 +781,35 @@ export default function ProjectManagementPage() {
                                     >
                                       {STATUS_LABELS[req.status] || req.status}
                                       {req.status === 'draft' && <MessageCircle className="w-3 h-3 ml-0.5 animate-pulse" />}
+                                      {req.status === 'analyzing' && reqTaskProgress[req.id] && (
+                                        <Loader2 className="w-3 h-3 ml-0.5 animate-spin" />
+                                      )}
                                     </span>
+                                    {/* v2.8.57: analyzing 状态展示迷你进度条 */}
+                                    {req.status === 'analyzing' && reqTaskProgress[req.id] && (() => {
+                                      const tp = reqTaskProgress[req.id]
+                                      const phaseLabels: Record<string, string> = {
+                                        upload: '解析中', parse: '解析中', kb_search: '检索知识库',
+                                        clarify: '澄清中', regenerate: '保存中', recheck: '验证中',
+                                        done: '完成', '': '处理中',
+                                      }
+                                      return (
+                                        <div className="mt-1.5 flex items-center gap-1.5" style={{ minWidth: 120 }}>
+                                          <div
+                                            className="rounded-full overflow-hidden flex-shrink-0"
+                                            style={{ width: 60, height: 3, background: 'var(--background-muted)' }}
+                                          >
+                                            <div
+                                              className="h-full rounded-full transition-all duration-500"
+                                              style={{ width: `${tp.progress}%`, background: 'var(--brand-500)' }}
+                                            />
+                                          </div>
+                                          <span className="text-[10px] whitespace-nowrap" style={{ color: 'var(--foreground-muted)' }}>
+                                            {tp.progress}% · {phaseLabels[tp.phase] || tp.phase}
+                                          </span>
+                                        </div>
+                                      )
+                                    })()}
                                   </td>
                                   <td className="px-4 py-2.5 text-right">
                                     <span className="text-xs tabular-nums" style={{ color: 'var(--foreground-tertiary)' }}>{formatDate(req.created_at)}</span>

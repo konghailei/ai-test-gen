@@ -37,6 +37,7 @@ from app.models.api_schemas import (
     KbQACharRequest,
     KbQACorrectRequest,
     KbQAArchiveRequest,
+    KbQAReviewRequest,
     KbQARecord,
 )
 from app.utils.id_gen import gen_requirement_id, gen_test_case_id
@@ -143,6 +144,15 @@ def _record_to_dict(record: KnowledgeQA) -> dict:
         "conversation_history": record.conversation_history,
         "created_at": record.created_at.isoformat() if record.created_at else "",
         "updated_at": record.updated_at.isoformat() if record.updated_at else "",
+        # v2.8.56: 审核流程字段
+        "correction_status": record.correction_status,
+        "correction_module": record.correction_module,
+        "correction_target_type": record.correction_target_type,
+        "correction_target_id": record.correction_target_id,
+        "reviewed_by": record.reviewed_by,
+        "reviewed_at": record.reviewed_at.isoformat() if record.reviewed_at else None,
+        "review_notes": record.review_notes,
+        "product_id": record.product_id,
     }
 
 
@@ -254,14 +264,11 @@ async def _stream_qa_answer(
             - error: str       检索失败时的错误信息
             - total: int       检索到的来源数
     """
-    # 按 go_live_date 降序 + 相似度降序排序（上线日期靠后的优先）
-    kb_sources.sort(
-        key=lambda x: (
-            (x.get("metadata", {}) or {}).get("go_live_date", ""),
-            x.get("similarity", 0),
-        ),
-        reverse=True,
-    )
+    # v2.8.55: 移除应用层 go_live_date 覆盖排序
+    # 原因：hybrid_search 已在 RRF 融合阶段应用时间衰减因子（_apply_time_decay），
+    #       相关性主导 + 时间辅助，应用层覆盖排序会破坏 CrossEncoder 精排结果。
+    #       知识问答与 ClarifyAgent 保持一致，直接使用 hybrid_search 返回的排序。
+    # kb_sources 已按 RRF + 时间衰减 + CrossEncoder 排序，直接截取 top 8
     kb_sources = kb_sources[:8]
 
     # 丰富来源信息（查询产品名+标题），同时过滤孤儿向量
@@ -528,16 +535,23 @@ async def kqa_correct(
     req: KbQACorrectRequest,
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
-    """提交人工纠错。
+    """提交人工纠错（v2.8.56：改为审核流程，纠正后状态为 pending_review）。
 
-    用户对 AI 的回答进行修改和补充。
+    用户对 AI 的回答进行修改和补充，提交后进入审核状态。
+    审核通过后才归档到向量库，避免错误纠正污染知识库。
 
     Args:
-        req: 纠错请求（含 id / corrected_answer / correction_notes）
+        req: 纠错请求（含 id / corrected_answer / correction_notes / correction_module / correction_target_*）
         session: 数据库会话
 
     Returns:
         ApiResponse: data 含更新后的记录信息
+
+    流程:
+        1. 用户提交纠错 → correction_status=pending_review
+        2. 审核员在纠正审核列表查看（支持按模块筛选）
+        3. 审核通过 → correction_status=approved → 自动归档到向量库
+        4. 审核拒绝 → correction_status=rejected → 不进向量库
     """
     result = await session.execute(select(KnowledgeQA).where(KnowledgeQA.id == req.id))
     record = result.scalar_one_or_none()
@@ -547,15 +561,23 @@ async def kqa_correct(
     try:
         record.corrected_answer = req.corrected_answer
         record.correction_notes = req.correction_notes
+        # v2.8.56: 审核流程字段
+        record.correction_status = "pending_review"
+        record.correction_module = req.correction_module
+        record.correction_target_type = req.correction_target_type
+        record.correction_target_id = req.correction_target_id
         record.updated_at = datetime.now(timezone.utc)
-        logger.info("[API/knowledge-qa] 纠错提交: {} -> {}chars", req.id, len(req.corrected_answer))
+        logger.info(
+            "[API/knowledge-qa] 纠错提交审核: {} -> {}chars, module={}, target_type={}",
+            req.id, len(req.corrected_answer), req.correction_module, req.correction_target_type,
+        )
     except Exception as e:
         logger.error("[API/knowledge-qa] 保存纠错失败: {}", str(e)[:200])
         raise HTTPException(status_code=500, detail="保存纠错失败，请稍后重试")
 
     return ApiResponse(
         success=True,
-        message="纠错已保存",
+        message="纠错已提交审核，等待审核通过后归档到知识库",
         data=_record_to_dict(record),
     )
 
@@ -816,3 +838,288 @@ async def kqa_delete(
         message="已删除",
         data={"deleted": True, "record_id": record_id},
     )
+
+
+# ============================================================================
+# 7. 纠正审核列表（v2.8.56 新增）
+# ============================================================================
+
+@router.get("/corrections", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def kqa_corrections(
+    status: str = Query(default="pending_review", description="纠正状态筛选：pending_review/approved/rejected/all"),
+    module: str = Query(default="", description="按模块筛选（精确匹配 correction_module）"),
+    product_id: str = Query(default="", description="按产品筛选"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """获取纠正审核列表（支持按模块、状态、产品筛选）。
+
+    Args:
+        status: 纠正状态（pending_review/approved/rejected/all）
+        module: 模块名精确匹配
+        product_id: 产品 ID 筛选
+        page: 页码
+        page_size: 每页数量
+        session: 数据库会话
+
+    Returns:
+        ApiResponse: data 含 items / total / page / page_size
+    """
+    # 构建查询条件
+    conditions = []
+    if status != "all":
+        conditions.append(KnowledgeQA.correction_status == status)
+    if module:
+        conditions.append(KnowledgeQA.correction_module == module)
+    if product_id:
+        conditions.append(KnowledgeQA.product_id == product_id)
+
+    # 总数查询
+    count_stmt = select(func.count(KnowledgeQA.id))
+    for cond in conditions:
+        count_stmt = count_stmt.where(cond)
+    total = (await session.execute(count_stmt)).scalar() or 0
+
+    # 分页查询
+    stmt = select(KnowledgeQA)
+    for cond in conditions:
+        stmt = stmt.where(cond)
+    stmt = (
+        stmt.order_by(KnowledgeQA.updated_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    result = await session.execute(stmt)
+    records = result.scalars().all()
+
+    items = [_record_to_dict(r) for r in records]
+
+    return ApiResponse(
+        success=True,
+        message="ok",
+        data={
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        },
+    )
+
+
+# ============================================================================
+# 8. 审核通过：自动归档到向量库（v2.8.56 新增）
+# ============================================================================
+
+@router.post("/corrections/{record_id}/approve", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def kqa_approve_correction(
+    record_id: str,
+    req: KbQAReviewRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> ApiResponse:
+    """审核通过纠正内容，自动归档到向量库。
+
+    审核通过后：
+    - requirement 颗粒度：调用 /archive 逻辑归档为新需求
+    - functional_point 颗粒度：定位原 FP 向量，删除后重新嵌入纠正内容
+      实现"部分纠正"，不影响其他正确 FP 的向量
+
+    Args:
+        record_id: 问答记录 ID
+        req: 审核请求（含 review_notes）
+        session: 数据库会话
+        current_user: 当前用户（来自 Depends）
+
+    Returns:
+        ApiResponse: data 含 archived_id / archived_type / correction_target_type
+    """
+    result = await session.execute(select(KnowledgeQA).where(KnowledgeQA.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail=f"问答记录不存在: {record_id}")
+
+    if record.correction_status != "pending_review":
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前状态不允许审核：correction_status={record.correction_status}（仅 pending_review 可审核）"
+        )
+
+    # 当前用户名（get_current_user 返回 CurrentUser 对象）
+    username = getattr(current_user, "username", "") or "system"
+
+    final_content = record.corrected_answer or record.answer
+    archived_id = ""
+    archived_type = "requirement"
+    real_product_id = record.product_id or "PROD-DEFAULT"
+    archived_now = datetime.now(timezone.utc)
+
+    try:
+        if record.correction_target_type == "functional_point" and record.correction_target_id:
+            # ===== FP 级别部分纠正 =====
+            # 定位原 FP 向量，删除后重新嵌入
+            fp_id = record.correction_target_id
+            logger.info(
+                "[API/knowledge-qa] FP 级别部分纠正: record={}, fp_id={}",
+                record_id, fp_id,
+            )
+
+            # 删除原 FP 向量
+            try:
+                await asyncio.to_thread(vector_store.delete_requirement, fp_id)
+                logger.info("[API/knowledge-qa] 已删除原 FP 向量: {}", fp_id)
+            except Exception as e:
+                logger.warning("[API/knowledge-qa] 删除原 FP 向量失败（可能不存在）: {}", str(e)[:100])
+
+            # 构造纠正后的 FP SRR
+            fp_srr = {
+                "requirement": {
+                    "title": f"知识问答纠正 - FP {fp_id}",
+                    "summary": final_content[:500],
+                    "product_id": real_product_id,
+                },
+                "flows": {},
+                "business_rules": [],
+                "boundary_conditions": [],
+            }
+
+            # 重新嵌入
+            archive_meta = {
+                "title": f"知识问答纠正 - FP {fp_id}",
+                "type": "functional_point",
+                "doc_type": "functional_point",
+                "fp_id": fp_id,
+                "qa_id": record_id,
+                "product_id": real_product_id,
+                "status": "archived",
+                "corrected_by": "knowledge_qa_review",
+                "archived_at": archived_now.isoformat(),
+            }
+            await asyncio.to_thread(
+                vector_store.add_requirement, fp_id, fp_srr, metadata=archive_meta
+            )
+            archived_id = fp_id
+            archived_type = "functional_point"
+
+        else:
+            # ===== 需求级别完整纠正（复用 /archive 逻辑）=====
+            archived_id = gen_requirement_id()
+            title = f"知识问答纠正 - {record.question[:50]}"
+            new_req = Requirement(
+                id=archived_id,
+                product_id=real_product_id,
+                title=title,
+                priority="P2",
+                status="archived",
+                srr_json={
+                    "requirement": {
+                        "title": title,
+                        "summary": final_content[:500],
+                        "product_id": real_product_id,
+                    },
+                    "flows": {},
+                    "business_rules": [],
+                    "boundary_conditions": [],
+                },
+                raw_text=final_content,
+                source_type="knowledge_qa",
+                created_by="system",
+                created_at=archived_now,
+                updated_at=archived_now,
+                archived_at=archived_now,
+            )
+            session.add(new_req)
+
+            archive_meta = {
+                "title": title,
+                "type": "knowledge_qa",
+                "qa_id": record_id,
+                "product_id": real_product_id,
+                "status": "archived",
+                "corrected_by": "knowledge_qa_review",
+                "archived_at": archived_now.isoformat(),
+            }
+            await asyncio.to_thread(
+                vector_store.add_requirement, archived_id, new_req.srr_json, metadata=archive_meta
+            )
+            archived_type = "requirement"
+
+        # 更新问答记录状态
+        record.correction_status = "approved"
+        record.archived = True
+        record.archived_type = archived_type
+        record.archived_id = archived_id
+        record.reviewed_by = username
+        record.reviewed_at = archived_now
+        record.review_notes = req.review_notes
+        record.updated_at = archived_now
+
+        logger.info(
+            "[API/knowledge-qa] 审核通过并归档: record={}, archived_id={}, type={}",
+            record_id, archived_id, archived_type,
+        )
+
+    except Exception as e:
+        logger.error("[API/knowledge-qa] 审核通过失败: {}", str(e)[:200])
+        raise HTTPException(status_code=500, detail=f"审核归档失败: {str(e)[:100]}")
+
+    return ApiResponse(
+        success=True,
+        message=f"审核通过，已归档到知识库（{archived_type}）",
+        data={
+            "archived_id": archived_id,
+            "archived_type": archived_type,
+            "correction_target_type": record.correction_target_type,
+        },
+    )
+
+
+# ============================================================================
+# 9. 审核拒绝（v2.8.56 新增）
+# ============================================================================
+
+@router.post("/corrections/{record_id}/reject", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def kqa_reject_correction(
+    record_id: str,
+    req: KbQAReviewRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+) -> ApiResponse:
+    """审核拒绝纠正内容，不归档到向量库。
+
+    Args:
+        record_id: 问答记录 ID
+        req: 审核请求（含 review_notes）
+        session: 数据库会话
+        current_user: 当前用户（来自 Depends）
+
+    Returns:
+        ApiResponse: data 含 correction_status
+    """
+    result = await session.execute(select(KnowledgeQA).where(KnowledgeQA.id == record_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail=f"问答记录不存在: {record_id}")
+
+    if record.correction_status != "pending_review":
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前状态不允许审核：correction_status={record.correction_status}（仅 pending_review 可审核）"
+        )
+
+    username = getattr(current_user, "username", "") or "system"
+
+    record.correction_status = "rejected"
+    record.reviewed_by = username
+    record.reviewed_at = datetime.now(timezone.utc)
+    record.review_notes = req.review_notes
+    record.updated_at = datetime.now(timezone.utc)
+
+    logger.info("[API/knowledge-qa] 审核拒绝: record={}, notes={}", record_id, req.review_notes[:100])
+
+    return ApiResponse(
+        success=True,
+        message="已拒绝，纠正内容不会进入知识库",
+        data={"correction_status": "rejected"},
+    )
+

@@ -78,7 +78,7 @@ Level 3: 细化后的 SRR v2 (进入生成流程)
 
 ### 2.2 Level 2: 结构化需求 JSON (SRR v2.48) ⭐
 
-> **v2.53 文档同步**：本节示例与字段说明已对齐代码实现（[backend/app/models/srr.py](file:///d:/git_down/ai-test-gen/backend/app/models/srr.py) 的 `SRR` 类），反映 v2.22/v2.32/v2.34/v2.40/v2.48 共 8 个版本的演进。早期 v2.1 示例中的 `boundary_conditions`/`data_constraints`/`business_rules`/`acceptance_criteria`/`test_points_hint` 等顶层字段已下沉或合并，详见 §2.2.3 版本变更记录。
+> **v2.8.53 文档同步**：本节示例与字段说明已对齐代码实现（[backend/app/models/srr.py](file:///d:/git_down/ai-test-gen/backend/app/models/srr.py) 的 `SRR` 类），反映 v2.22/v2.32/v2.34/v2.40/v2.48 共 8 个版本的演进。早期 v2.1 示例中的 `boundary_conditions`/`data_constraints`/`business_rules`/`acceptance_criteria`/`test_points_hint` 等顶层字段已下沉或合并，详见 §2.2.3 版本变更记录。
 
 ```json
 {
@@ -242,7 +242,7 @@ LLM 原始输出
 
 ### 2.2.3 SRR 版本变更记录（v2.22 ~ v2.48）⭐
 
-> **v2.53 文档同步**：以下 8 个版本的变更此前未在本文档记录，导致文档与代码实现（[srr.py](file:///d:/git_down/ai-test-gen/backend/app/models/srr.py)）长期存在偏差。本小节补齐变更记录，作为字段演进的权威参考。
+> **v2.8.53 文档同步**：以下 8 个版本的变更此前未在本文档记录，导致文档与代码实现（[srr.py](file:///d:/git_down/ai-test-gen/backend/app/models/srr.py)）长期存在偏差。本小节补齐变更记录，作为字段演进的权威参考。
 
 | 版本 | 变更类型 | 字段/逻辑 | 说明 |
 |------|---------|----------|------|

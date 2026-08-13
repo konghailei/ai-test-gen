@@ -46,7 +46,7 @@ class MultiDocUploadRequest(BaseModel):
 
 class KBAccessLogEntry(BaseModel):
     """KB 访问日志条目（v2.1 新增）。"""
-    action: str = Field(..., description="操作类型：search_similar_requirements / kb_augment / check_kb_status")
+    action: str = Field(..., description="操作类型：kb_query / kb_unresolved / kb_augment / check_kb_status")
     query: str | None = Field(default=None, description="检索语句")
     result_count: int | None = Field(default=None, description="检索返回数量")
     top_similarity: float | None = Field(default=None, description="最高相似度")
@@ -280,10 +280,16 @@ class KbQACharRequest(BaseModel):
 
 
 class KbQACorrectRequest(BaseModel):
-    """知识问答纠错请求。"""
+    """知识问答纠错请求（v2.8.56：提交审核流程）。"""
     id: str = Field(..., description="问答记录 ID")
     corrected_answer: str = Field(..., min_length=1, max_length=50000, description="纠错后的回答")
     correction_notes: str = Field(default="", max_length=2000, description="纠错说明")
+    # v2.8.56: 审核流程字段
+    correction_module: str = Field(default="", max_length=128, description="纠正关联的模块名（用于按模块筛选审核列表）")
+    correction_target_type: Literal["requirement", "functional_point"] = Field(
+        default="requirement", description="纠正目标颗粒度：整篇需求 / 单个功能点"
+    )
+    correction_target_id: str = Field(default="", max_length=64, description="纠正目标 ID（FP_ID 或 req_id）")
 
 
 class KbQAArchiveRequest(BaseModel):
@@ -292,6 +298,12 @@ class KbQAArchiveRequest(BaseModel):
     archive_type: Literal["requirement", "test_case"] = Field(default="requirement", description="归档类型")
     title: str = Field(default="", max_length=512, description="归档标题（可选，留空自动生成）")
     content: str = Field(..., min_length=1, max_length=50000, description="归档内容")
+
+
+class KbQAReviewRequest(BaseModel):
+    """v2.8.56: 纠正审核请求。"""
+    id: str = Field(..., description="问答记录 ID")
+    review_notes: str = Field(default="", max_length=2000, description="审核意见")
 
 
 class KbQARecord(BaseModel):
@@ -307,3 +319,11 @@ class KbQARecord(BaseModel):
     reference_sources: list[dict] = Field(default_factory=list)
     created_at: str
     updated_at: str
+    # v2.8.56: 审核流程字段
+    correction_status: str = "none"
+    correction_module: str = ""
+    correction_target_type: str = "requirement"
+    correction_target_id: str = ""
+    reviewed_by: str = ""
+    reviewed_at: str | None = None
+    review_notes: str = ""

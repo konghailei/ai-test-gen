@@ -42,11 +42,10 @@ const PHASE_LABELS: Record<string, string> = {
   '': '初始化',
 }
 
-/** v2.24: kb_search 子阶段标签（区分 KB 检索 vs LLM 调用） */
+/** v2.24: kb_search 子阶段标签（区分 KB 检索 vs LLM 调用）
+ *  v2.8.59: 移除 kb_similar_search_ms 和 pg_enrich_ms（v2.8.55 已移除对应检索） */
 const KB_SUB_PHASE_LABELS: Record<string, string> = {
   kb_status_check_ms: 'KB 状态检查',
-  kb_similar_search_ms: '相似需求检索',
-  pg_enrich_ms: 'PG 关系增强',
   llm_kb_query_gen_ms: 'LLM 生成查询',
   kb_qa_ms: 'KB 问答查询',
   kb_apply_ms: 'KB 答案应用',

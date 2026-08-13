@@ -404,10 +404,17 @@ class ModuleDependency(Base):
 # ============================================================================
 
 class KnowledgeQA(Base):
-    """知识问答记录表（v2.4 新增）。
+    """知识问答记录表（v2.4 新增，v2.8.56 增加审核流程）。
 
     存储用户提问、AI 回答、人工纠错及归档状态。
     conversation_history 存储多轮对话记录。
+
+    v2.8.56 审核流程：
+        - /correct 提交纠正后 status=pending_review
+        - 审核通过后 status=approved，自动归档到向量库
+        - 审核拒绝后 status=rejected
+        - correction_module 用于按模块筛选审核列表
+        - correction_target_type 支持 requirement / functional_point 两种颗粒度
     """
     __tablename__ = "knowledge_qa"
 
@@ -427,9 +434,27 @@ class KnowledgeQA(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+    # v2.8.56: 纠正审核流程字段
+    # 纠正状态：none（未纠正）/ pending_review（待审核）/ approved（已通过）/ rejected（已拒绝）
+    correction_status: Mapped[str] = mapped_column(String(32), default="none", index=True)
+    # 纠正关联的模块名（用于按模块筛选审核列表，从问答上下文中提取或用户指定）
+    correction_module: Mapped[str] = mapped_column(String(128), default="", index=True)
+    # 纠正目标颗粒度：requirement（整篇需求）/ functional_point（单个功能点）
+    correction_target_type: Mapped[str] = mapped_column(String(32), default="requirement")
+    # 纠正目标 ID（functional_point 颗粒度时为 FP_ID，requirement 颗粒度时为 req_id）
+    correction_target_id: Mapped[str] = mapped_column(String(64), default="")
+    # 审核人
+    reviewed_by: Mapped[str] = mapped_column(String(64), default="")
+    # 审核时间
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 审核意见
+    review_notes: Mapped[str] = mapped_column(Text, default="")
+
     __table_args__ = (
         Index("idx_kqa_created_at", "created_at"),
         Index("idx_kqa_product", "product_id"),
+        Index("idx_kqa_correction_status", "correction_status"),
+        Index("idx_kqa_correction_module", "correction_module"),
     )
 
 
@@ -506,7 +531,7 @@ class AnalysisTask(Base):
 
 DEFAULT_MENUS = [
     "dashboard", "requirements", "generate", "testcases",
-    "dependency_graph", "knowledge", "knowledge_qa", "projects_modules",
+    "dependency_graph", "knowledge", "knowledge_qa", "correction_review", "projects_modules",
     "admin", "admin_dashboard", "admin_products", "admin_prompts", "admin_settings",
     "admin_users", "admin_roles", "admin_kb", "admin_logs",
 ]

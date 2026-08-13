@@ -1,7 +1,7 @@
 """一次性清理脚本：清理 Milvus 中遗留的需求与用例向量。
 
 背景：
-    v2.51 之前 delete_requirement / delete_test_case 未调用 flush，
+    v2.8.51 之前 delete_requirement / delete_test_case 未调用 flush，
     导致删除产品/项目/需求后向量遗留。此脚本对照 PostgreSQL 中现存
     的 product_id 列表，删除 Milvus 中所有不属于这些产品的向量。
 

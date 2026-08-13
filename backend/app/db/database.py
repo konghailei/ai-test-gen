@@ -122,6 +122,14 @@ async def init_db() -> None:
                 ("conversation_history", "JSON NOT NULL DEFAULT '[]'", "conversation_history"),
                 # 产品隔离字段（替代归档时硬编码的 PROD-DEFAULT）
                 ("product_id", "VARCHAR(64) DEFAULT 'PROD-DEFAULT'", "product_id"),
+                # v2.8.56: 纠正审核流程字段
+                ("correction_status", "VARCHAR(32) NOT NULL DEFAULT 'none'", "correction_status"),
+                ("correction_module", "VARCHAR(128) NOT NULL DEFAULT ''", "correction_module"),
+                ("correction_target_type", "VARCHAR(32) NOT NULL DEFAULT 'requirement'", "correction_target_type"),
+                ("correction_target_id", "VARCHAR(64) NOT NULL DEFAULT ''", "correction_target_id"),
+                ("reviewed_by", "VARCHAR(64) NOT NULL DEFAULT ''", "reviewed_by"),
+                ("reviewed_at", "TIMESTAMP WITH TIME ZONE", "reviewed_at"),
+                ("review_notes", "TEXT NOT NULL DEFAULT ''", "review_notes"),
             ],
             # v1.4: 功能点新表（Base.metadata.create_all 自动创建）
             "functional_points": [
@@ -146,7 +154,7 @@ async def init_db() -> None:
                 # v2.45 修复：version_pk 补外键约束，与 models.py 一致
                 ("version_pk", "INTEGER REFERENCES fp_dependency_versions(id) ON DELETE SET NULL", "version_pk"),
             ],
-            # v2.53 修复：fp_dependency_history 审计字段（v2.45 新增，存量库缺列导致归档 500）
+            # v2.8.53 修复：fp_dependency_history 审计字段（v2.45 新增，存量库缺列导致归档 500）
             # 场景：项目归档冻结依赖时写入 old_is_active/new_is_active/old_version_pk/new_version_pk，
             # 旧库未建这 4 列 -> INSERT 报 UndefinedColumnError -> 归档 500。
             "fp_dependency_history": [
@@ -248,6 +256,9 @@ async def init_db() -> None:
                 ("fp_dependencies", "idx_fp_dep_active", "is_active"),
                 ("fp_dependencies", "idx_fp_dep_version", "version_pk"),
                 ("fp_dependencies", "idx_fp_dep_review", "review_status"),
+                # v2.8.56: 知识问答纠正审核筛选索引
+                ("knowledge_qa", "idx_kqa_correction_status", "correction_status"),
+                ("knowledge_qa", "idx_kqa_correction_module", "correction_module"),
             ]
             for tbl, idx_name, cols in SEARCH_INDEXES:
                 if not inspector.has_table(tbl):
@@ -313,7 +324,7 @@ async def init_db() -> None:
                         logger.warning("DB 迁移: {}.{} BM25 设置失败（已跳过，不影响启动）: {}",
                                        table, vec_col, str(mig_e)[:120])
 
-                # v2.55 Bug C-1: 创建触发器，INSERT/UPDATE 时自动维护 search_vec
+                # v2.8.55 Bug C-1: 创建触发器，INSERT/UPDATE 时自动维护 search_vec
                 # 之前仅有一次性 UPDATE，后续新增/修改的数据 search_vec 为 NULL，BM25 检索失效
                 try:
                     sp_trig = conn_sync.begin_nested()

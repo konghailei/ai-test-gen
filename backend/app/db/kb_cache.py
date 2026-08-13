@@ -74,7 +74,7 @@ class KbCache:
         - top_k_bucket 分桶（如 10/20/40/80）：避免 top_k=11 与 top_k=12 各存一份缓存，控制缓存膨胀。
         """
         raw = f"{query}|{product_id}|{modules}|{doc_type}|{coll_type}|{status}|{top_k_bucket}"
-        # v2.55 Bug A-2: product_id 作为 key 前缀，支持按产品 SCAN 失效缓存
+        # v2.8.55 Bug A-2: product_id 作为 key 前缀，支持按产品 SCAN 失效缓存
         return f"kb_cache:{product_id}:{hashlib.md5(raw.encode()).hexdigest()}"
 
     @staticmethod
@@ -167,7 +167,7 @@ class KbCache:
                 logger.debug("[KbCache] Redis 写入失败: {}", str(e)[:80])
 
     async def invalidate_by_product(self, product_id: str) -> int:
-        """v2.55 Bug A-2: 按产品失效缓存。
+        """v2.8.55 Bug A-2: 按产品失效缓存。
 
         归档项目时调用，防止 KB augmentation 使用过期缓存（24h TTL 内）。
         返回失效的缓存条目数。

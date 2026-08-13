@@ -60,6 +60,9 @@ services:
         REDIS_PORT: 6379
         CELERY_BROKER_URL: redis://redis:6379/1
         CELERY_RESULT_BACKEND: redis://redis:6379/2
+        # v2.8.60 修复：补齐生产环境必需密钥（原缺失会导致 DEBUG=false 时启动失败）
+        APP_SECRET_KEY: ${APP_SECRET_KEY:-}
+        MASTER_KEY: ${MASTER_KEY:-}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]

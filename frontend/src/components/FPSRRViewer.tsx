@@ -7,7 +7,7 @@ import {
 import { requirements as reqApi, dependencyGraph, products as prodApi } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import type { FPItem } from '../types'
-import { brTypeLabel, fpTypeLabel, acTypeLabel, dataTypeLabel } from '../utils/labels'
+import { brTypeLabel, fpTypeLabel, dataTypeLabel } from '../utils/labels'
 import FieldEditor from '../components/FieldEditor'
 
 interface Props {

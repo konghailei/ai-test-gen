@@ -25,7 +25,7 @@ from typing import Any, NamedTuple
 class ParseResult(NamedTuple):
     """ReqAgent 解析结果（含 FP 提取产物）。
 
-    v2.52: 替代实例属性传递，消除单例并发污染。
+    v2.8.52: 替代实例属性传递，消除单例并发污染。
     """
     srr: dict                          # SRR JSON 字典
     fps: list[dict]                    # 功能点列表（新生成的）
@@ -67,7 +67,7 @@ class ReqAgent:
     ) -> ParseResult:
         """解析原始需求为 SRR JSON + FP 提取产物。
 
-        v2.52: 返回 ParseResult 替代实例属性，消除并发污染。
+        v2.8.52: 返回 ParseResult 替代实例属性，消除并发污染。
         实例属性（last_fps/last_fp_dependencies/interaction_srr）仍被填充，
         保持向后兼容。
 
@@ -234,7 +234,7 @@ class ReqAgent:
     ) -> ParseResult:
         """解析实现（内部）。
 
-        v2.52: 返回 ParseResult 元组，消除实例属性并发污染。
+        v2.8.52: 返回 ParseResult 元组，消除实例属性并发污染。
         """
         # 1. 构建 Prompt
         user_prompt = prompts.build_user_prompt(raw_requirement, product_id, product_name)
@@ -349,7 +349,7 @@ class ReqAgent:
         except Exception as e:
             logger.warning("[ReqAgent] FP 提取失败（不阻断主流程）: {}", str(e)[:200])
 
-        # v2.52: 保持向后兼容——写入实例属性（旧代码读取）
+        # v2.8.52: 保持向后兼容——写入实例属性（旧代码读取）
         self.last_fps = fps
         self.last_fp_dependencies = fp_deps
         self.interaction_srr = interaction_srr
@@ -843,7 +843,7 @@ class ReqAgent:
     ) -> tuple[list[dict], list[dict], dict | None]:
         """v1.6: 从原始文档一体式提取功能点 + 交互层 SRR。
 
-        v2.52: 返回元组替代实例属性，消除并发污染。
+        v2.8.52: 返回元组替代实例属性，消除并发污染。
 
         Returns:
             tuple[list[dict], list[dict], dict | None]:

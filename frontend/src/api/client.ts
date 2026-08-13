@@ -39,10 +39,20 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
-  const res = await fetch(`${BASE}${url}`, {
-    headers: { ...headers, ...options?.headers as Record<string, string> },
-    ...options,
-  })
+  let res: Response
+  try {
+    res = await fetch(`${BASE}${url}`, {
+      headers: { ...headers, ...options?.headers as Record<string, string> },
+      ...options,
+    })
+  } catch (err) {
+    // 页面导航/组件卸载导致的主动取消（fetch 抛出 AbortError），并非真实错误。
+    // 标记 _aborted 供调用方识别，避免污染 Console 或弹出错误提示。
+    if ((err as any)?.name === 'AbortError') {
+      throw Object.assign(err as Error, { _aborted: true })
+    }
+    throw err
+  }
   // Token 过期或未授权 → 强制退出
   if (res.status === 401) {
     forceLogout()
@@ -638,10 +648,26 @@ export const knowledgeQA = {
       method: 'POST',
       body: JSON.stringify({ record_id: recordId, question }),
     }),
-  correct: (id: string, correctedAnswer: string, correctionNotes = '') =>
+  correct: (
+    id: string,
+    correctedAnswer: string,
+    correctionNotes = '',
+    options?: {
+      correction_module?: string;
+      correction_target_type?: 'requirement' | 'functional_point';
+      correction_target_id?: string;
+    }
+  ) =>
     request<KbQARecord>('/knowledge-qa/correct', {
       method: 'POST',
-      body: JSON.stringify({ id, corrected_answer: correctedAnswer, correction_notes: correctionNotes }),
+      body: JSON.stringify({
+        id,
+        corrected_answer: correctedAnswer,
+        correction_notes: correctionNotes,
+        correction_module: options?.correction_module || '',
+        correction_target_type: options?.correction_target_type || 'requirement',
+        correction_target_id: options?.correction_target_id || '',
+      }),
     }),
   archive: (id: string, archiveType: 'requirement' | 'test_case', title: string, content: string) =>
     request<{ archived_id: string; archived_type: string; title: string }>('/knowledge-qa/archive', {
@@ -654,6 +680,21 @@ export const knowledgeQA = {
     request<KbQARecord>(`/knowledge-qa/history/${id}`),
   delete: (id: string) =>
     request<{ deleted: boolean; record_id: string }>(`/knowledge-qa/history/${id}`, { method: 'DELETE' }),
+  // v2.8.56: 纠正审核接口
+  corrections: (params: { status?: string; module?: string; product_id?: string; page?: number; page_size?: number } = {}) =>
+    request<PaginatedData<KbQARecord>>(
+      `/knowledge-qa/corrections?status=${params.status || 'pending_review'}&module=${params.module || ''}&product_id=${params.product_id || ''}&page=${params.page || 1}&page_size=${params.page_size || 20}`
+    ),
+  approve: (id: string, reviewNotes = '') =>
+    request<{ archived_id: string; archived_type: string; correction_target_type: string }>(
+      `/knowledge-qa/corrections/${id}/approve`,
+      { method: 'POST', body: JSON.stringify({ id, review_notes: reviewNotes }) }
+    ),
+  reject: (id: string, reviewNotes = '') =>
+    request<{ correction_status: string }>(
+      `/knowledge-qa/corrections/${id}/reject`,
+      { method: 'POST', body: JSON.stringify({ id, review_notes: reviewNotes }) }
+    ),
 }
 
 // ============================================================
@@ -777,27 +818,27 @@ export const exportCases = {
 // 产品/项目/模块
 // ============================================================
 export const products = {
-  list: () => request<import('../types').Product[]>('/products/products'),
+  list: () => request<import('../types').Product[]>('/products/'),
   create: (name: string, desc = '') =>
-    request('/products/products', { method: 'POST', body: JSON.stringify({ name, description: desc }) }),
+    request('/products/', { method: 'POST', body: JSON.stringify({ name, description: desc }) }),
   /** 删除产品（需传入 confirm_name 进行二次确认，名称必须完全匹配） */
   delete: (id: string, confirmName: string) =>
-    request(`/products/products/${id}?confirm_name=${encodeURIComponent(confirmName)}`, { method: 'DELETE' }),
+    request(`/products/${id}?confirm_name=${encodeURIComponent(confirmName)}`, { method: 'DELETE' }),
   /** 删除预检查：返回产品名称与关联数据统计（项目/模块/需求/用例/功能点数量） */
   deleteCheck: (id: string) =>
-    request<{ id: string; name: string; stats: { projects: number; modules: number; requirements: number; test_cases: number; functional_points: number } }>(`/products/products/${id}/delete-check`),
+    request<{ id: string; name: string; stats: { projects: number; modules: number; requirements: number; test_cases: number; functional_points: number } }>(`/products/${id}/delete-check`),
   listProjects: (pid: string) =>
-    request<import('../types').Project[]>(`/products/products/${pid}/projects`),
+    request<import('../types').Project[]>(`/products/${pid}/projects`),
   createProject: (pid: string, name: string, desc = '', version = '1.0') =>
-    request(`/products/products/${pid}/projects`, {
+    request(`/products/${pid}/projects`, {
       method: 'POST', body: JSON.stringify({ name, description: desc, version }),
     }),
   deleteProject: (id: string) =>
     request(`/products/projects/${id}`, { method: 'DELETE' }),
   listModules: (pid: string) =>
-    request<import('../types').Module[]>(`/products/products/${pid}/modules`),
+    request<import('../types').Module[]>(`/products/${pid}/modules`),
   createModule: (pid: string, name: string, desc = '') =>
-    request(`/products/products/${pid}/modules`, {
+    request(`/products/${pid}/modules`, {
       method: 'POST', body: JSON.stringify({ name, description: desc }),
     }),
   deleteModule: (id: string) =>
@@ -838,7 +879,7 @@ export const products = {
     ),
   // v2.45 依赖版本查询
   listDependencyVersionsByProduct: (productId: string) =>
-    request<DependencyVersion[]>(`/products/products/${productId}/fp/dependency-versions`),
+    request<DependencyVersion[]>(`/products/${productId}/fp/dependency-versions`),
   listDependencyVersionsByProject: (projectId: string) =>
     request<DependencyVersion[]>(`/products/projects/${projectId}/fp/dependency-versions`),
   getDependencyVersionDetail: (versionPk: number) =>
@@ -847,7 +888,7 @@ export const products = {
     request<VersionDiff>(`/products/fp/dependency-versions/${v1}/diff/${v2}`),
   // v2.45 知识库按项目展示
   listKbProjects: (productId: string) =>
-    request<KbProject[]>(`/products/products/${productId}/kb/projects`),
+    request<KbProject[]>(`/products/${productId}/kb/projects`),
   listKbEntriesByProject: (projectId: string) =>
     request<{ project: any; requirements: any[]; test_cases: any[] }>(`/products/projects/${projectId}/kb/entries`),
 }

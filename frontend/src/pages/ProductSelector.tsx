@@ -141,9 +141,9 @@ export default function ProductSelector() {
     if (!editId || !editName.trim()) return
     setSaving(true)
     try {
-      // Use PUT /api/products/products/{id}
+      // Use PUT /api/products/{id}
       const token = localStorage.getItem('aitestgen_token')
-      await fetch(`/api/products/products/${editId}`, {
+      await fetch(`/api/products/${editId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ name: editName.trim(), description: editDesc.trim() }),

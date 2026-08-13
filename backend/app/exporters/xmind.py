@@ -58,7 +58,7 @@ def _case_type_label(t: str) -> str:
 def export_to_xmind(cases: list[dict], project_name: str = "", include_details: bool = True) -> bytes:
     """导出为 XMind 思维导图 JSON 格式。
 
-    分组逻辑（v2.52: 对齐需求分析 XMind 结构）：
+    分组逻辑（v2.8.52: 对齐需求分析 XMind 结构）：
     1. 按需求 ID 分组
     2. 需求下先分"业务场景"节点（跨功能点/整体性用例），再按功能点分组
     3. 功能点下展示用例 + 步骤 + 前置条件
@@ -208,10 +208,6 @@ def export_to_xmind(cases: list[dict], project_name: str = "", include_details: 
     return buf.getvalue()
 
 
-# 兼容别名（验证脚本/旧代码可能用 export_xmind 而非 export_to_xmind）
-export_xmind = export_to_xmind
-
-
 # ============================================================================
 # XMind 8 XML 导出（content.xml + XMAP 2.0 命名空间，兼容 XMind 8）
 # ============================================================================
@@ -261,7 +257,7 @@ def export_to_xmind_xml(cases: list[dict], project_name: str = "", include_detai
     """
     root_title = project_name or "测试用例"
 
-    # 1. 分组（复用 JSON 版逻辑，v2.52: 无功能点归属的用例归入"业务场景"）
+    # 1. 分组（复用 JSON 版逻辑，v2.8.52: 无功能点归属的用例归入"业务场景"）
     req_groups: dict[str, dict] = {}
     for c in cases:
         rid = c.get("req_id") or c.get("related_requirement") or "未知"

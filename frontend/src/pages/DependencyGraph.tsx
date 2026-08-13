@@ -181,7 +181,60 @@ function FPNode({ data, selected }: any) {
   )
 }
 
-const nodeTypes = { moduleNode: ModuleNode, fpNode: FPNode }
+// v2.47: 同名功能点聚合节点——跨版本同名 FP（如 v1.4/v1.6「版本对比功能」）合并为一个聚合节点。
+// 显示名称 + 版本数徽标，点击展开查看各版本子节点。
+function FPGroupNode({ data, selected }: any) {
+  const versionCount = Array.isArray(data.versions) ? data.versions.length : 0
+  const isArchived = data.reqStatus === 'archived'
+  const expanded = data.expanded === true
+  return (
+    <div className={[
+      'relative px-4 py-3 border-2 min-w-[160px] transition-all duration-200 group cursor-pointer',
+      selected ? 'shadow-lg ring-2' : 'hover:shadow-lg',
+    ].join(' ')} style={{
+      borderRadius: 'calc(var(--radius) * 1.1)',
+      boxShadow: selected ? 'var(--shadow-apple-md)' : 'var(--shadow-apple-sm)',
+      background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.06)',
+      borderColor: selected ? 'var(--brand-400)' : expanded ? 'var(--brand-400)' : isArchived ? 'var(--input)' : 'var(--brand-200)',
+      borderStyle: expanded ? 'solid' : 'dashed',
+    }}>
+      <Handle type="source" position={Position.Left} id="left"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
+      <Handle type="source" position={Position.Right} id="right"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
+      <Handle type="source" position={Position.Top} id="top"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
+      <Handle type="source" position={Position.Bottom} id="bottom"
+        className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
+      <div className="flex items-center gap-2 mb-1">
+        <div className="w-8 h-8 flex items-center justify-center flex-shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.08)' }}>
+          <Boxes className="w-4 h-4" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }} />
+        </div>
+        <span className="text-sm font-semibold truncate max-w-[120px]" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--foreground)' }}>
+          {data.label}
+        </span>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0`}
+          style={{ background: 'rgba(0, 122, 255, 0.1)', color: 'var(--brand-500)' }}>
+          {versionCount} 版本
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5 pl-10">
+        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+          style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
+          {expanded ? '点击折叠' : '点击展开'}
+        </span>
+        {isArchived && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+            style={{ background: 'var(--input)', color: 'var(--foreground-tertiary)' }}>
+            已归档
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const nodeTypes = { moduleNode: ModuleNode, fpNode: FPNode, fpGroupNode: FPGroupNode }
 
 // ============================================================================
 // FloatingEdge — 浮动边组件（v2.43）
@@ -531,6 +584,10 @@ function ImpactDescriptionModal({
                         <span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{fp.fp_name}</span>
                         <span className="px-1.5 py-0.5" style={{ borderRadius: 'calc(var(--radius) * 0.25)', background: 'rgba(0, 122, 255, 0.12)', color: 'var(--brand-500)' }}>
                           {fp.relation_cn || fp.relation_type}
+                        </span>
+                        {/* v3.1: 方向标识——outgoing=被依赖(上游)，incoming=依赖此FP(下游) */}
+                        <span className="px-1.5 py-0.5" style={{ borderRadius: 'calc(var(--radius) * 0.25)', background: fp.direction === 'outgoing' ? 'rgba(139, 92, 246, 0.12)' : 'rgba(16, 185, 129, 0.12)', color: fp.direction === 'outgoing' ? '#7c3aed' : '#059669' }}>
+                          {fp.direction === 'outgoing' ? '被依赖(上游)' : '依赖者(下游)'}
                         </span>
                         {fp.req_title && (
                           <span className="truncate" style={{ color: 'var(--foreground-tertiary)' }}>← {fp.req_title}</span>
@@ -1376,6 +1433,11 @@ export default function DependencyGraph() {
   const [graphModules, setGraphModules] = useState<{ id: string; name: string }[]>([])
   // v2.46: 是否包含已归档项目的「冻结历史边」（is_active=false）。默认打开，保证用户查看已归档项目（如 REQ-1785813815766-7531 所属项目）的依赖关系可见
   const [includeArchivedEdges, setIncludeArchivedEdges] = useState<boolean>(true)
+  // v2.47: 同名功能点合并。默认开启——跨需求/跨版本的同名 FP（如 v1.4/v1.6 都创建「版本对比功能」）
+  // 合并为一个聚合节点，点击展开查看各版本子节点。关闭则显示全部独立节点。
+  const [mergeFpNodes, setMergeFpNodes] = useState<boolean>(true)
+  // v2.47: 已展开的聚合节点 id 集合（key 为名称），展开后显示该名称下各版本子节点
+  const [expandedFpGroups, setExpandedFpGroups] = useState<Set<string>>(new Set())
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyItems, setHistoryItems] = useState<FPDependencyHistoryItem[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -1464,6 +1526,113 @@ export default function DependencyGraph() {
     setLoading(false)
   }
 
+  // v2.47: 缓存 FP 原始数据（未合并），用于展开/折叠时本地重算布局（不发网络请求）
+  const fpRawRef = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null)
+
+  // v2.47: 从原始 FP 数据应用「同名合并 + 布局」。
+  // 合并逻辑与 loadFPGraph 解耦，展开/折叠聚合节点或切换合并开关时仅本地重算，避免重新请求后端。
+  const applyFpMergeAndLayout = useCallback(() => {
+    const raw = fpRawRef.current
+    if (!raw) return
+    const { nodes: fpNodes, edges: baseEdges } = raw
+    let layoutNodes: Node[] = fpNodes
+    let layoutEdges: Edge[] = baseEdges
+    if (mergeFpNodes && fpNodes.length > 0) {
+      // 1. 按名称分组
+      const groupMap = new Map<string, Node[]>()
+      fpNodes.forEach(n => {
+        const key = String(n.data.label)
+        if (!groupMap.has(key)) groupMap.set(key, [])
+        groupMap.get(key)!.push(n)
+      })
+      const groups = Array.from(groupMap.entries()).filter(([, nodes]) => nodes.length > 1)
+      // 2. 仅当存在同名分组才做合并
+      if (groups.length > 0) {
+        const groupNodeById = new Map<string, string>()  // member fp id -> group node id
+        const expanded = new Set(expandedFpGroups)
+        const groupNodes: Node[] = []
+        const memberNodes: Node[] = []
+        groups.forEach(([key, members], gi) => {
+          const groupId = `group-${key}-${gi}`
+          members.forEach(m => {
+            groupNodeById.set(m.id, groupId)
+            // 保留各版本子节点（供展开显示），但默认折叠时不展示
+            memberNodes.push({ ...m, data: { ...m.data, _memberOfGroup: groupId, _groupName: key } })
+          })
+          // 聚合节点：取第一个成员的样式信息，版本列表存 members
+          const first = members[0]
+          const isArchived = members.every(m => (m.data.reqStatus === 'archived' || m.data.fpStatus === 'archived'))
+          groupNodes.push({
+            id: groupId,
+            type: 'fpGroupNode',
+            position: first.position,
+            data: {
+              label: key,
+              fpType: first.data.fpType,
+              reqStatus: isArchived ? 'archived' : (first.data.reqStatus || ''),
+              fpStatus: isArchived ? 'archived' : (first.data.fpStatus || ''),
+              versions: members.map(m => ({
+                id: m.id,
+                reqId: m.data.reqId,
+                reqTitle: m.data.reqTitle,
+                reqStatus: m.data.reqStatus,
+                fpStatus: m.data.fpStatus,
+                label: m.data.label,
+              })),
+              expanded: expanded.has(key),
+              _isGroup: true,
+              _groupName: key,
+            },
+          })
+        })
+        // 3. 重映射边：源/目标在合并组内 → 指向聚合节点
+        const remappedEdges: Edge[] = layoutEdges.map((e: any) => {
+          const srcGroup = groupNodeById.get(e.source)
+          const tgtGroup = groupNodeById.get(e.target)
+          let source = e.source
+          let target = e.target
+          if (srcGroup) { source = srcGroup }
+          if (tgtGroup) { target = tgtGroup }
+          return { ...e, source, target, id: `${source}-${target}-${e.id}` }
+        })
+        // 4. 展开的分组：显示成员子节点 + 聚合节点；折叠的分组：仅显示聚合节点
+        const visibleNodes: Node[] = []
+        const seenIds = new Set<string>()
+        // 先加入所有聚合节点
+        groupNodes.forEach(g => { visibleNodes.push(g); seenIds.add(g.id) })
+        // 加入非合并组成员（独立 FP）
+        fpNodes.forEach(n => {
+          if (!groupNodeById.has(n.id)) { visibleNodes.push(n); seenIds.add(n.id) }
+        })
+        // 展开分组：追加成员子节点（用真实 fpId 作为 id，避免与聚合节点冲突）
+        memberNodes.forEach(m => {
+          const gkey = String(m.data._groupName)
+          if (expanded.has(gkey) && !seenIds.has(m.id)) { visibleNodes.push(m); seenIds.add(m.id) }
+        })
+        layoutNodes = visibleNodes
+        layoutEdges = remappedEdges
+      }
+    }
+    // v2.43: FP 图谱应用 dagre 层次布局（FP 节点位置不持久化，每次重新布局）
+    const finalFpNodes = layoutHierarchical(layoutNodes, layoutEdges, {
+      direction: layoutDirection,
+      nodeSep: 50,
+      rankSep: 110,
+      startX: 80,
+      startY: 80,
+    })
+    setNodes(finalFpNodes)
+    setEdges(layoutEdges)
+  }, [mergeFpNodes, expandedFpGroups, layoutDirection])
+
+  // v2.47: 展开/折叠聚合节点、切换合并开关或布局方向时，本地重算布局（不发请求）
+  useEffect(() => {
+    if (selectedProductId && graphType === 'fp') {
+      applyFpMergeAndLayout()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applyFpMergeAndLayout])
+
   // ========== v1.4 FP Graph（使用跨需求图谱端点，消除 N+1 + slice 截断） ==========
   const loadFPGraph = async () => {
     if (!selectedProductId) return
@@ -1522,25 +1691,19 @@ export default function DependencyGraph() {
       })
       const nameMap: Record<string, string> = {}
       fpNodes.forEach(n => { nameMap[n.id] = String(n.data.label) })
-      const fpEdges: Edge[] = (data?.edges || []).map((e: any) =>
+      // v2.46: 归档冻结边 → 灰 + 虚线 + [冻结] 标签；用户通过"包含归档冻结边"开关控制是否加载。
+      const baseEdges: Edge[] = (data?.edges || []).map((e: any) =>
         createFPEdge(
           e.id, e.source, e.target, e.relation_type,
           nameMap[e.source], nameMap[e.target], e.description,
           e.review_status || 'pending',
-          // v2.46: 归档冻结边 → 灰 + 虚线 + [冻结] 标签；用户通过"包含归档冻结边"开关控制是否加载。
           typeof e.is_active === 'boolean' ? e.is_active : true,
         )
       )
-      // v2.43: FP 图谱应用 dagre 层次布局（FP 节点位置不持久化，每次重新布局）
-      const finalFpNodes = layoutHierarchical(fpNodes, fpEdges, {
-        direction: layoutDirection,
-        nodeSep: 50,
-        rankSep: 110,
-        startX: 80,
-        startY: 80,
-      })
-      setNodes(finalFpNodes)
-      setEdges(fpEdges)
+      // v2.47: 缓存原始（未合并）数据，供展开/折叠时本地重算布局，避免重新请求后端。
+      // 同名合并 + 布局统一由 applyFpMergeAndLayout 处理。
+      fpRawRef.current = { nodes: fpNodes, edges: baseEdges }
+      applyFpMergeAndLayout()
     } catch { }
     setLoading(false)
   }
@@ -1687,6 +1850,17 @@ export default function DependencyGraph() {
   // Double-click: 模块模式打开 picker 交换节点；FP 模式打开节点详情 Drawer
   const onNodeDoubleClick = useCallback((_: any, node: Node) => {
     if (graphType === 'fp') {
+      // v2.47: 聚合节点双击 → 切换展开/折叠该名称下的各版本子节点
+      if ((node.data as any)?._isGroup) {
+        const key = String((node.data as any)._groupName)
+        setExpandedFpGroups(prev => {
+          const next = new Set(prev)
+          if (next.has(key)) next.delete(key)
+          else next.add(key)
+          return next
+        })
+        return
+      }
       // v2.45: FP 模式双击打开详情 Drawer（影响说明可通过 Drawer 内按钮打开）
       setFpDetailNode(node)
       return
@@ -1921,6 +2095,18 @@ export default function DependencyGraph() {
                   onChange={e => setIncludeArchivedEdges(e.target.checked)}
                 />
                 包含归档冻结边
+              </label>
+              {/* v2.47: 同名功能点合并开关 — 跨版本同名 FP 合并为聚合节点；关闭则显示全部独立节点 */}
+              <label className="inline-flex items-center gap-1.5 text-xs px-2 py-1 border cursor-pointer select-none"
+                style={{ borderColor: 'var(--border)', borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--background)', color: 'var(--foreground-secondary)' }}
+                title="开启后跨需求/跨版本的同名功能点（如多版本的「版本对比功能」）合并为一个聚合节点，双击展开查看各版本子节点">
+                <input
+                  type="checkbox"
+                  className="w-3.5 h-3.5 cursor-pointer"
+                  checked={mergeFpNodes}
+                  onChange={e => setMergeFpNodes(e.target.checked)}
+                />
+                合并同名功能点
               </label>
             </div>
             <div className="w-px h-5" style={{ background: 'var(--border)' }} />

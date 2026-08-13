@@ -25,21 +25,13 @@ from app.core.auth import require_write, get_current_user
 from app.db.database import get_session
 from app.db.models import TestCase, Requirement, FunctionalPoint, Project
 from app.exporters import export_cases, SUPPORTED_FORMATS
+# v2.8.60: 复用 testcases API 的 _extract_fp，消除重复定义
+from app.api.testcases import _extract_fp as _extract_fp_id
 from app.models.api_schemas import ExportRequest
 from app.utils.logger import logger
 
 
 router = APIRouter()
-
-
-def _extract_fp_id(case_json: dict) -> str:
-    """从 case_json 中提取功能点 ID（与 testcases API 的 _extract_fp 一致）。
-
-    优先取 related_fp，其次 functional_point。
-    """
-    if not case_json:
-        return ""
-    return case_json.get("related_fp", "") or case_json.get("functional_point", "") or ""
 
 
 async def _resolve_case_context(rows: list[TestCase], session: AsyncSession) -> list[dict]:

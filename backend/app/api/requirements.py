@@ -150,7 +150,7 @@ def _count_clarify_rounds_since_last_regen(clarify_history: list) -> int:
     return sum(1 for h in scope if isinstance(h, dict) and h.get("action") == "clarify")
 
 
-# v2.52: 后台任务异常回调——防止协程静默消亡
+# v2.8.52: 后台任务异常回调——防止协程静默消亡
 def _bg_task_done_callback(task: asyncio.Task) -> None:
     """asyncio.create_task 的 done_callback，记录未捕获异常。"""
     if task.cancelled():
@@ -190,7 +190,7 @@ def _merge_interaction_srr(base_srr: dict, interaction_srr: dict) -> dict:
     """
     merged = dict(base_srr)
 
-    # v2.52: 深拷贝嵌套结构，避免浅拷贝副作用污染调用方数据
+    # v2.8.52: 深拷贝嵌套结构，避免浅拷贝副作用污染调用方数据
     import copy as _copy
     cfi = _copy.deepcopy(merged.get("cross_fp_interactions"))
     if not isinstance(cfi, dict):
@@ -282,7 +282,7 @@ async def _save_fps_to_db(
 ) -> int:
     """将 ReqAgent 提取的功能点列表存入 functional_points 表。
 
-    v2.55 修复 Bug A-1：解析 suggested_module（模块名称）-> Module.id（FK），
+    v2.8.55 修复 Bug A-1：解析 suggested_module（模块名称）-> Module.id（FK），
     写入 module_id + modules JSON 列，避免 FP 入库后模块信息丢失导致：
       - FP 复用候选查询命中 0 条
       - 依赖图谱模块筛选失效
@@ -290,15 +290,34 @@ async def _save_fps_to_db(
       - 归档向量 modules 元数据为空
     每个 FP 的 sub_srr -> srr_json，suggested_module 解析后仍保留在 srr_json 中。
     返回实际入库的 FP 数量。
+
+    v2.8.56：新增 FP 拆分质量门禁（FPGate），落库前校验 FP 完整性。
+           门禁失败抛出 ValueError，由调用方捕获并中断流水线。
     """
     if not fps:
         return 0
+
+    # v2.8.56: FP 拆分质量门禁检查
+    from app.core.fp_gate import fp_gate
+    gate_result = fp_gate.check(fps, srr=None)
+    if not gate_result.passed:
+        blocker_msg = "; ".join(gate_result.blockers)
+        logger.error(
+            "[FP-AutoSave] FP 拆分质量门禁未通过（中断流水线）: req_id={}, blockers={}",
+            req_id, blocker_msg,
+        )
+        raise ValueError(f"FP 拆分质量门禁未通过: {blocker_msg}")
+    if gate_result.warnings:
+        logger.warning(
+            "[FP-AutoSave] FP 拆分质量门禁警告: req_id={}, warnings={}",
+            req_id, "; ".join(gate_result.warnings),
+        )
 
     saved = 0
     # v2.48: 数据类型中文化兜底（防止 LLM 输出英文类型）
     from app.exporters.req_xmind import _data_type_cn
 
-    # v2.55 Bug A-1：预加载该产品下的 Module 表，构建 name -> id 映射
+    # v2.8.55 Bug A-1：预加载该产品下的 Module 表，构建 name -> id 映射
     module_name_to_id: dict[str, str] = {}
     if product_id:
         try:
@@ -338,7 +357,7 @@ async def _save_fps_to_db(
                 if isinstance(dc, dict) and dc.get("type"):
                     dc["type"] = _data_type_cn(str(dc["type"]))
 
-        # v2.55 Bug A-1：解析 suggested_module -> module_id
+        # v2.8.55 Bug A-1：解析 suggested_module -> module_id
         suggested_module = (
             fp.get("suggested_module", "") if isinstance(fp, dict) else ""
         )
@@ -979,9 +998,13 @@ async def _parse_uploaded_files(files: list[UploadFile], session=None) -> tuple[
             raise HTTPException(status_code=400, detail=f"文件 {filename} 内容为空")
 
         logger.info("[API/requirements] 文件解析完成: filename={}, text_len={}", filename, len(file_text))
-        parts.append(file_text)
+        # v2.8.64: 多/单文件合并时增加文档边界标记，让 ClarifyAgent 能识别跨文档矛盾
+        if len(files) > 1 or filename:
+            parts.append(f"【文档：{filename or '未命名'}】\n{file_text}")
+        else:
+            parts.append(file_text)
 
-    # 多文件以分隔线连接，保持各文件内容边界清晰
+    # v2.8.64: 多文件之间用分隔线 + 文档标记连接，便于后续 LLM 识别跨文档矛盾
     return "\n\n---\n\n".join(parts), all_images
 
 
@@ -1004,6 +1027,9 @@ async def upload_requirement(
     后台协程执行 ReqAgent 解析 + ClarifyAgent 检测。立即返回 task_id + req_id，
     前端轮询任务进度（GET /requirements/tasks/{task_id}）。
 
+    v2.8.69: 上传前校验项目状态——若所属项目已归档，则拒绝上传新需求。
+             归档是「项目级」的一次性操作，必须保证归档冻结后无法再新增需求。
+
     Args:
         req: 上传请求，含 raw_text / product_id / product_name / title / priority / modules
         session: 数据库会话（依赖注入）
@@ -1013,6 +1039,15 @@ async def upload_requirement(
     """
     if not req.raw_text or not req.raw_text.strip():
         raise HTTPException(status_code=400, detail="需求文本不能为空")
+
+    # v2.8.69: 项目归档后禁止上传新需求
+    if req.project_id:
+        project = await session.get(Project, req.project_id)
+        if project and project.status == "archived":
+            raise HTTPException(
+                status_code=403,
+                detail=f"项目「{project.name or project.id}」已归档，禁止上传新需求"
+            )
 
     logger.info(
         "[API/requirements] 上传需求(raw_text 异步模式): text_len={}, product_id={}, title={}",
@@ -1163,7 +1198,7 @@ async def _update_task(task_id: str, **fields) -> None:
 
             stmt = sa_update(AnalysisTask).where(
                 AnalysisTask.id == task_id,
-                AnalysisTask.status != "interrupted",  # v2.52: 已取消的任务不再覆盖
+                AnalysisTask.status != "interrupted",  # v2.8.52: 已取消的任务不再覆盖
             ).values(**fields)
             await s.execute(stmt)
             await s.commit()
@@ -1255,7 +1290,7 @@ async def _run_requirement_analysis(
         if not isinstance(srr, dict):
             raise RuntimeError(f"需求解析返回异常类型: {type(srr).__name__}")
 
-        # v2.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
+        # v2.8.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
         captured_fps = parse_result.fps
         captured_fp_deps = parse_result.fp_deps
         captured_interaction_srr = parse_result.interaction_srr
@@ -1285,12 +1320,18 @@ async def _run_requirement_analysis(
         await _update_task(task_id, phase="kb_search", progress=40,
                            message="正在检索知识库历史需求并补充缺失字段...")
 
+        # v2.8.57: 澄清进度回调——将 ClarifyAgent 内部 LLM 调用级进度上报到任务
+        async def _clarify_progress_cb(message: str, progress: int) -> None:
+            await _update_task(task_id, phase="kb_search", progress=progress, message=message)
+
         clarify_result = None
         questions = []
         clarify_error: str | None = None
         async with async_session() as s:
             try:
-                clarify_result = await clarify_agent.clarify(srr)
+                clarify_result = await clarify_agent.clarify(
+                    srr, progress_callback=_clarify_progress_cb,
+                )
                 questions = clarify_result.get("questions", [])
             except Exception as e:
                 # v2.18: 关键错误不再静默——中断流水线，保存已解析结果，标记任务失败
@@ -1318,8 +1359,13 @@ async def _run_requirement_analysis(
                     await _save_fp_dependencies(save_s, req_id, captured_fp_deps)
                     await _update_fp_index_in_srr(save_s, req_id)
                     await save_s.commit()
+                except ValueError as gate_err:
+                    # v2.8.56: FP 质量门禁失败（ValueError）不降级保存，向上抛出中断流水线
+                    await save_s.rollback()
+                    logger.error("[Task] FP 拆分质量门禁未通过（不降级保存）: {}", str(gate_err)[:200])
+                    raise
                 except Exception as fp_e:
-                    # v2.52: FP 保存失败时回滚整个事务，避免半写入状态
+                    # v2.8.52: FP 保存失败时回滚整个事务，避免半写入状态
                     await save_s.rollback()
                     logger.error("[Task] ClarifyAgent 失败后基础 FP 保存也失败，事务已回滚: {}", str(fp_e)[:200])
                     # 至少保存 Requirement（不带 FP），让用户能看到 SRR
@@ -1408,7 +1454,7 @@ async def _run_requirement_analysis(
                 )
                 final_srr = regen_result.srr
                 final_srr.setdefault("requirement", {})["id"] = req_id
-                # v2.52: regen 成功后更新 FP 为第二次 parse 的结果（保证 SRR/FP 一致）
+                # v2.8.52: regen 成功后更新 FP 为第二次 parse 的结果（保证 SRR/FP 一致）
                 captured_fps = regen_result.fps
                 captured_fp_deps = regen_result.fp_deps
                 captured_interaction_srr = regen_result.interaction_srr
@@ -1434,7 +1480,7 @@ async def _run_requirement_analysis(
             srr_json_data.pop("_clarify_state", None)
             srr_json_data.pop("_field_sources", None)
 
-        # ===== 持久化 Requirement + FP（合并为单事务，v2.52 修复事务拆分）=====
+        # ===== 持久化 Requirement + FP（合并为单事务，v2.8.52 修复事务拆分）=====
         # v2.18: 合并 interaction_srr 到总 SRR（统一所有流程的 interaction_srr 处理）
         if captured_interaction_srr:
             srr_json_data = _merge_interaction_srr(srr_json_data, captured_interaction_srr)
@@ -1464,7 +1510,7 @@ async def _run_requirement_analysis(
         except Exception as e:
             fp_err_msg = str(e)[:500]
             logger.error("[Task] Requirement/FP 保存失败（关键错误，中断流水线）: {}", fp_err_msg)
-            # v2.53: 回滚 Requirement status 到 draft，避免卡死在 analyzing 状态
+            # v2.8.53: 回滚 Requirement status 到 draft，避免卡死在 analyzing 状态
             # （事务已回滚，status 保持 analyzing，前端不允许操作 analyzing 状态的需求）
             try:
                 async with async_session() as rollback_s:
@@ -1552,10 +1598,21 @@ async def upload_requirement_multi(
     v2.1 新增：
     - 多文档融合分析（DocMergeAgent）
     - 冲突检测与合并
+
+    v2.8.69: 上传前校验项目状态——项目已归档时拒绝上传新需求
     """
     module_list = [m.strip() for m in modules.split(",") if m.strip()]
     if not files or len(files) == 0:
         raise HTTPException(status_code=400, detail="请上传至少一个文件")
+
+    # v2.8.69: 项目归档后禁止上传新需求
+    if project_id:
+        project = await session.get(Project, project_id)
+        if project and project.status == "archived":
+            raise HTTPException(
+                status_code=403,
+                detail=f"项目「{project.name or project.id}」已归档，禁止上传新需求"
+            )
 
     MAX_TOTAL_SIZE = 50 * 1024 * 1024
     total_size = 0
@@ -1563,7 +1620,7 @@ async def upload_requirement_multi(
     # v2.24: 先读取文件字节（快速操作），文件解析移到后台协程中
     # 这样任务记录可以在文件解析之前就创建，用户立即看到任务
     file_bytes_list: list[tuple[str, bytes]] = []
-    MAX_SINGLE_SIZE = 10 * 1024 * 1024  # v2.52: 单文件 10MB 上限
+    MAX_SINGLE_SIZE = 10 * 1024 * 1024  # v2.8.52: 单文件 10MB 上限
     for file in files:
         filename = file.filename or ""
         ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
@@ -1573,13 +1630,13 @@ async def upload_requirement_multi(
                 detail=f"不支持的文件格式: .{ext}（文件：{filename}），仅支持 .md / .docx / .txt",
             )
         raw_bytes = await file.read()
-        # v2.52: 单文件大小校验
+        # v2.8.52: 单文件大小校验
         if len(raw_bytes) > MAX_SINGLE_SIZE:
             raise HTTPException(
                 status_code=400,
                 detail=f"文件 {filename} 超过单文件 10MB 上限（当前 {len(raw_bytes) // 1024 // 1024}MB）",
             )
-        # v2.52: 魔数校验（防止伪造扩展名）
+        # v2.8.52: 魔数校验（防止伪造扩展名）
         _validate_file_magic(ext, raw_bytes)
         total_size += len(raw_bytes)
         if total_size > MAX_TOTAL_SIZE:
@@ -1814,7 +1871,7 @@ async def cancel_task(
             except (ValueError, TypeError):
                 pass
 
-    # v2.52: 若关联需求仍为 analyzing 状态，回退为 draft 避免卡死
+    # v2.8.52: 若关联需求仍为 analyzing 状态，回退为 draft 避免卡死
     # （原状态可能是 draft/pending_review/confirmed，但 analyzing 期间无法得知原状态，
     #   统一回退 draft 是安全选择——用户可重新操作）
     if task.req_id:
@@ -2082,48 +2139,34 @@ async def get_clarify_questions(
     saved_questions = clarify_state.get("questions", []) or []
     saved_answers = srr.get("clarify_answers", {}) or {}
 
-    # ⭐ 合并 _clarify_history（多轮澄清历史）：
-    # 历史上 submit_clarify 会把已回答对写入 clarify_history[*].{questions,answers}，
-    # 但顶层 _clarify_state.questions 会被 recheck 阶段清空，前端从该字段读会误以为
-    # "之前澄清过的问题没生成"。这里把历史中每一轮的 questions+answers 扁平化合并，
-    # 保证 UI 看到：已回答过的问题（带着 answer）仍出现，状态应为 answered。
-    merged_questions_map: dict[str, dict] = {}
-    # 先写最终 snapshot（最新一轮），旧的不会覆盖新的
-    for q in saved_questions:
-        qid = str(q.get("id") or f"{q.get('field','')}__{q.get('question','')[:40]}")
-        merged_questions_map[qid] = dict(q)
-    # 再 merge history；若最终 snapshot 没有则补上（旧问过但 snapshot 被清空的）
-    history = srr.get("_clarify_history") or []
-    for h in history:
-        for q in (h.get("questions") or []):
-            qid = str(q.get("id") or f"{q.get('field','')}__{q.get('question','')[:40]}")
-            if qid not in merged_questions_map:
-                merged_questions_map[qid] = dict(q)
-    # 合并 answers：顶层 clarify_answers + history 每轮的 answers
+    # v2.8.66: ⭐ 不再把 _clarify_history 中历史已回答的问题合并到当前 questions
+    # 用户要求：当前澄清页面只显示本轮待回答的问题；已回答的问题应去「澄清历史」查看。
+    # 之前的逻辑会把历史每轮的问题都扁平化合并，导致第二轮回答时仍能看到第一轮的
+    # 所有旧问题，造成"永远回答不完"的体验。
+
+    # 合并 answers：仅用顶层 clarify_answers（最新一轮的草稿/提交）
     merged_answers: dict = dict(saved_answers)
-    for h in history:
-        if isinstance(h.get("answers"), dict):
-            # 旧 answers 覆盖空值；新值优先（history 越后越新，最后一轮要比之前优先）
-            for k, v in h["answers"].items():
-                if not merged_answers.get(k):
-                    merged_answers[k] = v
+    history = srr.get("_clarify_history") or []
+
     # 为每个 question 注入 answered 状态（便于前端直接展示）
     merged_questions: list[dict] = []
-    for qid, q in merged_questions_map.items():
+    for q in saved_questions:
+        qid = str(q.get("id") or f"{q.get('field','')}__{q.get('question','')[:40]}")
         ans = merged_answers.get(qid)
-        if ans:
-            q2 = dict(q)
-            if not q2.get("answer"):
-                q2["answer"] = ans if isinstance(ans, str) else (ans.get("answer") if isinstance(ans, dict) else "")
+        q2 = dict(q)
+        if ans and not q2.get("answer"):
+            q2["answer"] = ans if isinstance(ans, str) else (ans.get("answer") if isinstance(ans, dict) else "")
             if q2.get("answered") is None:
                 q2["answered"] = True
             if "status" not in q2 or not q2.get("status"):
                 q2["status"] = "answered"
-            merged_questions.append(q2)
-        else:
-            merged_questions.append(q)
-    # 保持稳定顺序：已回答的排在前面，未回答按原顺序
-    merged_questions.sort(key=lambda q: (0 if q.get("answered") else 1))
+        # v2.8.66: 若顶层已有答案，标记 resolved=true（避免前端重复展示）
+        if ans:
+            q2["resolved"] = True
+        merged_questions.append(q2)
+
+    # 排序：未回答按原顺序；已回答的标记不影响排序（因为有 resolved=true 前端会过滤掉）
+    has_unresolved = any(not q.get("resolved") for q in merged_questions)
 
     # ⭐ kb_access_log 合并：_clarify_state.kb_access_log + history 每轮的 kb_access_log
     kb_access_log_merged: list[dict] = list(clarify_state.get("kb_access_log", []) or [])
@@ -2141,7 +2184,7 @@ async def get_clarify_questions(
             "req_id": req_id,
             "status": (
                 "needs_clarification"
-                if any(not q.get("answered") for q in merged_questions)
+                if has_unresolved
                 else "passed"
             ),
             "questions": merged_questions,
@@ -2196,7 +2239,7 @@ async def submit_clarify_answers(
     if not req.answers:
         raise HTTPException(status_code=400, detail="澄清答案不能为空")
 
-    # v2.33: 互斥锁检查——防止与其他分析任务并发冲突（v2.52: 传入 session 启用 advisory lock）
+    # v2.33: 互斥锁检查——防止与其他分析任务并发冲突（v2.8.52: 传入 session 启用 advisory lock）
     await _check_no_running_task(req_id, session=session)
 
     # 从 DB 取需求
@@ -2212,7 +2255,7 @@ async def submit_clarify_answers(
             status_code=409,
             detail=f"当前状态 {record.status} 不可提交澄清（仅 draft/pending_review/confirmed 可提交）",
         )
-    # v2.52: confirmed 状态提交澄清时明确提示——已审核 FP 将被重建
+    # v2.8.52: confirmed 状态提交澄清时明确提示——已审核 FP 将被重建
     if record.status == "confirmed":
         # 检查是否有已审核的 FP
         from sqlalchemy import func as _func
@@ -2236,7 +2279,7 @@ async def submit_clarify_answers(
 
     # v2.42: 澄清轮次收敛（docs/01 §4.1 第4条：最多 3 轮，质量达标才放行）
     # v2.43: 轮次统计基于"当前重新生成周期"，重新生成后重置计数
-    # v2.51: 从 settings 读取，与 orchestrator ClarifyLoopGuard 保持一致
+    # v2.8.51: 从 settings 读取，与 orchestrator ClarifyLoopGuard 保持一致
     MAX_CLARIFY_ITERATIONS = settings.MAX_CLARIFY_ITERATIONS
     existing_history = list(srr_json.get("_clarify_history", []))
     clarify_rounds_done = _count_clarify_rounds_since_last_regen(existing_history)
@@ -2301,7 +2344,7 @@ async def submit_clarify_answers(
     }
     clarify_history = list(srr_json.get("_clarify_history", []))
     clarify_history.append(history_entry)
-    # v2.52: 裁剪历史记录，防止 srr_json 无界膨胀（最多保留最近 5 轮）
+    # v2.8.52: 裁剪历史记录，防止 srr_json 无界膨胀（最多保留最近 5 轮）
     MAX_CLARIFY_HISTORY = 5
     if len(clarify_history) > MAX_CLARIFY_HISTORY:
         clarify_history = clarify_history[-MAX_CLARIFY_HISTORY:]
@@ -2337,7 +2380,7 @@ async def submit_clarify_answers(
         enhanced_parts.extend(qa_pairs)
 
     # 合并 KB 已自动补全的字段（避免人工澄清时丢失 KB 已查到的答案）
-    # v2.52: _clarify_state 可能已被 regen 分支清空，回退到 _clarify_history 最近一条
+    # v2.8.52: _clarify_state 可能已被 regen 分支清空，回退到 _clarify_history 最近一条
     kb_augments = (srr_json.get("_clarify_state", {}) or {}).get("auto_augmentations", [])
     if not kb_augments and clarify_history:
         # 从最近一条 clarify 历史记录中恢复 KB 补全信息
@@ -2365,7 +2408,7 @@ async def submit_clarify_answers(
     )
 
     # v2.15: 标记需求为 analyzing 状态
-    # v2.52: 先快照原始状态，再修改（避免 original_status 被覆盖为 "analyzing"）
+    # v2.8.52: 先快照原始状态，再修改（避免 original_status 被覆盖为 "analyzing"）
     original_status_snapshot = record.status
     record.status = "analyzing"
     await session.commit()
@@ -2396,7 +2439,7 @@ async def submit_clarify_answers(
         clarify_history=clarify_history,
         old_srr=srr_json,
         priority=record.priority,
-        original_status=original_status_snapshot,  # v2.52: 使用状态修改前的快照
+        original_status=original_status_snapshot,  # v2.8.52: 使用状态修改前的快照
     ))
 
     return ApiResponse(
@@ -2420,7 +2463,7 @@ async def _run_clarify_reparse(
     clarify_history: list,
     old_srr: dict,
     priority: str,
-    original_status: str = "draft",  # v2.52: 原始状态快照，失败时恢复
+    original_status: str = "draft",  # v2.8.52: 原始状态快照，失败时恢复
 ) -> None:
     """后台执行澄清后的 SRR 重新生成（异步协程，独立 session）。
 
@@ -2453,7 +2496,7 @@ async def _run_clarify_reparse(
             final_srr.pop("_field_sources", None)
             final_srr["_clarify_degraded"] = True
 
-        # v2.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
+        # v2.8.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
         # v1.6: 使用 original_raw（原始需求文本）进行 FP 提取，而非 enhanced_raw。
         if original_raw:
             try:
@@ -2560,7 +2603,7 @@ async def _run_clarify_reparse(
                         updated_fields.append(sub)
 
                 if updated_fields:
-                    # v2.53: 用户已选"不影响历史数据，仅新增功能" -> is_optimization 设为 False
+                    # v2.8.53: 用户已选"不影响历史数据，仅新增功能" -> is_optimization 设为 False
                     # 避免后续 ClarifyAgent 二次验证时再次生成历史数据问题（死循环提问）
                     no_impact_selected = (
                         "不影响历史数据" in impact_types
@@ -2631,7 +2674,7 @@ async def _run_clarify_reparse(
         # v2.42: 3 轮收敛（docs/01 §4.1 第4条 + §4.2 流程图）
         # 第 3 轮仍有未解决问题 → 强制放行，标记 _clarify_force_passed + 未解决问题降级为 optional
         # v2.43: 轮次统计基于"当前重新生成周期"，重新生成后重置计数
-        # v2.51: 从 settings 读取，与 orchestrator ClarifyLoopGuard 保持一致
+        # v2.8.51: 从 settings 读取，与 orchestrator ClarifyLoopGuard 保持一致
         MAX_CLARIFY_ITERATIONS = settings.MAX_CLARIFY_ITERATIONS
         clarify_rounds_done = _count_clarify_rounds_since_last_regen(clarify_history)
         force_passed = (
@@ -2671,7 +2714,7 @@ async def _run_clarify_reparse(
                 srr_json=final_data, status=recheck_final_status,
                 # v2.33: 自增 revision（澄清重解析属于内容变更）
                 revision=Requirement.revision + 1,
-                # v2.52: 同步更新标题（LLM 重解析可能产生新标题）
+                # v2.8.52: 同步更新标题（LLM 重解析可能产生新标题）
                 title=final_data.get("requirement", {}).get("title", ""),
             ))
             await s.commit()
@@ -2741,7 +2784,7 @@ async def _run_clarify_reparse(
             message="澄清重生成失败: " + err_msg[:200],
             completed_at=datetime.now(timezone.utc),
         )
-        # 失败时将需求状态恢复为原始状态（v2.52: 不再无条件降级为 draft）
+        # 失败时将需求状态恢复为原始状态（v2.8.52: 不再无条件降级为 draft）
         try:
             async with async_session() as s:
                 await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(status=original_status))
@@ -2779,7 +2822,7 @@ async def finalize_requirement(
     if record.status != "draft":
         raise HTTPException(status_code=400, detail="只能对 draft 状态的需求执行此操作")
 
-    # v2.52: 互斥检查（与其他分析任务冲突检测）
+    # v2.8.52: 互斥检查（与其他分析任务冲突检测）
     await _check_no_running_task(req_id, session=session)
 
     srr = record.srr_json or {}
@@ -2834,10 +2877,10 @@ async def finalize_requirement(
     # v2.41: 修复 active/confirmed 死锁——原落库 active 会被 confirm_requirement 拒绝（只接受 pending_review）
     # 改为 pending_review，让用户走标准 confirm 流程，与 _run_requirement_analysis / _run_clarify_reparse 对齐
     record.status = "pending_review"
-    # v2.52: 同步更新标题（LLM 重解析可能产生新标题）
+    # v2.8.52: 同步更新标题（LLM 重解析可能产生新标题）
     record.title = final_data.get("requirement", {}).get("title", record.title)
 
-    # v2.52: 同步更新 FP（原 finalize 不更新 FP，导致 SRR 新 / FP 旧）
+    # v2.8.52: 同步更新 FP（原 finalize 不更新 FP，导致 SRR 新 / FP 旧）
     if finalize_result.fps:
         try:
             await _save_fps_to_db(session, req_id, finalize_result.fps, record.priority, product_id=record.product_id or "")
@@ -3103,7 +3146,7 @@ async def regenerate_requirement(
             len(valid_files), len(supplementary_text),
         )
 
-    # v2.52: 快照原始状态，供失败时原样恢复
+    # v2.8.52: 快照原始状态，供失败时原样恢复
     original_status = record.status
 
     old_srr = dict(record.srr_json or {})
@@ -3178,7 +3221,7 @@ async def regenerate_requirement(
         req_id, has_files, len(extra_notes), len(enhanced_raw),
     )
 
-    # v2.16: 冲突检测（v2.52: 传入 session 启用 advisory lock）
+    # v2.16: 冲突检测（v2.8.52: 传入 session 启用 advisory lock）
     await _check_no_running_task(req_id, session=session)
 
     # v2.15: 标记需求为 analyzing 状态
@@ -3287,7 +3330,7 @@ async def _run_regenerate_reparse(
             final_srr.pop("_field_sources", None)
             final_srr["_clarify_degraded"] = True
 
-        # v2.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
+        # v2.8.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
         captured_fps: list = []
         captured_fp_deps: list = []
         captured_interaction_srr = None
@@ -3312,12 +3355,23 @@ async def _run_regenerate_reparse(
 
         # ===== v2.32: phase=kb_search + clarify（与需求分析流程一致）=====
         # 重新生成同样需要走澄清环节：KB 检索 + 问题生成 + 质量评分
+        # v2.8.57: 传入进度回调，将 ClarifyAgent 内部 40-70 区间映射到重新生成的 55-80
+        await _update_task(task_id, phase="kb_search", progress=55,
+                           message="正在检索知识库历史需求并补充缺失字段...")
+
+        async def _regen_clarify_progress_cb(message: str, progress: int) -> None:
+            # 线性映射：40-70 → 55-80
+            mapped = 55 + round((progress - 40) * 25 / 30) if progress > 40 else 55
+            await _update_task(task_id, phase="kb_search", progress=mapped, message=message)
+
         clarify_result = None
         questions: list = []
         clarify_error: str | None = None
         async with async_session() as s:
             try:
-                clarify_result = await clarify_agent.clarify(final_srr)
+                clarify_result = await clarify_agent.clarify(
+                    final_srr, progress_callback=_regen_clarify_progress_cb,
+                )
                 questions = clarify_result.get("questions", [])
             except Exception as e:
                 # v2.18: 关键错误不再静默——中断流水线，保存已生成结果，标记任务失败
@@ -3426,7 +3480,7 @@ async def _run_regenerate_reparse(
         }
         clarify_history = list(old_srr.get("_clarify_history", []))
         clarify_history.append(history_entry)
-        # v2.52: 裁剪历史记录（最多保留最近 5 轮）
+        # v2.8.52: 裁剪历史记录（最多保留最近 5 轮）
         if len(clarify_history) > 5:
             clarify_history = clarify_history[-5:]
 
@@ -3461,7 +3515,7 @@ async def _run_regenerate_reparse(
             "extra_notes": extra_notes,
             "srr": old_snapshot,
         })
-        # v2.52: 裁剪历史版本，防止 srr_json 无界膨胀（最多保留最近 3 个版本）
+        # v2.8.52: 裁剪历史版本，防止 srr_json 无界膨胀（最多保留最近 3 个版本）
         MAX_VERSION_HISTORY = 3
         if len(version_history) > MAX_VERSION_HISTORY:
             version_history = version_history[-MAX_VERSION_HISTORY:]
@@ -3484,7 +3538,7 @@ async def _run_regenerate_reparse(
         # 但需保留旧的 legacy_data_impact.user_clarification，避免重新生成后数据丢失。
         # 若 LLM 重新生成了 legacy_data_impact（is_optimization=True），则尊重 LLM 判断，
         # 仅在新 user_clarification 为空时回填旧值。
-        # v2.53: 用户已答"不影响历史数据"（impact_scope 含标记）时也需保留，
+        # v2.8.53: 用户已答"不影响历史数据"（impact_scope 含标记）时也需保留，
         # 避免 ClarifyAgent 二次验证时因丢失用户答复而再次生成历史数据问题
         try:
             new_ldi = final_data.get("legacy_data_impact")
@@ -3492,7 +3546,7 @@ async def _run_regenerate_reparse(
             old_has_user_answer = isinstance(old_ldi, dict) and (
                 # 旧 ldi 标记为优化需求且有用户澄清文本
                 (old_ldi.get("is_optimization") and old_ldi.get("user_clarification", "").strip())
-                # v2.53: 或 impact_scope 含用户已答标记（如"不影响历史数据"）
+                # v2.8.53: 或 impact_scope 含用户已答标记（如"不影响历史数据"）
                 or any(m in str(old_ldi.get("impact_scope", "")) for m in ("不影响历史数据", "仅新增功能", "无影响"))
             )
             if old_has_user_answer:
@@ -3500,7 +3554,7 @@ async def _run_regenerate_reparse(
                     # LLM 重新生成了优化需求分析，回填旧的用户澄清（若新值为空）
                     if not str(new_ldi.get("user_clarification", "")).strip():
                         new_ldi["user_clarification"] = old_ldi.get("user_clarification", "")
-                        # v2.53: 同步回填 impact_scope（含用户已答标记）
+                        # v2.8.53: 同步回填 impact_scope（含用户已答标记）
                         if not str(new_ldi.get("impact_scope", "")).strip():
                             new_ldi["impact_scope"] = old_ldi.get("impact_scope", "")
                         logger.info(
@@ -3580,7 +3634,7 @@ async def _run_regenerate_reparse(
             # v2.18: FP 应用失败不再静默——中断流水线，标记任务失败
             fp_err_msg = str(fp_err)[:500]
             logger.error("[Task/Regenerate] FP 应用失败（关键错误，中断流水线）: req_id={}, err={}", req_id, fp_err_msg)
-            # v2.53: 回滚 Requirement status 到 original_status，避免状态与 FP 数据不一致
+            # v2.8.53: 回滚 Requirement status 到 original_status，避免状态与 FP 数据不一致
             # （Requirement 状态已 commit 为 final_status，但 FP 保存失败，需回滚）
             try:
                 async with async_session() as rollback_s:
@@ -3626,7 +3680,7 @@ async def _run_regenerate_reparse(
             message="重新生成失败: " + err_msg[:200],
             completed_at=datetime.now(timezone.utc),
         )
-        # 失败时回退到原始状态（v2.52: 不再无条件升级为 pending_review）
+        # 失败时回退到原始状态（v2.8.52: 不再无条件升级为 pending_review）
         try:
             async with async_session() as s:
                 await s.execute(sa_update(Requirement).where(Requirement.id == req_id).values(status=original_status))
@@ -4484,7 +4538,7 @@ async def confirm_requirement(
 
     # v1.6: 校验影响分析确认状态
     # 若 SRR 中存在 impact_analysis 且包含未确认的受影响 FP，则阻止确认
-    # v2.52: 修复死锁——原逻辑要求所有 is_affected=True 才能确认，
+    # v2.8.52: 修复死锁——原逻辑要求所有 is_affected=True 才能确认，
     # 但 confirm_impact_analysis 只能设置 is_affected=True，用户无法标记"确认不受影响"。
     # 改为检查 confirmed_at 字段（用户已审核标记），而非 is_affected 值。
     srr = req.srr_json or {}
@@ -4499,6 +4553,42 @@ async def confirm_requirement(
                 detail=f"存在 {len(unconfirmed_impacts)} 个未确认的影响范围功能点"
                        f"（{', '.join(fp_names)}{suffix}），"
                        f"请先通过影响分析确认功能点后再确认",
+            )
+
+    # v3.1: 需求确认时自动审核通过该需求产生的依赖关系（无需去依赖图谱人工审核）。
+    # 依赖边由本需求 FP 拆分生成（source 属于本需求），确认 SRR 即代表用户认可其依赖关系，
+    # 因此直接把本需求 source 的 pending 依赖边置为 approved，使其参与影响分析。
+    fp_id_stmt = select(FpModel.id).where(FpModel.requirement_id == req_id)
+    own_fp_ids = [r[0] for r in (await session.execute(fp_id_stmt)).all()]
+    if own_fp_ids:
+        dep_stmt = select(FPDependency).where(
+            FPDependency.source_fp_id.in_(own_fp_ids),
+            FPDependency.review_status == "pending",
+        )
+        pending_deps = (await session.execute(dep_stmt)).scalars().all()
+        auto_approved = 0
+        for dep in pending_deps:
+            dep.review_status = "approved"
+            dep.reviewed_by = current_user.username
+            dep.reviewed_at = datetime.now(timezone.utc)
+            session.add(FPDependencyHistory(
+                dependency_id=dep.id,
+                source_fp_id=dep.source_fp_id,
+                target_fp_id=dep.target_fp_id,
+                relation_type=dep.relation_type,
+                description=dep.description,
+                action="approved",
+                old_review_status="pending",
+                new_review_status="approved",
+                changed_by=current_user.username,
+                change_reason="需求确认时自动审核通过",
+                related_req_id=req_id,
+            ))
+            auto_approved += 1
+        if auto_approved:
+            logger.info(
+                "[FP] 需求确认自动审核通过 {} 条依赖关系: req_id={}",
+                auto_approved, req_id,
             )
 
     req.status = "confirmed"
@@ -4526,7 +4616,7 @@ async def _check_no_running_task(
     - upload_requirement / regenerate / merge_fp / submit_clarify 四种操作互斥
     - 已有任务 running/pending 时抛 HTTPException 409
 
-    v2.52: 使用 PG advisory lock 消除 TOCTOU 竞态——
+    v2.8.52: 使用 PG advisory lock 消除 TOCTOU 竞态——
     互斥检查与任务创建在调用方同一事务中原子执行，防止并发请求同时通过检查。
     调用方需传入 session 参数，advisory lock 持有到该事务提交/回滚。
 
@@ -5229,7 +5319,7 @@ async def confirm_impact_analysis(
     )
     if not lock_req.fetchone():
         raise HTTPException(status_code=404, detail="需求不存在（行锁获取失败）")
-    # v2.52: 使用 dict() 创建新字典，确保 SQLAlchemy 检测到 JSON 字段变更
+    # v2.8.52: 使用 dict() 创建新字典，确保 SQLAlchemy 检测到 JSON 字段变更
     srr = dict(req.srr_json or {})
 
     removed_set = set(body.removed_fp_ids or [])
@@ -5818,8 +5908,9 @@ async def fp_delete(
             (Traceability.src_fp_id == fp_id) | (Traceability.dest_fp_id == fp_id)
         )
         await session.execute(tr_cleanup)
-    except Exception:
-        pass
+    except Exception as e:
+        # v2.8.60: 静默吞异常改为日志记录（Traceability 表可能不存在或已删除，不阻断主流程但需可追溯）
+        logger.warning("清理 FP {} 的 Traceability 关联失败（非阻断）: {}", fp_id, str(e)[:200])
 
     # 删除关联依赖
     dep_result = await session.execute(

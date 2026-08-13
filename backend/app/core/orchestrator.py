@@ -195,7 +195,7 @@ class ClarifyLoopGuard:
         _route_after_gate 调用本类的 should_retry / should_force_pass 判断路由。
     """
 
-    # v2.52: 改为 property，运行时读取 settings（消除导入时绑定隐患）
+    # v2.8.52: 改为 property，运行时读取 settings（消除导入时绑定隐患）
     @property
     @classmethod
     def MAX_ITERATIONS(cls) -> int:

@@ -2,13 +2,20 @@
 
 将所有业务路由子模块聚合为统一的 api_router，由 main.py 注册到 /api 前缀。
 
-路由组织（对应实现计划 T5.1）：
-    - requirements: 需求上传 / 列表 / 详情 / 澄清问题 / 提交澄清答案
+路由组织（v2.8.60 更新，共 13 个子路由）：
+    - auth:         登录 / JWT 颁发 / 用户认证
+    - requirements: 需求上传 / 列表 / 详情 / 澄清 / 重新生成 / 归档 / XMind 导出
     - generate:     SSE 流式生成测试用例（核心端点）
     - testcases:    用例列表 / 详情 / 编辑 / 删除 / 反馈回流
-    - knowledge:    知识库统计 / 测试模式列表
+    - knowledge:    知识库统计 / 测试模式列表 / 向量重处理
+    - knowledge_qa: 知识库问答（含人工纠错 + 审核流程）
     - settings:     LLM 配置读取 / 更新 / 连通性测试
-    - export:       用例导出（Markdown / Gherkin / pytest / JSON）
+    - export:       用例导出（Markdown / Gherkin / pytest / JSON / XMind）
+    - products:     产品 + 项目 + 模块 + 依赖图谱 + 影响分析
+    - prompts:      提示词覆盖管理
+    - roles:        角色 CRUD + 菜单权限
+    - users:        用户 CRUD + 角色分配
+    - logs:         操作日志查询
 
 设计依据：
 - docs/00-architecture-overview.md §2 访问层

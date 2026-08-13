@@ -136,7 +136,7 @@ class CoverageSummary(BaseModel):
 class UTCFMetadata(BaseModel):
     """UTCF 元数据。"""
     generated_at: str = Field(default="", description="生成时间 ISO 8601")
-    generator: str = Field(default="ai-test-gen v1.2.0", description="生成器标识")
+    generator: str = Field(default="ai-test-gen", description="生成器标识")
     generator_model: str = Field(default="", description="生成模型")
     source_requirement: SourceRequirement | None = Field(default=None, description="来源需求")
     gen_batch_id: str = Field(default="", description="生成批次 ID")

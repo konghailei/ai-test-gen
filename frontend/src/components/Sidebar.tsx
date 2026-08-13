@@ -2,7 +2,7 @@ import { Link, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, FileText, TestTube, Database,
   Sparkles, Share2,
-  MessageSquare, FolderOpen, Puzzle, ShieldCheck
+  MessageSquare, FolderOpen, Puzzle, ShieldCheck, ClipboardCheck
 } from 'lucide-react'
 import { useAuth } from '../auth'
 
@@ -16,6 +16,7 @@ function navItems(permissions: string[]) {
     { key: 'dependency_graph', path: '/dependency-graph', label: '依赖图谱', icon: Share2 },
     { key: 'knowledge', path: '/knowledge', label: '知识库', icon: Database },
     { key: 'knowledge_qa', path: '/knowledge-qa', label: '知识问答', icon: MessageSquare },
+    { key: 'correction_review', path: '/corrections', label: '纠正审核', icon: ClipboardCheck },
   ]
   // 兼容旧权限映射：
   // - projects_modules → project_management + module_management

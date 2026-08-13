@@ -265,7 +265,7 @@ export default function ProductsPage() {
     if (!editTarget) return
     setSaving(true)
     try {
-      await apiPut(`/products/products/${editTarget.id}`, { name, description: desc, visible_to_user_ids: visibleIds })
+      await apiPut(`/products/${editTarget.id}`, { name, description: desc, visible_to_user_ids: visibleIds })
       setEditTarget(null)
       load()
     } catch (e: any) { alert('保存失败: ' + e.message) }

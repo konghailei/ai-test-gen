@@ -96,7 +96,7 @@ class AddDependencyEdgeRequest(BaseModel):
 # 1. 产品 CRUD
 # ============================================================================
 
-@router.get("/products", response_model=ApiResponse)
+@router.get("/", response_model=ApiResponse)
 async def list_products(
     session: AsyncSession = Depends(get_session),
     user: "CurrentUser" = Depends(get_current_user),
@@ -119,7 +119,7 @@ async def list_products(
     return ApiResponse(success=True, message="ok", data=filtered)
 
 
-@router.post("/products", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+@router.post("/", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def create_product(body: CreateProductRequest, session: AsyncSession = Depends(get_session)):
     """创建产品。产品 ID 自动生成（时间戳后缀 + 随机数防冲突）。"""
     if body.id:
@@ -143,7 +143,7 @@ async def create_product(body: CreateProductRequest, session: AsyncSession = Dep
     return ApiResponse(success=True, message="产品已创建", data={"id": pid, "name": body.name})
 
 
-@router.put("/products/{pid}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+@router.put("/{pid}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def update_product(pid: str, body: UpdateProductRequest, session: AsyncSession = Depends(get_session)):
     result = await session.execute(select(Product).where(Product.id == pid))
     row = result.scalar_one_or_none()
@@ -165,7 +165,7 @@ async def update_product(pid: str, body: UpdateProductRequest, session: AsyncSes
     return ApiResponse(success=True, message="已更新")
 
 
-@router.get("/products/{pid}/delete-check", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+@router.get("/{pid}/delete-check", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def delete_product_check(pid: str, session: AsyncSession = Depends(get_session)):
     """产品删除预检查：返回产品名称与关联数据统计，供前端二次确认。
 
@@ -204,7 +204,7 @@ async def delete_product_check(pid: str, session: AsyncSession = Depends(get_ses
     })
 
 
-@router.delete("/products/{pid}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+@router.delete("/{pid}", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def delete_product(
     pid: str,
     session: AsyncSession = Depends(get_session),
@@ -257,7 +257,7 @@ async def delete_product(
         raise HTTPException(500, f"删除失败：{str(e)[:200]}")
 
     # 4) 同步删除向量库中该产品的所有需求与用例向量（按 product_id 批量清理）
-    # v2.51 修复：原循环单条 delete 未 flush，导致 Milvus BOUNDED 一致性下查询仍返回已删数据。
+    # v2.8.51 修复：原循环单条 delete 未 flush，导致 Milvus BOUNDED 一致性下查询仍返回已删数据。
     # 改为按 product_id 批量 delete + flush，确保彻底清理。
     try:
         from app.db.milvus_store import vector_store
@@ -287,25 +287,50 @@ async def delete_product(
 # 2. 项目 CRUD
 # ============================================================================
 
-@router.get("/products/{pid}/projects", response_model=ApiResponse)
-async def list_projects(pid: str, session: AsyncSession = Depends(get_session)):
+@router.get("/{pid}/projects", response_model=ApiResponse)
+async def list_projects(
+    pid: str,
+    session: AsyncSession = Depends(get_session),
+    _user: "CurrentUser" = Depends(get_current_user),
+):
+    """v2.8.69: 补全统一登录态依赖（与 list_products 对齐）和空值安全防护。
+    避免 r.created_at=None 时 .isoformat() 崩溃或未登录态绕过导致的前端异常。
+    """
+    from app.core.auth import CurrentUser
     result = await session.execute(
         select(Project).where(Project.product_id == pid).order_by(Project.created_at.desc())
     )
     rows = result.scalars().all()
-    return ApiResponse(success=True, message="ok", data=[{
-        "id": r.id, "product_id": r.product_id, "name": r.name,
-        "description": r.description, "version": r.version or "1.0",
-        "created_at": r.created_at.isoformat() if r.created_at else "",
-        # v2.45: 归档状态字段
-        "status": r.status or "active",
-        "go_live_date": r.go_live_date.isoformat() if r.go_live_date else "",
-        "archived_at": r.archived_at.isoformat() if r.archived_at else "",
-        "archived_by": r.archived_by or "",
-    } for r in rows])
+    data = []
+    for r in rows:
+        try:
+            created_at = r.created_at.isoformat() if r.created_at else ""
+        except Exception:
+            created_at = ""
+        try:
+            go_live_date = r.go_live_date.isoformat() if r.go_live_date else ""
+        except Exception:
+            go_live_date = ""
+        try:
+            archived_at = r.archived_at.isoformat() if r.archived_at else ""
+        except Exception:
+            archived_at = ""
+        data.append({
+            "id": r.id or "",
+            "product_id": r.product_id or "",
+            "name": r.name or "",
+            "description": r.description or "",
+            "version": r.version or "1.0",
+            "created_at": created_at,
+            "status": r.status or "active",
+            "go_live_date": go_live_date,
+            "archived_at": archived_at,
+            "archived_by": r.archived_by or "",
+        })
+    return ApiResponse(success=True, message="ok", data=data)
 
 
-@router.post("/products/{pid}/projects", response_model=ApiResponse, dependencies=[Depends(require_write)])
+@router.post("/{pid}/projects", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def create_project(pid: str, body: CreateProjectRequest, session: AsyncSession = Depends(get_session)):
     """创建项目。项目 ID 自动生成（时间戳后缀 + 随机数防冲突）。"""
     if body.id:
@@ -753,13 +778,24 @@ async def archive_project(
             )
         raise HTTPException(status_code=409, detail=f"归档失败（数据冲突）: {str(e)[:200]}")
 
-    # 12. 写入向量库（异步，不阻断主流程）
+    # 12. 写入向量库（v2.8.58: 改为 Celery 异步派发，PG 同步落库后立即返回）
+    # 架构设计：PG commit → celery_app.send_task → Celery Worker 异步 Embedding + Milvus 写入
+    # Celery 不可用时降级为同步写入（保持兼容）
     project_version = project.version
     kb_count = 0
+    kb_failed: list[dict] = []  # v2.8.56: 记录向量写入失败的条目
     # v2.45 优化：按 requirement_id 分组 FP，避免嵌套循环 O(需求数 × FP数) → O(需求数 + FP数)
     fp_by_req: dict[str, list] = {}
     for f in all_fps:
         fp_by_req.setdefault(f.requirement_id, []).append(f)
+
+    # v2.8.58: 检测 Celery 是否可用（决定异步派发还是同步降级）
+    try:
+        from app.tasks.celery_app import celery_app as _celery_app
+        _celery_available = _celery_app is not None
+    except ImportError:
+        _celery_app = None
+        _celery_available = False
 
     for r in requirements:
         milvus_meta = {
@@ -772,17 +808,42 @@ async def archive_project(
             "go_live_date": parsed_go_live.isoformat(),
             "project_version": project_version,
         }
-        try:
-            from app.db.milvus_store import vector_store
-            await asyncio.to_thread(
-                vector_store.add_requirement,
-                req_id=r.id,
-                srr_json=r.srr_json or {},
-                metadata=milvus_meta,
-            )
-            kb_count += 1
-        except Exception as e:
-            logger.warning("[ArchiveProject] 需求向量写入失败 req_id={}: {}", r.id, str(e)[:150])
+        if _celery_available:
+            # 异步派发：设置 pending 状态，Celery 任务完成后回写 completed/failed
+            try:
+                _celery_app.send_task(
+                    "app.tasks.embedding_tasks.embed_and_store_requirement",
+                    args=[r.id, r.srr_json or {}, milvus_meta],
+                    queue="embedding",
+                )
+                kb_count += 1
+                r.vectorization_status = "pending"
+                r.vectorization_error = None
+            except Exception as e:
+                err_msg = str(e)[:500]
+                logger.error("[ArchiveProject] 需求向量化任务派发失败 req_id={}: {}", r.id, err_msg[:150])
+                r.vectorization_status = "failed"
+                r.vectorization_error = f"任务派发失败: {err_msg}"
+                kb_failed.append({"id": r.id, "title": r.title, "type": "requirement", "error": err_msg[:200]})
+        else:
+            # 降级：同步写入（Celery 未安装）
+            try:
+                from app.db.milvus_store import vector_store
+                await asyncio.to_thread(
+                    vector_store.add_requirement,
+                    req_id=r.id,
+                    srr_json=r.srr_json or {},
+                    metadata=milvus_meta,
+                )
+                kb_count += 1
+                r.vectorization_status = "completed"
+                r.vectorization_error = None
+            except Exception as e:
+                err_msg = str(e)[:500]
+                logger.error("[ArchiveProject] 需求向量写入失败 req_id={}: {}", r.id, err_msg[:150])
+                r.vectorization_status = "failed"
+                r.vectorization_error = err_msg
+                kb_failed.append({"id": r.id, "title": r.title, "type": "requirement", "error": err_msg[:200]})
 
         # FP 向量（从预分组字典读取，O(1) 查找）
         for f in fp_by_req.get(r.id, []):
@@ -803,18 +864,40 @@ async def archive_project(
             embed_srr["requirement"]["title"] = f.name
             if f.summary:
                 embed_srr["requirement"]["summary"] = f.summary
-            try:
-                from app.db.milvus_store import vector_store
-                await asyncio.to_thread(
-                    vector_store.add_requirement,
-                    req_id=f"FP-{f.id}",
-                    srr_json=embed_srr,
-                    metadata=fp_meta,
-                )
-            except Exception as e:
-                logger.warning("[ArchiveProject] FP向量写入失败 fp_id={}: {}", f.id, str(e)[:150])
+            if _celery_available:
+                # 异步派发 FP 向量化
+                try:
+                    _celery_app.send_task(
+                        "app.tasks.embedding_tasks.embed_and_store_requirement",
+                        args=[f"FP-{f.id}", embed_srr, fp_meta],
+                        queue="embedding",
+                    )
+                except Exception as e:
+                    err_msg = str(e)[:500]
+                    logger.error("[ArchiveProject] FP向量化任务派发失败 fp_id={}: {}", f.id, err_msg[:150])
+                    kb_failed.append({"id": f.id, "title": f.name, "type": "functional_point", "error": err_msg[:200]})
+            else:
+                # 降级：同步写入
+                try:
+                    from app.db.milvus_store import vector_store
+                    await asyncio.to_thread(
+                        vector_store.add_requirement,
+                        req_id=f"FP-{f.id}",
+                        srr_json=embed_srr,
+                        metadata=fp_meta,
+                    )
+                except Exception as e:
+                    err_msg = str(e)[:500]
+                    logger.error("[ArchiveProject] FP向量写入失败 fp_id={}: {}", f.id, err_msg[:150])
+                    kb_failed.append({"id": f.id, "title": f.name, "type": "functional_point", "error": err_msg[:200]})
 
-    # v2.55 Bug A-2: 失效该产品的 KB 检索缓存，防止 24h 内 augmentation 使用归档前旧数据
+    # v2.8.56: 回写 vectorization_status 到 DB
+    try:
+        await session.commit()
+    except Exception as e:
+        logger.warning("[ArchiveProject] vectorization_status 回写失败（不阻断）: {}", str(e)[:150])
+
+    # v2.8.55 Bug A-2: 失效该产品的 KB 检索缓存，防止 24h 内 augmentation 使用归档前旧数据
     product_id_for_cache = requirements[0].product_id if requirements else ""
     if product_id_for_cache:
         try:
@@ -824,12 +907,19 @@ async def archive_project(
             logger.warning("[ArchiveProject] KB 缓存失效失败（不阻断）: {}", str(cache_e)[:150])
 
     logger.info(
-        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量写入={}",
-        proj_id, version_id, len(requirements), len(all_fps), len(all_deps), kb_count
+        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量派发={}, 失败={}, celery={}",
+        proj_id, version_id, len(requirements), len(all_fps), len(all_deps), kb_count, len(kb_failed),
+        "async" if _celery_available else "sync",
     )
+    # v2.8.58: 异步派发时提示用户向量化进行中，同步写入时提示完成状态
+    msg = f"项目已归档，版本号: {version_id}"
+    if _celery_available and not kb_failed:
+        msg += f"（向量化任务已异步派发，{kb_count} 条记录正在后台处理）"
+    elif kb_failed:
+        msg += f"（警告: {len(kb_failed)} 条向量写入失败，知识库检索可能不完整，请检查嵌入模型状态）"
     return ApiResponse(
         success=True,
-        message=f"项目已归档，版本号: {version_id}",
+        message=msg,
         data={
             "project_id": proj_id,
             "status": "archived",
@@ -838,6 +928,8 @@ async def archive_project(
             "fp_count": len(all_fps),
             "dependency_count": len(all_deps),
             "kb_written": kb_count,
+            "kb_failed": kb_failed,  # v2.8.56: 返回失败列表供前端展示
+            "vectorization_mode": "async" if _celery_available else "sync",  # v2.8.58
             "go_live_date": parsed_go_live.isoformat(),
         },
     )
@@ -1099,7 +1191,7 @@ async def reactivate_project(
 # v2.45: 依赖版本查询端点
 # ============================================================================
 
-@router.get("/products/{pid}/fp/dependency-versions", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+@router.get("/{pid}/fp/dependency-versions", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def list_dependency_versions_by_product(
     pid: str,
     session: AsyncSession = Depends(get_session),
@@ -1290,7 +1382,7 @@ async def diff_dependency_versions(
 # v2.45: 知识库按项目展示端点
 # ============================================================================
 
-@router.get("/products/{pid}/kb/projects", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+@router.get("/{pid}/kb/projects", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def list_kb_projects(
     pid: str,
     session: AsyncSession = Depends(get_session),
@@ -1307,22 +1399,31 @@ async def list_kb_projects(
     )
     projects = result.scalars().all()
 
-    # 查询每个项目下的需求数量和用例数量
+    # 查询每个项目下的需求数量和用例数量（v2.8.56 修复：仅统计知识库内 status='archived' 的需求，
+    # 避免从知识库删除后恢复 active 的需求仍被计入）
     proj_ids = [p.id for p in projects]
     req_counts: dict[str, int] = {}
     tc_counts: dict[str, int] = {}
     if proj_ids:
         req_result = await session.execute(
             select(Requirement.project_id, func.count(Requirement.id))
-            .where(Requirement.project_id.in_(proj_ids))
+            .where(
+                Requirement.project_id.in_(proj_ids),
+                Requirement.status == "archived",
+            )
             .group_by(Requirement.project_id)
         )
         req_counts = {row[0]: row[1] for row in req_result.all()}
 
+        # 用例走物理删除（delete_kb_entry 直接 delete），但需求恢复 active 后
+        # 其历史用例可能仍存在；为保持口径一致，只统计已归档需求下的用例
         tc_result = await session.execute(
             select(Requirement.project_id, func.count(TestCase.id))
             .join(TestCase, TestCase.req_id == Requirement.id)
-            .where(Requirement.project_id.in_(proj_ids))
+            .where(
+                Requirement.project_id.in_(proj_ids),
+                Requirement.status == "archived",
+            )
             .group_by(Requirement.project_id)
         )
         tc_counts = {row[0]: row[1] for row in tc_result.all()}
@@ -1357,10 +1458,14 @@ async def list_kb_entries_by_project(
     if not project:
         raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
 
-    # 查询需求
+    # 查询需求（v2.8.56 修复：仅返回知识库内 status='archived' 的需求，
+    # 避免从知识库删除后恢复 active 的需求仍展示在项目详情页）
     req_result = await session.execute(
         select(Requirement.id, Requirement.title, Requirement.status, Requirement.go_live_date, Requirement.priority)
-        .where(Requirement.project_id == proj_id)
+        .where(
+            Requirement.project_id == proj_id,
+            Requirement.status == "archived",
+        )
         .order_by(Requirement.created_at)
     )
     req_rows = req_result.all()
@@ -1408,7 +1513,7 @@ async def list_kb_entries_by_project(
 # 3. 模块 CRUD
 # ============================================================================
 
-@router.get("/products/{pid}/modules", response_model=ApiResponse)
+@router.get("/{pid}/modules", response_model=ApiResponse)
 async def list_modules(pid: str, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
         select(Module).where(Module.product_id == pid).order_by(Module.created_at.desc())
@@ -1421,7 +1526,7 @@ async def list_modules(pid: str, session: AsyncSession = Depends(get_session)):
     } for r in rows])
 
 
-@router.post("/products/{pid}/modules", response_model=ApiResponse, dependencies=[Depends(require_write)])
+@router.post("/{pid}/modules", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def create_module(pid: str, body: CreateModuleRequest, session: AsyncSession = Depends(get_session)):
     """创建模块。模块 ID 自动生成。"""
     import time, random
@@ -1835,7 +1940,7 @@ async def get_fp_impact(
         elif d.relation_type == "data_flows":
             adj.setdefault(d.source_fp_id, set()).add(d.target_fp_id)
         elif d.relation_type in ("lifecycle_scenarios", "conflicts_with", "invariants"):
-            # v2.55 Bug B-3: 双向关系——两个方向都传播影响
+            # v2.8.55 Bug B-3: 双向关系——两个方向都传播影响
             adj.setdefault(d.source_fp_id, set()).add(d.target_fp_id)
             adj.setdefault(d.target_fp_id, set()).add(d.source_fp_id)
 
@@ -1973,34 +2078,100 @@ async def analyze_project_impact(
     # 查找受影响的需求和用例（v2.4: 修复 pid 未定义 NameError；改用 modules[] 在 Python 层匹配）
     all_modules = list(visited)
     affected_reqs: list[dict] = []
+    # v2.8.69: 前端类型 ProjectImpact 分 direct_requirements / regression_requirements
+    #   - direct_requirements: 项目自身需求中命中受影响模块的（直接受影响）
+    #   - regression_requirements: 其他产品内项目命中的（跨项目回归）
+    direct_reqs: list[dict] = []
+    regression_reqs: list[dict] = []
+
+    # v2.8.69: 加载模块名称映射（模块信息为空的根因——原返回只给 module_id）
+    mod_name_lookup: dict[str, str] = {}
+    all_mod_ids = set(all_modules) | set(target_modules) | {m.get("module_id", "") for m in indirect if m.get("module_id")}
+    if all_mod_ids:
+        all_mod_ids.discard("")
+        mod_q = await session.execute(
+            select(Module.id, Module.name).where(Module.id.in_(list(all_mod_ids)))
+        )
+        for mid, mname in mod_q.all():
+            mod_name_lookup[mid] = mname or mid
+
     if all_modules:
         # 通过 proj_id 查询所属 product_id，用于隔离查询范围（原代码误用未定义的 pid 导致 NameError）
         proj_result = await session.execute(
-            select(Project.product_id).where(Project.id == proj_id)
+            select(Project.id, Project.name, Project.version, Project.product_id).where(Project.id == proj_id)
         )
-        product_id = proj_result.scalar_one_or_none()
+        proj_row = proj_result.first()
+        project_info: dict = {"id": proj_id, "name": "", "version": "1.0", "product_id": ""}
+        product_id = ""
+        if proj_row:
+            project_info["id"] = proj_row[0] or proj_id
+            project_info["name"] = proj_row[1] or ""
+            project_info["version"] = proj_row[2] or "1.0"
+            product_id = proj_row[3] or ""
         if product_id:
             # 仅按 product_id 隔离；module 字段（单值，已废弃 v2.2，仅存首模块）不再作为 DB 过滤条件，
             # 改在 Python 层用 modules[] 数组匹配，避免漏掉多模块关联的需求
             req_result = await session.execute(
-                select(Requirement).where(
+                select(Requirement.id, Requirement.title, Requirement.modules, Requirement.project_id).where(
                     Requirement.product_id == product_id,
                 ).order_by(Requirement.created_at.desc())
             )
-            for req in req_result.scalars().all():
-                req_mods = set(req.modules or [])
+            for row in req_result.all():
+                rid, rtitle, rmodules, rproj_id = row[0], row[1], row[2], row[3]
+                req_mods = set(rmodules or [])
                 matched = list(req_mods & set(all_modules))
-                if matched:
-                    affected_reqs.append({
-                        "id": req.id,
-                        "title": req.title,
-                        "matched_modules": matched,
-                    })
+                if not matched:
+                    continue
+                entry_direct: dict = {
+                    "id": rid,
+                    "title": rtitle or "",
+                    "modules": list(rmodules or []),
+                }
+                entry_regression: dict = {
+                    "id": rid,
+                    "title": rtitle or "",
+                    "matched_modules": matched,
+                }
+                affected_reqs.append({
+                    "id": rid, "title": rtitle or "", "matched_modules": matched,
+                })
+                # 区分: 项目自身需求 → direct_reqs；跨项目需求 → regression_reqs
+                if rproj_id and rproj_id == proj_id:
+                    direct_reqs.append(entry_direct)
+                else:
+                    regression_reqs.append(entry_regression)
+
+    # v2.8.69: 与前端 ProjectImpact 类型对齐
+    #   direct_modules: {id, name}[] — 前端展示模块名，不能只有字符串 mid
+    #   indirect_modules: {module_id, name, relation_type, depth}[]
+    #   project / direct_requirements / regression_requirements 全部补齐
+    direct_modules_out: list[dict] = [
+        {"id": mid, "name": mod_name_lookup.get(mid, mid)}
+        for mid in target_modules
+    ]
+    indirect_modules_out: list[dict] = [
+        {
+            "module_id": m.get("module_id", ""),
+            "name": mod_name_lookup.get(m.get("module_id", ""), m.get("module_id", "")),
+            "relation_type": m.get("reason", ""),
+            "depth": m.get("depth", 1),
+        }
+        for m in indirect
+    ]
 
     return ApiResponse(success=True, message="ok", data={
-        "direct_modules": target_modules,
-        "indirect_modules": indirect,
-        "all_affected_modules": all_modules,
+        "project": {
+            "id": project_info.get("id", proj_id),
+            "name": project_info.get("name", ""),
+            "version": project_info.get("version", "1.0"),
+        },
+        "direct_modules": direct_modules_out,
+        "indirect_modules": indirect_modules_out,
+        "all_affected_modules": [
+            {"id": mid, "name": mod_name_lookup.get(mid, mid)} for mid in all_modules
+        ],
+        "direct_requirements": direct_reqs,
+        "regression_requirements": regression_reqs,
         "affected_requirements": affected_reqs,
         "affected_requirement_count": len(affected_reqs),
     })

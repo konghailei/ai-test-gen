@@ -667,7 +667,6 @@ class GenAgent:
 
     def _get_model_name(self) -> str:
         """获取当前 LLM 模型名。"""
-        from app.config import settings
         return settings.llm_config.get("model", "unknown")
 
     # ========================================================================

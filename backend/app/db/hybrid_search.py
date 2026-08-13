@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -29,8 +30,10 @@ class HybridSearcher:
     """混合检索器，融合向量语义检索和 BM25 关键词检索。"""
 
     RRF_K = 60  # RRF 融合参数
-    # BM25 文本搜索配置：优先 chinese(zhparser)，回退 simple
-    # 在首次 BM25 查询时动态检测并缓存
+    # 时间衰减参数（v2.8.55：修复应用层粗暴覆盖排序破坏 RRF 相关性）
+    # 半衰期 T=180 天：180 天前的文档权重衰减到 0.5，360 天前衰减到 0.25
+    # 衰减作为 RRF 分数的乘数，而非覆盖排序，保证相关性仍是主导信号
+    TIME_DECAY_HALF_LIFE_DAYS = 180
     _ts_config: str | None = None
 
     async def search_requirements(
@@ -52,7 +55,7 @@ class HybridSearcher:
             top_k: 返回数量
             status: 按状态过滤
             session: PG 异步会话（有值时启用 BM25 混合检索）
-            doc_type: 按文档类型过滤（v2.53 新增）
+            doc_type: 按文档类型过滤（v2.8.53 新增）
                 - "requirement": 仅检索总 SRR 记录（避免 FP 向量混入）
                 - "functional_point": 仅检索功能点 SRR 记录
                 - None: 同时检索两类（默认，向后兼容）
@@ -101,7 +104,12 @@ class HybridSearcher:
         # 4. RRF 融合
         fused = self._rrf_fuse(vector_results, bm25_results)
 
-        # 5. Cross-Encoder 重排
+        # v2.8.55: 在 RRF 融合后应用时间衰减因子
+        # 不再用应用层覆盖排序，而是用乘数方式让时间作为辅助信号
+        # 相关性主导（RRF 分数）× 时间新鲜度（衰减因子）
+        fused = self._apply_time_decay(fused)
+
+        # 5. Cross-Encoder 重排（基于时间衰减后的排序结果）
         if settings.RERANKER_ENABLED and len(fused) > settings.MATCH_FINAL_N:
             try:
                 from app.db.reranker import reranker
@@ -155,32 +163,81 @@ class HybridSearcher:
         module_filter = ",".join(modules) if modules else None
         # 强校验 top_k 为正整数（防止 SQL 注入/异常值绕过 LIMIT 语义）
         safe_top_k = max(1, int(top_k))
-        sql = text("""
+        # BM25 三级降级查询策略（避免长问句因 plainto_tsquery 的 AND 条件导致 0 命中）：
+        #   Level A : websearch_to_tsquery  → 支持短语/引号/OR/排除，语义友好（PG11+ 可用）
+        #   Level B : plainto_tsquery       → AND 连接所有词，精确（兼容旧PG）
+        #   Level C : 提取核心词做 OR 查询  → 任一词命中即可，极度宽松兜底
+        query_levels = []
+        # Level A: websearch（若 PG 支持则首选；失败自动 savepoint 回退不抛错）
+        query_levels.append(("websearch", "websearch_to_tsquery(CAST(:ts_config AS regconfig), :q)"))
+        # Level B: plainto（AND 连接）
+        query_levels.append(("plainto", "plainto_tsquery(CAST(:ts_config AS regconfig), :q)"))
+        # Level C: OR 核心词兜底——用 regexp_split_to_table 对短句去停用词做 OR（由 Python 端替换 <OR_QUERY> 后执行）
+        #          这里用 to_tsquery 的 | 连接所有单 token 的 OR 查询；若 query 过短则原样 plainto
+        module_sql = "(CAST(:module_filter AS VARCHAR) IS NULL OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(modules::jsonb, '[]'::jsonb)) AS m WHERE m = ANY(string_to_array(:module_filter, ','))))"
+        base_sql = f"""
             SELECT id,
-                   ts_rank(search_vec, plainto_tsquery(CAST(:ts_config AS regconfig), :q)) AS rank,
+                   ts_rank(search_vec, {{tsquery_fn}}) AS rank,
                    title,
                    srr_json,
                    status,
                    product_id
             FROM requirements
-            WHERE search_vec @@ plainto_tsquery(CAST(:ts_config AS regconfig), :q)
+            WHERE search_vec @@ {{tsquery_fn}}
               AND (CAST(:product_id AS VARCHAR) IS NULL OR product_id = :product_id)
               AND (CAST(:status AS VARCHAR) IS NULL OR status = :status)
-              AND (CAST(:module_filter AS VARCHAR) IS NULL OR EXISTS (SELECT 1 FROM json_array_elements_text(COALESCE(modules, '[]'::jsonb)) AS m WHERE m = ANY(string_to_array(:module_filter, ','))))
+              AND {module_sql}
             ORDER BY rank DESC
             LIMIT CAST(:top_k AS BIGINT)
-        """)
-        # 使用 savepoint 隔离 BM25 失败，避免污染外层事务
-        async with session.begin_nested():
-            result = await session.execute(sql, {
-                "q": query,
-                "ts_config": ts_config,
-                "product_id": product_id,
-                "status": status,
-                "module_filter": module_filter,
-                "top_k": safe_top_k,
-            })
-            rows = result.all()
+        """
+
+        rows = []
+        # 使用 savepoint 隔离每一级查询，任何一级失败都不影响外层
+        for lvl_name, tsquery_fn in query_levels:
+            async with session.begin_nested():
+                try:
+                    sql = text(base_sql.format(tsquery_fn=tsquery_fn))
+                    result = await session.execute(sql, {
+                        "q": query,
+                        "ts_config": ts_config,
+                        "product_id": product_id,
+                        "status": status,
+                        "module_filter": module_filter,
+                        "top_k": safe_top_k,
+                    })
+                    rows = result.all()
+                    if rows:
+                        break
+                except Exception as e:  # 例如 websearch_to_tsquery 在不支持版本/特殊 query 语法时失败
+                    logger.debug("[HybridSearch] BM25 %s query skipped: %s", lvl_name, e)
+                    continue
+
+        # Level C 兜底：若前两级仍 0 条，且 query 非纯符号则做关键词 OR 查询
+        if not rows:
+            # 从 query 中提取长度≥2 的中文/英文片段（去除纯标点/疑问词/停用词），用 | 拼接
+            import re
+            tokens = []
+            for t in re.findall(r"[\u4e00-\u9fa5A-Za-z0-9]{2,}", query):
+                if t not in {"什么","怎么","如何","为什么","是否","可以","能够","应该","支持","具体","哪些"}:
+                    tokens.append(t)
+            if tokens:
+                # 保留最多 6 个关键词，避免 OR 太散
+                tokens = tokens[:6]
+                or_q = " | ".join(tokens)
+                async with session.begin_nested():
+                    try:
+                        sql = text(base_sql.format(tsquery_fn=f"to_tsquery(CAST(:ts_config AS regconfig), :q2)"))
+                        result = await session.execute(sql, {
+                            "q2": or_q,
+                            "ts_config": ts_config,
+                            "product_id": product_id,
+                            "status": status,
+                            "module_filter": module_filter,
+                            "top_k": safe_top_k,
+                        })
+                        rows = result.all()
+                    except Exception as e:
+                        logger.debug("[HybridSearch] BM25 Level-C OR query skipped: %s", e)
         return [
             {
                 "id": r.id,
@@ -248,6 +305,74 @@ class HybridSearcher:
             {**items[item_id], "rrf_score": score}
             for item_id, score in sorted(scores.items(), key=lambda x: -x[1])
         ]
+        return fused
+
+    def _apply_time_decay(self, fused: list[dict]) -> list[dict]:
+        """对 RRF 融合结果应用时间衰减因子（v2.8.55）。
+
+        设计目标：在功能点迭代多次的场景下，让较新版本的文档在相同相关性下优先。
+        实现：用指数衰减作为 RRF 分数的乘数，而非应用层覆盖排序。
+              - 相关性主导：RRF 分数仍是主要排序信号
+              - 时间辅助：相同 RRF 分数下，上线时间新的优先
+              - 半衰期 T=180 天：文档年龄每增加 180 天，权重衰减一半
+
+        衰减公式：decay = 0.5 ** (age_days / T)
+        最终分数：final_score = rrf_score * (0.5 + 0.5 * decay)
+                  （0.5 基线保证旧文档不会完全被压制）
+
+        Args:
+            fused: RRF 融合后的结果列表
+
+        Returns:
+            list[dict]: 应用时间衰减后的结果列表，按新分数降序排列
+        """
+        if not fused:
+            return fused
+
+        now = datetime.now(timezone.utc)
+        half_life = self.TIME_DECAY_HALF_LIFE_DAYS
+
+        for item in fused:
+            rrf_score = item.get("rrf_score", 0)
+            meta = item.get("metadata", {}) or {}
+            go_live = meta.get("go_live_date", "")
+
+            # 解析上线时间（支持 ISO 格式字符串和 datetime 对象）
+            age_days = 0
+            if go_live:
+                try:
+                    if isinstance(go_live, str):
+                        # 处理 ISO 格式，兼容带/不带时区的情况
+                        go_live_dt = datetime.fromisoformat(
+                            go_live.replace("Z", "+00:00")
+                        )
+                    elif isinstance(go_live, datetime):
+                        go_live_dt = go_live
+                    else:
+                        go_live_dt = None
+
+                    if go_live_dt:
+                        # 统一时区
+                        if go_live_dt.tzinfo is None:
+                            go_live_dt = go_live_dt.replace(tzinfo=timezone.utc)
+                        age_timedelta = now - go_live_dt
+                        age_days = max(0, age_timedelta.days)
+                except (ValueError, TypeError):
+                    age_days = 0
+
+            # 指数衰减：0.5 ** (age_days / T)
+            decay = 0.5 ** (age_days / half_life) if half_life > 0 else 1.0
+            # 0.5 基线 + 0.5 * decay，保证旧文档权重最低为 0.5
+            time_factor = 0.5 + 0.5 * decay
+            final_score = rrf_score * time_factor
+
+            item["rrf_score"] = round(final_score, 6)
+            # 保留时间衰减信息供调试和日志使用
+            item["_time_decay"] = round(time_factor, 4)
+            item["_age_days"] = age_days
+
+        # 按应用时间衰减后的分数重新排序
+        fused.sort(key=lambda x: -x.get("rrf_score", 0))
         return fused
 
 

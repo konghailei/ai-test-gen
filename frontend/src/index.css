@@ -94,7 +94,7 @@
   /* select 箭头和下拉样式 */
   select {
     @apply cursor-pointer;
-    /* v2.53 修复：隐藏浏览器原生箭头，避免与下方自定义背景箭头叠加出现"双箭头"。
+    /* v2.8.53 修复：隐藏浏览器原生箭头，避免与下方自定义背景箭头叠加出现"双箭头"。
        原生 appearance 需带 -webkit/-moz 前缀以兼容各浏览器。 */
     -webkit-appearance: none;
     -moz-appearance: none;

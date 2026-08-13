@@ -37,17 +37,22 @@ _PROMPT_REGISTRY: list[dict] = [
         "description": "ReqAgent Few-shot 示例 — 登录功能 SRR 范式",
     },
     # ClarifyAgent（需求澄清）
+    # v2.8.67: 重新注册 SYSTEM_PROMPT--v2.8.56 曾以"_generate_questions 未被主流程调用"
+    # 为由移除注册，但该判断有误（_generate_questions 在 clarify() L669 确实被调用），
+    # 导致 DB 中残留的旧版 SYSTEM_PROMPT（3981字）长期覆盖代码里持续迭代的最新版
+    # （含 v2.8.65 引用未定义/跨节矛盾专项 + v2.8.67 设计阶段细节抑制）。
+    # 重新注册后，register_default 会因 value==default 将 DB 的 value/default 同步为最新代码值。
     {
         "module": "clarify_agent",
         "name": "SYSTEM_PROMPT",
         "default": clarify_agent.SYSTEM_PROMPT,
-        "description": "ClarifyAgent 系统指令 — 需求完整性与歧义检测",
+        "description": "ClarifyAgent 系统指令 - LLM 语义检测生成澄清问题（完整性/充分性/遗漏/歧义/矛盾/引用未定义）",
     },
     {
         "module": "clarify_agent",
         "name": "UNRESOLVED_REFINER_SYSTEM_PROMPT",
         "default": clarify_agent.UNRESOLVED_REFINER_SYSTEM_PROMPT,
-        "description": "ClarifyAgent 未答缺口精炼 — 为 KB 无法回答的缺口生成带可选项的澄清问题",
+        "description": "ClarifyAgent 未答缺口精炼 - 为 KB 无法回答的缺口生成带可选项的澄清问题",
     },
     # GenAgent（用例生成）
     {

@@ -51,6 +51,10 @@ milvus/
 .env.local
 .env.*.local
 backend/.env
+# v2.8.60: 主密钥文件（LLM API Key 加密密钥，泄露会导致数据库中加密的 API Key 被解密）
+backend/.keys/
+*.key
+*.master.key
 
 # ===== IDE / 编辑器 =====
 .idea/
@@ -112,3 +116,19 @@ install_*.env
 /test_*.py
 /verify_*.py
 /_*.py
+# backend 下的一次性诊断/验证脚本、临时产物与 e2e 验证目录（不入库）
+backend/_*.py
+backend/verify_*.py
+backend/check_*.py
+backend/_e2e_tmp/
+backend/artifacts/
+backend/e2e_runner.py
+backend/find_req.py
+backend/questions_*.txt
+backend/test_req_doc.md
+backend/clarify_v1_1_results.json
+# v2.8.60: 根目录临时报告文件（应归档到 docs/ 或删除）
+BUG_REPORT_*.md
+SECURITY-AUDIT-REPORT.md
+KB_MODEL_FIX_OVERVIEW.md
+DEPLOY_OFFLINE_PACK.md

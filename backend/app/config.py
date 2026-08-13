@@ -364,7 +364,11 @@ class Settings(BaseSettings):
             warnings.append("APP_SECRET_KEY 长度不足 16 字符，建议使用更长的随机串")
 
         # MASTER_KEY 校验（LLM API Key 加密密钥）
-        master_key_env = os.environ.get("MASTER_KEY", "")
+        # v2.8.60 修复：原代码使用 os.environ.get("MASTER_KEY") 读取，
+        # 但 pydantic-settings 已将 .env 中的 MASTER_KEY 加载到 self.MASTER_KEY，
+        # 本地 python -m app.main 启动时（未 export 到 shell）会导致 self.MASTER_KEY 有值
+        # 但 os.environ.get 返回空，触发误报 RuntimeError。
+        master_key_env = self.MASTER_KEY or ""
         if not master_key_env and not self.DEBUG:
             raise RuntimeError(
                 "生产环境必须设置 MASTER_KEY 环境变量（用于加密数据库中存储的 LLM API Key）。\n"

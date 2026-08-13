@@ -88,6 +88,11 @@ export interface ClarifyQuestion {
   options?: string[]
   source?: string  // cold_start_xxx 等
   _llm_refine_missing?: boolean  // v2.8.6: LLM 未返回精炼结果标记
+  // v2.8.66: 回答状态相关字段（后端getClarifyState接口会注入）
+  answered?: boolean         // 是否已回答（用户有答案）
+  status?: string            // 状态：answered / unresolved
+  resolved?: boolean         // 是否已解决（已解决问题不在当前澄清页显示，仅历史可见）
+  answer?: string            // 历史答案文本（如用户已提交过）
 }
 
 export interface KbAugmentation {
@@ -462,6 +467,15 @@ export interface KbQARecord {
   conversation_history?: Array<{ role: string; content: string }>
   created_at: string
   updated_at: string
+  // v2.8.56: 审核流程字段
+  correction_status?: 'none' | 'pending_review' | 'approved' | 'rejected'
+  correction_module?: string
+  correction_target_type?: 'requirement' | 'functional_point'
+  correction_target_id?: string
+  reviewed_by?: string
+  reviewed_at?: string | null
+  review_notes?: string
+  product_id?: string
 }
 
 export interface KbQACorrectRequest {
@@ -643,6 +657,7 @@ export interface FPImpactDescription {
     req_title?: string
     depth: number
     description?: string
+    direction?: 'incoming' | 'outgoing'  // v3.1: incoming=依赖此FP(下游)，outgoing=被依赖(上游)
   }[]
   affected_modules: {
     module_id: string

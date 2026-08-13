@@ -72,10 +72,17 @@ SYSTEM_PROMPT = """你是一个专业的软件需求分析师。请将以下需�
 **注意**：总 SRR 不再输出顶层 business_rules 字段，跨 FP 共享规则统一写入
 cross_fp_interactions.shared_business_rules。
 
-**优化需求识别（v2.32）：** 如果需求标题或正文包含"优化/改进/升级/重构/调整/改造/迁移/
-替换/增强/完善/迭代/改版/重做/提速"等关键词，必须在 legacy_data_impact 中描述
-对已有历史数据的潜在影响（影响范围/数据盘点/迁移策略/兼容性/回滚/验证等）。
-若无法判断影响范围，user_clarification 字段留空，由后续澄清环节补充。
+**优化需求识别（v2.32，v2.8.60 修订）：** 如果需求标题或正文包含"优化/改进/升级/重构/调整/改造/迁移/
+替换/增强/完善/迭代/改版/重做/提速"等关键词，设置 legacy_data_impact.is_optimization = true。
+
+**legacy_data_impact 各字段严格遵循"原文明确写出才提取"原则（v2.8.60 强化）：**
+- `impact_scope` / `migration_plan` / `rollback_and_validation` / `risks` / `user_clarification`
+  仅当原文档中**明确写出**对应内容时才提取填充；原文未提及则全部留空（空字符串 / 空数组 `[]`）。
+- **严禁基于功能点描述推断历史数据影响**——即使识别到优化需求，也不得自行推测影响范围、
+  迁移方案、回滚策略、风险等内容填充到这些字段。这些内容属于后续澄清环节由用户补充后再生成。
+- **严禁使用占位符**——不得用"待技术评审确定"、"待评估"、"待补充"等占位文本填充字段，未提及就留空。
+- 历史数据影响分析相关内容（影响范围/数据盘点/迁移策略/兼容性/回滚/验证）必须能在原文找到
+  对应的明确描述，否则对应字段留空，由后续澄清环节补充。
 
 ### 3. 禁止编造与推断（v2.47 强化版）
 - **仅提取原文明确写出的内容**——不要假设或补充文档未提及的功能、规则、流程
@@ -148,7 +155,7 @@ cross_fp_interactions.shared_business_rules。
 - 如果原文内容非常丰富，**不要省略任何全局性细节**，输出 JSON 可以很长
 - `fp_summary` 是功能点概要列表，每项含 name/fp_type/priority/summary/module，**不要展开功能点内部细节**
 - `fp_type` 只能从 6 种值中选择：workflow/constraint/calculation/api_behavior/data_record/config
-- 优化需求时必须在 `legacy_data_impact` 中描述历史数据影响（无法判断则 user_clarification 留空）
+- 优化需求时设置 `legacy_data_impact.is_optimization = true`，其他字段（impact_scope/migration_plan/rollback_and_validation/risks/user_clarification）仅从原文档明确写出处提取，未提及时留空，**严禁推断填充**
 """
 
 
@@ -244,11 +251,11 @@ SRR_SCHEMA_GUIDE = """输出 JSON 必须包含以下字段(对应 SRR Schema):
   },
 
   "legacy_data_impact": {           // 历史数据影响分析（仅优化/改进/升级需求生成，非优化需求时设为 null）
-    "is_optimization": true,        // 是否为优化需求
-    "impact_scope": "",             // 影响范围：受影响的功能点、数据实体（主数据/在途数据/历史数据/日志）、上下游系统、用户角色
-    "migration_plan": "",           // 迁移方案：含迁移策略（全量/增量/双写/停机）、字段映射（老→新）、兼容性分析（格式/编码/关联完整性）
-    "rollback_and_validation": "",  // 验证与回滚：回滚策略（备份/回滚窗口/触发条件）+ 验证方法（数量校验/业务关联校验/并行比对）
-    "risks": [],                    // 风险与缓解：业务逻辑丢失、数据不一致、停机超时
+    "is_optimization": true,        // 是否为优化需求（识别到优化关键词即置 true）
+    "impact_scope": "",             // 影响范围：仅从原文档明确写出处提取，未提及留空（v2.8.60）
+    "migration_plan": "",           // 迁移方案：仅从原文档明确写出处提取，未提及留空（v2.8.60）
+    "rollback_and_validation": "",  // 验证与回滚：仅从原文档明确写出处提取，未提及留空（v2.8.60）
+    "risks": [],                    // 风险与缓解：仅从原文档明确写出处提取，未提及留空数组（v2.8.60）
     "user_clarification": ""        // 用户在澄清环节填写的具体影响范围（无法判断时留空）
   },
 

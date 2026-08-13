@@ -96,6 +96,20 @@ export default function TestCases() {
   const [genReqSearch, setGenReqSearch] = useState('')
   const [showGenReqDropdown, setShowGenReqDropdown] = useState(false)
   const genReqDropdownRef = useRef<HTMLDivElement>(null)
+  // v2.8.60: 保存生成任务的 AbortController 和超时定时器，组件卸载时清理避免内存泄漏
+  const genAbortRef = useRef<AbortController | null>(null)
+  const genTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (genAbortRef.current && !genAbortRef.current.signal.aborted) {
+        genAbortRef.current.abort()
+      }
+      if (genTimeoutRef.current) {
+        clearTimeout(genTimeoutRef.current)
+      }
+    }
+  }, [])
   const genReqFiltered = reqs.filter(r => {
     if (!genReqSearch) return true
     const s = genReqSearch.toLowerCase()
@@ -353,7 +367,13 @@ export default function TestCases() {
       (err: string) => { setGenerating(false); setGenMessage('失败: ' + err) },
       () => { setGenerating(false); setGenDone(true); setGenProgress(100); loadCases() },
     )
-    setTimeout(() => { if (!ctrl.signal.aborted) ctrl.abort() }, 300000)
+    genAbortRef.current = ctrl
+    // v2.8.60: 保存 timeout 句柄，组件卸载时 clearTimeout 避免泄漏
+    genTimeoutRef.current = setTimeout(() => {
+      if (genAbortRef.current && !genAbortRef.current.signal.aborted) {
+        genAbortRef.current.abort()
+      }
+    }, 300000)
   }
 
   // 项目过滤

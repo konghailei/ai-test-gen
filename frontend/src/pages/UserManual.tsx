@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import {
   Upload, FileText, Database, FolderTree, Settings, Search,
   BookOpen, ArrowLeft, Workflow, Cpu, GitBranch, ShieldCheck,
-  Layers, Zap, Image, TestTube, Server, Activity,
+  Layers, Zap, Image, TestTube, Server, Activity, ClipboardCheck,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { health } from '../api/client'
@@ -491,6 +491,66 @@ const SECTIONS: ManualSection[] = [
     diagram: <KbArchitectureDiagram />,
   },
   {
+    id: 'correction_review',
+    icon: ClipboardCheck,
+    title: '纠正审核',
+    subtitle: '人工纠错审核 + 部分纠正 + 模块筛选',
+    color: 'text-rose-600 bg-rose-50',
+    features: [
+      { label: '纠正审核流程', desc: '用户在「知识问答」页提交的人工纠正内容不会直接进入向量库，而是进入待审核状态。审核员在「纠正审核」页面按模块和状态筛选，审核通过后纠正内容归档到向量库（支持整篇需求或单个功能点部分纠正），审核拒绝则不进入向量库。' },
+      { label: '颗粒度选择', desc: '纠正支持两种颗粒度：整篇需求（requirement）替换整条需求向量；单个功能点（functional_point）仅替换该 FP 的向量，不影响其他功能点（部分纠正）。' },
+      { label: '模块筛选', desc: '审核列表支持按关联模块筛选，快速定位待审核的纠正内容；同时支持按状态（待审核/已通过/已拒绝/全部）筛选。' },
+      { label: '部分纠正机制', desc: '当向量库中某条需求描述了多个功能点，但只有其中一个功能点错误时，可选择"单个功能点"颗粒度纠正。审核通过后系统仅删除该FP的向量并重新嵌入纠正内容，不影响其他功能点的向量数据。' },
+    ],
+    steps: [
+      { title: '纠正审核概述', desc: '用户在「知识问答」页提交的人工纠正内容不会直接进入向量库，而是进入待审核状态。审核员在「纠正审核」页面按模块和状态筛选，审核通过后纠正内容归档到向量库（支持整篇需求或单个功能点部分纠正），审核拒绝则不进入向量库。', img: 'correction-review.png' },
+      { title: '提交纠正', desc: '用户在「知识问答」页点击纠错按钮 → 选择颗粒度（整篇需求/单个功能点）→ 填写关联模块和功能点ID（FP颗粒度时）→ 编辑纠正内容 → 点击"提交审核" → 状态变为 pending_review。', img: 'correction-review.png' },
+      { title: '审核通过', desc: '点击"审核通过" → 填写审核备注（可选）→ 确认 → 系统根据颗粒度执行归档：整篇需求归档为新需求并嵌入向量库；单个功能点删除原FP向量并重新嵌入纠正内容（部分纠正）→ 状态变为 approved。', img: 'correction-review.png' },
+      { title: '审核拒绝', desc: '点击"拒绝" → 填写拒绝原因（建议填写）→ 确认 → 纠正内容不进入向量库 → 状态变为 rejected。', img: 'correction-review.png' },
+      { title: '部分纠正', desc: '在纠错弹窗中选择"单个功能点" → 填写功能点ID（如 FP-xxx）→ 编辑纠正内容。审核通过后系统调用 vector_store.delete_requirement(fp_id) 删除原FP向量 → vector_store.add_requirement(fp_id, fp_srr, metadata) 重新嵌入纠正内容，不影响其他功能点。', img: 'correction-review.png' },
+    ],
+    logic: [
+      {
+        step: '提交纠正',
+        detail: '用户在「知识问答」页点击纠错按钮 → 选择颗粒度（整篇需求/单个功能点）→ 填写关联模块和功能点ID（FP颗粒度时）→ 编辑纠正内容 → 点击"提交审核" → 状态变为 pending_review',
+      },
+      {
+        step: '查看审核列表',
+        detail: '审核员进入「纠正审核」页面 → 按状态（待审核/已通过/已拒绝/全部）和模块筛选 → 查看原问题、原回答、纠正内容、纠正说明',
+      },
+      {
+        step: '审核通过',
+        detail: '点击"审核通过" → 填写审核备注（可选）→ 确认 → 系统根据颗粒度执行归档：整篇需求归档为新需求并嵌入向量库；单个功能点删除原FP向量并重新嵌入纠正内容（部分纠正）→ 状态变为 approved',
+      },
+      {
+        step: '审核拒绝',
+        detail: '点击"拒绝" → 填写拒绝原因（建议填写）→ 确认 → 纠正内容不进入向量库 → 状态变为 rejected',
+      },
+      {
+        step: '部分纠正 - 选择颗粒度',
+        detail: '在纠错弹窗中选择"单个功能点" → 填写功能点ID（如 FP-xxx）→ 编辑纠正内容',
+      },
+      {
+        step: '部分纠正 - 审核通过执行',
+        detail: '系统调用 vector_store.delete_requirement(fp_id) 删除原FP向量 → vector_store.add_requirement(fp_id, fp_srr, metadata) 重新嵌入纠正内容',
+      },
+    ],
+    config: [
+      { key: '纠正状态', value: 'none / pending_review / approved / rejected', note: '默认 none，提交后 pending_review' },
+      { key: '颗粒度类型', value: 'requirement / functional_point', note: '整篇需求 / 单个功能点' },
+      { key: '关联模块', value: '字符串', note: '用于按模块筛选审核列表' },
+      { key: '审核权限', value: 'require_write', note: '审核通过/拒绝需要写权限' },
+      { key: '审核人', value: '当前登录用户', note: '审核时记录 reviewed_by' },
+    ],
+    terms: [
+      { term: 'pending_review', desc: '待审核状态，纠正内容已提交等待审核员审核' },
+      { term: 'approved', desc: '已通过，纠正内容已归档到向量知识库' },
+      { term: 'rejected', desc: '已拒绝，纠正内容未进入向量知识库' },
+      { term: '部分纠正', desc: '仅替换单个功能点的向量数据，不影响其他功能点' },
+      { term: '颗粒度', desc: '纠正的范围：整篇需求或单个功能点' },
+    ],
+  },
+  {
     id: 'projects',
     icon: FolderTree,
     title: '项目与模块',
@@ -821,6 +881,7 @@ const SECTION_COLOR_STYLES: Record<string, { color: string; background: string }
   'text-teal-600 bg-teal-50': { color: 'var(--state-success)', background: 'var(--state-success-surface)' },
   'text-cyan-600 bg-cyan-50': { color: 'var(--brand-500)', background: 'rgba(0, 122, 255, 0.08)' },
   'text-emerald-600 bg-emerald-50': { color: 'var(--state-success)', background: 'var(--state-success-surface)' },
+  'text-rose-600 bg-rose-50': { color: 'var(--state-error)', background: 'var(--state-error-surface)' },
 }
 const getSectionColorStyle = (color: string) => SECTION_COLOR_STYLES[color] || { color: 'var(--foreground-secondary)', background: 'var(--background-muted)' }
 

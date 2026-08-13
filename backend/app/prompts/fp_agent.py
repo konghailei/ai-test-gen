@@ -82,6 +82,10 @@ FP 的粒度是**业务能力级**，不是操作步骤级。一个 FP 是一个
 - alternate_flows 用对象数组（name/trigger/expect），含边界场景；**原文未描述异常场景时输出 `[]`，不得编造**
 - business_rules 用对象数组（id/rule/type），含校验规则、边界条件、**验收标准**（v2.48 合并）
 - data_constraints 用完整对象（field/type/required/constraints/example），**type 字段使用中文**（如"字符串/整数/日期/布尔"）
+- **data_constraints 适用场景（field 种类）**：文档明确给出的字段定义——必填字段、格式/长度/唯一性校验、**枚举值集合**、**计数阈值/取值范围**、默认值。凡文档明确列出的字段及其取值集合、阈值、范围，都应生成 data_constraints（忠实提取，非编造）。
+  **句式识别（务必执行）**：
+  - 文档出现「XX 包括：A/B/C」「XX 有：A/B/C」「XX 分为：A/B/C」「XX 包含：A/B/C」等枚举说明 → 把「XX」作为**枚举字段** `{"field":"XX","type":"枚举","required":true,"constraints":"可选值：A/B/C",...}` 写入 data_constraints。如「角色包括：超级管理员、普通用户、访客」→ 角色=枚举字段。
+  - 文档出现「连续失败 n 次」「XX 上限 n」「XX 时长 n 分钟/秒」「XX 不能超过 n」等计数/时长/范围说明 → 把涉及的指标作为**整数/字符串**字段写入 data_constraints。如「密码错误连续 5 次锁定账号 1 分钟」→ 失败次数(整数,上限5)+锁定时长(字符串/整数,1分钟)。
 - non_functional 用对象（performance/security/compatibility/accessibility）
 
 **v2.48 重要变更**：
@@ -116,7 +120,7 @@ validation/calculation/workflow/permission/security/business/constraint/mandator
    - 若原文描述的是"输出结果"（如导出文件字段值为"-"、报表显示空值），sub_srr.business_rules / data_constraints 只能记录"该字段值为 -"，**不得**生成"提示用户"、"弹窗报错"、"阻止操作"等交互流程
    - 若原文描述的是"用户交互"（如点击按钮、输入校验），才能生成对应的 alternate_flows
 4. **异常场景明确化**：若需求未描述异常处理流程，alternate_flows 字段留空数组 `[]`，不得编造"超时"、"权限不足"、"网络异常"等场景
-5. **数据约束严格化**：data_constraints 仅包含需求明确提及的字段规则，未提及字段不生成；字段的 constraints 描述必须与原文一致，不得添加"长度限制"、"格式校验"等未提及规则
+5. **数据约束严格化**：data_constraints 仅包含需求**明确提及**的字段规则，未提及字段不生成。**文档明确给出的字段定义必须生成**：字段必填性、格式/长度/唯一性校验、**枚举值列表（如「角色」=超级管理员/普通用户/访客）**、**计数阈值/取值范围（如「失败次数」上限5次、「锁定时长」1分钟）**、默认值。这些属于忠实提取，不是编造。字段的 constraints 描述必须与原文一致，不得添加原文未提及的"长度限制"、"格式校验"等规则。**data_constraints 与 business_rules 是互补的两个维度**：枚举/阈值/取值范围这类"字段级定义"必须同时写入 data_constraints——即使你已把同一内容作为业务规则（如 type=enumeration/security）写入了 business_rules，也不得因此省略 data_constraints。
 6. **验收标准合并到业务规则**（v2.48 新增）：
    - 原验收标准（acceptance_criteria）的内容合并到 business_rules，type 字段使用 validation 或 business
    - 例：原 `{"id":"AC-001","description":"正确账号密码可成功登录","type":"functional"}` → 合并为 `{"id":"BR-001","rule":"正确账号密码可成功登录","type":"validation"}`
@@ -201,7 +205,9 @@ validation/calculation/workflow/permission/security/business/constraint/mandator
         ],
         "data_constraints": [
           {"field": "账号", "type": "字符串", "required": true, "constraints": "唯一性校验，正则 ^[a-zA-Z0-9_-]{3,50}$", "example": "user@example.com"},
-          {"field": "密码", "type": "字符串", "required": true, "constraints": "长度≥6位", "example": "pass123456"}
+          {"field": "密码", "type": "字符串", "required": true, "constraints": "长度≥6位", "example": "pass123456"},
+          {"field": "角色", "type": "枚举", "required": true, "constraints": "可选值：超级管理员/普通用户/访客", "example": "普通用户"},
+          {"field": "失败次数", "type": "整数", "required": false, "constraints": "连续失败上限5次，达到后锁定", "example": "5"}
         ],
         "non_functional": {
           "performance": "登录响应P99 < 500ms",

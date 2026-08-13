@@ -58,7 +58,8 @@ export default function Generate() {
     prodApi.listProjects(selectedProductId)
       .then(list => setProjects(Array.isArray(list) ? list : []))
       .catch(e => {
-        console.error('[Generate] 项目列表加载失败:', e)
+        // 导航导致的主动 abort 属正常取消，不当作错误记录
+        if (!e?._aborted) console.error('[Generate] 项目列表加载失败:', e)
         setProjects([])
       })
       .finally(() => setLoadingProjects(false))

@@ -1,0 +1,127 @@
+[
+  {
+    "label": "文档1: v1.1 优化需求",
+    "doc_path": "/app/tests/博客创作平台-v1.1优化需求文档.md",
+    "elapsed_sec": 94.1,
+    "status": "needs_clarification",
+    "quality": {
+      "overall_score": 0.685,
+      "pass_threshold": 0.75
+    },
+    "questions_count": 12,
+    "issues_count": 0,
+    "expected_passed": 3,
+    "expected_total": 5,
+    "expected_failed": 2,
+    "questions_summary": [
+      {
+        "id": "llm_Q001",
+        "priority": "important",
+        "category": "gap",
+        "field": "legacy_data_impact.impact_scope",
+        "question": "该优化（涉及数据库迁移、存储结构扩展）会影响哪些历史数据？请列出具体受影响的表、字段、实体以及上下游系统。"
+      },
+      {
+        "id": "llm_Q002",
+        "priority": "important",
+        "category": "gap",
+        "field": "legacy_data_impact.migration_plan",
+        "question": "请描述数据迁移的具体策略（全量/增量/双写/停机？），字段映射规则，以及兼容性保证方案。"
+      },
+      {
+        "id": "llm_Q003",
+        "priority": "important",
+        "category": "gap",
+        "field": "legacy_data_impact.rollback_and_validation",
+        "question": "迁移失败时如何回滚（备份/回滚窗口/触发条件）？如何验证迁移正确性（数量校验/并行比对）？"
+      },
+      {
+        "id": "llm_Q004",
+        "priority": "important",
+        "category": "gap",
+        "field": "data_constraints.image_upload_rules",
+        "question": "现有图片上传规则具体支持的图片格式和单文件大小限制是什么？请明确。"
+      },
+      {
+        "id": "llm_Q005",
+        "priority": "important",
+        "category": "gap",
+        "field": "data_constraints.version_retention_policy",
+        "question": "现有自动保存版本的保留策略具体是什么？例如保留最近N个版本或保留N天？"
+      },
+      {
+        "id": "llm_Q006",
+        "priority": "important",
+        "category": "gap",
+        "field": "data_constraints.comment_frequency",
+        "question": "现有评论频率限制的具体值是什么？（例如间隔多少秒、单日上限多少条）优化方案中收紧为间隔≥30秒，需要明确基准值。"
+      },
+      {
+        "id": "llm_Q007",
+        "priority": "important",
+        "category": "gap",
+        "field": "data_constraints.notification_rules",
+        "question": "现有通知体系的具体规则是什么？包括哪些场景会触发通知、通知类型（推送/站内信/邮件等）？小修订不触发通知的判定需基于此规则。"
+      },
+      {
+        "id": "llm_Q008",
+        "priority": "important",
+        "category": "gap",
+        "field": "data_constraints.publish_requirements",
+        "question": "发布前检查中“分类或标签不符合发布要求”的具体规则是什么？例如分类是否是必选、标签数量限制、允许的标签格式。"
+      },
+      {
+        "id": "llm_Q009",
+        "priority": "important",
+        "category": "ambiguity",
+        "field": "data_constraints.minor_revision_threshold",
+        "question": "“正文改动 < 5%”的具体计算方式是什么？请明确是按字符数、段落数、编辑距离还是其他指标？"
+      },
+      {
+        "id": "llm_Q010",
+        "priority": "critical",
+        "category": "conflict",
+        "field": "functional_points.OPT-A-02.validation_criteria",
+        "question": "手动标记版本的数量上限存在矛盾：优化方案要求最多保留50个，超出提示清理；验收标准要求长期保留不设上限。请问以哪个为准？"
+      },
+      {
+        "id": "kb_optimization_impact",
+        "priority": "critical",
+        "category": "impact_analysis",
+        "field": "optimization_impact",
+        "question": "【DevBlog 博客创作平台 v1.1 迭代需求文档】检测到这是优化/改进类需求，请问此次优化是否会影响已有历史数据？"
+      },
+      {
+        "id": "kb_optimization_impact_scope",
+        "priority": "important",
+        "category": "impact_analysis",
+        "field": "legacy_data_impact.user_clarification",
+        "question": "请描述此次优化具体影响的历史数据范围（可留空）"
+      }
+    ]
+  },
+  {
+    "label": "文档2: v1.0 产品PRD",
+    "doc_path": "/app/tests/博客创作平台-产品需求文档PRD.md",
+    "elapsed_sec": 51.8,
+    "status": "needs_clarification",
+    "quality": {
+      "overall_score": 0.685,
+      "pass_threshold": 0.75
+    },
+    "questions_count": 1,
+    "issues_count": 0,
+    "expected_passed": 0,
+    "expected_total": 4,
+    "expected_failed": 4,
+    "questions_summary": [
+      {
+        "id": "kb_cross_fp_interactions_shared_business_rules",
+        "priority": "important",
+        "category": "completeness",
+        "field": "cross_fp_interactions.shared_business_rules",
+        "question": "DevBlog 平台缺少跨功能模块的全局业务规则定义，请选择需要覆盖的全局共享规则（可多选）："
+      }
+    ]
+  }
+]

@@ -6,7 +6,7 @@
  * 所有 API 请求自动附加 Authorization Header。
  */
 
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
 
 const TOKEN_KEY = 'aitestgen_token'
 const USER_KEY = 'aitestgen_user'

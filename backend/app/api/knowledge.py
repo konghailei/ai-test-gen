@@ -36,7 +36,7 @@ router = APIRouter()
 
 def _build_requirement_kb_meta(record: Requirement, project_version: str) -> dict:
     """为已归档需求构建 Milvus 写入元数据（与归档接口保持一致）。"""
-    # v2.52: 补充 project_id 和 type 字段，与归档路径（products.py）保持一致。
+    # v2.8.52: 补充 project_id 和 type 字段，与归档路径（products.py）保持一致。
     # 原实现缺失 project_id 导致项目删除/恢复活动时按 project_id 批量清理无法命中，
     # 孤儿向量残留并持续污染 KB 检索结果。
     return {

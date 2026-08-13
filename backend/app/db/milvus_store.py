@@ -475,7 +475,7 @@ class MilvusVectorStore:
         if doc_type:
             conditions.append(f'metadata["type"] == "{_safe_id(doc_type, "type")}"')
         if requirement_id:
-            # v2.51 修复：总 SRR 写入 metadata.req_id，FP 归档写入 metadata.requirement_id
+            # v2.8.51 修复：总 SRR 写入 metadata.req_id，FP 归档写入 metadata.requirement_id
             # 需同时匹配两个字段，否则总 SRR 永远无法被 requirement_id 过滤命中
             safe_rid = _safe_id(requirement_id, "requirement_id")
             conditions.append(
@@ -531,7 +531,7 @@ class MilvusVectorStore:
     def delete_requirement(self, req_id: str) -> None:
         """删除需求向量。
 
-        v2.51 修复：必须 flush 才能让 delete 在 query/num_entities 中生效，
+        v2.8.51 修复：必须 flush 才能让 delete 在 query/num_entities 中生效，
         否则 BOUNDED 一致性下查询仍会返回已删除的记录（导致删除产品后向量遗留）。
         """
         self._ensure_connected()
@@ -742,7 +742,7 @@ class MilvusVectorStore:
     def delete_test_case(self, case_id: str) -> None:
         """删除用例向量。
 
-        v2.51 修复：必须 flush 才能让 delete 在 query/num_entities 中生效。
+        v2.8.51 修复：必须 flush 才能让 delete 在 query/num_entities 中生效。
         """
         self._ensure_connected()
         collection = self._get_collection("test_cases")
@@ -898,7 +898,7 @@ class MilvusVectorStore:
         self._ensure_connected()
         collection = self._get_collection("req_pats")
         collection.delete(f'id == "{_safe_id(pattern_id, "pattern_id")}"')
-        # v2.51: 必须 flush 才能让 delete 在 query/num_entities 中生效
+        # v2.8.51: 必须 flush 才能让 delete 在 query/num_entities 中生效
         # （与 delete_requirement / delete_test_case 保持一致，BOUNDED 一致性下否则仍返回已删除记录）
         collection.flush()
 
@@ -947,7 +947,7 @@ class MilvusVectorStore:
         self._ensure_connected()
         collection = self._get_collection("errors")
         collection.delete(f'id == "{_safe_id(error_id, "error_id")}"')
-        # v2.51: 必须 flush 才能让 delete 在 query/num_entities 中生效
+        # v2.8.51: 必须 flush 才能让 delete 在 query/num_entities 中生效
         collection.flush()
 
     # ========================================================================
@@ -979,7 +979,7 @@ class MilvusVectorStore:
 
         Args:
             product_id: 按产品过滤（可选）
-            status: 按状态过滤（可选，如 "archived"）；v2.8.5 新增
+            status: 按状态过滤（可选，如 "archived"）；v2.8.50 新增
         """
         try:
             self._ensure_connected()
@@ -1008,7 +1008,7 @@ class MilvusVectorStore:
     def is_product_first_requirement(self, product_id: str) -> bool:
         """判断是否为该产品的首个需求（冷启动判断）。
 
-        v2.8.5: 按 status=archived 过滤——KB 只检索已归档需求，
+        v2.8.50: 按 status=archived 过滤——KB 只检索已归档需求，
         若产品有需求向量但均为非 archived 状态（如 analyzing/draft），
         仍应判定为冷启动（KB 无法提供任何补全）。
 

@@ -114,7 +114,7 @@ BR_TYPE_CN: dict[str, str] = {
     "enumeration": "枚举",
 }
 
-# v2.53: 跨 FP 交互类型英文 → 中文映射（CrossFpFlow.interaction_type）
+# v2.8.53: 跨 FP 交互类型英文 → 中文映射（CrossFpFlow.interaction_type）
 INTERACTION_TYPE_CN: dict[str, str] = {
     "sequence": "顺序调用",
     "data_flow": "数据流",
@@ -122,7 +122,7 @@ INTERACTION_TYPE_CN: dict[str, str] = {
     "dependency": "依赖",
 }
 
-# v2.53: 假设类型英文 → 中文映射（Assumption.type）
+# v2.8.53: 假设类型英文 → 中文映射（Assumption.type）
 ASSUMPTION_TYPE_CN: dict[str, str] = {
     "assumption": "假设",
     "constraint": "约束",
@@ -258,7 +258,7 @@ def _format_item_title(it: dict, label: str = "") -> str:
         if parts:
             return " ".join(parts)
 
-    # 业务规则 / 共享业务规则：[类型中文] rule / description  ← v2.48 类型中文化；v2.53 共享规则补充 applied_fps
+    # 业务规则 / 共享业务规则：[类型中文] rule / description  ← v2.48 类型中文化；v2.8.53 共享规则补充 applied_fps
     if label in ("业务规则", "共享业务规则"):
         br_type = _br_type_cn(_as_str(it.get("type")))
         text = (
@@ -281,7 +281,7 @@ def _format_item_title(it: dict, label: str = "") -> str:
             return text
 
     # FP 调用顺序（cross_fp_flows）：[交互类型中文] source_fp → target_fp: description
-    # v2.53 修复K: 原逻辑落入通用匹配，丢失 source_fp/target_fp/interaction_type 关键字段
+    # v2.8.53 修复K: 原逻辑落入通用匹配，丢失 source_fp/target_fp/interaction_type 关键字段
     if label == "FP 调用顺序":
         # 兼容 source_fp/from 与 target_fp/to 两种字段命名
         source_fp = _as_str(it.get("source_fp") or it.get("from"))
@@ -312,7 +312,7 @@ def _format_item_title(it: dict, label: str = "") -> str:
         return " | ".join(p for p in parts if p)
 
     # FP 间契约（fp_contracts）：provider_fp → consumer_fp: contract_desc (data_fields)
-    # v2.53 修复L: 原逻辑无匹配字段，落入 JSON fallback，丢失 provider/consumer/data_fields
+    # v2.8.53 修复L: 原逻辑无匹配字段，落入 JSON fallback，丢失 provider/consumer/data_fields
     if label == "FP 间契约":
         # 兼容 provider_fp/fp_a 与 consumer_fp/fp_b 两种字段命名
         provider = _as_str(it.get("provider_fp") or it.get("fp_a"))
@@ -330,7 +330,7 @@ def _format_item_title(it: dict, label: str = "") -> str:
         if parts:
             return " | ".join(parts)
 
-    # v2.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
+    # v2.8.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
     # 原导出器未覆盖这些字段，导致静默丢失。下面为每个字段添加专用格式化分支。
     if label == "API 接口":
         method = _as_str(it.get("method")).upper()
@@ -709,7 +709,7 @@ def export_requirement_to_xmind(
 
     # v2.40: 移除 additional_details 字段，不再导出"附加详情"节点
 
-    # v2.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
+    # v2.8.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
     # 原导出器未覆盖，导致静默丢失。统一聚合到"附加信息"二级节点下。
     extra_kids: list = []
     for field, label in [
@@ -1076,7 +1076,7 @@ def export_requirement_to_xmind_json(
 
     # v2.40: 移除 additional_details 字段，不再导出"附加详情"节点
 
-    # v2.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
+    # v2.8.53 修复M: 旧版 SRR 顶层字段（api_definitions/user_roles/dependencies/ui_rules/data_model/assumptions）
     # 原导出器未覆盖，导致静默丢失。统一聚合到"附加信息"二级节点下。
     extra_kids: list = []
     for field, label in [

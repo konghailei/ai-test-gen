@@ -14,6 +14,7 @@ import ProjectsModules from './pages/ProjectsModules'
 import ProjectManagement from './pages/ProjectManagement'
 import ModuleManagement from './pages/ModuleManagement'
 import KnowledgeQA from './pages/KnowledgeQA'
+import CorrectionReview from './pages/CorrectionReview'
 import Settings from './pages/Settings'
 import Products from './pages/Products'
 import PromptManager from './pages/PromptManager'
@@ -94,6 +95,7 @@ export default function App() {
           <Route path="/testcases" element={<TestCases />} />
           <Route path="/knowledge" element={<KnowledgeBase />} />
           <Route path="/knowledge-qa" element={<KnowledgeQA />} />
+          <Route path="/corrections" element={<CorrectionReview />} />
           <Route path="/dependency-graph" element={<DependencyGraph />} />
           <Route path="/projects-modules" element={<ProjectsModules />} />
           <Route path="/projects" element={<ProjectManagement />} />

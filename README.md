@@ -1,6 +1,6 @@
 # AI-Test-Gen - AI 驱动测试用例自动生成系统
 
-> v1.9.0 | 基于需求驱动 + AI 自动生成测试用例的完整设计方案（含 XMind 在线编辑器）
+> v2.8.60 | 基于需求驱动 + AI 自动生成测试用例的完整设计方案（含 XMind 在线编辑器）
 
 ---
 
@@ -395,7 +395,7 @@ print(f'向量数: {len(v)}')
 
 | 层级 | 推荐方案 |
 |------|---------|
-| LLM | DeepSeek-V4 (主力) + GPT-4o (复杂场景) |
+| LLM | deepseek-chat (DeepSeek-V3, 主力) + GPT-4o (复杂场景) |
 | 多提供商路由 | LiteLLM (故障转移) |
 | Agent 框架 | LangGraph |
 | 向量数据库 | Milvus（HNSW 索引） |

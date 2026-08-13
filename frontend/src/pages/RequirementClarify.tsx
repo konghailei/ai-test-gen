@@ -10,6 +10,60 @@ import { requirements as reqApi } from '../api/client'
 import type { ClarifyQuestion, KbAugmentation, FieldConflict, ClarifyHistoryEntry, AnalysisTaskInfo } from '../types'
 
 // ============================================================================
+// v2.8.57: 任务阶段时间线配置
+// 根据 task.phase 判断当前在哪个阶段，展示横向阶段指示器 + 进度条
+// ============================================================================
+
+interface StageDef {
+  key: string
+  label: string
+  phases: string[]  // 该阶段对应的后端 phase 值
+}
+
+const TASK_STAGES: StageDef[] = [
+  { key: 'parse', label: '需求解析', phases: ['upload', 'parse'] },
+  { key: 'kb_search', label: '知识库检索', phases: ['kb_search'] },
+  { key: 'clarify', label: '澄清', phases: ['clarify'] },
+  { key: 'save', label: '保存', phases: ['regenerate', 'recheck'] },
+  { key: 'done', label: '完成', phases: ['done'] },
+]
+
+/** 根据 task.phase 获取当前阶段索引（0-based），未匹配返回 -1 */
+function getStageIndex(phase: string): number {
+  for (let i = 0; i < TASK_STAGES.length; i++) {
+    if (TASK_STAGES[i].phases.includes(phase)) return i
+  }
+  return -1
+}
+
+/** 计算阶段耗时（毫秒），优先使用 server_now 计算进行中阶段 */
+function getStageDurationMs(
+  phase: string,
+  phaseTimings?: Record<string, { start?: string; end?: string; duration_ms?: number }>,
+  serverNow?: string,
+): number {
+  if (!phaseTimings || !phaseTimings[phase]) return 0
+  const pt = phaseTimings[phase]
+  if (pt.duration_ms != null) return pt.duration_ms
+  if (pt.start) {
+    const end = pt.end || serverNow || new Date().toISOString()
+    try {
+      return Math.max(0, new Date(end).getTime() - new Date(pt.start).getTime())
+    } catch {
+      return 0
+    }
+  }
+  return 0
+}
+
+/** 格式化耗时（毫秒 → 可读文本） */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`
+}
+
+// ============================================================================
 // 草稿自动保存工具
 // ============================================================================
 
@@ -145,8 +199,10 @@ export default function RequirementClarify() {
   const [history, setHistory] = useState<ClarifyHistoryEntry[]>([])
 
   // P1 修复：异步任务轮询（与后端 _run_clarify_reparse / _run_regenerate_reparse 配合）
+  // v2.8.57: 保存完整 task 对象，用于展示阶段时间线+进度条
   const taskPollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [taskMessage, setTaskMessage] = useState('')
+  const [taskInfo, setTaskInfo] = useState<AnalysisTaskInfo | null>(null)
 
   // ===== 加载澄清状态 =====
   useEffect(() => {
@@ -157,8 +213,14 @@ export default function RequirementClarify() {
       reqApi.getClarifyState(id),
       reqApi.getClarifyHistory(id).catch(() => ({ items: [] as ClarifyHistoryEntry[], total: 0 })),
     ]).then(([data, histData]) => {
-      const qs = data?.questions || []
-      setQuestions(qs)
+      // v2.8.66: 过滤掉已解决（resolved=true）的问题，只在澄清历史中查看
+      // 防止第二轮澄清页面显示第一轮已回答的问题，造成用户困惑
+      const allQs = data?.questions || []
+      const unresolvedQs = allQs.filter(q => q.resolved !== true)
+      setQuestions(unresolvedQs)
+      if (unresolvedQs.length !== allQs.length) {
+        console.info(`[RequirementClarify] 过滤已解决问题: 展示 ${unresolvedQs.length}/${allQs.length}（已解决的仅在澄清历史中查看）`)
+      }
       setAutoAugmentations(data?.auto_augmentations || [])
       setQualityReport(data?.quality_report || null)
       setKbStatus(data?.kb_status || null)
@@ -166,13 +228,13 @@ export default function RequirementClarify() {
       setHistory(histData?.items || [])
 
       // 无澄清问题 → 进入重新生成模式（需求已确认/已澄清）
-      if (qs.length === 0) {
+      if (unresolvedQs.length === 0) {
         setRegenMode(true)
       }
 
       const prev = data?.previous_answers || {}
       const init: Record<string, string> = {}
-      qs.forEach(q => { init[q.id] = prev[q.id] || '' })
+      unresolvedQs.forEach(q => { init[q.id] = prev[q.id] || '' })
       setAnswers(init)
 
       // 初始化冲突解决状态
@@ -186,7 +248,7 @@ export default function RequirementClarify() {
       setConflictCustomValues(initCustom)
 
       // 检查是否有未提交草稿（仅在有问题时检查）
-      if (qs.length > 0) {
+      if (unresolvedQs.length > 0) {
         const draft = loadDraft(id)
         if (draft && Object.keys(prev).length === 0) {
           setDraftPrompt(draft)
@@ -206,6 +268,7 @@ export default function RequirementClarify() {
     if (!hasNotes && !hasFiles) return
     setRegenerating(true)
     setError('')
+    setTaskInfo(null)
     setTaskMessage('正在提交重新生成请求...')
     try {
       const res = await reqApi.regenerate(id, regenNotes.trim(), regenFiles.length > 0 ? regenFiles : undefined)
@@ -224,6 +287,7 @@ export default function RequirementClarify() {
     taskPollingRef.current = setInterval(async () => {
       try {
         const task: AnalysisTaskInfo = await reqApi.getTask(taskId)
+        setTaskInfo(task)
         setTaskMessage(task.message || '正在重新生成...')
         if (task.status === 'completed') {
           if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
@@ -282,7 +346,7 @@ export default function RequirementClarify() {
   }
 
   // ===== 进度计算 =====
-  // v2.55: 进度只统计 critical + important 问题（与页面展示一致），optional 问题不纳入进度
+  // v2.8.55: 进度只统计 critical + important 问题（与页面展示一致），optional 问题不纳入进度
   const { answeredCount, skippedCount, totalCount } = useMemo(() => {
     const visibleQs = questions.filter(q => q.priority === 'critical' || q.priority === 'important')
     const answered = visibleQs.filter(q => (answers[q.id] || '').trim() !== '').length
@@ -348,6 +412,7 @@ export default function RequirementClarify() {
     }
     setSubmitting(true)
     setError('')
+    setTaskInfo(null)
     setTaskMessage('正在提交澄清答案...')
     try {
       // 将冲突解决结果合并到 answers
@@ -379,6 +444,7 @@ export default function RequirementClarify() {
     taskPollingRef.current = setInterval(async () => {
       try {
         const task: AnalysisTaskInfo = await reqApi.getTask(taskId)
+        setTaskInfo(task)
         setTaskMessage(task.message || '正在重新生成 SRR...')
         if (task.status === 'completed') {
           if (taskPollingRef.current) { clearInterval(taskPollingRef.current); taskPollingRef.current = null }
@@ -423,21 +489,143 @@ export default function RequirementClarify() {
         </button>
       </div>
 
-      {/* P1 修复：异步任务轮询中的进度提示（submitting/regenerating 时显示 taskMessage） */}
-      {((submitting || regenerating) && taskMessage) && (
-        <div
-          className="border p-6 text-center"
-          style={{
-            background: 'rgba(0, 122, 255, 0.06)',
-            borderColor: 'rgba(0, 122, 255, 0.12)',
-            borderRadius: 'calc(var(--radius) * 1.1)',
-          }}
-        >
-          <Loader2 className="w-10 h-10 mx-auto mb-2 animate-spin" style={{ color: 'var(--brand-500)' }} />
-          <h2 className="text-base font-semibold mb-1" style={{ color: 'var(--foreground)' }}>任务进行中</h2>
-          <p className="text-sm" style={{ color: 'var(--brand-500)' }}>{taskMessage}</p>
-        </div>
-      )}
+      {/* v2.8.57: 异步任务进度展示（阶段时间线+进度条），复用于提交澄清和重新生成 */}
+      {((submitting || regenerating) && (taskMessage || taskInfo)) && (() => {
+        const phase = taskInfo?.phase || ''
+        const progress = taskInfo?.progress ?? 0
+        const currentIdx = getStageIndex(phase)
+        const isFailed = taskInfo?.status === 'failed' || taskInfo?.status === 'interrupted'
+        const isDone = taskInfo?.status === 'completed'
+        return (
+          <div
+            className="border p-6"
+            style={{
+              background: isFailed ? 'var(--state-error-surface)' : 'rgba(0, 122, 255, 0.06)',
+              borderColor: isFailed ? 'var(--state-error)' : 'rgba(0, 122, 255, 0.12)',
+              borderRadius: 'calc(var(--radius) * 1.1)',
+            }}
+          >
+            <div className="flex items-center gap-2 mb-4">
+              {isFailed ? (
+                <XCircle className="w-5 h-5 flex-shrink-0" style={{ color: 'var(--state-error)' }} />
+              ) : isDone ? (
+                <CheckCircle2 className="w-5 h-5 flex-shrink-0" style={{ color: 'var(--state-success)' }} />
+              ) : (
+                <Loader2 className="w-5 h-5 flex-shrink-0 animate-spin" style={{ color: 'var(--brand-500)' }} />
+              )}
+              <h2 className="text-base font-semibold" style={{ color: 'var(--foreground)' }}>
+                {isFailed ? '任务失败' : isDone ? '任务完成' : '任务进行中'}
+              </h2>
+              <span className="text-xs ml-auto" style={{ color: 'var(--foreground-muted)' }}>
+                {taskInfo?.task_type === 'regenerate' ? '重新生成' :
+                 taskInfo?.task_type === 'submit_clarify' ? '澄清提交' : '需求分析'}
+              </span>
+            </div>
+
+            {/* 阶段时间线（横向圆点+连接线） */}
+            <div className="flex items-center mb-4">
+              {TASK_STAGES.map((stage, idx) => {
+                const stageDone = idx < currentIdx || isDone
+                const stageCurrent = idx === currentIdx && !isDone && !isFailed
+                const stageFailed = idx === currentIdx && isFailed
+                return (
+                  <div key={stage.key} className="flex items-center" style={{ flex: idx < TASK_STAGES.length - 1 ? '1' : '0' }}>
+                    <div className="flex flex-col items-center" style={{ flexShrink: 0 }}>
+                      <div
+                        className="flex items-center justify-center rounded-full"
+                        style={{
+                          width: 28, height: 28,
+                          background: stageDone ? 'var(--state-success)' :
+                                    stageCurrent ? 'var(--brand-500)' :
+                                    stageFailed ? 'var(--state-error)' :
+                                    'var(--background-muted)',
+                          color: stageDone || stageCurrent || stageFailed ? 'white' : 'var(--foreground-muted)',
+                          fontSize: 12, fontWeight: 600,
+                        }}
+                      >
+                        {stageDone ? <CheckCircle2 className="w-4 h-4" /> :
+                         stageCurrent ? <Loader2 className="w-4 h-4 animate-spin" /> :
+                         stageFailed ? <XCircle className="w-4 h-4" /> :
+                         idx + 1}
+                      </div>
+                      <span
+                        className="text-xs mt-1 whitespace-nowrap"
+                        style={{
+                          color: stageCurrent || stageDone ? 'var(--foreground)' : 'var(--foreground-muted)',
+                          fontWeight: stageCurrent ? 600 : 400,
+                        }}
+                      >
+                        {stage.label}
+                      </span>
+                    </div>
+                    {idx < TASK_STAGES.length - 1 && (
+                      <div
+                        className="h-0.5 mx-1"
+                        style={{
+                          flex: 1,
+                          minWidth: 16,
+                          background: idx < currentIdx || isDone ? 'var(--state-success)' : 'var(--border)',
+                        }}
+                      />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* 进度条 */}
+            <div className="mb-3">
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span style={{ color: 'var(--foreground-muted)' }}>{taskMessage || '处理中...'}</span>
+                <span style={{ color: 'var(--brand-500)', fontWeight: 600 }}>{progress}%</span>
+              </div>
+              <div
+                className="rounded-full overflow-hidden"
+                style={{ height: 6, background: 'var(--background-muted)' }}
+              >
+                <div
+                  className="h-full rounded-full transition-all duration-500"
+                  style={{
+                    width: `${progress}%`,
+                    background: isFailed ? 'var(--state-error)' : 'var(--brand-500)',
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* 当前阶段耗时 */}
+            {taskInfo?.phase_timings && (() => {
+              const pt = taskInfo.phase_timings
+              const completedStages = TASK_STAGES
+                .filter(s => {
+                  const idx = TASK_STAGES.indexOf(s)
+                  return idx < currentIdx || isDone
+                })
+                .filter(s => s.key !== 'done')
+              if (completedStages.length === 0 && !taskInfo.phase) return null
+              return (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs" style={{ color: 'var(--foreground-muted)' }}>
+                  {completedStages.map(s => {
+                    const stagePhase = s.phases.find(p => pt[p])
+                    if (!stagePhase) return null
+                    const dur = getStageDurationMs(stagePhase, pt, taskInfo.server_now)
+                    return (
+                      <span key={s.key}>{s.label}: {formatDuration(dur)}</span>
+                    )
+                  })}
+                  {!isDone && !isFailed && currentIdx >= 0 && (
+                    <span style={{ color: 'var(--brand-500)' }}>
+                      {TASK_STAGES[currentIdx]?.label}: {
+                        formatDuration(getStageDurationMs(phase, pt, taskInfo.server_now))
+                      }（进行中）
+                    </span>
+                  )}
+                </div>
+              )
+            })()}
+          </div>
+        )
+      })()}
 
       {done ? (
         <div
