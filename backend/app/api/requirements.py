@@ -2524,6 +2524,14 @@ async def _run_clarify_reparse(
         final_data.pop("clarify_answers", None)
         final_data.pop("_field_sources", None)
 
+        # v3.0.1: 澄清重解析后，将 _raw_text 恢复为原始需求文本（original_raw），
+        # 而非增强文本（enhanced_raw）。修复根因：重解析时 req_agent.parse(enhanced_raw)
+        # 会把含「补充信息（用户澄清）」的回填文本写入 _raw_text，导致下一轮 ClarifyAgent
+        # 基于 _raw_text 检测引用未定义时，把用户澄清问题里的「引用未定义」关键词当作
+        # 新的引用未定义，造成同一主题反复提问、澄清无法收敛。
+        if original_raw and original_raw.strip():
+            final_data["_raw_text"] = original_raw
+
         # 保留 KB 查询日志
         if original_kb_logs := old_srr.get("_kb_query_logs"):
             final_data["_kb_query_logs"] = original_kb_logs

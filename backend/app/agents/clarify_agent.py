@@ -875,6 +875,27 @@ class ClarifyAgent:
                 "legacy_data_impact",
                 "optimization_impact",
             )
+
+            # v3.0.1: 追加兜底收集——对无 _ref_theme_label 的历史问题，
+            # 只要是引用未定义类型，用 _llm_extract_theme 提取主题加入 _llm_resolved_themes
+            # 否则会导致 LLM 语义层问题在第一轮回答后第二轮仍重复提问
+            try:
+                _hist = srr.get("_clarify_history") if isinstance(srr, dict) else None
+                if isinstance(_hist, list):
+                    for _entry in _hist:
+                        if not isinstance(_entry, dict):
+                            continue
+                        for _q in (_entry.get("questions") or []):
+                            if not isinstance(_q, dict):
+                                continue
+                            if _q.get("_ref_theme_label"):
+                                continue  # 已有 _ref_theme_label，前面已经收集过了
+                            if _llm_is_ref_undef_q(_q):
+                                _fallback = _llm_extract_theme(_q)
+                                if _fallback:
+                                    _llm_resolved_themes.add(_fallback)
+            except Exception:
+                pass  # 兜底不影响主流程
             for q in llm_semantic_questions:
                 cat = q.get("category", "completeness")
                 field = q.get("field", "") or ""
@@ -4242,6 +4263,21 @@ class ClarifyAgent:
                         _tl = _q.get("_ref_theme_label") or ""
                         if isinstance(_tl, str) and _tl:
                             resolved_themes.add(_tl)
+                        else:
+                            # v3.0.1: 兜底——历史问题未带 _ref_theme_label 时，
+                            # 若为引用未定义类问题，从问题「」中抽取主题纳入已答主题集合，
+                            # 避免同一引用未定义主题第二轮仍重复提问。
+                            _qt = str(_q.get("question", "") or "")
+                            _ctx = str(_q.get("context", "") or "")
+                            _hay = f"{_qt} {_ctx}"
+                            _is_ref = ("引用未定义" in _ctx
+                                       or "沿用" in _hay
+                                       or ("现有" in _hay and ("规则" in _hay or "一致" in _hay)))
+                            if _is_ref:
+                                import re as _re_th
+                                _m = _re_th.search(r"「([^」]{1,20})」", _qt or _ctx)
+                                if _m:
+                                    resolved_themes.add(_m.group(1))
         except Exception:
             resolved_themes = set()
 
@@ -4902,7 +4938,11 @@ class ClarifyAgent:
                     "请补充该历史版本/自动保存规则：自动保留数量上限、保留时长、"
                     "淘汰优先级、手动保留如何标记。"
                 )
-            elif any(tk in theme_label for tk in ["敏感词", "校验", "过滤"]):
+            elif "敏感词" in theme_label:
+                # v3.0.1: 收紧敏感词专属模板触发条件。原条件含"校验/过滤"过于宽泛，
+                # 导致"校验XX规则、沿用现有规则"这类与敏感词无关的主题被错误套用
+                # 敏感词专属模板，编造出需求中不存在的"敏感词来源字典/白名单/拦截替换"。
+                # 现仅当主题明确含"敏感词"时才使用专属模板，其余走通用维度清单兜底。
                 theme_specific_hint = (
                     "请补充该敏感词校验规则：敏感词来源字典、匹配方式（精确/模糊）、"
                     "命中后的处理行为（拦截/提示/替换）、白名单机制。"
