@@ -1766,8 +1766,11 @@ async def get_fp_dependency_graph(
     - module_id: 按模块筛选，仅返回该模块内 FP 及其内部依赖关系
     - review_status: 按审核状态筛选依赖边 (pending/approved/rejected)
     """
-    # 1. 查询该产品下所有需求的 ID + title + status
-    req_stmt = select(Requirement.id, Requirement.title, Requirement.status).where(
+    # 1. 查询该产品下所有需求的 ID + title + status + version（用于同名合并节点判断最新版本）
+    req_stmt = select(
+        Requirement.id, Requirement.title, Requirement.status, Requirement.version,
+        Requirement.created_at,
+    ).where(
         Requirement.product_id == product_id
     )
     req_result = await session.execute(req_stmt)
@@ -1775,6 +1778,8 @@ async def get_fp_dependency_graph(
     req_id_set = {row[0] for row in req_rows}
     req_title_map = {row[0]: row[1] or "" for row in req_rows}
     req_status_map = {row[0]: row[2] or "active" for row in req_rows}
+    req_version_map = {row[0]: int(row[3] or 1) for row in req_rows}
+    req_created_map = {row[0]: row[4] for row in req_rows}
 
     if not req_id_set:
         return ApiResponse(success=True, message="ok", data={"nodes": [], "edges": [], "modules": []})
@@ -1822,6 +1827,8 @@ async def get_fp_dependency_graph(
             "req_id": row[3],
             "req_title": req_title_map.get(row[3], ""),
             "req_status": req_status_map.get(row[3], "active"),
+            "req_version": req_version_map.get(row[3], 1),
+            "req_created_at": req_created_map.get(row[3]).isoformat() if req_created_map.get(row[3]) else "",
             "priority": row[4] or "P2",
             "module_id": mod_id,
             "modules": mods,

@@ -2634,17 +2634,20 @@ async def _run_clarify_reparse(
         except Exception as ldi_e:
             logger.warning("[Task/Clarify] 写入 legacy_data_impact 失败(不阻断): {}", str(ldi_e)[:200])
 
-        # ===== 甲2+丙：重解析后再验证（ClarifyAgent 二次检测）+ 轻量质量门禁 =====
-        # 断点4修复：_run_clarify_reparse 原本重解析后直接 pending_review，不再验证
-        # 这里追加一轮 ClarifyAgent.clarify() 检测新 SRR，发现新矛盾时补充澄清问题
-        # 同时消费 quality_report.overall_score 做轻量门禁（与 _run_requirement_analysis 一致）
+        # ===== 甲2+丙：重解析后再验证（答案覆盖评估）+ 轻量质量门禁 =====
+        # v3.0.1 多轮收敛重构：不再从零做完整缺口检测生成整轮新问题，
+        # 而是评估「上一轮问题的答案是否覆盖」。覆盖 → 收敛进入 pending_review；
+        # 未覆盖/模糊 → 仅对这些问题追问；用户跳过 → 视为不关注，不再追问。
+        # 正常 1 轮正确回答即完全收敛，不会出现第二轮。
         recheck_questions: list = []
         recheck_quality_warning: str | None = None
         try:
             await _update_task(task_id, phase="recheck", progress=88,
-                               message="正在对重解析结果做一致性再验证...")
+                               message="正在评估上一轮澄清答案的覆盖情况...")
             async with async_session() as s:
-                recheck_result = await clarify_agent.clarify(final_data)
+                recheck_result = await clarify_agent.eval_answer_coverage(
+                    final_data, clarify_history=clarify_history,
+                )
             recheck_questions = recheck_result.get("questions", []) or []
             recheck_quality_report = recheck_result.get("quality_report", {}) or {}
             recheck_score = recheck_quality_report.get("overall_score")

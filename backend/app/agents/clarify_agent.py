@@ -1747,6 +1747,136 @@ class ClarifyAgent:
         return result
 
     # ========================================================================
+    # 答案覆盖评估（v3.0.1 多轮收敛重构）
+    # 核心思路：提交答案后不再从零做完整缺口检测，而是「逐条评估上一轮问题
+    # 的答案是否已覆盖该问题」。覆盖 → 收敛；未覆盖/模糊 → 追问；用户跳过
+    # （未回答）→ 视为不关注，不再追问。这样正常 1 轮正确回答即收敛。
+    # ========================================================================
+    async def eval_answer_coverage(
+        self,
+        srr: dict,
+        clarify_history: list | None = None,
+        progress_callback=None,
+    ) -> dict:
+        """评估上一轮澄清问题的答案覆盖情况，返回需追问的问题列表。
+
+        Args:
+            srr: 重解析后的最终 SRR（含答案合并后的内容）
+            clarify_history: 澄清历史（提交答案时传入），取最后一条的 questions+answers
+            progress_callback: 可选进度回调
+
+        Returns:
+            dict: 与 clarify() 兼容的结构，其中 questions 仅包含「未覆盖/模糊」的追问，
+                  已覆盖或已跳过的问题不再出现。
+        """
+        req_id = (srr.get("requirement") or {}).get("id", "")
+        kb_status = {"kb_empty": False, "product_first_requirement": False, "kb_unavailable": False}
+
+        # 1. 取上一条澄清记录（questions + answers）
+        prev_questions: list[dict] = []
+        prev_answers: dict = {}
+        hist = clarify_history if clarify_history is not None else (srr.get("_clarify_history") or [])
+        if isinstance(hist, list) and hist:
+            last = hist[-1]
+            if isinstance(last, dict):
+                prev_questions = last.get("questions") or []
+                _ans = last.get("answers") or {}
+                prev_answers = {str(k): v for k, v in _ans.items()} if isinstance(_ans, dict) else {}
+
+        if not prev_questions:
+            logger.info("[ClarifyAgent] eval_answer_coverage: 无上一轮问题，直接收敛")
+            return {
+                "status": "passed",
+                "questions": [],
+                "auto_augmentations": [],
+                "quality_report": {"overall_score": 1.0, "pass_threshold": self.PASS_THRESHOLD},
+                "kb_status": kb_status,
+                "kb_access_log": [],
+                "field_conflicts": [],
+            }
+
+        # 2. 分离：跳过的（不关注） vs 已回答的（需评估覆盖）
+        unanswered_or_skipped: list[dict] = []   # 答案为空 → 不关注，不再追问
+        answered: list[dict] = []                # 有答案 → 需 LLM 评估是否覆盖
+        for q in prev_questions:
+            if not isinstance(q, dict):
+                continue
+            qid = str(q.get("id", "") or "")
+            ans = prev_answers.get(qid)
+            if isinstance(ans, list):
+                ans = ",".join(str(x) for x in ans if x)
+            ans = str(ans or "").strip()
+            if not ans:
+                unanswered_or_skipped.append(q)
+            else:
+                answered.append({"question": q, "answer": ans})
+
+        # 3. 对已回答的问题，用 LLM 评估是否已覆盖问题核心
+        followup: list[dict] = []
+        if answered:
+            items = []
+            for it in answered:
+                qtext = (it["question"].get("question", "") or "")[:200]
+                items.append({
+                    "id": it["question"].get("id", ""),
+                    "question": qtext,
+                    "answer": it["answer"][:300],
+                })
+            try:
+                prompt = prompts.ANSWER_COVERAGE_EVAL_PROMPT
+                result = await self._llm.call_json(
+                    prompt=prompt.format(
+                        raw_text=(srr.get("_raw_text", "") or "")[:12000],
+                        items=json.dumps(items, ensure_ascii=False),
+                    ),
+                    system_prompt="你是一个需求澄清收敛评估助手。只基于给定问题与回答，判断回答是否已充分覆盖问题。",
+                    schema_hint={"items": list},
+                    temperature=0.1,
+                    agent_name="ClarifyAgent.CoverageEval",
+                )
+                evals = result.get("items", []) if isinstance(result, dict) else []
+                eval_by_id = {}
+                for e in evals:
+                    if isinstance(e, dict):
+                        eval_by_id[str(e.get("id", ""))] = e
+                for it in answered:
+                    qid = str(it["question"].get("id", "") or "")
+                    cov = eval_by_id.get(qid) or {}
+                    decision = str(cov.get("coverage", "") or "").lower()
+                    if decision in ("covered", "yes", "y"):
+                        logger.info("[ClarifyAgent] 答案已覆盖，收敛: id=%s question=%s",
+                                    qid, (it["question"].get("question", "") or "")[:40])
+                        continue
+                    # 未覆盖 / 模糊 / 不完整 → 追问（保留原问题，标记追问）
+                    qi = dict(it["question"])
+                    qi["_followup"] = True
+                    qi["_followup_reason"] = str(cov.get("reason", "") or "")[:200]
+                    followup.append(qi)
+                logger.info("[ClarifyAgent] eval_answer_coverage: answered=%d, followup=%d, skipped=%d",
+                            len(answered), len(followup), len(unanswered_or_skipped))
+            except Exception as e:
+                logger.warning("[ClarifyAgent] 答案覆盖评估失败，保守处理：全部视为未覆盖追问: {}", str(e)[:200])
+                followup = [dict(it["question"]) for it in answered]
+
+        # 4. 收敛判定
+        if followup:
+            status = "needs_clarification"
+        else:
+            status = "passed"
+        logger.info("[ClarifyAgent] ◀ eval_answer_coverage ▶ req_id={}, status={}, followup={}",
+                    req_id, status, len(followup))
+        return {
+            "status": status,
+            "questions": followup,
+            "auto_augmentations": [],
+            "quality_report": {"overall_score": 1.0 if not followup else 0.8,
+                               "pass_threshold": self.PASS_THRESHOLD},
+            "kb_status": kb_status,
+            "kb_access_log": [],
+            "field_conflicts": [],
+        }
+
+    # ========================================================================
     # 完整性检测（docs/01 §4.3.1）
     # ========================================================================
 
