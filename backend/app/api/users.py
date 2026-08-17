@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -97,7 +99,8 @@ async def create_user(body: UserCreate, session: AsyncSession = Depends(get_sess
 
     user = User(
         username=body.username,
-        password_hash=hash_password(body.password),
+        # v3.1.2: PBKDF2 移入线程池，避免阻塞事件循环
+        password_hash=await asyncio.to_thread(hash_password, body.password),
         role_id=body.role_id,
         display_name=body.display_name,
         email=body.email,
@@ -136,7 +139,8 @@ async def update_user(user_id: int, body: UserUpdate, session: AsyncSession = De
     if body.is_active is not None:
         user.is_active = body.is_active
     if body.password:
-        user.password_hash = hash_password(body.password)
+        # v3.1.2: PBKDF2 移入线程池，避免阻塞事件循环
+        user.password_hash = await asyncio.to_thread(hash_password, body.password)
 
     await session.commit()
     await session.refresh(user)

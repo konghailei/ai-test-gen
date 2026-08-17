@@ -29,6 +29,9 @@ function forceLogout(): void {
   }
 }
 
+/** v3.1.2: 请求级超时兜底 — 后端连接池僵死等极端场景下请求不会永远挂起 */
+const DEFAULT_TIMEOUT_MS = 30000
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {}
   // DELETE 请求不需要 Content-Type
@@ -39,26 +42,66 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
-  let res: Response
-  try {
-    res = await fetch(`${BASE}${url}`, {
+
+  const doFetch = (): Promise<Response> => {
+    // v3.1.2: 每次请求自带 30s 超时（与调用方传入的 signal 取并集）
+    const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS)
+    const signal = options?.signal
+      ? AbortSignal.any([options.signal, timeoutSignal])
+      : timeoutSignal
+    return fetch(`${BASE}${url}`, {
       headers: { ...headers, ...options?.headers as Record<string, string> },
       ...options,
+      signal,
     })
+  }
+
+  // v3.1.1 修复：GET 请求网络层瞬断（API 容器重启/Nginx 短暂不可达导致 Failed to fetch）
+  // 自动重试 1 次，消除切换产品时偶发「加载项目列表失败」的硬报错。
+  const isGet = !options?.method || options.method === 'GET'
+  let res: Response
+  try {
+    res = await doFetch()
   } catch (err) {
     // 页面导航/组件卸载导致的主动取消（fetch 抛出 AbortError），并非真实错误。
     // 标记 _aborted 供调用方识别，避免污染 Console 或弹出错误提示。
     if ((err as any)?.name === 'AbortError') {
       throw Object.assign(err as Error, { _aborted: true })
     }
-    throw err
+    // v3.1.2: 超时（TimeoutError）或网络瞬断 → GET 幂等请求自动重试一次
+    if (isGet) {
+      await new Promise(r => setTimeout(r, 400))
+      try {
+        res = await doFetch()
+      } catch (err2) {
+        if ((err2 as any)?.name === 'AbortError') {
+          throw Object.assign(err2 as Error, { _aborted: true })
+        }
+        if ((err2 as any)?.name === 'TimeoutError') {
+          (err2 as Error).message = `请求超时（${DEFAULT_TIMEOUT_MS / 1000}s），请稍后重试`
+        }
+        throw err2
+      }
+    } else {
+      if ((err as any)?.name === 'TimeoutError') {
+        (err as Error).message = `请求超时（${DEFAULT_TIMEOUT_MS / 1000}s），请稍后重试`
+      }
+      throw err
+    }
   }
   // Token 过期或未授权 → 强制退出
   if (res.status === 401) {
     forceLogout()
-    throw new Error('登录已过期，请重新登录')
+    // v3.1.1: 标记 _unauthorized，调用方跳过「加载失败」类提示（页面即将跳转登录页）
+    throw Object.assign(new Error('登录已过期，请重新登录'), { _unauthorized: true })
   }
-  const json = await res.json()
+  // v3.1.2: 502/504 等网关错误返回 HTML 页时 res.json() 会抛 SyntaxError，收敛为友好错误
+  let json: any
+  try {
+    json = await res.json()
+  } catch {
+    throw new Error(`服务暂不可用（HTTP ${res.status}），请稍后重试`)
+  }
   // FastAPI HTTPException 返回格式：{"detail": "..."}
   if (!res.ok && json.detail) {
     throw new Error(json.detail)

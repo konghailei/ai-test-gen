@@ -227,6 +227,9 @@ class Settings(BaseSettings):
     """调试模式（生产环境必须设为 False）"""
     DEBUG: bool = False
 
+    """SQL 语句全量日志（v3.1.2：与 DEBUG 解耦，默认关闭；全量 SQL echo 拖慢事件循环）"""
+    SQL_ECHO: bool = False
+
     @property
     def pg_async_url(self) -> str:
         """获取 PostgreSQL 异步连接字符串。

@@ -164,6 +164,8 @@ export default function KnowledgeBase() {
       const data = await prodApi.listKbProjects(selectedProductId)
       setKbProjects(data || [])
     } catch (e: any) {
+      // v3.1.1 修复：页面卸载/切换产品导致的主动取消与登录过期跳转不弹错误提示
+      if (e?._aborted || e?._unauthorized) { setKbProjects([]); return }
       setKbProjects([])
       setToast({ type: 'error', msg: `加载项目列表失败：${e?.message || '未知错误'}` })
     }

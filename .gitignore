@@ -98,6 +98,8 @@ edit-dialog.yaml
 # ===== 本地临时文件 / 历史离线包（不入库） =====
 dy
 ai-testgen-update-*.zip
+# ===== 内网离线更新包（构建产物，不入库） =====
+release/
 
 # ===== 调试残留文件（防止再次入库） =====
 # 一次性调试 dump / state / json

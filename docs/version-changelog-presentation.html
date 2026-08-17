@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI-Test-Gen 全版本演进与亮点总结</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --primary: #4f46e5; --primary-light: #818cf8; --primary-dark: #3730a3;
+    --accent: #06b6d4; --success: #10b981; --warning: #f59e0b; --danger: #ef4444;
+    --bg: #0f172a; --bg-card: #1e293b; --bg-card-hover: #334155;
+    --text: #f1f5f9; --text-muted: #94a3b8; --border: #334155;
+  }
+  body { font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: var(--bg); color: var(--text); overflow: hidden; height: 100vh; }
+  .slides-container { width: 100vw; height: 100vh; position: relative; overflow: hidden; }
+  .slide { position: absolute; top: 0; left: 0; width: 100%; height: 100%; padding: 52px 68px; display: none; flex-direction: column; overflow-y: auto; animation: fadeIn 0.5s ease; }
+  .slide.active { display: flex; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateX(30px); } to { opacity: 1; transform: translateX(0); } }
+
+  .nav-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; background: var(--bg-card); padding: 10px 24px; border-radius: 50px; border: 1px solid var(--border); box-shadow: 0 4px 20px rgba(0,0,0,0.4); z-index: 100; }
+  .nav-btn { background: var(--primary); color: white; border: none; width: 40px; height: 40px; border-radius: 50%; cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+  .nav-btn:hover { background: var(--primary-dark); transform: scale(1.1); }
+  .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .page-info { color: var(--text-muted); font-size: 14px; min-width: 60px; text-align: center; }
+
+  h1 { font-size: 2.6em; margin-bottom: 16px; }
+  h2 { font-size: 2em; margin-bottom: 18px; color: var(--primary-light); }
+  h3 { font-size: 1.3em; margin: 16px 0 10px; color: var(--accent); }
+  p { line-height: 1.7; margin-bottom: 10px; font-size: 1.02em; }
+  ul, ol { margin-left: 22px; margin-bottom: 14px; }
+  li { line-height: 1.7; margin-bottom: 5px; }
+  code { background: var(--bg-card); padding: 2px 7px; border-radius: 4px; font-family: 'Consolas', 'Courier New', monospace; font-size: 0.88em; color: var(--accent); }
+
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin: 10px 0; transition: all 0.3s; }
+  .card:hover { background: var(--bg-card-hover); border-color: var(--primary); }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.82em; font-weight: 600; }
+  .badge-blue { background: rgba(79,70,229,0.2); color: var(--primary-light); }
+  .badge-green { background: rgba(16,185,129,0.2); color: var(--success); }
+  .badge-yellow { background: rgba(245,158,11,0.2); color: var(--warning); }
+  .badge-red { background: rgba(239,68,68,0.2); color: var(--danger); }
+  .highlight { color: var(--warning); font-weight: 600; }
+  .text-center { text-align: center; }
+
+  .cover { justify-content: center; align-items: center; text-align: center; background: linear-gradient(135deg, var(--bg) 0%, var(--primary-dark) 100%); }
+  .cover h1 { font-size: 3.4em; background: linear-gradient(135deg, var(--primary-light), var(--accent)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 20px; }
+  .cover .subtitle { font-size: 1.4em; color: var(--text-muted); margin-bottom: 14px; }
+  .cover .sub-sub { font-size: 1.05em; color: var(--text-muted); margin-bottom: 36px; }
+
+  .timeline { position: relative; padding-left: 40px; }
+  .timeline::before { content: ''; position: absolute; left: 14px; top: 8px; bottom: 8px; width: 3px; background: linear-gradient(180deg, var(--primary), var(--accent), var(--success)); border-radius: 3px; }
+  .tl-item { position: relative; margin-bottom: 22px; }
+  .tl-item::before { content: ''; position: absolute; left: -37px; top: 8px; width: 17px; height: 17px; border-radius: 50%; background: var(--primary); border: 3px solid var(--bg); }
+  .tl-item .tl-ver { font-size: 1.45em; font-weight: 700; color: var(--primary-light); }
+  .tl-item .tl-phase { font-size: 0.85em; color: var(--text-muted); margin-left: 8px; }
+  .tl-item .tl-title { font-size: 1.1em; font-weight: 600; color: var(--text); margin: 4px 0 6px; }
+  .tl-item .tl-desc { font-size: 0.93em; color: var(--text-muted); line-height: 1.65; }
+
+  .phase { background: var(--bg-card); border: 1px solid var(--border); border-left: 4px solid var(--primary); border-radius: 8px; padding: 14px 18px; margin: 10px 0; }
+  .phase .phase-title { font-weight: 700; color: var(--primary-light); font-size: 1.15em; margin-bottom: 8px; }
+  .phase .ver-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .phase.keep { border-left-color: var(--success); }
+  .phase.keep .phase-title { color: var(--success); }
+  .phase.drop { border-left-color: var(--danger); }
+  .phase.drop .phase-title { color: var(--danger); }
+
+  .flow-step { background: var(--bg-card); border: 1px solid var(--border); border-left: 4px solid var(--primary); border-radius: 8px; padding: 11px 18px; margin: 7px 0; display: flex; align-items: center; gap: 15px; }
+  .flow-step .step-num { background: var(--primary); color: white; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; flex-shrink: 0; }
+  .flow-step .step-content { flex: 1; }
+  .flow-step .step-title { font-weight: 600; color: var(--text); }
+  .flow-step .step-desc { font-size: 0.88em; color: var(--text-muted); margin-top: 2px; }
+
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; }
+  th, td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--primary-light); font-weight: 600; }
+  tr:hover { background: var(--bg-card); }
+
+  .tip-box { background: rgba(79,70,229,0.1); border-left: 4px solid var(--primary); padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+  .tip-box.warning { background: rgba(245,158,11,0.1); border-left-color: var(--warning); }
+  .tip-box.success { background: rgba(16,185,129,0.1); border-left-color: var(--success); }
+  .tip-box .tip-title { font-weight: 700; margin-bottom: 7px; }
+
+  .metric-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; text-align: center; }
+  .metric-card .metric-num { font-size: 2.2em; font-weight: 700; color: var(--accent); }
+  .metric-card .metric-label { font-size: 0.9em; color: var(--text-muted); margin-top: 6px; }
+
+  .toc-item { display: flex; align-items: center; gap: 16px; padding: 11px 18px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin: 7px 0; cursor: pointer; transition: all 0.2s; }
+  .toc-item:hover { border-color: var(--primary); background: var(--bg-card-hover); }
+  .toc-item .toc-num { background: var(--primary); color: white; width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 700; flex-shrink: 0; }
+
+  .compare-box { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0; }
+  .compare-bad { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.3); border-radius: 12px; padding: 15px; }
+  .compare-good { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.3); border-radius: 12px; padding: 15px; }
+  .compare-label { font-weight: 700; margin-bottom: 7px; font-size: 0.9em; }
+  .compare-bad .compare-label { color: var(--danger); }
+  .compare-good .compare-label { color: var(--success); }
+
+  .slide::-webkit-scrollbar { width: 6px; }
+  .slide::-webkit-scrollbar-track { background: var(--bg); }
+  .slide::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="slides-container">
+
+<!-- ========== Slide 1: 封面 ========== -->
+<div class="slide cover active" data-slide="0">
+  <h1>AI-Test-Gen 全版本演进</h1>
+  <div class="subtitle">从 v1.1.0 → v3.1.0 的完整演进故事与亮点沉淀</div>
+  <div class="sub-sub">记录每一个有意义的变更 · 也记录那些最终未采纳却推动演进的探索</div>
+  <div>
+    <span class="badge badge-blue">v1.x 建模期</span>
+    <span class="badge badge-blue">v2.0 重构期</span>
+    <span class="badge badge-green">v2.8 打磨期</span>
+    <span class="badge badge-yellow">v3.x 收敛期</span>
+    <span class="badge badge-green">v3.1.0</span>
+  </div>
+  <p style="margin-top:46px; color:var(--text-muted); font-size:0.9em;">使用 ← → 方向键或下方按钮翻页</p>
+</div>
+
+<!-- ========== Slide 2: 目录 ========== -->
+<div class="slide" data-slide="1">
+  <h2>目录</h2>
+  <div class="toc-item" onclick="goToSlide(2)"><div class="toc-num">1</div><div>第一阶段 v1.x — 从 0 到 1：功能点建模</div></div>
+  <div class="toc-item" onclick="goToSlide(4)"><div class="toc-num">2</div><div>第二阶段 v2.0-v2.2 — 双 SRR 架构重构</div></div>
+  <div class="toc-item" onclick="goToSlide(6)"><div class="toc-num">3</div><div>第三阶段 v2.8.x — 澄清与知识库深度打磨</div></div>
+  <div class="toc-item" onclick="goToSlide(9)"><div class="toc-num">4</div><div>第四阶段 v3.x — 收敛与体验跃升</div></div>
+  <div class="toc-item" onclick="goToSlide(12)"><div class="toc-num">5</div><div>那些未采纳却推动演进的探索</div></div>
+  <div class="toc-item" onclick="goToSlide(15)"><div class="toc-num">6</div><div>跨版本能力演进 & 核心价值</div></div>
+  <div class="toc-item" onclick="goToSlide(17)"><div class="toc-num">7</div><div>关键量化成果</div></div>
+  <div class="toc-item" onclick="goToSlide(18)"><div class="toc-num">8</div><div>演进路线与展望</div></div>
+</div>
+
+<!-- ========== Slide 3: 阶段一 时间线 ========== -->
+<div class="slide" data-slide="2">
+  <h2>1. 第一阶段 v1.x — 从 0 到 1</h2>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-ver">v1.1.0 <span class="tl-phase">2026-07-10 · 地基期</span></div>
+      <div class="tl-title">双索引知识库 + Celery 异步双写</div>
+      <div class="tl-desc">PG + Milvus 双写；归档异步向量化；KB 降级兜底。奠定 "需求 → 知识库 → 生成" 的闭环底座。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v1.2/v1.3 <span class="tl-phase">2026-07-14 · 数据修复</span></div>
+      <div class="tl-title">go_live_date 类型修复 + 向量化状态跟踪</div>
+      <div class="tl-desc">时间精确到分秒；向量化状态双徽章展示；修复 Milvus 元数据字段冲突。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v1.4 <span class="tl-phase">2026-07-14 · ⭐ 里程碑</span></div>
+      <div class="tl-title">功能点(FP)系统引入</div>
+      <div class="tl-desc">引入 BP→FP→Data 三级粒度 + FP 依赖表 + 原子性自检；FP 定向生成用例；追溯强化。奠定 "需求 → FP → 用例" 核心价值链。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v1.5.x <span class="tl-phase">2026-07-14/15</span></div>
+      <div class="tl-title">功能点深化：依赖图谱 + 归档门控 + 影响分析</div>
+      <div class="tl-desc">依赖图谱可视化 + FP 归档门控 + 删除级联清理 + 影响分析完整流程。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v1.6/v1.7 <span class="tl-phase">2026-07-15/16</span></div>
+      <div class="tl-title">编辑能力强化</div>
+      <div class="tl-desc">FP 多选合并 + SRR 逐字段编辑（FieldEditor 组件化）。通道策略改为全部走 FULL 保质量。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v1.8/v1.9 <span class="tl-phase">2026-07-17/20</span></div>
+      <div class="tl-title">需求确认流程 + XMind 在线编辑 + 全面中文化</div>
+      <div class="tl-desc">引入 pending_review → confirmed 状态门控；XMind 在线编辑器；系统全面中文化。打通 "先确认再生成" 的质量闸门。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 4: 阶段一 亮点 ========== -->
+<div class="slide" data-slide="3">
+  <h2>阶段一 · 核心沉淀</h2>
+  <div class="grid-2">
+    <div class="card">
+      <div class="badge badge-blue">功能点三级粒度</div>
+      <p>把"一个需求"拆成可独立审核、独立生成、可追溯的 FP 单元。<code>related_fp</code> 让每条用例都能回溯到功能点。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-blue">状态机门控</div>
+      <p>确认流程让质量可控：未确认(confirmed)的需求无法生成用例，杜绝"半成品进生产"。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-green">FP 依赖图谱</div>
+      <p>依赖关系从"人肉记忆"变为可视化 + 影响分析可计算，为后续回归测试铺路。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-green">双库架构</div>
+      <p>PG（结构化）+ Milvus（向量）双写，异步不阻塞，KB 不可用静默降级——稳定性防护的雏形。</p>
+    </div>
+  </div>
+  <div class="tip-box">
+    <div class="tip-title">设计决定</div>
+    <p>通道全部走 <strong>FULL</strong>（v1.6）：简单需求也需澄清 + 影响分析。这一短期"变慢"换来了长期的质量一致性，为后续强大澄清机制奠定基调。</p>
+  </div>
+</div>
+
+<!-- ========== Slide 5: 阶段二 时间线 ========== -->
+<div class="slide" data-slide="4">
+  <h2>2. 第二阶段 v2.0-v2.2 — 双 SRR 架构重构</h2>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-ver">v2.0.0 <span class="tl-phase">2026-07-20 · ⭐⭐ 里程碑</span></div>
+      <div class="tl-title">双 SRR 分层 + KB 基线补全精准化</div>
+      <div class="tl-desc">单一 SRR 拆分 interaction_srr（交互层）+ FP sub_srr（内部层），"一条规则只定义一次"消除重复；基线补全从全量 5 维度精准到单维度（答案 559→110 字符）；FP 同名复用跳过 LLM。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v2.1.0/v2.1.1 <span class="tl-phase">2026-07-20</span></div>
+      <div class="tl-title">项目/模块管理拆分 + 需求历史版本</div>
+      <div class="tl-desc">项目与模块独立管理；需求历史版本快照 + 一键切换；XMind 导出；修复项目筛选 NULL bug。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v2.2.0 <span class="tl-phase">2026-07-21 · ⭐⭐ 里程碑</span></div>
+      <div class="tl-title">DLQ 死信队列 + 一致性检查 + 异步任务体系</div>
+      <div class="tl-desc">四层防护补全 L4（DLQ）；启动安全校验；用例数一致性检查；FP 覆盖率矩阵；AnalysisTask 任务表 + SSE 进度。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 6: 阶段二 亮点 ========== -->
+<div class="slide" data-slide="5">
+  <h2>阶段二 · 核心沉淀</h2>
+  <div class="compare-box">
+    <div class="compare-bad">
+      <div class="compare-label">重构前（单层 SRR）</div>
+      <ul>
+        <li>全局规则与交互规则混杂</li>
+        <li>跨 FP 交互规则重复定义</li>
+        <li>需求变更 → 规则漂移难维护</li>
+      </ul>
+    </div>
+    <div class="compare-good">
+      <div class="compare-label">重构后（双 SRR）</div>
+      <ul>
+        <li>总 SRR：仅整体功能 + 跨 FP 交互</li>
+        <li>FP SRR：各功能点内部细节独立</li>
+        <li>拆分时 append 合并，不覆盖核心字段</li>
+      </ul>
+    </div>
+  </div>
+  <h3>稳定性防护闭环（四层）</h3>
+  <div class="grid-4">
+    <div class="card"><div class="badge badge-blue">L1</div><p>JWT + RBAC + 限流</p></div>
+    <div class="card"><div class="badge badge-blue">L2</div><p>断路器 + 重试 + 故障转移</p></div>
+    <div class="card"><div class="badge badge-green">L3</div><p>门禁 + 一致性 + 回环守卫</p></div>
+    <div class="card"><div class="badge badge-green">L4</div><p>DLQ + 幂等 + 静默降级</p></div>
+  </div>
+</div>
+
+<!-- ========== Slide 7: 阶段三 时间线 1 ========== -->
+<div class="slide" data-slide="6">
+  <h2>3. 第三阶段 v2.8.x — 澄清与知识库深度打磨</h2>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-ver">v2.8.5x <span class="tl-phase">2026-08-05 · ⭐ 里程碑</span></div>
+      <div class="tl-title">知识问答纠正审核 + KB 检索优化</div>
+      <div class="tl-desc">纠正需人工审核才入库；Milvus 删除 flush 一致性；事务一致性 + 会话管理；LLM 语义判优化需求；KB 检索 Plan C（RRF 时间衰减 + 字段级片段 + 版本感知去重）。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v2.8.57/v2.8.58 <span class="tl-phase">2026-08-06</span></div>
+      <div class="tl-title">进度可观测化 + 归档异步化</div>
+      <div class="tl-desc">ClarifyAgent LLM 调用级进度（41→70 精细区间）+ 阶段时间线组件；归档向量化改 Celery 异步派发（修复转圈）。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v2.8.60 <span class="tl-phase">2026-08-06 · 质量治理</span></div>
+      <div class="tl-title">legacy_data_impact 预填充修复 + 全面代码治理</div>
+      <div class="tl-desc">「原文未提及则留空」原则；移除字段补全式提问；22 个文件安全/垃圾代码/前端 bug 治理。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 8: 阶段三 时间线 2 ========== -->
+<div class="slide" data-slide="7">
+  <h2>第三阶段 · 澄清检测体系强化</h2>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-ver">v2.8.61 <span class="tl-phase">2026-08-06 · ⭐ 里程碑</span></div>
+      <div class="tl-title">修复 LLM 语义检测失灵 + 跨节矛盾 + 引用未定义</div>
+      <div class="tl-desc">根因：<code>_generate_questions</code> 从未被主流程调用（主流程只走规则层缺口）→ 修复后 LLM 语义检测真正生效；跨节矛盾检测 + 引用未定义检测。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v2.8.62 <span class="tl-phase">2026-08-06</span></div>
+      <div class="tl-title">LLM 语义检测前移 + issues 转 questions</div>
+      <div class="tl-desc">语义检测前移至 KB 查询之前；检测出的 issues 规范化转为澄清问题。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v2.8.63 <span class="tl-phase">2026-08-06</span></div>
+      <div class="tl-title">引用表述预扫描注入 hint</div>
+      <div class="tl-desc">预扫描原文中的引用未定义候选，注入 hint 强制 LLM 逐条判断，提升检测召回率。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v2.8.64/v2.8.65 <span class="tl-phase">2026-08-06/07</span></div>
+      <div class="tl-title">PRD 专项 + 跨文档矛盾 + KB 分流</div>
+      <div class="tl-desc">PRD 新建功能专项检测（上限/降级/风险一致性）；多文件上传【文档】标记检测跨文档矛盾；LLM 问题先经 KB 查询（KB 可答自动补全，未答转人工），conflict 类直接人工。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 9: 阶段三 亮点 ========== -->
+<div class="slide" data-slide="8">
+  <h2>阶段三 · 沉淀的澄清哲学</h2>
+  <div class="grid-2">
+    <div class="card">
+      <div class="badge badge-blue">先 KB 后人工</div>
+      <p>所有语义问题（completeness/ambiguity）先查知识库，KB 有定义自动补全，KB 无才转人工——减少人机往返。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-green">原因为本</div>
+      <p>问题基于原始文本分析产生（逻辑冲突/描述不清/信息缺失），不做"字段为空就提问"的机械补全。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-yellow">不兜底</div>
+      <p>LLM 未返回精炼答案时不降低质量兜底，直接提示「需人工澄清」。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-green">纠正确认</div>
+      <p>知识库纠正不直接写入，进入 pending_review 待审核，保证知识库纯净。</p>
+    </div>
+  </div>
+  <div class="tip-box success">
+    <div class="tip-title">从"能检测"到"会思辨"</div>
+    <p>本阶段核心不是增加规则，而是让 <strong>LLM 自主理解文档语义</strong>（检测矛盾、引用、遗漏），规则层只做存在性兜底——这是澄清质量跃升的关键。</p>
+  </div>
+</div>
+
+<!-- ========== Slide 10: 阶段四 时间线 ========== -->
+<div class="slide" data-slide="9">
+  <h2>4. 第四阶段 v3.x — 收敛与体验跃升</h2>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-ver">v3.0.0 <span class="tl-phase">2026-08-12 · 提示词泛化</span></div>
+      <div class="tl-title">提示词全面泛化 + 影响分析双向 BFS + 同名 FP 合并</div>
+      <div class="tl-desc">移除针对特定语料的死板模式，强化领域无关总原则；影响分析从单向改为双向 BFS（覆盖被依赖 + 依赖者）；功能点按名称合并去重。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v3.0.1 <span class="tl-phase">2026-08-14 · ⭐⭐ 里程碑</span></div>
+      <div class="tl-title">多轮澄清收敛重构（eval_answer_coverage）</div>
+      <div class="tl-desc">从"提交答案后从零重新生成整轮问题"改为"评估上一轮答案是否覆盖"。覆盖→收敛；跳过→视为不关注；模糊→仅追问该问题；禁止发散。正常 1 轮正确回答即完全收敛。</div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-ver">v3.1.0 <span class="tl-phase">2026-08-17 · 当前</span></div>
+      <div class="tl-title">文档化发布</div>
+      <div class="tl-desc">架构设计文档 + 前端使用手册整理，版本号统一同步。知识沉淀，让演进可追溯。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Slide 11: 收敛机制 ========== -->
+<div class="slide" data-slide="10">
+  <h2>本期核心：多轮澄清收敛（v3.0.1）</h2>
+  <p>澄清是"需求质量优先"的命脉。v3.0.1 彻底解决了<strong>问题发散与无法一轮收敛</strong>的痛点。</p>
+  <div class="compare-box">
+    <div class="compare-bad">
+      <div class="compare-label">旧逻辑（发散）</div>
+      <ul>
+        <li>提交答案后从零做完整缺口检测</li>
+        <li>已答问题被<strong>重复提问</strong></li>
+        <li>答案引出新话题 → 越问越多</li>
+      </ul>
+    </div>
+    <div class="compare-good">
+      <div class="compare-label">新逻辑（eval_answer_coverage）</div>
+      <ul>
+        <li>只评估上一轮答案<strong>是否覆盖问题核心</strong></li>
+        <li>覆盖 → 收敛；跳过 → 不再追问</li>
+        <li>模糊/不完整 → <strong>仅对该问题追问</strong> + 理由</li>
+        <li><strong>禁止发散</strong>，1 轮正确回答即收敛</li>
+      </ul>
+    </div>
+  </div>
+  <div class="metric-card" style="margin-top:16px;">
+    <div style="display:flex; justify-content:space-around;">
+      <div><div class="metric-num">7</div><div class="metric-label">首轮问题</div></div>
+      <div><div class="metric-num">0</div><div class="metric-label">追问新问题</div></div>
+      <div><div class="metric-num">1 轮</div><div class="metric-label">完全收敛</div></div>
+    </div>
+  </div>
+  <p style="text-align:center; margin-top:10px;">端到端验证：<code>eval_answer_coverage: answered=7, followup=0, status=passed</code></p>
+</div>
+
+<!-- ========== Slide 12: 未采纳的探索 ========== -->
+<div class="slide" data-slide="11">
+  <h2>5. 那些未采纳却推动演进的探索</h2>
+  <p>每一次版本演进，都有被否决却有价值的方案。它们虽未进入最终版本，却塑造了系统的设计方向。</p>
+  <div class="phase drop">
+    <div class="phase-title">✗ MatchAgent — 从知识库检索历史用例辅助生成（v1.x → v2.0 移除）</div>
+    <div class="ver-row"><span class="badge badge-red">最终未采纳</span></div>
+    <p><strong>探索</strong>：用例生成阶段从 KB 检索历史用例注入。<strong>否决理由</strong>：v2.0 双 SRR 架构下，SRR 已足够详细，检索历史用例成本高且收益有限。<strong>替代方案</strong>：Few-shot 示例注入 Prompt + FP 定向生成上下文。<strong>推动价值</strong>：催生了"提示词注入上下文"这一更优的生成范式。</p>
+  </div>
+  <div class="phase drop">
+    <div class="phase-title">✗ 向量库 ChromaDB → pgvector → Milvus（三阶段迁移规划）</div>
+    <div class="ver-row"><span class="badge badge-red">最终采用 Milvus</span></div>
+    <p><strong>探索</strong>：三阶段演进论证（纯向量库 / PG 扩展 / 专用向量库）。<strong>取舍</strong>：最终统一采用 Milvus（规模、性能、生态最优），前两阶段仅作为规划论证。<strong>推动价值</strong>：决定了向量存储抽象层设计，让替换成本降为配置级。</p>
+  </div>
+  <div class="phase drop">
+    <div class="phase-title">✗ legacy_data_impact 字段由 LLM 推断预填充（曾采用 → v2.8.60 修正）</div>
+    <div class="ver-row"><span class="badge badge-red">最终修正为留空</span></div>
+    <p><strong>探索</strong>：LLM 基于功能点描述推断历史数据影响字段。<strong>否决理由</strong>：原文未提及不应臆造，应由澄清环节补充（"原文未提及则留空"原则）。<strong>推动价值</strong>：确立"不臆造、由澄清补齐"的强约束。</p>
+  </div>
+</div>
+
+<!-- ========== Slide 13: 未采纳的探索 2 ========== -->
+<div class="slide" data-slide="12">
+  <h2>未采纳的探索（续）</h2>
+  <div class="phase drop">
+    <div class="phase-title">✗ 字段补全式澄清提问（曾采用 → v2.8.60 移除）</div>
+    <div class="ver-row"><span class="badge badge-red">最终移除</span></div>
+    <p><strong>探索</strong>：字段为空就自动生成"XX是什么/如何迁移"补全式提问。<strong>否决理由</strong>：某些字段允许为空（如 legacy_data_impact），机械提问不靠谱。<strong>替代</strong>：保留固定优化提问（是否影响历史数据 + 影响范围），由用户主动补充；问题一律基于原文分析产生。<strong>推动价值</strong>：明确"问题必须锚定原始文本，不做机械补全"的标准。</p>
+  </div>
+  <div class="phase drop">
+    <div class="phase-title">✗ 应用层 go_live_date 覆盖排序（曾采用 → v2.8.55 改为 RRF 时间衰减）</div>
+    <div class="ver-row"><span class="badge badge-red">最终被替代</span></div>
+    <p><strong>探索</strong>：应用层直接用 go_live_date 覆盖相似度排序。<strong>否决理由</strong>：破坏相关性排序，旧版本可能反超。<strong>替代</strong>：RRF 时间衰减因子融入融合分数。<strong>推动价值</strong>：确立"相关性优先、时效加权"的检索融合原则。</p>
+  </div>
+  <div class="phase drop">
+    <div class="phase-title">✗ 敏感词编造通用选项（曾出现 → 收紧模板触发）</div>
+    <div class="ver-row"><span class="badge badge-red">最终收紧</span></div>
+    <p><strong>探索</strong>：问题模板硬编码"网络异常/并发冲突"等通用场景。<strong>否决理由</strong>：脱离原文档的臆造选项。<strong>替代</strong>：选项留空、仅当 LLM 精炼成功才填充。<strong>推动价值</strong>：杜绝"文档未描述却编造规则"，坚持基于上下文的生成。</p>
+  </div>
+  <div class="tip-box success">
+    <div class="tip-title">共同主线</div>
+    <p>所有被否决的方案都指向同一原则——<strong>忠于原始需求，不臆造；能由澄清/KB 补齐的，不靠机械推理。</strong></p>
+  </div>
+</div>
+
+<!-- ========== Slide 14: 未采纳 - 保留的价值 ========== -->
+<div class="slide" data-slide="13">
+  <h2>"留"与"弃"的智慧</h2>
+  <div class="grid-2">
+    <div class="card">
+      <div class="badge badge-green">被验证沿用</div>
+      <ul>
+        <li>双 SRR 分层（v2.0）</li>
+        <li>DLQ + 四层防护（v2.2）</li>
+        <li>澄清先 KB 后人工（v2.8.x）</li>
+        <li>RRF 时间衰减（v2.8.55）</li>
+        <li>多轮收敛 eval_answer_coverage（v3.0.1）</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="badge badge-red">经研判放弃</div>
+      <ul>
+        <li>MatchAgent 历史用例检索（→ Few-shot）</li>
+        <li>ChromaDB / pgvector（→ 统一 Milvus）</li>
+        <li>字段补全式提问（→ 基于原文分析）</li>
+        <li>应用层版本覆盖排序（→ RRF 衰减）</li>
+        <li>LLM 预填充 legacy_data_impact（→ 澄清补齐）</li>
+      </ul>
+    </div>
+  </div>
+  <div class="tip-box" style="margin-top:14px;">
+    <div class="tip-title">演进不是加法</div>
+    <p>真正成熟的系统不是"功能越堆越多"，而是每一步都经过"取舍"。被否决的方案证明了团队<strong>敢于纠错、忠于需求</strong>的判断力——这本身就是最有价值的沉淀。</p>
+  </div>
+</div>
+
+<!-- ========== Slide 15: 跨版本能力演进 ========== -->
+<div class="slide" data-slide="14">
+  <h2>6. 跨版本能力演进</h2>
+  <table>
+    <tr><th>能力</th><th>起点</th><th>当前 v3.1.0</th></tr>
+    <tr><td>需求解析</td><td>单一 SRR JSON</td><td>总 SRR + FP SRR 双分层</td></tr>
+    <tr><td>澄清</td><td>规则层缺口检测</td><td>LLM 语义 + KB 分流 + 多轮收敛闭环</td></tr>
+    <tr><td>功能点</td><td>整体需求</td><td>三级粒度 + 同名合并 + 双向影响</td></tr>
+    <tr><td>知识库</td><td>双索引基础写入</td><td>时间衰减 + 产品隔离 + 纠正审核 + 版本时效</td></tr>
+    <tr><td>生成</td><td>基础用例</td><td>5 类多维 + 四级去重 + LLM 审核 + 一致性检查</td></tr>
+    <tr><td>稳定性</td><td>基础异常处理</td><td>四层防护 + DLQ + 任务异步化 + 错误可见性</td></tr>
+  </table>
+  <h3>贯穿全程的设计原则</h3>
+  <div class="grid-3">
+    <div class="card"><div class="badge badge-blue">需求质量优先</div><p>先澄清确认，再生成</p></div>
+    <div class="card"><div class="badge badge-blue">闭环积累</div><p>越用越聪明</p></div>
+    <div class="card"><div class="badge badge-green">全链路可追溯</div><p>用例↔需求↔FP</p></div>
+    <div class="card"><div class="badge badge-green">稳定性保障</div><p>四层防护</p></div>
+    <div class="card"><div class="badge badge-yellow">可插拔</div><p>LLM/向量库可替换</p></div>
+    <div class="card"><div class="badge badge-yellow">忠于需求</div><p>不臆造、由澄清补齐</p></div>
+  </div>
+</div>
+
+<!-- ========== Slide 16: 核心价值 ========== -->
+<div class="slide" data-slide="15">
+  <h2>系统核心价值</h2>
+  <div class="grid-2">
+    <div class="card">
+      <div class="badge badge-blue">自动化提效</div>
+      <p>需求文档直达测试用例，减少手工编写 60%+，支持功能/边界/异常/安全/性能多维用例。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-green">回归智能化</div>
+      <p>影响分析（双向 BFS）+ 依赖图谱，自动识别优化影响范围，推荐精准回归测试。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-yellow">质量质量闸门</div>
+      <p>确认流程 + 质量门禁 + 多轮澄清收敛，确保进入生成的每个需求都明确、无遗漏、无矛盾。</p>
+    </div>
+    <div class="card">
+      <div class="badge badge-green">知识沉淀</div>
+      <p>审核后的用例和历史需求回写知识库，版本时效 + 时间衰减 + 纠正审核，越用越准。</p>
+    </div>
+  </div>
+  <div class="tip-box">
+    <div class="tip-title">一句话</div>
+    <p>AI-Test-Gen 不是"一次性的生成工具"，而是一套<strong>越用越聪明的需求测试闭环系统</strong>。</p>
+  </div>
+</div>
+
+<!-- ========== Slide 17: 量化成果 ========== -->
+<div class="slide" data-slide="16">
+  <h2>7. 关键量化成果</h2>
+  <div class="grid-4">
+    <div class="metric-card"><div class="metric-num">30+</div><div class="metric-label">版本迭代</div></div>
+    <div class="metric-card"><div class="metric-num">4</div><div class="metric-label">演进阶段</div></div>
+    <div class="metric-card"><div class="metric-num">6</div><div class="metric-label">AI Agent 节点</div></div>
+    <div class="metric-card"><div class="metric-num">5 类</div><div class="metric-label">多维用例</div></div>
+  </div>
+  <div class="grid-3" style="margin-top:16px;">
+    <div class="metric-card"><div class="metric-num">60%+</div><div class="metric-label">用例编写减少</div></div>
+    <div class="metric-card"><div class="metric-num">1 轮</div><div class="metric-label">澄清收敛</div></div>
+    <div class="metric-card"><div class="metric-num">3 轮</div><div class="metric-label">澄清上限保护</div></div>
+  </div>
+  <h3 style="margin-top:20px;">澄清收敛里程碑验证</h3>
+  <div class="tip-box success">
+    <div class="tip-title">一轮收敛（v3.0.1 实测）</div>
+    <p>首轮 7 个问题收到完整理想答案 → <code>followup=0, status=passed</code> → 需求直接进入 <code>pending_review</code>。澄清体验从"反复追问"变为"一问即清"。</p>
+  </div>
+</div>
+
+<!-- ========== Slide 18: 展望 ========== -->
+<div class="slide" data-slide="17">
+  <h2>8. 演进路线与展望</h2>
+  <div class="grid-2">
+    <div class="card">
+      <div class="badge badge-blue">持续强化</div>
+      <ul>
+        <li>ImpactAgent 完整启用（优化需求为主）</li>
+        <li>ClarifyAgent 跨轮次覆盖校验纵深</li>
+        <li>KB 语义遗漏检测阈值精细化</li>
+        <li>提示词跨场景鲁棒性持续验证</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="badge badge-green">前瞻探索</div>
+      <ul>
+        <li>多 LLM 对冲（并发取首达）</li>
+        <li>LangFuse 全链路 Trace 可视化</li>
+        <li>MinIO 对象存储（报告/日志/文档）</li>
+        <li>FastAPI 多实例横向扩展</li>
+      </ul>
+    </div>
+  </div>
+  <div class="tip-box" style="margin-top:20px;">
+    <div class="tip-title">设计哲学不变</div>
+    <p><strong>需求质量优先 · 闭环积累 · 全链路可追溯 · 稳定性保障 · 忠于需求</strong> —— 这套原则驱动了每一次演进，未来也将持续指导每一次取舍。</p>
+  </div>
+</div>
+
+<!-- ========== Slide 19: 结尾 ========== -->
+<div class="slide cover" data-slide="18">
+  <h1 style="font-size:2.6em;">谢谢观看</h1>
+  <div class="subtitle">AI-Test-Gen — 需求驱动的智能测试用例生成</div>
+  <div class="sub-sub">从 v1.1.0 到 v3.1.0 · 每一版都算数</div>
+  <p style="margin-top:36px; color:var(--text-muted);">详细架构文档见 docs/11-architecture-design-and-changelog.md</p>
+</div>
+
+</div>
+
+<!-- ========== 导航栏 ========== -->
+<div class="nav-bar">
+  <button class="nav-btn" id="prevBtn" onclick="changeSlide(-1)">←</button>
+  <span class="page-info"><span id="curPage">1</span> / <span id="totalPage">19</span></span>
+  <button class="nav-btn" id="nextBtn" onclick="changeSlide(1)">→</button>
+</div>
+
+<script>
+  let currentSlide = 0;
+  const slides = document.querySelectorAll('.slide');
+  const totalSlides = slides.length;
+  document.getElementById('totalPage').textContent = totalSlides;
+
+  function showSlide(index) {
+    slides.forEach(s => s.classList.remove('active'));
+    slides[index].classList.add('active');
+    currentSlide = index;
+    document.getElementById('curPage').textContent = index + 1;
+    document.getElementById('prevBtn').disabled = index === 0;
+    document.getElementById('nextBtn').disabled = index === totalSlides - 1;
+  }
+
+  function changeSlide(dir) {
+    const next = currentSlide + dir;
+    if (next >= 0 && next < totalSlides) showSlide(next);
+  }
+
+  function goToSlide(index) {
+    if (index >= 0 && index < totalSlides) showSlide(index);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') changeSlide(-1);
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); changeSlide(1); }
+    else if (e.key === 'Home') showSlide(0);
+    else if (e.key === 'End') showSlide(totalSlides - 1);
+  });
+
+  showSlide(0);
+</script>
+
+</body>
+</html>

@@ -196,7 +196,14 @@ export default function Layout() {
                           onClick={() => {
                             setSelectedProduct(p.id, p.name)
                             setShowProductMenu(false)
-                            window.location.reload()
+                            // v3.1.1 修复：去掉 window.location.reload() 硬刷新。
+                            // 硬刷新会 abort 页面卸载前所有进行中的请求（console 大量 ERR_ABORTED），
+                            // 且重载窗口内若 API 瞬时不可用（容器重启等）会直接弹「加载项目列表失败」。
+                            // 所有列表页均有 [selectedProductId] effect 响应切换，SPA 状态更新即可刷新数据。
+                            // 仅需求详情/澄清/生成页强绑定具体需求：切产品后回到首页，避免展示不属于新产品的需求。
+                            if (location.pathname.startsWith('/requirements/') || location.pathname === '/generate') {
+                              navigate('/', { replace: true })
+                            }
                           }}
                           className="flex items-center gap-2.5 w-full transition-all"
                           style={{

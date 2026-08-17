@@ -255,7 +255,7 @@ const SECTIONS: ManualSection[] = [
       { title: '上传需求文档', desc: '在「需求管理」点击「上传需求」，填写需求名称、选择所属项目/版本与关联模块，上传 .md/.docx/.txt 原文后点击「上传并解析」，系统调用 POST /requirements/upload 进入解析 → 澄清 → 质量门禁流程。', img: 'requirements-upload.png' },
       { title: '查看需求列表', desc: '解析完成后在列表中查看需求，支持按项目 / status / priority 筛选与标题模糊搜索。需求状态：draft（草稿）/ pending_review（待确认）/ confirmed（已确认，可生成用例）/ archived（已归档）。', img: 'requirements-list.png' },
       { title: '查看需求详情', desc: '点击需求进入详情页，可查看结构化 SRR、功能点（含审核）、影响分析与追溯矩阵。详情页含多个 Tab：SRR 概览 / 功能点 / 功能点 SRR / 影响分析 / 追溯矩阵。', img: 'requirement-detail.png' },
-      { title: '回答澄清问题', desc: '对待补充的需求进入「澄清」页，逐条回答系统基于知识库检索与维度检测生成的问题并提交，系统据此重新生成更精确的 SRR。', img: 'requirement-clarify.png' },
+      { title: '回答澄清问题', desc: '对待补充的需求进入「澄清」页，逐条回答系统基于知识库检索与维度检测生成的问题并提交。系统评估答案覆盖情况（v3.0.1）：充分回答即一轮收敛；跳过视为不关注；模糊/不完整仅对该问题追问。最多 3 轮。', img: 'requirement-clarify.png' },
       { title: '审核功能点', desc: '在需求详情「功能点 SRR」Tab 查看自动拆分的功能点，为每个功能点分配模块后点击「审核通过」。所有功能点审核通过后方可确认需求。', img: 'requirement-fp.png' },
       { title: '确认需求完成', desc: '所有功能点审核通过后，需求状态变为 pending_review（待确认）。在需求详情页点击「确认完成」按钮，需求状态变为 confirmed（已确认），此时可以生成测试用例。', img: 'requirement-detail.png' },
       { title: '归档需求', desc: '需求确认并生成用例后，可归档入库。归档时填写上线时间 go_live_date，同时写入 PostgreSQL 与 Milvus 向量库，供后续检索。', img: 'requirement-detail.png' },
@@ -297,6 +297,10 @@ const SECTIONS: ManualSection[] = [
       {
         step: '3. 澄清问题生成',
         detail: '动态分析当前 SRR：① 知识库检索到的缺失字段 ② requirement_patterns 检测的缺失维度 ③ 字段冲突 → 经 LLM 过滤 → 生成 input_type 为 text / select / multi_select 的问题 → 用户回答 → POST /requirements/{id}/clarify 重新生成 SRR。',
+      },
+      {
+        step: '3.1 多轮澄清收敛（v3.0.1）',
+        detail: '提交答案后不再从零生成新问题，而是评估上一轮答案的覆盖情况（eval_answer_coverage）：答案为空（跳过）→ 视为不关注不再追问；答案充分覆盖问题核心 → 收敛；答案模糊 / 不完整 / 答非所问 → 仅对该问题追问并附追问理由（_followup_reason）。规则上**禁止发散**，正常 1 轮正确回答即完全收敛，最多 3 轮。',
       },
       {
         step: '4. 功能点拆分与审核',

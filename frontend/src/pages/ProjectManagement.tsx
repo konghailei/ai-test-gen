@@ -283,8 +283,8 @@ export default function ProjectManagementPage() {
       setProjects(p => ({ ...p, [pid]: projs || [] }))
     } catch (e: any) {
       // v2.45 修复：列表加载失败时弹出 alert 提示，避免用户误以为"无项目"；
-      // 导航导致的主动 abort 属正常取消，不弹窗
-      if (!e?._aborted) alert('加载项目列表失败：' + (e?.message || '网络错误'))
+      // 导航导致的主动 abort / 登录过期跳转（v3.1.2）属正常流程，不弹窗
+      if (!e?._aborted && !e?._unauthorized) alert('加载项目列表失败：' + (e?.message || '网络错误'))
     } finally { setLoading(false) }
   }
 

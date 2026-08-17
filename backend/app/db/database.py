@@ -28,13 +28,33 @@ class Base(DeclarativeBase):
 
 
 # 异步引擎（PostgreSQL only）
+# v3.1.2 修复「切换产品加载项目列表失败」：
+# 根因是池内连接偶发僵死（网络中断/PG 侧连接失效后，池仍把死连接发给请求），
+# 查询发出后永远无响应 → 请求挂死 → 用户刷新放弃（nginx 499）→ 前端报错。
+# 防御（宁报错不挂死）：
+# - pool_pre_ping：每次取连接前探活，自动剔除僵死连接
+# - pool_recycle：30 分钟强制回收长连接，避免半开连接
+# - statement_timeout：PG 侧语句 60s 超时，任何挂死查询会被强制取消并报错
+# - idle_in_transaction_session_timeout：事务中 idle 超 120s 的会话强制断开，防止长事务持锁
+# - SQL echo 与 DEBUG 解耦（SQL_ECHO 单独控制）：全量 SQL 日志拖慢事件循环
 engine = create_async_engine(
     settings.pg_async_url,
-    echo=settings.DEBUG,
+    echo=settings.SQL_ECHO,
     pool_size=settings.PG_POOL_SIZE,
     pool_timeout=settings.PG_TIMEOUT,
+    max_overflow=10,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    connect_args={
+        "timeout": 10,           # TCP 连接建立超时（秒）
+        "command_timeout": 60,   # 单语句执行超时（秒）
+        "server_settings": {
+            "statement_timeout": "60000",
+            "idle_in_transaction_session_timeout": "120000",
+        },
+    },
 )
-logger.info("数据库引擎: PostgreSQL (pool_size={}, timeout={}s)",
+logger.info("数据库引擎: PostgreSQL (pool_size={}, timeout={}s, pre_ping=True, recycle=1800s, statement_timeout=60s)",
             settings.PG_POOL_SIZE, settings.PG_TIMEOUT)
 
 # 异步 Session 工厂

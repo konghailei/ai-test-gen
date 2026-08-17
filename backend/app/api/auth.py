@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -194,7 +195,10 @@ async def login(
         raise HTTPException(status_code=401, detail="账户已禁用，请联系管理员")
 
     # 验证密码
-    if not verify_password(body.password, user.password_hash):
+    # v3.1.2 修复：PBKDF2 600K 迭代为 CPU 密集同步调用（容器内实测 0.3~15s），
+    # 直接在事件循环执行会阻塞所有并发请求（含 /projects 列表），导致切换产品挂死报错。
+    # 移入线程池执行，不再阻塞事件循环。
+    if not await asyncio.to_thread(verify_password, body.password, user.password_hash):
         logger.warning("[auth] 登录失败：密码错误 - username={}", body.username)
         _record_login_failure(body.username, client_ip)
         await log_operation(
@@ -313,8 +317,8 @@ async def change_password(
     if user is None:
         raise HTTPException(status_code=401, detail="用户不存在")
 
-    # 验证当前密码
-    if not verify_password(body.current_password, user.password_hash):
+    # 验证当前密码（v3.1.2: 移入线程池，避免 PBKDF2 阻塞事件循环）
+    if not await asyncio.to_thread(verify_password, body.current_password, user.password_hash):
         logger.warning("[auth] 修改密码失败：当前密码错误 - username={}", username)
         await log_operation(
             username=username, user_id=user.id, action="change_password",
@@ -326,9 +330,9 @@ async def change_password(
     if body.current_password == body.new_password:
         raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
 
-    # 更新密码
+    # 更新密码（v3.1.2: 移入线程池，避免 PBKDF2 阻塞事件循环）
     from app.utils.password import hash_password
-    user.password_hash = hash_password(body.new_password)
+    user.password_hash = await asyncio.to_thread(hash_password, body.new_password)
     await session.commit()
 
     logger.info("[auth] 用户 {} 已成功修改密码", username)

@@ -4372,6 +4372,9 @@ class ClarifyAgent:
             list[dict]: 逻辑矛盾问题列表，每项含 category="conflict"、priority="critical"
         """
         questions: list[dict] = []
+        # v3.0.1 跨条目矛盾按主题合并：同一约束主题（th）下的多处冲突收集后
+        # 合并为一条问题，避免 O(n²) 对同一主题的多对条目生成多条重复问题。
+        theme_conflicts: dict[str, list[dict]] = {}
         req = srr.get("requirement", {}) or {}
         req_title = req.get("title", "当前需求") or "当前需求"
 
@@ -4817,35 +4820,12 @@ class ClarifyAgent:
                             "[ClarifyAgent] 条目级冲突命中 theme=%s: 「%s...」vs「%s...」pair=(%s vs %s)",
                             th, ti[:40], tj[:40], side_A, side_B,
                         )
-                        questions.append({
-                            "id": f"contradiction_{len(questions) + 1}",
-                            "field": "requirement.logic_consistency",
-                            "priority": "critical",
-                            "category": "conflict",
-                            "question": (
-                                f"【{req_title}】检测到跨条目矛盾（{th}类）："
-                                f"①{si} 表述为『{side_A}』/ 原文：{ti[:120]}；"
-                                f"②{sj} 表述为『{side_B}』/ 原文：{tj[:120]}。"
-                                f"两者对同一约束的结论互斥，请统一为一个最终规则。"
-                            ),
-                            "context": (
-                                f"跨条目语义冲突（v2.8.65 条目级两两对比检测）。"
-                                f"两条原文分别来自：『{si}』和『{sj}』，"
-                                f"在同一约束主题【{th}】下给出了互相排斥的结论。"
-                                f"若不澄清，测试将无法确定版本保留规则的预期（上限 vs 不设上限），"
-                                f"生成的 SRR.business_rules / data_constraints 也会互相冲突。"
-                            ),
-                            "default_answer": "",
-                            "input_type": "select",
-                            "options": [
-                                f"以更严格条款为准（{side_A}）",
-                                f"以更宽松条款为准（{side_B}）",
-                                "统一为新的中间表述（请用户补充最终规则）",
-                            ],
+                        # v3.0.1 按主题收集，末尾统一合并为一条问题
+                        theme_conflicts.setdefault(th, []).append({
+                            "si": si, "sj": sj, "ti": ti, "tj": tj,
+                            "side_A": side_A, "side_B": side_B,
                         })
-                        break  # 一对条目只要命中一个相反模式即可
-                    if any(q["id"].endswith(str(len(questions))) for q in questions[-1:]):
-                        break  # 已为该theme生成，跳到下一条目j
+                        break  # 一对条目面对同一 theme 只记录一对相反模式即可
 
         # ====================================================================
         # v2.8.65 新增能力 C：引用未定义的规则级兜底检测（语义而非纯关键词）
@@ -5135,6 +5115,47 @@ class ClarifyAgent:
                 # v2.8.67: 附加主题标签，供 KB 查询生成时使用（抽短 query，
                 # 不用整段长 question 丢进去检索）
                 "_ref_theme_label": theme_label,
+            })
+
+        # v3.0.1 跨条目矛盾按主题合并：同一主题下的所有冲突位置合并为一条问题
+        _MAX_PAIRS_PER_THEME = 8
+        for _th, _confs in theme_conflicts.items():
+            if not _confs:
+                continue
+            _total = len(_confs)
+            _shown = _confs[:_MAX_PAIRS_PER_THEME]
+            _parts = []
+            for _c in _shown:
+                _parts.append(
+                    f"①{_c['si']} 表述为『{_c['side_A']}』/ 原文：{_c['ti'][:120]}；"
+                    f"②{_c['sj']} 表述为『{_c['side_B']}』/ 原文：{_c['tj'][:120]}"
+                )
+            if _total > len(_shown):
+                _parts.append(f"……（共 {_total} 处冲突）")
+            _summary = f"共{_total}处冲突，" if _total > 1 else ""
+            questions.append({
+                "id": f"contradiction_{len(questions) + 1}",
+                "field": "requirement.logic_consistency",
+                "priority": "critical",
+                "category": "conflict",
+                "question": (
+                    f"【{req_title}】检测到跨条目矛盾（{_th}类），{_summary}"
+                    f"{'；'.join(_parts)}。"
+                    f"以上对同一约束的结论互斥，请统一为一个最终规则。"
+                ),
+                "context": (
+                    f"跨条目语义冲突（v2.8.65 条目级两两对比检测，已按主题合并）。"
+                    f"在同一约束主题【{_th}】下存在互相排斥的结论，"
+                    f"若不澄清，测试将无法确定版本保留规则的预期（上限 vs 不设上限），"
+                    f"生成的 SRR.business_rules / data_constraints 也会互相冲突。"
+                ),
+                "default_answer": "",
+                "input_type": "select",
+                "options": [
+                    "以更严格的条款为准",
+                    "以更宽松的条款为准",
+                    "统一为新的中间表述（请用户补充最终规则）",
+                ],
             })
 
         if questions:
