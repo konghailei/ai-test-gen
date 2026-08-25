@@ -682,6 +682,8 @@ export interface RequirementImpactResult {
     fp_id: string
     fp_name: string
     fp_status: string
+    req_id?: string
+    req_title?: string
     module_id: string
     module_name: string
     impact_reason: string
@@ -691,6 +693,51 @@ export interface RequirementImpactResult {
     existing_cases_count: number
   }[]
   total_affected: number
+}
+
+/** v3.2 功能点权威完整版 SRR（CRSR，跨版本聚合）— GET /products/fp-crsr/{fp_id} */
+export interface FpCrsrResult {
+  fp_id: string
+  fp_name: string
+  product_id: string
+  /** 聚合后整体 SRR：标量取最新、数组去重并集、冲突以最新为主 */
+  crsr: {
+    summary?: string
+    suggested_module?: string
+    flows?: {
+      happy_path?: { steps?: { order: number; action: string; expect?: string }[] }
+      alternate_flows?: { name?: string; trigger?: string; expect?: string; [k: string]: any }[]
+    }
+    business_rules?: { id?: string; rule?: string; type?: string; [k: string]: any }[]
+    data_constraints?: { field?: string; type?: string; required?: boolean; constraints?: string; [k: string]: any }[]
+    non_functional?: Record<string, any>
+    [k: string]: any
+  }
+  /** 各版本归属（最新在前） */
+  versions: {
+    fp_id: string
+    fp_name: string
+    fp_status: string
+    req_id: string
+    req_title: string
+    req_status: string
+    req_version: number
+    created_at: string
+    is_latest: boolean
+    is_archived: boolean
+  }[]
+  version_count: number
+  source_fp_ids: string[]
+  /** 归档固化时的版本追溯链 */
+  stored_version_refs: { version_id: string; snapshot_at: string; source_fp_ids?: string[] }[]
+  /** v3.3 反链（Obsidian Backlinks 借鉴）：谁依赖此功能 / 此功能依赖谁 / 用例引用 */
+  backlinks?: {
+    depended_by: { fp_id: string; fp_name: string; relation_cn: string; req_id: string; req_title: string; req_archived: boolean; review_label: string; is_active: boolean }[]
+    references_fp: { fp_id: string; fp_name: string; relation_cn: string; req_id: string; req_title: string; req_archived: boolean; review_label: string; is_active: boolean }[]
+    referenced_by_cases: { case_id: string; title: string; req_id: string; case_type: string }[]
+    fan_in: number
+    fan_out: number
+  }
 }
 
 /** confirm_impact_analysis 接口请求 body

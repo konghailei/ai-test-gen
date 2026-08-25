@@ -50,7 +50,11 @@ engine = create_async_engine(
         "command_timeout": 60,   # 单语句执行超时（秒）
         "server_settings": {
             "statement_timeout": "60000",
-            "idle_in_transaction_session_timeout": "120000",
+            # v3.3.2: 调大事务空闲容忍度。finalize/澄清重解析等同步方案会长时间持有连接等待 LLM
+            # 生成（平均可达 200s+），原 120s 的 idle_in_transaction_session_timeout 会用空闲
+            # 超时主动断开连接，导致 commit 时报 "connection is closed"。调至 900s 仅放宽长事务
+            # 空闲容忍，不变更业务逻辑与结果（原值主要防御极端异常连接，900s 已足够）。
+            "idle_in_transaction_session_timeout": "900000",
         },
     },
 )
@@ -83,6 +87,8 @@ async def init_db() -> None:
         # 但显式导入保持与 models.py 定义一致，避免未来重构遗漏）
         FunctionalPoint, FPDependency, FPDependencyVersion,
         FPDependencyVersionItem, Role,
+        # v3.2: 功能点权威完整版 SRR（CRSR）
+        FunctionalPointCRSR,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 

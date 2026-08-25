@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, createContext, useContext } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   ReactFlow, useNodesState, useEdgesState, Background, Controls, MiniMap,
@@ -13,6 +13,7 @@ import {
   History, CheckCircle, XCircle, Clock, Filter,
 } from 'lucide-react'
 import { dependencyGraph, products as prodApi, requirements as reqApi } from '../api/client'
+import FpCrsrPanel from '../components/FpCrsrPanel'
 import { useProduct } from '../store/ProductContext'
 import type {
   Module as ModuleType, FPDependencyHistoryItem,
@@ -22,6 +23,31 @@ import { getEdgeParams, layoutHierarchical, type LayoutDirection } from '../util
 
 // ============================================================================
 // v2.3 审核状态样式（FP 依赖图谱）
+// ============================================================================
+// Obsidian Graph View 风格（v3.3 美化）：
+//   1. 悬停聚焦——悬停节点时高亮其邻居节点与相连边，其余淡化，快速看清局部关系
+//   2. 度中心性——节点视觉尺寸按连接数分档缩放，枢纽功能点一眼可辨
+//   3. 连接数徽标——节点左上角显示连接数（呼应影响分析的热度排序）
+// ============================================================================
+const HoverFocusContext = createContext<{ hoveredId: string | null; neighbors: Set<string> }>({
+  hoveredId: null, neighbors: new Set(),
+})
+
+/** 计算每个节点的连接数（度中心性），写入 node.data.degree */
+function withDegrees(nodes: Node[], edges: Edge[]): Node[] {
+  const degreeMap: Record<string, number> = {}
+  edges.forEach((e: any) => {
+    degreeMap[e.source] = (degreeMap[e.source] || 0) + 1
+    degreeMap[e.target] = (degreeMap[e.target] || 0) + 1
+  })
+  return nodes.map(n => ({ ...n, data: { ...n.data, degree: degreeMap[n.id] || 0 } }))
+}
+
+/** 按连接度分档：0=孤立/叶子节点，1=普通（3+连线），2=枢纽（6+连线） */
+function degreeTier(degree: number): 0 | 1 | 2 {
+  return degree >= 6 ? 2 : degree >= 3 ? 1 : 0
+}
+
 // ============================================================================
 const REVIEW_STATUS_STYLES: Record<string, { label: string; stroke: string; dashed: boolean; bg: string; text: string }> = {
   pending: { label: '待审核', stroke: '#f59e0b', dashed: true, bg: 'bg-amber-50', text: 'text-amber-700' },
@@ -39,10 +65,18 @@ const FP_STATUS_STYLES: Record<string, { label: string; bg: string; text: string
 // ============================================================================
 // Module Node
 // ============================================================================
-function ModuleNode({ data, selected }: any) {
+function ModuleNode({ id, data, selected }: any) {
+  const { hoveredId, neighbors } = useContext(HoverFocusContext)
+  // Obsidian 风格：悬停聚焦——非悬停节点且非邻居时淡化
+  const dimmed = hoveredId != null && hoveredId !== id && !neighbors.has(id)
+  const isNeighbor = hoveredId != null && hoveredId !== id && neighbors.has(id)
+  // 度分档：枢纽模块放大（呼应 Obsidian 节点大小 = 连接数）
+  const tier = degreeTier(Number(data.degree) || 0)
+  const iconBox = tier === 2 ? 'w-10 h-10' : tier === 1 ? 'w-9 h-9' : 'w-8 h-8'
   return (
     <div className={[
       'relative px-4 py-3 border-2 min-w-[140px] transition-all duration-200 group',
+      tier === 2 ? 'min-w-[170px]' : tier === 1 ? 'min-w-[150px]' : '',
       selected
         ? 'shadow-lg ring-2'
         : 'hover:shadow-lg',
@@ -50,7 +84,10 @@ function ModuleNode({ data, selected }: any) {
       background: 'var(--background)',
       borderRadius: 'calc(var(--radius) * 1.1)',
       boxShadow: selected ? 'var(--shadow-apple-md)' : 'var(--shadow-apple-sm)',
-      borderColor: selected ? 'var(--brand-400)' : 'var(--border)',
+      borderColor: selected || isNeighbor ? 'var(--brand-400)' : 'var(--border)',
+      borderWidth: tier === 2 ? 3 : 2,
+      opacity: dimmed ? 0.25 : 1,
+      filter: dimmed ? 'saturate(0.4)' : undefined,
       ...(selected ? { '--tw-ring-color': 'rgba(0, 122, 255, 0.1)' } as React.CSSProperties : {}),
     }}>
       <Handle type="source" position={Position.Left} id="left"
@@ -62,12 +99,19 @@ function ModuleNode({ data, selected }: any) {
       <Handle type="source" position={Position.Bottom} id="bottom"
         className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
       <div className="flex items-center gap-2 mb-1">
-        <div className="w-8 h-8 flex items-center justify-center flex-shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 122, 255, 0.08)' }}>
-          <Puzzle className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+        <div className={`${iconBox} flex items-center justify-center flex-shrink-0`} style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'rgba(0, 122, 255, 0.08)' }}>
+          <Puzzle className={tier === 2 ? 'w-5 h-5' : 'w-4 h-4'} style={{ color: 'var(--brand-500)' }} />
         </div>
-        <span className="text-sm font-semibold truncate max-w-[140px]" style={{ color: 'var(--foreground)' }}>
+        <span className={`font-semibold truncate ${tier === 2 ? 'text-[15px] max-w-[160px]' : 'text-sm max-w-[140px]'}`} style={{ color: 'var(--foreground)' }}>
           {data.label}
         </span>
+        {/* 连接数徽标：枢纽程度一眼可辨 */}
+        {Number(data.degree) > 0 && (
+          <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0"
+            style={{ background: 'rgba(0, 122, 255, 0.1)', color: 'var(--brand-600, var(--brand-500))' }}>
+            ×{data.degree}
+          </span>
+        )}
       </div>
       {data.description && (
         <p className="text-[11px] leading-relaxed line-clamp-2 pl-10" style={{ color: 'var(--foreground-tertiary)' }}>
@@ -102,7 +146,11 @@ const REQ_STATUS_STYLES: Record<string, { label: string; bg: string; text: strin
   deprecated: { label: '已弃用', bg: 'bg-red-50', text: 'text-red-600' },
 }
 
-function FPNode({ data, selected }: any) {
+function FPNode({ id, data, selected }: any) {
+  const { hoveredId, neighbors } = useContext(HoverFocusContext)
+  // Obsidian 风格：悬停聚焦——非悬停节点且非邻居时淡化
+  const dimmed = hoveredId != null && hoveredId !== id && !neighbors.has(id)
+  const isNeighbor = hoveredId != null && hoveredId !== id && neighbors.has(id)
   const fpStyle = FP_TYPE_STYLES[data.fpType] || FP_TYPE_STYLES.workflow
   const isArchived = data.reqStatus === 'archived' || data.fpStatus === 'archived'
   // v2.3: 含未审核依赖时高亮显示（橙色边框 + 脉冲动画）
@@ -111,9 +159,13 @@ function FPNode({ data, selected }: any) {
   const statusStyle = REQ_STATUS_STYLES[data.reqStatus]
   // v2.44: 所属模块名列表
   const moduleNames: string[] = Array.isArray(data.moduleNames) ? data.moduleNames : []
+  // Obsidian 风格：度分档——枢纽功能点放大（被依赖越多视觉越重，呼应热度排序）
+  const tier = degreeTier(Number(data.degree) || 0)
+  const iconBox = tier === 2 ? 'w-10 h-10' : tier === 1 ? 'w-9 h-9' : 'w-8 h-8'
   return (
     <div className={[
-      'relative px-4 py-3 border-2 min-w-[140px] transition-all duration-200 group',
+      'relative px-4 py-3 border-2 transition-all duration-200 group',
+      tier === 2 ? 'min-w-[170px]' : tier === 1 ? 'min-w-[150px]' : 'min-w-[140px]',
       selected
         ? 'shadow-lg ring-2'
         : hasPendingReview
@@ -121,10 +173,14 @@ function FPNode({ data, selected }: any) {
           : 'hover:shadow-lg',
     ].join(' ')} style={{
       borderRadius: 'calc(var(--radius) * 1.1)',
-      boxShadow: selected || hasPendingReview ? 'var(--shadow-apple-md)' : 'var(--shadow-apple-sm)',
+      boxShadow: selected || hasPendingReview ? 'var(--shadow-apple-md)' : tier === 2 ? 'var(--shadow-apple-md)' : 'var(--shadow-apple-sm)',
       background: isArchived ? 'var(--background-muted)' : hasPendingReview ? 'var(--state-warning-surface)' : 'var(--background)',
-      borderColor: selected ? 'var(--brand-400)' : hasPendingReview ? 'var(--state-warning)' : isArchived ? 'var(--input)' : 'var(--border)',
-      opacity: isArchived ? 0.8 : 1,
+      borderColor: selected || isNeighbor
+        ? 'var(--brand-400)'
+        : hasPendingReview ? 'var(--state-warning)' : isArchived ? 'var(--input)' : 'var(--border)',
+      borderWidth: tier === 2 ? 3 : 2,
+      opacity: dimmed ? 0.25 : (isArchived ? 0.8 : 1),
+      filter: dimmed ? 'saturate(0.4)' : undefined,
       ...(selected ? { '--tw-ring-color': 'rgba(0, 122, 255, 0.1)' } as React.CSSProperties : {}),
     }}>
       {isArchived && (
@@ -137,6 +193,13 @@ function FPNode({ data, selected }: any) {
           <Clock className="w-2.5 h-2.5" /> 待审核
         </span>
       )}
+      {/* 连接数徽标（左上角）：被依赖越多，回归风险越高 */}
+      {Number(data.degree) > 0 && (
+        <span className="absolute -top-2 -left-2 text-[9px] px-1.5 py-0.5 rounded-full font-medium"
+          style={{ background: tier === 2 ? 'rgba(0, 122, 255, 0.16)' : 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-700, var(--brand-500))' }}>
+          ×{data.degree}
+        </span>
+      )}
       <Handle type="source" position={Position.Left} id="left"
         className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
       <Handle type="source" position={Position.Right} id="right"
@@ -146,10 +209,10 @@ function FPNode({ data, selected }: any) {
       <Handle type="source" position={Position.Bottom} id="bottom"
         className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
       <div className="flex items-center gap-2 mb-1">
-        <div className="w-8 h-8 flex items-center justify-center flex-shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.08)' }}>
-          <Boxes className="w-4 h-4" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }} />
+        <div className={`${iconBox} flex items-center justify-center flex-shrink-0`} style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.08)' }}>
+          <Boxes className={tier === 2 ? 'w-5 h-5' : 'w-4 h-4'} style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }} />
         </div>
-        <span className="text-sm font-semibold truncate max-w-[120px]" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--foreground)' }}>
+        <span className={`font-semibold truncate ${tier === 2 ? 'text-[15px] max-w-[140px]' : 'text-sm max-w-[120px]'}`} style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--foreground)' }}>
           {data.label}
         </span>
       </div>
@@ -185,25 +248,41 @@ function FPNode({ data, selected }: any) {
 // v2.47: 同名功能点聚合节点——跨版本同名 FP（如 v1.4/v1.6「版本对比功能」）合并为一个聚合节点。
 // v3.0.1: 改为单节点+状态标签——不再通过双击展开/折叠子节点，节点状态显示「最新版本」对应需求的状态：
 //   若存在 active（活动中）版本则显示「活动中」，全部归档则显示「归档」。
-function FPGroupNode({ data, selected }: any) {
+function FPGroupNode({ id, data, selected }: any) {
+  const { hoveredId, neighbors } = useContext(HoverFocusContext)
+  const dimmed = hoveredId != null && hoveredId !== id && !neighbors.has(id)
+  const isNeighbor = hoveredId != null && hoveredId !== id && neighbors.has(id)
   const versionCount = Array.isArray(data.versions) ? data.versions.length : 0
   const isArchived = data.reqStatus === 'archived'
   // v3.0.1: 展示最新版本状态标签（由 applyFpMergeAndLayout 计算得出）
   const statusStyle = REQ_STATUS_STYLES[data.reqStatus]
+  // Obsidian 风格：度分档——聚合节点同样按连接数放大
+  const tier = degreeTier(Number(data.degree) || 0)
+  const iconBox = tier === 2 ? 'w-10 h-10' : tier === 1 ? 'w-9 h-9' : 'w-8 h-8'
   return (
     <div className={[
-      'relative px-4 py-3 border-2 min-w-[160px] transition-all duration-200 group cursor-pointer',
+      'relative px-4 py-3 border-2 transition-all duration-200 group cursor-pointer',
+      tier === 2 ? 'min-w-[190px]' : tier === 1 ? 'min-w-[170px]' : 'min-w-[160px]',
       selected ? 'shadow-lg ring-2' : 'hover:shadow-lg',
     ].join(' ')} style={{
       borderRadius: 'calc(var(--radius) * 1.1)',
-      boxShadow: selected ? 'var(--shadow-apple-md)' : 'var(--shadow-apple-sm)',
+      boxShadow: selected || tier === 2 ? 'var(--shadow-apple-md)' : 'var(--shadow-apple-sm)',
       background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.06)',
-      borderColor: selected ? 'var(--brand-400)' : isArchived ? 'var(--input)' : 'var(--brand-200)',
-      opacity: isArchived ? 0.8 : 1,
+      borderColor: selected || isNeighbor ? 'var(--brand-400)' : isArchived ? 'var(--input)' : 'var(--brand-200)',
+      borderWidth: tier === 2 ? 3 : 2,
+      opacity: dimmed ? 0.25 : (isArchived ? 0.8 : 1),
+      filter: dimmed ? 'saturate(0.4)' : undefined,
     }}>
       {isArchived && (
         <span className="absolute -top-2 -right-2 text-[9px] px-1.5 py-0.5 rounded-full font-medium" style={{ background: 'var(--input)', color: 'var(--foreground-tertiary)' }}>
           已归档
+        </span>
+      )}
+      {/* 连接数徽标（左上角） */}
+      {Number(data.degree) > 0 && (
+        <span className="absolute -top-2 -left-2 text-[9px] px-1.5 py-0.5 rounded-full font-medium"
+          style={{ background: tier === 2 ? 'rgba(0, 122, 255, 0.16)' : 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-700, var(--brand-500))' }}>
+          ×{data.degree}
         </span>
       )}
       <Handle type="source" position={Position.Left} id="left"
@@ -215,10 +294,10 @@ function FPGroupNode({ data, selected }: any) {
       <Handle type="source" position={Position.Bottom} id="bottom"
         className="!w-3 !h-3 !bg-[var(--input)] !border-2 !border-[var(--background)] hover:!bg-[var(--brand-400)] !transition-colors !opacity-0 group-hover:!opacity-100" />
       <div className="flex items-center gap-2 mb-1">
-        <div className="w-8 h-8 flex items-center justify-center flex-shrink-0" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.08)' }}>
-          <Boxes className="w-4 h-4" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }} />
+        <div className={`${iconBox} flex items-center justify-center flex-shrink-0`} style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: isArchived ? 'var(--background-muted)' : 'rgba(0, 122, 255, 0.08)' }}>
+          <Boxes className={tier === 2 ? 'w-5 h-5' : 'w-4 h-4'} style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--brand-500)' }} />
         </div>
-        <span className="text-sm font-semibold truncate max-w-[120px]" style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--foreground)' }}>
+        <span className={`font-semibold truncate ${tier === 2 ? 'text-[15px] max-w-[140px]' : 'text-sm max-w-[120px]'}`} style={{ color: isArchived ? 'var(--foreground-tertiary)' : 'var(--foreground)' }}>
           {data.label}
         </span>
         <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0`}
@@ -263,6 +342,10 @@ function FloatingEdge({
   const { getNode } = useReactFlow()
   const sourceNode = getNode(source)
   const targetNode = getNode(target)
+  // Obsidian 风格：悬停聚焦——相连边加粗高亮，无关边淡化（保留透明度可追溯）
+  const { hoveredId } = useContext(HoverFocusContext)
+  const connectedToHover = hoveredId != null && (source === hoveredId || target === hoveredId)
+  const dimmedByHover = hoveredId != null && !connectedToHover
 
   // 优先使用浮动参数；若节点未就绪（首次渲染），降级用 EdgeProps 传入的固定坐标
   let edgeParams: ReturnType<typeof getEdgeParams> | null = null
@@ -280,12 +363,13 @@ function FloatingEdge({
     borderRadius: 12,
   })
 
-  // 选中时高亮：提升 strokeWidth + drop-shadow
+  // 选中时高亮：提升 strokeWidth + drop-shadow；悬停聚焦时相连边同样加粗
   const mergedStyle: React.CSSProperties = {
     ...(style || {}),
-    strokeWidth: selected ? 4 : (style?.strokeWidth ?? 2.5),
+    strokeWidth: selected || connectedToHover ? 4 : (style?.strokeWidth ?? 2.5),
+    opacity: dimmedByHover ? 0.12 : (style?.opacity ?? 1),
     filter: selected ? 'drop-shadow(0 1px 3px rgba(0,0,0,0.18))' : undefined,
-    transition: 'stroke-width 0.15s ease',
+    transition: 'stroke-width 0.15s ease, opacity 0.15s ease',
   }
 
   return (
@@ -312,6 +396,8 @@ function FloatingEdge({
               position: 'absolute',
               transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
               pointerEvents: 'none',
+              opacity: dimmedByHover ? 0.15 : 1,
+              transition: 'opacity 0.15s ease',
               ...(labelStyle || {}),
               ...(labelBgStyle ? {
                 background: (labelBgStyle as any).fill,
@@ -704,11 +790,15 @@ function FPDetailDrawer({
   // v3.0.1: 聚合节点（同名合并）展示各版本步骤
   const isGroup = data._isGroup === true
   const versions: any[] = Array.isArray(data.versions) ? data.versions : []
+  // v3.2: CRSR 查询用的 fp_id——聚合节点取最新成员，普通节点取自身
+  const crsrFpId: string = isGroup
+    ? (versions.find(v => !v.archived && v.id)?.id || versions[0]?.id || '')
+    : String(node.id || '')
 
   return (
     <div className="fixed inset-0 z-[65]" onClick={onClose}>
       <div className="absolute inset-0" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} />
-      <div className="absolute top-0 right-0 bottom-0 w-[420px] flex flex-col"
+      <div className="absolute top-0 right-0 bottom-0 w-[600px] max-w-[92vw] flex flex-col"
         style={{ background: 'var(--background)', boxShadow: 'var(--shadow-apple-xl)' }}
         onClick={e => e.stopPropagation()}>
         {/* Header */}
@@ -760,46 +850,19 @@ function FPDetailDrawer({
             </div>
           </div>
 
-          {/* v3.0.1: 聚合节点（同名合并）版本列表 */}
-          {isGroup && versions.length > 0 && (
-            <div>
-              <h4 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--foreground-tertiary)' }}>
-                版本归属（{versions.length}）
-              </h4>
-              <div className="space-y-1.5">
-                {versions.map((v, vi) => {
-                  const vfStyle = FP_STATUS_STYLES[v.fpStatus] || FP_STATUS_STYLES.pending_review
-                  const vArchived = v.reqStatus === 'archived' || v.fpStatus === 'archived'
-                  return (
-                    <div key={vi} className="flex items-center gap-2 text-sm px-3 py-2"
-                      style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
-                      <span className="text-xs font-medium shrink-0" style={{ color: 'var(--foreground-secondary)' }}>v{v.reqVersion ?? '?'}</span>
-                      <span className="text-xs flex-1 truncate" style={{ color: vArchived ? 'var(--foreground-quaternary)' : 'var(--foreground)' }}>{v.reqTitle || v.label}</span>
-                      {vArchived ? (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0" style={{ background: 'var(--input)', color: 'var(--foreground-tertiary)' }}>已归档</span>
-                      ) : (
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium shrink-0 ${vfStyle.bg} ${vfStyle.text}`}>{vfStyle.label}</span>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* 实现内容概括 */}
-          <div>
-            <h4 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--foreground-tertiary)' }}>实现内容概括</h4>
-            <div className="text-sm leading-relaxed p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-secondary)', minHeight: '40px' }}>
-              {data.summary || <span style={{ color: 'var(--foreground-quaternary)' }}>暂无</span>}
-            </div>
-          </div>
-
           {/* 与其他功能点关系 */}
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--foreground-tertiary)' }}>与其他功能点关系</h4>
             <div className="text-sm leading-relaxed p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-secondary)', minHeight: '40px' }}>
               {data.relationsSummary || <span style={{ color: 'var(--foreground-quaternary)' }}>暂无</span>}
+            </div>
+          </div>
+
+          {/* v3.2: 最新完整 SRR（跨版本聚合 CRSR）— 单节点用自身 fp_id，聚合节点用最新成员 fp_id */}
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--foreground-tertiary)' }}>最新完整 SRR</h4>
+            <div className="p-3" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+              <FpCrsrPanel fpId={crsrFpId} />
             </div>
           </div>
         </div>
@@ -1486,6 +1549,22 @@ export default function DependencyGraph() {
     depId: number; sourceName: string; targetName: string; currentStatus: string; reqId: string
   } | null>(null)
 
+  // Obsidian 风格：悬停聚焦状态（hoveredId + 邻居集合），节点/边组件通过 Context 消费
+  const [hoverFocus, setHoverFocus] = useState<{ hoveredId: string | null; neighbors: Set<string> }>({
+    hoveredId: null, neighbors: new Set(),
+  })
+  const onNodeMouseEnter = useCallback((_: any, node: Node) => {
+    const neighbors = new Set<string>()
+    edges.forEach((e: any) => {
+      if (e.source === node.id) neighbors.add(e.target)
+      else if (e.target === node.id) neighbors.add(e.source)
+    })
+    setHoverFocus({ hoveredId: node.id, neighbors })
+  }, [edges])
+  const onNodeMouseLeave = useCallback(() => {
+    setHoverFocus({ hoveredId: null, neighbors: new Set() })
+  }, [])
+
   // 当前模式对应的边样式表
   const currentEdgeStyles = graphType === 'fp' ? FP_EDGE_STYLES : MODULE_EDGE_STYLES
 
@@ -1552,9 +1631,11 @@ export default function DependencyGraph() {
       )
       // v2.43: 应用 dagre 层次布局（若用户已自定义节点位置则保留，否则按依赖关系分层）
       const hasCustomPos = (data?.nodes || []).some((n: any) => n.position)
+      // Obsidian 风格：注入连接度（节点尺寸分档 + 悬停聚焦依据）
+      const degreeNodes = withDegrees(graphNodes, graphEdges)
       const finalNodes = hasCustomPos
-        ? graphNodes
-        : layoutHierarchical(graphNodes, graphEdges, {
+        ? degreeNodes
+        : layoutHierarchical(degreeNodes, graphEdges, {
             direction: layoutDirection,
             nodeSep: 60,
             rankSep: 120,
@@ -1660,7 +1741,10 @@ export default function DependencyGraph() {
       }
     }
     // v2.43: FP 图谱应用 dagre 层次布局（FP 节点位置不持久化，每次重新布局）
-    const finalFpNodes = layoutHierarchical(layoutNodes, layoutEdges, {
+    // Obsidian 风格：注入连接度（节点尺寸分档 + 悬停聚焦依据）——聚合后边已重映射，
+    // 聚合节点的度 = 合并各成员连接度的总和，枢纽感知保持正确
+    const degreeNodes = withDegrees(layoutNodes, layoutEdges)
+    const finalFpNodes = layoutHierarchical(degreeNodes, layoutEdges, {
       direction: layoutDirection,
       nodeSep: 50,
       rankSep: 110,
@@ -2273,13 +2357,26 @@ export default function DependencyGraph() {
                     </div>
                   ))}
                 </div>
+                {/* Obsidian 风格：节点大小 = 连接数 */}
+                <div className="mt-3 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
+                  <div className="flex items-center gap-2 text-[11px]">
+                    <div className="w-3 h-3 rounded-md flex items-center justify-center" style={{ border: '2px solid var(--brand-300, var(--brand-400))' }}>
+                      <span className="text-[8px] font-medium" style={{ color: 'var(--brand-600, var(--brand-500))' }}>×</span>
+                    </div>
+                    <span style={{ color: 'var(--foreground-secondary)' }}>×N 连接数（越大越关键）</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[11px] mt-1.5">
+                    <div className="w-3 h-3 rounded-md" style={{ border: '3px solid var(--brand-500)' }} />
+                    <span style={{ color: 'var(--foreground-secondary)' }}>枢纽节点（6+ 连线）</span>
+                  </div>
+                </div>
               </div>
 
               <div className="mt-auto pt-3" style={{ borderTop: '1px solid var(--border)' }}>
                 <p className="text-[10px] leading-relaxed" style={{ color: 'var(--foreground-tertiary)' }}>
                   {graphType === 'fp'
-                    ? '双击节点查看详情 · 拖拽节点手柄连线 · 右键删除/交换方向 · 位置不持久化'
-                    : '从工具栏拖拽模块到画布 · 拖拽节点手柄连线 · 双击节点切换模块'}
+                    ? '悬停节点聚焦关联 · 双击查看详情 · 拖拽节点手柄连线 · 右键删除/交换方向'
+                    : '悬停节点聚焦关联 · 从工具栏拖拽模块到画布 · 双击节点切换模块'}
                 </p>
               </div>
             </>
@@ -2306,6 +2403,7 @@ export default function DependencyGraph() {
               <p className="text-sm font-medium">请先在顶部栏选择产品</p>
             </div>
           ) : (
+            <HoverFocusContext.Provider value={hoverFocus}>
             <ReactFlowProvider>
               <ReactFlow
                 nodes={nodes} edges={edges}
@@ -2314,6 +2412,8 @@ export default function DependencyGraph() {
                 onInit={(inst: any) => { rfInstance.current = inst }}
                 onNodeDragStop={onNodeDragStop}
                 onNodeDoubleClick={onNodeDoubleClick}
+                onNodeMouseEnter={onNodeMouseEnter}
+                onNodeMouseLeave={onNodeMouseLeave}
                 onNodeContextMenu={onNodeContextMenu}
                 onEdgeContextMenu={onEdgeContextMenu}
                 onEdgeClick={onEdgeClick}
@@ -2386,6 +2486,7 @@ export default function DependencyGraph() {
                 </Panel>
               </ReactFlow>
             </ReactFlowProvider>
+            </HoverFocusContext.Provider>
           )}
         </div>
       </div>

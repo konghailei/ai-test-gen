@@ -1035,6 +1035,8 @@ class MilvusVectorStore:
             "srr_version",
             "requirement",
             "overview",
+            "fp_summary",
+            "fp_index",
             "flows",
             "boundary_conditions",
             "business_rules",
@@ -1046,32 +1048,92 @@ class MilvusVectorStore:
         }
         return {k: v for k, v in srr_json.items() if k in KEEP_TOP_KEYS}
 
+    # v3.2 N10 优化上升级：向量写入 / 问答回答的源文本需尽量完整，
+    # 不能只截取需求概述/前N条规则，否则 LLM 出现"命中 source 但说未找到具体规则"。
+    # 因此把功能点概要、完整业务规则、非功能约束、角色、UI/接口规则一并纳入。
+    # 上限放宽到 20000 字符（仍远低于 Milvus document 列 65535 与 metadata 65536 上限），
+    # 避免超大文档触发 (code=1100) 上限报错；核心细则（概述+功能点+业务规则）置于前部。
+    _SRR_TEXT_MAX_CHARS = 20000
+
     def _srr_to_text(self, srr_json: dict) -> str:
-        """SRR JSON → 嵌入文本。"""
+        """SRR JSON → 嵌入/问答源文本（N10 修复：纳入功能点级与完整规则，减少截断丢弃）。
+
+        产出内容优先级（置于前部，靠后被保护性截断影响最小）：
+          需求标题/概述 → 各功能点概要(fp_summary 名称+类型+summary) → 流程(flows) →
+          完整业务规则(不再限前10条) → 边界条件 → 数据约束 → 非功能约束 →
+          角色(user_roles) → UI 规则 → API 定义。
+        """
         parts = []
         req = srr_json.get("requirement", {})
-        if req.get("title"):
-            parts.append(f"需求标题: {req['title']}")
-        if req.get("summary"):
-            parts.append(f"需求概述: {req['summary']}")
+        if isinstance(req, dict):
+            if req.get("title"):
+                parts.append(f"需求标题: {req['title']}")
+            if req.get("summary"):
+                parts.append(f"需求概述: {req['summary']}")
+
+        # 功能点概要（v2.22+ srr_json 顶层含 fp_summary；兼容 fp_index）
+        fps = srr_json.get("fp_summary") or srr_json.get("fp_index") or []
+        if fps:
+            fp_lines = []
+            for f in fps:
+                if not isinstance(f, dict):
+                    continue
+                name = f.get("name", "") or f.get("fp_name", "")
+                ftype = f.get("fp_type", "")
+                fsum = f.get("summary", "")
+                fp_lines.append(
+                    f"{name}(类型={ftype})" + (f": {fsum}" if fsum else "")
+                )
+            if fp_lines:
+                parts.append("功能点: " + "；".join(fp_lines))
+
         flows = srr_json.get("flows", {})
-        for flow_name, flow_data in flows.items():
-            if isinstance(flow_data, dict):
-                steps = flow_data.get("steps", [])
-                if steps:
-                    steps_text = "; ".join(
-                        s.get("description", "") for s in steps if isinstance(s, dict)
-                    )
-                    if steps_text:
-                        parts.append(f"[{flow_name}] {steps_text}")
+        if isinstance(flows, dict):
+            for flow_name, flow_data in flows.items():
+                if isinstance(flow_data, dict):
+                    steps = flow_data.get("steps", [])
+                    if steps:
+                        steps_text = "; ".join(
+                            s.get("description", "") for s in steps if isinstance(s, dict)
+                        )
+                        if steps_text:
+                            parts.append(f"[{flow_name}] {steps_text}")
+
         business_rules = srr_json.get("business_rules", [])
         if business_rules:
-            parts.append(f"业务规则: {'; '.join(str(r) for r in business_rules[:10])}")
+            parts.append("业务规则: " + "; ".join(str(r) for r in business_rules))
+
         boundary = srr_json.get("boundary_conditions", [])
         if boundary:
-            parts.append(f"边界条件: {'; '.join(str(b) for b in boundary[:10])}")
-        # v2.40: additional_details 字段已移除，不再纳入检索文本
-        return "\n".join(parts)
+            parts.append("边界条件: " + "; ".join(str(b) for b in boundary))
+
+        data_constraints = srr_json.get("data_constraints", [])
+        if data_constraints:
+            parts.append("数据约束: " + "; ".join(str(d) for d in data_constraints))
+
+        non_func = srr_json.get("non_functional", {})
+        if isinstance(non_func, dict):
+            nf_pairs = [f"{k}:{v}" for k, v in non_func.items() if v]
+            if nf_pairs:
+                parts.append("非功能约束: " + "; ".join(nf_pairs))
+
+        user_roles = srr_json.get("user_roles", [])
+        if user_roles:
+            parts.append("角色: " + "; ".join(str(r) for r in user_roles))
+
+        ui_rules = srr_json.get("ui_rules", [])
+        if ui_rules:
+            parts.append("UI规则: " + "; ".join(str(u) for u in ui_rules))
+
+        api_defs = srr_json.get("api_definitions", [])
+        if api_defs:
+            parts.append("接口: " + "; ".join(str(a) for a in api_defs))
+
+        text = "\n".join(part for part in parts if part)
+        # 保护性截断（超大文档），确保不超 Milvus document 列上限
+        if len(text) > self._SRR_TEXT_MAX_CHARS:
+            text = text[:self._SRR_TEXT_MAX_CHARS]
+        return text
 
 
 # 全局单例

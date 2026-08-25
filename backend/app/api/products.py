@@ -906,10 +906,34 @@ async def archive_project(
         except Exception as cache_e:
             logger.warning("[ArchiveProject] KB 缓存失效失败（不阻断）: {}", str(cache_e)[:150])
 
+    # v3.2: 固化各功能点的 CRSR（权威完整版 SRR）
+    # 项目归档是版本定稿时刻，此处把同名功能点跨版本聚合固化到 functional_point_crsr，
+    # 供依赖图谱节点点击 / 影响分析展开直读，并追加 version_refs 追溯链。
+    # 失败不阻断归档主流程（CRSR 可随时重算重建），但记录失败列表供响应提示。
+    crsr_failed: list[dict] = []
+    crsr_count = 0
+    if product_id_for_cache:
+        try:
+            from app.core.fp_crsr import consolidate_crsr
+            fp_names = sorted({f.name for f in all_fps if f.name})
+            for fp_name in fp_names:
+                ok = await consolidate_crsr(
+                    session, product_id_for_cache, fp_name, version_id=version_id,
+                )
+                if ok:
+                    crsr_count += 1
+                else:
+                    crsr_failed.append({"fp_name": fp_name})
+            await session.commit()
+        except Exception as crsr_e:
+            await session.rollback()
+            logger.error("[ArchiveProject] CRSR 固化失败（不阻断）: {}", str(crsr_e)[:200])
+            crsr_failed.append({"error": str(crsr_e)[:200]})
+
     logger.info(
-        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量派发={}, 失败={}, celery={}",
+        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量派发={}, 失败={}, celery={}, crsr={}",
         proj_id, version_id, len(requirements), len(all_fps), len(all_deps), kb_count, len(kb_failed),
-        "async" if _celery_available else "sync",
+        "async" if _celery_available else "sync", crsr_count,
     )
     # v2.8.58: 异步派发时提示用户向量化进行中，同步写入时提示完成状态
     msg = f"项目已归档，版本号: {version_id}"
@@ -931,6 +955,9 @@ async def archive_project(
             "kb_failed": kb_failed,  # v2.8.56: 返回失败列表供前端展示
             "vectorization_mode": "async" if _celery_available else "sync",  # v2.8.58
             "go_live_date": parsed_go_live.isoformat(),
+            # v3.2: CRSR 固化结果
+            "crsr_consolidated": crsr_count,
+            "crsr_failed": crsr_failed,
         },
     )
 
@@ -2006,6 +2033,36 @@ async def get_fp_impact(
         "max_depth_reached": max(visited.values()) if visited else 0,
         "impact_summary": impact_summary,
     })
+
+
+# ============================================================================
+# v3.2: 功能点权威完整版 SRR（CRSR）— 依赖图谱节点点击 / 影响分析展开共用
+# ============================================================================
+
+@router.get("/fp-crsr/{fp_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_fp_crsr(
+    fp_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """获取功能点跨版本聚合的权威完整版 SRR（最新最完整内容）。
+
+    返回：
+        - crsr: 聚合后整体 SRR（标量取最新、数组去重并集、冲突以最新为主）
+        - versions: 各版本归属（最新在前，含所属需求/版本号/归档态）
+        - version_count: 版本数
+        - stored_version_refs: 归档固化时的版本追溯链（仅已固化时有值）
+    """
+    from app.core.fp_crsr import get_crsr_view
+
+    try:
+        view = await get_crsr_view(session, fp_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("[API/products] CRSR 查询失败 fp_id={}: {}", fp_id, str(e)[:200])
+        raise HTTPException(status_code=500, detail=f"CRSR 查询失败: {str(e)[:200]}")
+
+    return ApiResponse(success=True, message="ok", data=view)
 
 # ============================================================================
 # 5. 影响分析（面向模块的 BFS 遍历）

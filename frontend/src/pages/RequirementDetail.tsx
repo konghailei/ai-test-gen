@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Database, Search, BookOpen, GitBranch, Share2, History, RefreshCw, Layers, Download, FilePlus, Image as ImageIcon, ChevronDown } from 'lucide-react'
+import { ArrowLeft, Play, MessageCircle, Send, Loader2, FileText, AlertCircle, CheckCircle2, Edit3, Save, X, FileCode, FileType, Database, Search, BookOpen, GitBranch, Share2, History, RefreshCw, Layers, Download, FilePlus, Image as ImageIcon, ChevronDown, ChevronRight } from 'lucide-react'
 import { requirements as reqApi, products as prodApi } from '../api/client'
 import type { RequirementDetail, ClarifyQuestion, ClarifyHistoryEntry, Product, RequirementRevision } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS, normalizeSourceType, sourceTypeLabel } from '../utils'
@@ -11,6 +11,7 @@ import FunctionalPoints from '../components/FunctionalPoints'
 import FPSRRViewer from '../components/FPSRRViewer'
 import FieldEditor from '../components/FieldEditor'
 import VersionHistoryPanel from '../components/VersionHistoryPanel'
+import FpCrsrPanel from '../components/FpCrsrPanel'
 
 // ============================================================================
 // Markdown 自定义渲染组件
@@ -237,6 +238,8 @@ export default function RequirementDetail() {
       fp_id: string
       fp_name: string
       fp_status: string
+      req_id?: string
+      req_title?: string
       module_id: string
       module_name: string
       impact_reason: string
@@ -244,11 +247,23 @@ export default function RequirementDetail() {
       source_fp_name: string
       kb_context: string
       existing_cases_count: number
+      /** v3.3 P0-1: 引用热度（被依赖数），后端按此降序排序 */
+      fan_in?: number
     }[]
     total_affected: number
   } | null>(null)
   // 用户勾选的受影响 FP（将用于生成回归测试用例）
   const [confirmedFpIds, setConfirmedFpIds] = useState<Set<string>>(new Set())
+  // v3.2: 展开/收起受影响 FP 行（点击行展开显示最新完整 SRR）
+  const [expandedFpIds, setExpandedFpIds] = useState<Set<string>>(new Set())
+  const toggleFpExpand = (fpId: string) => {
+    setExpandedFpIds(prev => {
+      const next = new Set(prev)
+      if (next.has(fpId)) next.delete(fpId)
+      else next.add(fpId)
+      return next
+    })
+  }
 
   // 从 SRR.impact_analysis 恢复已确认的 fp_id
   useEffect(() => {
@@ -270,6 +285,16 @@ export default function RequirementDetail() {
       setConfirmedFpIds(prev => (prev.size === 0 ? prev : new Set()))
     }
   }, [req?.srr_json, req?.id, id])
+
+  // v3.4: 影响分析待确认数——后端 run_impact_analysis 已将受影响 FP 以未确认态
+  // 持久化到 srr.impact_analysis；存在未确认条目时需求无法 confirm/归档（链式锁定）。
+  // 此处统计未确认条目数，用于影响分析 tab 标题黄色提醒。
+  const impactUnconfirmedCount = useMemo(() => {
+    const srr = req?.srr_json as Record<string, unknown> | undefined
+    const ia = srr?.impact_analysis as Array<{ confirmed_at?: string }> | undefined
+    if (!Array.isArray(ia)) return 0
+    return ia.filter(x => !x.confirmed_at).length
+  }, [req?.srr_json])
 
   // ---- v1.6.1: 泛化 SRR 字段保存（FieldEditor 用） ----
   const saveSrrField = async (fieldPath: string, newValue: unknown) => {
@@ -433,9 +458,10 @@ export default function RequirementDetail() {
         const srr = detail.srr_json as Record<string, unknown> | undefined
         const ia = srr?.impact_analysis as Array<{
           fp_id?: string; fp_name?: string; is_affected?: boolean
-          impact_description?: string; confirmed_at?: string
+          impact_description?: string; confirmed_at?: string; source_req_id?: string; fp_type?: string
         }> | undefined
-        const items = Array.isArray(ia) ? ia : []
+        // v3.2: 只展示「确认受影响」的历史条目，不显示"确认不受影响"
+        const items = (Array.isArray(ia) ? ia : []).filter(item => item.is_affected !== false)
         setImpactData({
           req_title: detail.title || id,
           direct_modules: [],
@@ -444,9 +470,11 @@ export default function RequirementDetail() {
             fp_id: item.fp_id || '',
             fp_name: item.fp_name || item.fp_id || '',
             fp_status: 'archived',
+            req_id: item.source_req_id || '',
+            req_title: '',
             module_id: '',
             module_name: '',
-            impact_reason: item.impact_description || (item.is_affected ? '受需求影响' : '确认不受影响'),
+            impact_reason: item.impact_description || '受需求影响',
             depth: 0,
             source_fp_name: '',
             kb_context: '',
@@ -458,6 +486,12 @@ export default function RequirementDetail() {
       }
       const result = await reqApi.impactAnalysis(id)
       setImpactData(result)
+      // v3.4: 后端已将受影响 FP 以未确认态持久化到 srr.impact_analysis，
+      // 刷新 detail 使影响分析 tab 的"待确认"提醒与需求状态同步
+      try {
+        const refreshed = await reqApi.get(id)
+        if (refreshed) setReq(refreshed)
+      } catch { /* 刷新失败不影响展示 */ }
     } catch (e: any) {
       alert('影响分析失败: ' + (e?.message || '未知错误'))
     } finally {
@@ -546,6 +580,11 @@ export default function RequirementDetail() {
         affected_fps: result.affected_fps || [],
         total_affected: result.total_affected || 0,
       })
+      // v3.4: 后端已持久化未确认候选，刷新 detail 同步 tab"待确认"提醒
+      try {
+        const refreshed = await reqApi.get(id)
+        if (refreshed) setReq(refreshed)
+      } catch { /* 刷新失败不影响展示 */ }
     } catch (e: any) {
       alert('重新分析失败: ' + (e?.message || '未知错误'))
     } finally {
@@ -1603,8 +1642,10 @@ export default function RequirementDetail() {
       return (
         <div className="text-center py-12">
           <Share2 className="w-12 h-12 mx-auto mb-3" style={{ color: 'var(--foreground-quaternary)' }} />
-          <p className="font-medium" style={{ color: 'var(--foreground-tertiary)' }}>该需求未关联模块且无功能点依赖关系</p>
-          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>关联模块或建立 FP 依赖关系后可分析影响范围</p>
+          <p className="font-medium" style={{ color: 'var(--foreground-tertiary)' }}>分析完成：未发现受影响的功能点或模块</p>
+          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
+            当前需求变更不影响其他已有功能，可直接确认需求并归档
+          </p>
         </div>
       )
     }
@@ -1652,7 +1693,7 @@ export default function RequirementDetail() {
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>
                 受影响的功能点
-                <span className="text-xs font-normal ml-2" style={{ color: 'var(--foreground-tertiary)' }}>（{impactData.total_affected} 个，基于功能点依赖图谱 BFS 分析）</span>
+                <span className="text-xs font-normal ml-2" style={{ color: 'var(--foreground-tertiary)' }}>（{impactData.total_affected} 个，按引用热度排序，点击行展开最新完整 SRR）</span>
               </h3>
               <div className="flex items-center gap-2">
                 <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none" style={{ color: 'var(--foreground-secondary)' }}>
@@ -1669,8 +1710,10 @@ export default function RequirementDetail() {
             <div className="space-y-3">
               {impactData.affected_fps.map(fp => {
                 const checked = confirmedFpIds.has(fp.fp_id)
+                const expanded = expandedFpIds.has(fp.fp_id)
                 return (
-                  <div key={fp.fp_id} className="px-4 py-3 transition-all cursor-pointer" onClick={() => toggleFpConfirm(fp.fp_id)}
+                  <div key={fp.fp_id} className="px-4 py-3 transition-all"
+                    onClick={() => toggleFpExpand(fp.fp_id)}
                     style={{
                       background: checked ? 'rgba(0, 122, 255, 0.06)' : 'var(--background)',
                       borderRadius: 'calc(var(--radius) * 0.6)',
@@ -1679,6 +1722,10 @@ export default function RequirementDetail() {
                     }}>
                     <div className="flex items-center justify-between mb-1 gap-2">
                       <div className="flex items-center gap-2 min-w-0">
+                        {/* 展开指示（点击行展开最新完整 SRR） */}
+                        <span className="flex-shrink-0" style={{ color: 'var(--foreground-tertiary)', display: 'inline-flex' }}>
+                          {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                        </span>
                         <input
                           type="checkbox"
                           checked={checked}
@@ -1688,18 +1735,29 @@ export default function RequirementDetail() {
                           style={{ accentColor: 'var(--brand-500)', width: 15, height: 15 }}
                         />
                         <p className="text-sm font-medium truncate" style={{ color: checked ? 'var(--brand-700)' : 'var(--foreground-secondary)' }}>{fp.fp_name}</p>
-                        {fp.fp_status === 'archived' && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0" style={{ background: 'var(--state-success-surface)', color: 'var(--state-success)' }}>已归档</span>
-                        )}
-                        {fp.fp_status && fp.fp_status !== 'archived' && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0" style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }}>{fp.fp_status}</span>
+                        {fp.fp_status && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0"
+                            style={{
+                              background: fp.fp_status === 'archived' ? 'var(--state-success-surface)' : 'var(--state-warning-surface)',
+                              color: fp.fp_status === 'archived' ? 'var(--state-success)' : 'var(--state-warning)',
+                            }}>
+                            {STATUS_LABELS[fp.fp_status] || fp.fp_status}
+                          </span>
                         )}
                       </div>
                       <span className="text-xs flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>{fp.depth}跳</span>
                     </div>
-                    <div className="flex items-center gap-2 mb-1 ml-[23px]">
-                      {fp.module_name && (
-                        <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>{fp.module_name}</span>
+                    <div className="flex items-center gap-2 mb-1 ml-[23px] flex-wrap">
+                      {/* v3.2: 模块始终显示，未分配时兜底提示 */}
+                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: 'var(--background-muted)', color: fp.module_name ? 'var(--foreground-tertiary)' : 'var(--foreground-quaternary)' }}>
+                        {fp.module_name || '未分配模块'}
+                      </span>
+                      {/* v3.3 P0-1: 引用热度徽标——被依赖越多，回归优先级越高（排序列首） */}
+                      {(fp.fan_in ?? 0) > 0 && (
+                        <span className="text-xs px-1.5 py-0.5 rounded font-medium" title="被依赖数（引用热度）：越高表示变更牵连面越大，建议优先回归"
+                          style={{ background: (fp.fan_in ?? 0) >= 6 ? 'rgba(0, 122, 255, 0.12)' : 'var(--background-muted)', color: (fp.fan_in ?? 0) >= 6 ? 'var(--brand-700)' : 'var(--foreground-tertiary)' }}>
+                          被依赖 {fp.fan_in}
+                        </span>
                       )}
                       {fp.existing_cases_count > 0 && (
                         <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>已有 {fp.existing_cases_count} 条用例</span>
@@ -1708,6 +1766,13 @@ export default function RequirementDetail() {
                     <p className="text-xs mb-1 ml-[23px]" style={{ color: 'var(--foreground-tertiary)' }}>{fp.impact_reason}</p>
                     {fp.source_fp_name && (
                       <p className="text-xs ml-[23px]" style={{ color: 'var(--foreground-tertiary)' }}>来源：依赖「{fp.source_fp_name}」</p>
+                    )}
+                    {/* v3.2: 展开区 — 功能点最新完整 SRR（跨版本聚合） */}
+                    {expanded && (
+                      <div className="mt-2 pt-2 ml-[23px]" style={{ borderTop: '1px dashed var(--border)' }}
+                        onClick={e => e.stopPropagation()}>
+                        <FpCrsrPanel fpId={fp.fp_id} compact />
+                      </div>
                     )}
                     {/* KB 知识库说明（仅已归档 FP 有值） */}
                     {fp.kb_context && (
@@ -1748,8 +1813,10 @@ export default function RequirementDetail() {
           </div>
         ) : (
           <div className="text-center py-6">
-            <p className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>没有其他功能点受影响</p>
-            <p className="text-xs mt-1" style={{ color: 'var(--foreground-quaternary)' }}>建立功能点依赖关系后可分析受影响的功能点</p>
+            <p className="text-sm font-medium" style={{ color: 'var(--foreground-tertiary)' }}>未发现受影响的功能点</p>
+            <p className="text-xs mt-1" style={{ color: 'var(--foreground-quaternary)' }}>
+              当前需求变更不涉及其他功能点的回归，可直接确认需求并归档
+            </p>
           </div>
         )}
 
@@ -2018,6 +2085,16 @@ export default function RequirementDetail() {
           >
             <GitBranch className="w-4 h-4 inline-block mr-1.5 -mt-0.5" />
             影响分析
+            {/* v3.4: 存在未确认受影响 FP 时黄色提醒（未确认将阻止需求确认与归档） */}
+            {impactUnconfirmedCount > 0 && detail.status !== 'archived' && (
+              <span
+                title={`有 ${impactUnconfirmedCount} 个受影响功能点待确认，未确认前无法确认需求与归档`}
+                className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium"
+                style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)', border: '1px solid var(--state-warning)' }}
+              >
+                {impactUnconfirmedCount}个待确认
+              </span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('history')}

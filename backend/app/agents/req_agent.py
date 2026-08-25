@@ -873,10 +873,15 @@ class ReqAgent:
             req_meta = srr.get("requirement", {}) if isinstance(srr, dict) else {}
             product_id = req_meta.get("product_id", "")
             project_id = req_meta.get("project_id", "")
+            logger.info("[ReqAgent] FP候选查询: product_id=%r project_id=%r req_meta_keys=%s",
+                        product_id, project_id, list(req_meta.keys()) if isinstance(req_meta, dict) else [])
 
             async with async_session() as s:
-                # --- ① 强候选：module_id 或 modules JSON 命中 ---
+                from app.db.models import Requirement as _ReqModel
+                # --- ① 强候选：module_id 或 modules JSON 命中（限定同产品，避免跨产品历史 FP 混入复用候选）---
                 where_clauses_strong = []
+                if product_id:
+                    where_clauses_strong.append(_ReqModel.product_id == product_id)
                 if modules:
                     where_clauses_strong.append(FunctionalPoint.module_id.in_(modules))
                     # PostgreSQL JSONB @> 运算符：modules 列表包含任意目标模块
@@ -898,6 +903,7 @@ class ReqAgent:
                         FunctionalPoint.module_id,
                         FunctionalPoint.summary,
                     )
+                    .join(_ReqModel, _ReqModel.id == FunctionalPoint.requirement_id)
                     .where(_sa_or(*where_clauses_strong) if where_clauses_strong else False)
                     .distinct()
                     .limit(60)
@@ -934,11 +940,13 @@ class ReqAgent:
                         weak_candidate_keywords.add(chunk.strip())
 
                 if weak_candidate_keywords:
+                    # v3.3.2: FunctionalPoint 表无 product_id/project_id 列，需经 requirements 表关联过滤
+                    # （此前误用不存在字段导致 AttributeError，整段降级为 0 功能点）。
                     where_weak = []
                     if product_id:
-                        where_weak.append(FunctionalPoint.product_id == product_id)
+                        where_weak.append(_ReqModel.product_id == product_id)
                     if project_id:
-                        where_weak.append(FunctionalPoint.project_id == project_id)
+                        where_weak.append(_ReqModel.project_id == project_id)
                     if where_weak:
                         q_weak = (
                             sa_select(
@@ -947,6 +955,7 @@ class ReqAgent:
                                 FunctionalPoint.module_id,
                                 FunctionalPoint.summary,
                             )
+                            .join(_ReqModel, _ReqModel.id == FunctionalPoint.requirement_id)
                             .where(_sa_and(*where_weak))
                             .distinct()
                             .limit(200)

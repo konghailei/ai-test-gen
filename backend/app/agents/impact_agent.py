@@ -641,6 +641,9 @@ class ImpactAnalysisAgent:
         )
         own_fps = fp_result.scalars().all()
         own_fp_ids = {fp.id for fp in own_fps}
+        # v3.2: 需求自身的功能点名称集合——跨版本同名功能点属于同一功能（视为需求内部），
+        # 不纳入"受影响的其他功能"。避免把"工单查询"等同名功能点误报为受影响功能。
+        own_fp_names = {fp.name for fp in own_fps}
 
         # 2. 模块 BFS（保留模块级影响作为参考）
         mod_impact = await self._analyze_module_impact(involved_modules, session) if involved_modules else {
@@ -654,10 +657,16 @@ class ImpactAnalysisAgent:
                 reverse_fps = await self._bfs_fp_reverse(fp.id, session)
                 for rf in reverse_fps:
                     fid = rf["fp_id"]
-                    if fid not in own_fp_ids and fid not in all_affected_fps:
+                    # v3.2: 双重排除需求自身功能点：
+                    #   1) 按 fp_id（本需求直接拥有）
+                    #   2) 按 fp_name（跨版本同名功能点属同一功能，视为需求内部，如"工单查询"）
+                    if fid not in own_fp_ids and rf.get("fp_name") not in own_fp_names and fid not in all_affected_fps:
                         all_affected_fps[fid] = {
                             "fp_id": rf["fp_id"],
                             "fp_name": rf["fp_name"],
+                            # v3.2: 补充归属需求信息（前端展开行展示/取 CRSR 用）
+                            "req_id": rf.get("req_id", ""),
+                            "req_title": rf.get("req_title", ""),
                             "reason": f"依赖 FP「{fp.name}」（{rf.get('relation_type','')}），深度 {rf['depth']}",
                             "depth": rf["depth"],
                             "source_fp_id": fp.id,
@@ -683,6 +692,30 @@ class ImpactAnalysisAgent:
         if mod_ids:
             mn = await session.execute(select(Module.id, Module.name).where(Module.id.in_(mod_ids)))
             mod_name_map = {row[0]: row[1] for row in mn.all()}
+
+        # v3.3 P0-1 引用热度（Obsidian 借鉴）：统计受影响 FP 的扇入（被多少功能点依赖）。
+        # 口径与影响分析 BFS 一致：approved + active + 同产品（join requirements 过滤，
+        # 防止跨产品数据泄漏）。fan_in 越高 = 变更该 FP 牵连面越大 = 回归优先级越高。
+        fan_in_map: dict[str, int] = {}
+        if fp_ids_list:
+            try:
+                from sqlalchemy import func as sa_func
+                fan_result = await session.execute(
+                    select(FPDependency.target_fp_id, sa_func.count(FPDependency.id))
+                    .join(FunctionalPoint, FunctionalPoint.id == FPDependency.source_fp_id)
+                    .join(Requirement, Requirement.id == FunctionalPoint.requirement_id)
+                    .where(
+                        FPDependency.target_fp_id.in_(fp_ids_list),
+                        FPDependency.review_status == "approved",
+                        FPDependency.is_active == True,  # noqa: E712
+                        Requirement.product_id == req_data.product_id,
+                    )
+                    .group_by(FPDependency.target_fp_id)
+                )
+                fan_in_map = {row[0]: int(row[1]) for row in fan_result.all()}
+            except Exception as e:
+                # 扇入统计失败不阻断影响分析（降级为不排序），仅记录日志
+                logger.warning("[ImpactAgent] 扇入统计失败（降级不排序）: {}", str(e)[:150])
 
         # 5. KB 查询：只对已归档（status='archived'）的 FP 查询知识库
         # v2.35: 使用 vector_store.search_similar_requirements 按 doc_type=functional_point 过滤
@@ -760,6 +793,9 @@ class ImpactAnalysisAgent:
                 "fp_id": info["fp_id"],
                 "fp_name": info["fp_name"],
                 "fp_status": fp_status_map.get(fid, ""),
+                # v3.2: 归属需求（前端展开行跳转/取 CRSR 用）
+                "req_id": info.get("req_id", ""),
+                "req_title": info.get("req_title", ""),
                 "module_id": mid,
                 "module_name": mod_name_map.get(mid, ""),
                 "impact_reason": info["reason"],
@@ -767,7 +803,12 @@ class ImpactAnalysisAgent:
                 "source_fp_name": info["source_fp_name"],
                 "kb_context": kb_contexts.get(fid, ""),
                 "existing_cases_count": case_counts.get(fid, 0),
+                # v3.3 P0-1: 引用热度（被依赖数）——回归资源投放优先级依据
+                "fan_in": fan_in_map.get(fid, 0),
             })
+
+        # v3.3 P0-1: 按引用热度排序——fan_in 降序（高牵连优先回归），同热度按 BFS 深度升序
+        affected_fps_list.sort(key=lambda x: (-x.get("fan_in", 0), x.get("depth", 0)))
 
         return {
             "requirement": {

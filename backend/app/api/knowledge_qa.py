@@ -29,7 +29,7 @@ from app.core.auth import get_current_user, require_write
 from app.core.llm_client import llm_client
 from app.core import prompt_manager
 from app.db.database import get_session
-from app.db.models import KnowledgeQA, Requirement, TestCase, Product
+from app.db.models import KnowledgeQA, Requirement, TestCase, Product, FunctionalPoint
 from app.db.milvus_store import vector_store
 from app.models.api_schemas import (
     ApiResponse,
@@ -65,6 +65,43 @@ def _xml_escape(text: str) -> str:
     )
 
 
+# N10 修复：回答上下文源文本的最大长度（每篇文档）。
+# 向量写入已完整化（milvus_store._srr_to_text 纳入功能点/完整规则，上限 20000）。
+# 这里仍保留一个宽松上限，用于控制整批 top-8 文档进入 LLM 的 token 预算，
+# 但不再像旧版那样硬截前 800 字符（那是"命中 source 却说未找到具体规则"的根因之一）。
+_QA_DOC_MAX_CHARS = 8000
+
+
+def _doc_text_for_qa(r: dict) -> str:
+    """从检索结果中提取尽可能完整的文档文本用于回答上下文（N10 修复）。
+
+    优先级：
+      1. 向量检索的 document 字段——写入侧 _srr_to_text 已完整化
+         （纳入 fp_summary/完整业务规则/非功能/角色/UI/接口，上限 20000），
+         是含功能点细则的最优来源；
+      2. metadata.srr_json——兜底结构化 SRR（_srr_for_metadata 保留 KEEP_TOP_KEYS，
+         已补入 fp_summary/fp_index）；
+      3. 空。
+    BM25 检索 document=title 较简，故 document 较长时优先它。
+    """
+    doc = r.get("document", "") or ""
+    if len(doc) > 80:  # 向量检索的完整 document 通常远长于纯标题
+        return doc
+    meta = r.get("metadata", {}) or {}
+    srr_json = meta.get("srr_json")
+    if isinstance(srr_json, str) and srr_json.strip():
+        try:
+            parsed = json.loads(srr_json)
+            if isinstance(parsed, dict):
+                from app.db.milvus_store import vector_store
+                text = vector_store._srr_to_text(parsed)
+                if text:
+                    return text
+        except Exception:
+            pass
+    return doc
+
+
 def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: list[dict]) -> str:
     """构建问答 Prompt。
 
@@ -87,7 +124,7 @@ def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: li
             source_id = r.get("id", "未知")
             # 优先使用 enriched_sources 中的真实标题（产品名·需求名），其次用 metadata 中的 title
             title = id_to_title.get(source_id) or r.get("metadata", {}).get("title") or source_id
-            doc = r.get("document", "")[:800]
+            doc = _doc_text_for_qa(r)[:_QA_DOC_MAX_CHARS]
             meta = r.get("metadata", {}) or {}
             go_live = meta.get("go_live_date", "")
             proj_ver = meta.get("project_version", "")
@@ -1000,6 +1037,20 @@ async def kqa_approve_correction(
             )
             archived_id = fp_id
             archived_type = "functional_point"
+
+            # v3.2: 纠正审核通过后刷新该功能点的 CRSR（权威完整版 SRR），
+            # 防止固化内容与纠正后的最新事实漂移。失败不阻断审核主流程。
+            try:
+                from app.core.fp_crsr import consolidate_crsr
+                fp_row = await session.get(FunctionalPoint, fp_id)
+                if fp_row and fp_row.name:
+                    await consolidate_crsr(session, real_product_id, fp_row.name)
+                    await session.commit()
+            except Exception as crsr_e:
+                logger.warning(
+                    "[API/knowledge-qa] CRSR 刷新失败（不阻断） fp_id={}: {}",
+                    fp_id, str(csr_e)[:150],
+                )
 
         else:
             # ===== 需求级别完整纠正（复用 /archive 逻辑）=====

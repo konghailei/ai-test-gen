@@ -745,6 +745,46 @@ class FunctionalPoint(Base):
 
 
 # ============================================================================
+# 15.5 功能点权威完整版 SRR（functional_point_crsr，v3.2 新增）
+# ============================================================================
+
+class FunctionalPointCRSR(Base):
+    """功能点跨版本聚合的权威完整版 SRR（Consolidated Requirement Specification）。
+
+    背景：同一功能点常被多个项目版本分别完善，各版本 FP 记录分散存放规则，
+    库中无"总结性整体 SRR"。参考腾讯 Agent Memory L0-L3 分层思想：
+    - L0/L1（证据层）：各版本 functional_points.srr_json（保留，不删改）
+    - L2（场景层）：本表固化的聚合 CRSR，项目归档时重建
+    聚合规则：标量取最新非归档版本；数组按内容签名去重并集；冲突以最新版本为准。
+
+    消费方：依赖图谱节点点击、影响分析受影响 FP 展开（PG 直读）；
+    后续知识库问答可将其入向量库（doc_type=fp_crsr）。
+    """
+    __tablename__ = "functional_point_crsr"
+    __table_args__ = (
+        UniqueConstraint("product_id", "fp_name", name="uq_crsr_product_fpname"),
+        Index("idx_crsr_product", "product_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    fp_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 聚合后的整体 SRR（字段级合并结果）
+    content: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 证据链：参与聚合的各版本 FP 记录 ID
+    source_fp_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # 固化历史（追溯用）：[{version_id, snapshot_at, source_fp_ids}]，version_id 格式 {project.version}-{project.name}
+    version_refs: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+# ============================================================================
 # 16. 功能点依赖表（fp_dependencies，v1.4）
 # ============================================================================
 

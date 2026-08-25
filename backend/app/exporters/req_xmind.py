@@ -525,6 +525,71 @@ def _build_alt_flows_node(alt_flows: list) -> Element | None:
     return node
 
 
+def _impact_entry_title(e: dict) -> str:
+    """影响分析条目标题：受影响 FP 标【影响功能】前缀；未确认加 🚩 标记（文字方案）。
+
+    - 已确认受影响（confirmed_at + is_affected=True）：【影响功能】功能名
+    - 未确认（无 confirmed_at）：🚩【影响功能】功能名（未确认）
+    - 已确认不受影响（is_affected=False + confirmed_at）：不导出（在调用方过滤）
+    """
+    name = _as_str(e.get("fp_name") or e.get("fp_id") or "未知功能点")
+    confirmed = bool(e.get("confirmed_at"))
+    if confirmed:
+        return f"【影响功能】{name}"
+    return f"🚩【影响功能】{name}（未确认）"
+
+
+def _filter_impact_entries(impact_list: list) -> list[dict]:
+    """过滤影响分析条目：仅保留"确认受影响"与"未确认"条目，剔除"确认不受影响"。"""
+    if not isinstance(impact_list, list):
+        return []
+    entries = []
+    for e in impact_list:
+        if not isinstance(e, dict):
+            continue
+        # 已确认不受影响：不导出
+        if e.get("is_affected") is False and e.get("confirmed_at"):
+            continue
+        entries.append(e)
+    return entries
+
+
+def _build_impact_node(impact_list: list) -> Element | None:
+    """构建影响功能分析节点（XML 版）：一级节点，子节点为各受影响 FP。"""
+    entries = _filter_impact_entries(impact_list)
+    if not entries:
+        return None
+    node = _topic(f"影响功能分析（{len(entries)} 个）")
+    kids = []
+    for e in entries:
+        entry_node = _topic(_impact_entry_title(e))
+        desc = _as_str(e.get("impact_description"))
+        if desc:
+            _children(entry_node, [_topic(f"影响说明: {desc}")])
+        kids.append(entry_node)
+    if kids:
+        _children(node, kids)
+    return node
+
+
+def _jbuild_impact_node(impact_list: list) -> dict | None:
+    """构建影响功能分析节点（JSON 版）：一级节点，子节点为各受影响 FP。"""
+    entries = _filter_impact_entries(impact_list)
+    if not entries:
+        return None
+    node = _jtopic(f"影响功能分析（{len(entries)} 个）")
+    kids = []
+    for e in entries:
+        entry_node = _jtopic(_impact_entry_title(e))
+        desc = _as_str(e.get("impact_description"))
+        if desc:
+            _jattach(entry_node, [_jtopic(f"影响说明: {desc}")])
+        kids.append(entry_node)
+    if kids:
+        _jattach(node, kids)
+    return node
+
+
 def _build_fp_node(fp: dict) -> Element | None:
     """构建单个功能点节点。"""
     if not isinstance(fp, dict):
@@ -734,6 +799,11 @@ def export_requirement_to_xmind(
         total_srr_node = _topic("业务场景")
         _children(total_srr_node, total_srr_kids)
         root_kids.append(total_srr_node)
+
+    # ===== 1.5 影响功能分析（v3.4：受影响 FP 标【影响功能】前缀，未确认加 🚩 标记）=====
+    impact_node = _build_impact_node(srr.get("impact_analysis") or [])
+    if impact_node:
+        root_kids.append(impact_node)
 
     # ===== 2. 功能点（每个功能点作为独立一级节点）=====
     fps = srr.get("functional_points") or srr.get("fps") or []
@@ -1101,6 +1171,11 @@ def export_requirement_to_xmind_json(
         total_srr_node = _jtopic("业务场景")
         _jattach(total_srr_node, total_srr_kids)
         root_kids.append(total_srr_node)
+
+    # ===== 1.5 影响功能分析（v3.4：受影响 FP 标【影响功能】前缀，未确认加 🚩 标记）=====
+    impact_node = _jbuild_impact_node(srr.get("impact_analysis") or [])
+    if impact_node:
+        root_kids.append(impact_node)
 
     # ===== 2. 功能点（每个功能点作为独立一级节点）=====
     fps = srr.get("functional_points") or srr.get("fps") or []

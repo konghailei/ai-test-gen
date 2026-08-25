@@ -2139,13 +2139,114 @@ class ClarifyAgent:
     # LLM 生成的查询包含功能名、关键特征、技术术语，检索更精准。
     # ========================================================================
 
+    async def _load_kb_fp_inventory(self, srr: dict) -> dict:
+        """v3.3 P1: 加载知识库既有功能点清单（归档 FP 按名称去重，标最新版本号）。
+
+        用于 KB 查询生成的双清单注入——防止新功能点的查询词错误匹配到
+        知识库中的同名/相似历史功能（错配会导致检索回错误内容污染澄清答案）。
+        口径与 impact_agent 的 KB 查询一致：FP.status='archived' + 同产品。
+        查询失败时降级为空清单（不影响澄清主流程，仅记日志）。
+        """
+        product_id = (srr.get("requirement", {}) or {}).get("product_id", "")
+        if not product_id:
+            return {"archived": [], "names": set()}
+        try:
+            from sqlalchemy import select as _select, func as _func
+            from app.db.database import async_session as _as
+            from app.db.models import FunctionalPoint as _FP, Requirement as _ReqModel
+            async with _as() as sess:
+                rows = await sess.execute(
+                    _select(_FP.name, _func.max(_ReqModel.version))
+                    .join(_ReqModel, _ReqModel.id == _FP.requirement_id)
+                    .where(
+                        _ReqModel.product_id == product_id,
+                        _FP.status == "archived",
+                    )
+                    .group_by(_FP.name)
+                    .order_by(_FP.name)
+                    .limit(30)
+                )
+                archived = [{"name": r[0], "version": int(r[1] or 1)} for r in rows.all()]
+            return {"archived": archived, "names": {a["name"] for a in archived}}
+        except Exception as e:
+            logger.warning("[ClarifyAgent] KB 功能点清单加载失败（降级为空清单）: {}", str(e)[:150])
+            return {"archived": [], "names": set()}
+
+    def _build_dual_fp_list_block(self, srr: dict, kb_inventory: dict | None) -> str:
+        """v3.3 P1: 构建"当前需求功能点 + 知识库既有功能点"双清单注入块。
+
+        关键机制（用户确认的设计）：
+        - 清单A（当前需求功能点）来自 srr.fp_summary——需求解析时已生成；
+        - 清单B（知识库既有功能点）来自归档 FP——KB 里实际能查到的内容；
+        - 同名匹配在 Python 层预计算（精确名称匹配，不让 LLM 猜）：
+          同名 = 同一功能的迭代（查询可含功能点名+变更细节）；
+          清单A 独有 = 新功能（查询只描述自身行为，禁止借用既有名称）。
+        这样两个方向的错配都被堵住：新功能不会撞归档库的相似历史功能，
+        迭代功能又能精确命中历史版本。
+        """
+        # 清单A：当前需求功能点（解析时已生成，澄清阶段可用）
+        current_names: list[str] = []
+        for fp in (srr.get("fp_summary") or [])[:15]:
+            if isinstance(fp, dict) and fp.get("name"):
+                current_names.append(str(fp["name"]))
+
+        if not kb_inventory or not kb_inventory.get("archived"):
+            # KB 无归档功能点（或清单加载失败）：只提示当前功能点，避免 LLM 盲猜既有功能
+            if not current_names:
+                return ""
+            return (
+                f"【当前需求功能点（来自文档解析，尚未入库）】\n"
+                f"{'、'.join(current_names)}\n"
+                f"\n"
+                f"‼️ 注意：知识库中暂无已归档功能点。生成的 KB 查询只描述当前需求的"
+                f"功能行为与具体维度，不要假设存在历史版本。\n"
+            )
+
+        archived = kb_inventory["archived"]
+        arch_names: set[str] = kb_inventory["names"]
+        matched = [n for n in current_names if n in arch_names]
+        new_fps = [n for n in current_names if n not in arch_names]
+
+        lines: list[str] = []
+        # 清单A
+        lines.append("【当前需求功能点（来自文档解析，尚未入库）】")
+        lines.append("、".join(current_names) if current_names else "（文档未识别出功能点）")
+        lines.append("")
+        # 清单B
+        lines.append("【知识库既有功能点（已归档，可检索其历史规则）】")
+        lines.append("、".join(f"{a['name']}（v{a['version']}）" for a in archived))
+        lines.append("")
+        # 同名匹配指引（Python 预计算，不让 LLM 猜）
+        lines.append("‼️ 功能点匹配指引（生成查询前先判断归属）：")
+        if matched:
+            examples = "、".join(matched[:5])
+            lines.append(
+                f"- 「{examples}」与知识库既有功能点同名，是同一功能的迭代——"
+                f"相关查询应包含功能点名 + 当前需求的具体变更细节，可检索其历史规则；"
+            )
+        if new_fps:
+            examples = "、".join(new_fps[:5])
+            lines.append(
+                f"- 「{examples}」不在既有清单中，是新功能——查询只描述其自身行为与具体维度，"
+                f"禁止借用既有功能点名称，避免检索到无关历史内容；"
+            )
+        if not matched and not new_fps:
+            lines.append("- 当前需求未解析出功能点，按缺口维度自身措辞生成查询；")
+        lines.append(
+            "- 与任何功能点无关的通用缺口（如全局性能要求）按维度自身措辞生成查询。"
+        )
+        return "\n".join(lines) + "\n"
+
     def _build_kb_query_user_prompt(
-        self, srr: dict, completeness: dict, is_incremental: bool
+        self, srr: dict, completeness: dict, is_incremental: bool,
+        kb_inventory: dict | None = None,
     ) -> str:
         """构建 KB 查询生成的用户指令。
 
         将需求上下文 + 缺口信息组织成 prompt，让 LLM 生成具体、上下文感知的
         查询文本（直接用作向量库语义检索 query），而非固定模板。
+        v3.3 P1: 注入双清单（当前需求功能点 + 知识库既有功能点 + 同名匹配标注），
+        防止新功能点查询词错误匹配到 KB 中的同名历史功能。
         """
         req = srr.get("requirement", {}) or {}
         title = req.get("title", "当前需求")
@@ -2252,6 +2353,10 @@ class ClarifyAgent:
                     fp_summaries.append(line)
             fp_block = "\n".join(fp_summaries) if fp_summaries else "（无功能点）"
 
+            # v3.3 P1: 双清单注入——语义模式已有清单A详情（fp_block），
+            # 追加清单B（知识库既有功能点）+ 同名匹配指引
+            kb_inv_block = self._build_dual_fp_list_block(srr, kb_inventory)
+
             return (
                 f"【原始需求文档（最权威参考，请优先据此判断是否有语义遗漏）】\n"
                 f"{srr.get('_raw_text', '')[:3000]}\n"
@@ -2264,6 +2369,7 @@ class ClarifyAgent:
                 f"【功能点摘要（已存在于 SRR 中的功能点详情，不要对已有内容生成查询）】\n"
                 f"{fp_block}\n"
                 f"\n"
+                f"{kb_inv_block}\n"
                 f"【语义遗漏检测模式（v2.8.8）】\n"
                 f"当前需求的核心字段（summary/flows/cross_fp_interactions）均已存在，规则层完整性检测通过。\n"
                 f"但字段存在不代表内容充分——请基于 SRR 全文（含上述功能点摘要）和原始需求文档，检测是否存在以下语义遗漏：\n"
@@ -2293,6 +2399,7 @@ class ClarifyAgent:
             f"- 摘要: {summary}\n"
             f"{chr(10).join(context_snippets) if context_snippets else '（草稿SRR中暂无可提取的上下文特征）'}\n"
             f"\n"
+            f"{self._build_dual_fp_list_block(srr, kb_inventory)}\n"
             f"【待补全的信息缺口（逐一判断是否需要查知识库）】\n"
             f"{json.dumps(gaps, ensure_ascii=False, indent=2) if gaps else '（无缺口）'}\n"
             f"\n"
@@ -2343,7 +2450,12 @@ class ClarifyAgent:
         # 字段存在不代表内容充分——LLM 能基于 SRR 全文检测语义遗漏
         # （如缺少异常处理、输入校验、边界条件等），这些是规则层无法发现的。
 
-        user_prompt = self._build_kb_query_user_prompt(srr, completeness, is_incremental)
+        # v3.3 P1: 加载知识库既有功能点清单（归档 FP 按名称去重），
+        # 与当前需求功能点（srr.fp_summary）组成双清单注入 prompt——
+        # 防止新功能点查询词错误匹配到 KB 中的同名历史功能
+        kb_inventory = await self._load_kb_fp_inventory(srr)
+
+        user_prompt = self._build_kb_query_user_prompt(srr, completeness, is_incremental, kb_inventory)
 
         try:
             result = await self._llm.call_json(
@@ -3175,13 +3287,33 @@ class ClarifyAgent:
                 agent_name="ClarifyAgent",
             )
             # v2.30: 用 index 作为 key，避免相同 id 被覆盖
+            # v2.8.74: LLM 常不回显 index（实测只返回 id/input_type/options/question/default_answer），
+            #          仅依 index 会全部丢弃导致 options 被清空。构建 id/question 文本映射作双兜底。
             refined_by_idx: dict[int, dict] = {}
+            id_to_refine: dict[str, dict] = {}
             for r in result.get("questions", []) or []:
                 idx_val = r.get("index")
                 if isinstance(idx_val, int) and 0 <= idx_val < len(questions):
                     refined_by_idx[idx_val] = r
+                # id 兜底：LLM 返回的 id 与输入保持一致时可用
+                _rid = str(r.get("id", "") or "").strip()
+                if _rid:
+                    id_to_refine.setdefault(_rid, r)
+            # question 文本兜底映射（index/id 都缺失时的最后防线）
+            # 注意：LLM 会改写 question 文本，因此 qtext 匹配不可靠，仅作补充；
+            # 可靠的是 id（实测 LLM 返回的 id 与输入 id 完全一致）。
             for idx, q in enumerate(questions):
-                r = refined_by_idx.get(idx)
+                r = refined_by_idx.get(idx) or id_to_refine.get(str(q.get("id", "") or "").strip())
+                if not r:
+                    # question 文本兜底：原文与 LLM 返回文本精确一致时才命中
+                    r = next(
+                        (
+                            rr for rr in result.get("questions", []) or []
+                            if str(rr.get("question", "") or "").strip()
+                            == str(q.get("question", "") or "").strip()
+                        ),
+                        None,
+                    )
                 if not r:
                     # v2.8.6: LLM 未返回此问题的精炼结果——不兜底，保持原样。
                     # input_type 保持 text，options=[]，default_answer 留空，

@@ -2008,6 +2008,7 @@ async def get_requirement(
         data={
             "id": record.id,
             "product_id": record.product_id,
+            "project_id": record.project_id,  # v3.3.1: 补充 project_id，前端/脚本需据此定位所属项目
             "title": record.title,
             "priority": record.priority,
             "modules": record.modules,
@@ -5297,11 +5298,59 @@ async def run_impact_analysis(
         - affected_fps: 受影响 FP 列表（含 KB 上下文）
         - total_affected: 受影响 FP 总数
     """
-    await _load_active_requirement(req_id, session)
+    req = await _load_active_requirement(req_id, session)
     agent = ImpactAnalysisAgent()
     result = await agent.analyze_requirement_impact(req_id, session)
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
+
+    # v3.4: 影响分析候选持久化——检测出受影响 FP 时以未确认态写入 srr.impact_analysis。
+    # 作用：与 confirm_requirement 守卫（存在未确认条目时 409 阻止确认）及项目归档
+    # （归档要求需求 confirmed）形成链式锁定：未确认影响范围 → 无法确认需求 → 无法归档。
+    # 规则：
+    #   - 仅本次分析存在受影响 FP（或历史残留未确认条目）时写入
+    #   - 已确认条目（confirmed_at 存在）保留原确认结果，不覆盖
+    #   - 候选中未确认的 FP 写为未确认条目（无 confirmed_at，is_affected=None）
+    #   - 不在本次候选中的旧条目丢弃（重分析后影响范围以最新结果为准）
+    affected = result.get("affected_fps") or []
+    srr = dict(req.srr_json or {})
+    existing_list = [e for e in (srr.get("impact_analysis") or []) if isinstance(e, dict)]
+    has_unconfirmed = any(not e.get("confirmed_at") for e in existing_list)
+    if affected or has_unconfirmed:
+        existing_map = {e.get("fp_id"): e for e in existing_list}
+        new_impact: list[dict] = []
+        for a in affected:
+            fid = a.get("fp_id") or ""
+            if not fid:
+                continue
+            old = existing_map.get(fid)
+            if old and old.get("confirmed_at"):
+                # 已确认条目：保留原确认结果（is_affected / impact_description / confirmed_at）
+                new_impact.append(old)
+            else:
+                # 未确认候选：无 confirmed_at → confirm_requirement 守卫会拦截
+                new_impact.append({
+                    "fp_id": fid,
+                    "fp_name": a.get("fp_name") or "",
+                    "fp_type": a.get("fp_type") or "",
+                    "module_id": a.get("module_id") or "",
+                    "source_req_id": a.get("req_id") or "",
+                    # None = 未确认（区别于 True=确认受影响 / False=确认不受影响）
+                    "is_affected": None,
+                    "impact_description": a.get("impact_reason") or f"受需求[{req.title}]影响",
+                })
+        if not affected:
+            # 本次分析无受影响 FP：仅清除历史残留的未确认条目，保留已确认历史
+            new_impact = [e for e in existing_list if e.get("confirmed_at")]
+        srr["impact_analysis"] = new_impact
+        req.srr_json = srr
+        await session.commit()
+        logger.info(
+            "[ImpactAnalysis] 候选持久化: req=%s affected={} unconfirmed={}",
+            req_id, len(affected),
+            len([e for e in new_impact if not e.get("confirmed_at")]),
+        )
+
     return ApiResponse(success=True, data=result)
 
 

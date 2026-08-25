@@ -1004,6 +1004,9 @@ export const dependencyGraph = {
       source_fp_name: string; affected: any[]; affected_modules: any[];
       total: number; impact_summary: string;
     }>(`/products/${productId}/fp/impact?fp_id=${fpId}`),
+  /** v3.2: 功能点权威完整版 SRR（跨版本聚合，最新最完整内容） */
+  fpCrsr: (fpId: string) =>
+    request<import('../types').FpCrsrResult>(`/products/fp-crsr/${fpId}`),
 }
 
 // ============================================================
