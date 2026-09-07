@@ -58,15 +58,23 @@ def gen_test_case_id(module_prefix: str = "GEN") -> str:
 
     Note:
         严格符合 doc-04 §1 的正则 ^TC-[A-Z]+-\d{4}-\d{4}$
+
+    v4.4 修复 L2（用例 ID 碰撞）：
+        原实现 batch_num = int(time.time()) % 10000，时间每 10000 秒（≈2.78h）一轮回，
+        叠加进程重启后 _case_counter 随机起点，跨批次易与库内历史 ID 撞号，触发
+        UniqueViolation 导致用例丢失。现改为“每 100 秒一个时间分桶”的 batch_num，
+        轮回期从 2.78h 拉长到约 11.58 天；同批内 seq 保持严格递增，显著降低碰撞率，
+        同时维持 TC-XXX-\d{4}-\d{4} 格式不变。
     """
     global _case_counter
     with _id_lock:
         _case_counter += 1
         seq = _case_counter % 10000
+        # 每 100 秒一个分桶：time//100 变化周期 ≥1，10^6 秒轮回（≈11.58 天）
+        bucket = (int(time.time()) // 100) % 10000
     # 模块前缀转大写，移除非字母字符
     prefix = "".join(c for c in module_prefix.upper() if c.isalpha()) or "GEN"
-    batch_num = int(time.time()) % 10000
-    return f"TC-{prefix}-{batch_num:04d}-{seq:04d}"
+    return f"TC-{prefix}-{bucket:04d}-{seq:04d}"
 
 
 def gen_batch_id() -> str:

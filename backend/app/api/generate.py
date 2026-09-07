@@ -4,12 +4,12 @@ POST /api/generate —— 调用 LangGraph 编排器，流式返回测试用例�
 
 设计依据：
 - docs/00-architecture-overview.md §9.2 进度反馈机制（SSE）
-- docs/00 §3 核心数据流（8 阶段编排）
+- docs/00 §3 核心数据流（9 节点编排：parse → select_channel → clarify → gate → impact → test_design → generate → review → done）
 - 实现计划 §T5.3 SSE 实现
 - D4 决策：后端用 sse-starlette 的 EventSourceResponse，前端用 fetch + ReadableStream
 
 SSE 事件格式（由 orchestrator.make_sse_event 产生）：
-    {"stage": "parse|select_channel|clarify|gate|impact|generate|review|done|error",
+    {"stage": "parse|select_channel|clarify|gate|impact|test_design|generate|review|done|error",
      "message": "人类可读进度消息",
      "progress": 0-100,
      ...附加字段}
@@ -29,13 +29,15 @@ SSE 事件格式（由 orchestrator.make_sse_event 产生）：
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sse_starlette.sse import EventSourceResponse
 
-from app.core.auth import require_write
+from app.core.auth import require_write, get_current_user, CurrentUser
+from app.core.orchestrator import orchestrator
+from app.core.product_access import assert_product_visible
 from app.core.orchestrator import orchestrator
 from app.db.database import async_session
 from app.db.models import Requirement, AnalysisTask
@@ -47,8 +49,52 @@ from app.utils.logger import logger
 router = APIRouter()
 
 
+async def _find_resume_checkpoint(req_id: str, from_task: str = "") -> dict | None:
+    """查找可续跑的 checkpoint。
+
+    断点续跑：从最近一次「中断/中止/作废」的 generate_cases 任务读取 result_json.checkpoint。
+    返回 (resume_checkpoint, source_task_id)。
+
+    Args:
+        req_id: 需求 ID
+        from_task: 指定来源任务 ID（留空自动查找最近可续任务）
+
+    Returns:
+        dict | None: {"checkpoint": {...}, "source_task_id": "..."}
+    """
+    try:
+        async with async_session() as _s:
+            if from_task:
+                stmt = select(AnalysisTask).where(AnalysisTask.id == from_task)
+            else:
+                stmt = (
+                    select(AnalysisTask)
+                    .where(
+                        AnalysisTask.req_id == req_id,
+                        AnalysisTask.task_type == "generate_cases",
+                        AnalysisTask.status.in_(["interrupted", "aborted", "cancelled", "failed"]),
+                    )
+                    .order_by(AnalysisTask.created_at.desc())
+                )
+            result = await _s.execute(stmt)
+            task = result.scalars().first() if from_task else result.scalars().first()
+            if task is None or not isinstance(task.result_json, dict):
+                return None
+            cp = task.result_json.get("checkpoint")
+            if not isinstance(cp, dict) or not cp.get("fp_groups"):
+                return None
+            return {"checkpoint": cp, "source_task_id": task.id}
+    except Exception as e:
+        logger.warning("[API/generate] 续跑 checkpoint 查找失败: {}", str(e)[:120])
+        return None
+
+
 @router.post("/generate", dependencies=[Depends(require_write)])
-async def generate_test_cases(req: GenerateRequest, request: Request):
+async def generate_test_cases(
+    req: GenerateRequest,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+):
     """SSE 流式生成测试用例。
 
     Args:
@@ -80,6 +126,9 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
         logger.warning("[API/generate] 需求不存在: req_id={}", req.req_id)
         raise HTTPException(status_code=404, detail=f"需求 {req.req_id} 不存在")
 
+    # v3.1.3 P1-1 产品隔离：需求所属产品对当前用户不可见则拒绝生成
+    await assert_product_visible(session, user, requirement.product_id)
+
     raw_text = requirement.raw_text or ""
     srr_json = requirement.srr_json or {}
 
@@ -97,6 +146,26 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
                    f"请先确认需求分析结果（SRR/功能点/影响分析）后再试。",
         )
 
+    # v4.2.8 修复 P2：confirmed 后重跑影响分析会写入新的未确认候选条目，
+    # 但生成入口此前只校验 status，导致这些新候选被 prompt 端静默排除、
+    # 回归覆盖无声缩水且无任何提示。此处与 confirm_requirement 守卫对齐：
+    # 存在未确认影响条目时拒绝生成，强制用户先完成影响确认。
+    impact_items = srr_json.get("impact_analysis") or []
+    unconfirmed_impact = [
+        it for it in impact_items
+        if isinstance(it, dict) and not it.get("confirmed_at")
+    ]
+    if unconfirmed_impact:
+        logger.warning(
+            "[API/generate] 存在未确认影响分析条目，拒绝生成: req_id={}, count={}",
+            req.req_id, len(unconfirmed_impact),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"存在 {len(unconfirmed_impact)} 个未确认的影响分析条目，"
+                   f"请先到影响分析页完成确认后再生成测试用例。",
+        )
+
     # 生成用例必须使用已确认的 SRR（需求分析/澄清后形成的最终结构化需求），
     # 不允许回退到原始文本，防止 SRR 简化导致通道选择错误和用例质量下降。
     has_srr = bool(srr_json.get("requirement"))
@@ -112,6 +181,42 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
 
     # 从 srr_json 提取澄清答案（由 /requirements/{id}/clarify 端点存入）
     clarify_answers = srr_json.get("clarify_answers") or None
+
+    # v3.1.3 P1-2 并发互斥：同一需求存在未结束任务时拒绝重复启动。
+    # 并发生成会导致 SRR/用例双写冲突与任务状态互相覆盖。
+    # 超过 6 小时的 running 视为僵尸任务（服务重启残留），不阻塞新生成。
+    async with async_session() as mutex_session:
+        active_task_id = (
+            await mutex_session.execute(
+                select(AnalysisTask.id)
+                .where(
+                    AnalysisTask.req_id == req.req_id,
+                    AnalysisTask.status.in_(["pending", "running"]),
+                    AnalysisTask.created_at > datetime.now(timezone.utc) - timedelta(hours=6),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if active_task_id and not req.resume:
+        logger.warning(
+            "[API/generate] 并发互斥触发，拒绝重复生成: req_id={}, active_task={}",
+            req.req_id, active_task_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"该需求已有正在执行的任务（{active_task_id}），请等待其完成，"
+                   f"或到任务管理页取消后再发起生成。",
+        )
+
+    # v5.0 断点续跑：resume=True 时从最近一次中断/作废任务 checkpoint 继续
+    _resume_meta: dict | None = None
+    if req.resume:
+        _resume_meta = await _find_resume_checkpoint(req.resume_from_task, req.resume_from_task) if req.resume_from_task else await _find_resume_checkpoint(req.req_id)
+        if not _resume_meta:
+            logger.warning(
+                "[API/generate] 续跑请求但无可用 checkpoint，将从头生成: req_id={}, resume_from={}",
+                req.req_id, req.resume_from_task,
+            )
 
     # v1.4：创建 AnalysisTask 记录（保持 SSE 流式，仅追加任务可见性）
     task_id = gen_task_id()
@@ -171,7 +276,7 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
             if aborted["flag"]:
                 return
             aborted["flag"] = True
-            logger.warning("[API/generate] SSE 流中断: task_id=%s reason=%s", task_id, reason)
+            logger.warning("[API/generate] SSE 流中断: task_id={} reason={}", task_id, reason)
             await _update_gen_task(
                 status="aborted",
                 phase="generate",
@@ -193,6 +298,9 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
                 product_name=srr_json.get("requirement", {}).get("product_name", ""),
                 clarify_answers=clarify_answers,
                 existing_req_id=req.req_id,
+                task_id=task_id,
+                resume=req.resume,
+                resume_checkpoint=(_resume_meta or {}).get("checkpoint"),
             ):
                 # H6: 检查客户端是否已断开（每 5 秒至少检查一次；避免 event 间隔过长时检测延迟）
                 now_ts = getattr(event_generator, "_clock", 0) or 0  # noqa: F841
@@ -224,6 +332,11 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
                         title = c.get("title", "")
                         if title:
                             case_titles.append(title)
+                    # v5.1: 显式统计回归复用用例数，供 R2 质量验证直接读取
+                    reused_count = sum(1 for c in done_cases if c.get("source") == "reused")
+                    regression_count = type_dist.get("regression", 0)
+                    # v5.1: 从回归复用摘要中读取编排器装配的复用计数
+                    reuse_summary = event.get("regression_reuse_summary", {}) or {}
                     await _update_gen_task(
                         status="completed", phase="done", progress=100,
                         message="用例生成完成",
@@ -240,8 +353,57 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
                                 event.get("consistency_check", {}) or {}
                             ).get("is_inconsistent", False),
                             "duration_ms": event.get("duration_ms", 0),
+                            # 要点级覆盖映射（RTM 口径），供任务详情页与一致性检查使用
+                            "point_coverage": event.get("point_coverage", {}),
+                            # v5.1: 回归复用计数（显式字段，供 R2 验证）
+                            "reused_count": reused_count,
+                            "regression_count": regression_count,
+                            "regression_reuse_summary": reuse_summary,
+                            # KB 回流统计
+                            "kb_flowback": event.get("kb_flowback", {}),
                         },
                     )
+
+                    # v5.2 评审报告中心 P1：SRR 门禁报告 + 用例审核报告落库。
+                    # 失败不阻断主流程（报告中心仅作展示/后续采纳消费）。
+                    try:
+                        from app.core.review_reports import (
+                            build_case_report,
+                            build_srr_report,
+                            save_review_reports,
+                        )
+                        _req_title = srr_json.get("requirement", {}).get("title", "")
+                        _gen_batch = next(
+                            (c.get("gen_batch_id", "") for c in done_cases if c.get("gen_batch_id")),
+                            "",
+                        )
+                        _records = []
+                        _gate_result = event.get("gate_result", {}) or {}
+                        _review_report = event.get("review_report", {}) or {}
+                        if _gate_result.get("passed") is not None or _gate_result.get("blockers"):
+                            _records.append(build_srr_report(
+                                task_id=task_id,
+                                req_id=req.req_id,
+                                product_id=requirement.product_id,
+                                req_title=_req_title,
+                                gate_result=_gate_result,
+                                clarify_result=event.get("clarify_result", {}) or {},
+                            ))
+                        if _review_report.get("total_cases"):
+                            _records.append(build_case_report(
+                                task_id=task_id,
+                                req_id=req.req_id,
+                                product_id=requirement.product_id,
+                                req_title=_req_title,
+                                review_report=_review_report,
+                                gen_batch_id=_gen_batch,
+                            ))
+                        if _records:
+                            await save_review_reports(_records)
+                    except Exception as e:
+                        logger.warning(
+                            "[API/generate] 评审报告落库失败（不阻断）: {}", str(e)[:150],
+                        )
                 elif stage == "error":
                     await _update_gen_task(
                         status="failed", phase="generate",
@@ -287,7 +449,7 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
     # 覆盖 sse-starlette 在客户端 TCP 断连时没有"写任务状态"的缺口。
     response = EventSourceResponse(event_generator())
 
-    _orig_aclose = response.aclose
+    _orig_aclose = getattr(response, "aclose", None)
 
     async def _patched_aclose() -> None:
         try:
@@ -313,7 +475,8 @@ async def generate_test_cases(req: GenerateRequest, request: Request):
                 except Exception:
                     pass
         finally:
-            await _orig_aclose()
+            if _orig_aclose is not None:
+                await _orig_aclose()
 
     response.aclose = _patched_aclose  # type: ignore[method-assign]
     return response

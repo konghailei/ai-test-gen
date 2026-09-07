@@ -392,8 +392,8 @@ def test_factory() -> None:
         check("不支持的格式抛 ValueError", "xml" in str(e))
 
     # 4.3 SUPPORTED_FORMATS 完整性
-    check("SUPPORTED_FORMATS 含 4 种格式", len(SUPPORTED_FORMATS) == 4)
-    for fmt in ["json", "markdown", "gherkin", "pytest"]:
+    check("SUPPORTED_FORMATS 含 6 种格式", len(SUPPORTED_FORMATS) == 6)
+    for fmt in ("json", "markdown", "gherkin", "pytest", "xmind", "xmind8"):
         check(f"SUPPORTED_FORMATS 含 {fmt}", fmt in SUPPORTED_FORMATS)
 
 
@@ -482,15 +482,15 @@ async def cleanup_fixtures() -> None:
 def test_api_endpoint(client: TestClient) -> None:
     section("组5：API 端点端到端")
 
-    headers = {"Authorization": get_default_token()}
+    headers = {"Authorization": f"Bearer {get_default_token()}"}
 
     # 5.1 不存在的用例 → 404
     resp = client.post("/api/export", json={"format": "markdown", "case_ids": ["TC-NOT-EXIST"]}, headers=headers)
     check("导出不存在的用例返回 404", resp.status_code == 404)
 
     # 5.2 JSON 端到端
-    resp = client.post("/api/export", json={"format": "json"}, headers=headers)
-    check("API JSON 导出 200", resp.status_code == 200)
+    resp = client.post("/api/export", json={"format": "json", "case_ids": [TEST_CASE_ID]}, headers=headers)
+    check("API JSON 导出 200", resp.status_code == 200, f"status={resp.status_code}")
     check("API JSON Content-Type", "application/json" in resp.headers.get("content-type", ""))
     check("API JSON 含 attachment 头", "attachment" in resp.headers.get("content-disposition", ""))
     check("API JSON 文件名正确", "testcases.json" in resp.headers.get("content-disposition", ""))
@@ -502,23 +502,23 @@ def test_api_endpoint(client: TestClient) -> None:
         check("API JSON 可解析", False, str(e))
 
     # 5.3 Markdown 端到端
-    resp = client.post("/api/export", json={"format": "markdown"}, headers=headers)
-    check("API Markdown 导出 200", resp.status_code == 200)
+    resp = client.post("/api/export", json={"format": "markdown", "case_ids": [TEST_CASE_ID]}, headers=headers)
+    check("API Markdown 导出 200", resp.status_code == 200, f"status={resp.status_code}")
     check("API Markdown Content-Type", "text/markdown" in resp.headers.get("content-type", ""))
     check("API Markdown 文件名正确", "testcases.md" in resp.headers.get("content-disposition", ""))
     check("API Markdown 含测试用例 ID", TEST_CASE_ID in resp.text)
 
     # 5.4 Gherkin 端到端
-    resp = client.post("/api/export", json={"format": "gherkin"}, headers=headers)
-    check("API Gherkin 导出 200", resp.status_code == 200)
+    resp = client.post("/api/export", json={"format": "gherkin", "case_ids": [TEST_CASE_ID]}, headers=headers)
+    check("API Gherkin 导出 200", resp.status_code == 200, f"status={resp.status_code}")
     check("API Gherkin Content-Type", "text/plain" in resp.headers.get("content-type", ""))
     check("API Gherkin 文件名正确", "testcases.feature" in resp.headers.get("content-disposition", ""))
     check("API Gherkin 含 Feature", resp.text.startswith("Feature:"))
     check("API Gherkin 含 Scenario", "Scenario:" in resp.text)
 
     # 5.5 pytest 端到端
-    resp = client.post("/api/export", json={"format": "pytest"}, headers=headers)
-    check("API pytest 导出 200", resp.status_code == 200)
+    resp = client.post("/api/export", json={"format": "pytest", "case_ids": [TEST_CASE_ID]}, headers=headers)
+    check("API pytest 导出 200", resp.status_code == 200, f"status={resp.status_code}")
     check("API pytest Content-Type", "text/x-python" in resp.headers.get("content-type", ""))
     check("API pytest 文件名正确", "testcases.py" in resp.headers.get("content-disposition", ""))
     check("API pytest 含 import pytest", "import pytest" in resp.text)
@@ -546,11 +546,25 @@ def main() -> int:
     print(f"{YELLOW}╚══════════════════════════════════════════════════════════════╝{RESET}")
 
     # 初始化 DB
-    from app.db.database import init_db
-    asyncio.run(init_db())
+    from app.db.database import init_db, engine
+
+    async def _init() -> None:
+        await init_db()
+        await engine.dispose(close=False)
+
+    async def _setup() -> None:
+        await setup_fixtures()
+        await engine.dispose(close=False)
+
+    async def _cleanup() -> None:
+        await engine.dispose(close=False)
+        await cleanup_fixtures()
+        await engine.dispose(close=False)
+
+    asyncio.run(_init())
 
     # 插入夹具
-    asyncio.run(setup_fixtures())
+    asyncio.run(_setup())
 
     try:
         # 直接测试导出器（无需 TestClient）
@@ -566,7 +580,7 @@ def main() -> int:
             test_api_endpoint(client)
 
     finally:
-        asyncio.run(cleanup_fixtures())
+        asyncio.run(_cleanup())
 
     # 汇总
     total = len(results)

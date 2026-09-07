@@ -82,6 +82,11 @@ class TestCase(BaseModel):
     对应 docs/04-output-format.md §1 的 TestCase 定义。
     ID 正则：^TC-[A-Z]+-\d{4}-\d{4}$
     """
+    # v4.9: 保留 LLM 输出的未知字段（含 notes / cover_points 等要点标注），
+    # 否则 model_validate→model_dump 会静默丢弃 notes 中的方括号要点 ID，
+    # 导致 extract_point_ids 永远取不到标注、覆盖映射失效（回退数量比）。
+    model_config = {"extra": "allow"}
+
     id: str = Field(..., description="用例 ID，如 TC-AUTH-0001-0001")
     title: str = Field(..., description="用例标题")
     type: Literal[

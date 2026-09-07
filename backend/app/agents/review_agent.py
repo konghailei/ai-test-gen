@@ -34,6 +34,7 @@ from app.db.milvus_store import vector_store
 from app.models.utcf import ReviewReport
 from app.prompts import review_agent as prompts
 from app.core import prompt_manager
+from app.utils.coverage import calc_point_coverage
 from app.utils.id_gen import gen_batch_id, gen_error_id, gen_test_case_id
 from app.utils.logger import logger
 
@@ -59,12 +60,14 @@ class ReviewAgent:
         self,
         srr: dict,
         test_cases: list[dict],
+        functional_points: list[dict] | None = None,
     ) -> tuple[dict, list[dict]]:
         """对测试用例集执行 6 维度审核。
 
         Args:
             srr: SRR JSON 字典（用于追溯性和覆盖率检查）
             test_cases: GenAgent 生成的 UTCF 用例列表
+            functional_points: 功能点列表（用于要点级覆盖映射统计）
 
         Returns:
             tuple[dict, list[dict]]: (审核报告, 更新后的用例列表)
@@ -115,9 +118,18 @@ class ReviewAgent:
         logger.info("[ReviewAgent] LLM 审核完成: issues={}, avg_confidence={}",
                     len(llm_issues), llm_report.get("avg_confidence", 0))
 
-        # 4. 合并审核结果
+        # 4. 合并审核结果（含要点级覆盖映射，口径与 GenAgent._log_coverage_stats 一致）
+        point_coverage = calc_point_coverage(srr, functional_points or [], reviewed_cases)
+        logger.info(
+            "[ReviewAgent] 要点级覆盖[{}]: 要点总数={}, 已覆盖={}, 覆盖率={:.1%}, P0/P1={}/{}, 未覆盖={}",
+            "映射" if point_coverage["mapping_based"] else "回退(数量比)",
+            point_coverage["total_points"], point_coverage["covered_points"],
+            point_coverage["coverage_rate"],
+            point_coverage["high_priority_covered"], point_coverage["high_priority_total"],
+            len(point_coverage["uncovered"]),
+        )
         report = self._merge_review_results(
-            reviewed_cases, rule_issues, llm_report, srr
+            reviewed_cases, rule_issues, llm_report, srr, point_coverage=point_coverage
         )
 
         logger.info("[ReviewAgent] ◀ 审核完成 ▶ 编排器决策: "
@@ -296,6 +308,7 @@ class ReviewAgent:
         rule_issues: list[dict],
         llm_report: dict,
         srr: dict,
+        point_coverage: dict | None = None,
     ) -> dict:
         """合并规则预检和 LLM 审核结果。
 
@@ -304,6 +317,7 @@ class ReviewAgent:
             rule_issues: 规则预检发现的问题
             llm_report: LLM 审核报告
             srr: SRR JSON 字典
+            point_coverage: 要点级覆盖映射结果（calc_point_coverage 输出）
 
         Returns:
             dict: 合并后的审核报告
@@ -329,11 +343,19 @@ class ReviewAgent:
         if test_cases:
             avg_conf = sum(c.get("confidence", 0) for c in test_cases) / len(test_cases)
 
+        # v5.2 维度级置信度（评审报告中心 P1）：确定性规则聚合，不调 LLM
+        dimension_scores = self._calc_dimension_scores(
+            test_cases, all_issues, point_coverage
+        )
+
         # 判断是否需要补充生成
-        should_supplement = self._should_supplement(all_issues, coverage, srr, test_cases)
+        should_supplement = self._should_supplement(all_issues, coverage, srr, test_cases, point_coverage=point_coverage)
 
         # 补充提示
-        supplement_hints = self._gen_supplement_hints(coverage, srr) if should_supplement else []
+        supplement_hints = (
+            self._gen_supplement_hints(coverage, srr, point_coverage=point_coverage)
+            if should_supplement else []
+        )
 
         return {
             "total_cases": total,
@@ -341,9 +363,101 @@ class ReviewAgent:
             "blocked_cases": blocked,
             "issues": all_issues,
             "coverage_summary": coverage,
+            "point_coverage": point_coverage,
+            "dimension_scores": dimension_scores,
             "avg_confidence": round(avg_conf, 3),
             "should_supplement": should_supplement,
             "supplement_hints": supplement_hints,
+        }
+
+    def _calc_dimension_scores(
+        self,
+        test_cases: list[dict],
+        issues: list[dict],
+        point_coverage: dict | None = None,
+    ) -> dict:
+        """计算 6 维度置信度（v5.2 评审报告中心 P1，纯规则聚合，不调 LLM）。
+
+        口径设计（评审通过：确定性数据优先，避免为维度分再调 LLM 的成本与不稳定性）：
+        - traceability（追溯性）：1 - 追溯性 blocker 用例占比
+        - executability（可执行性）：1 - 可执行性问题占比（扣分封顶 1.0）
+        - consistency（一致性）：1 - 一致性问题占比
+        - deduplication（去重）：1 - 去重问题占比
+        - completeness（完整性）：要点覆盖率（映射口径）或数量比（回退口径）
+        - coverage（覆盖率）：P0/P1 高优覆盖率，无高优要点时退化为完整性分
+
+        Args:
+            test_cases: 用例列表
+            issues: 合并后的全部问题（含 dimension/severity）
+            point_coverage: calc_point_coverage 输出
+
+        Returns:
+            dict: {dim: {"score": float[0,1], "issue_count": int}}
+        """
+        total = max(len(test_cases), 1)
+
+        issue_counts: dict[str, int] = {
+            d: 0 for d in (
+                "completeness", "deduplication", "executability",
+                "consistency", "traceability", "coverage",
+            )
+        }
+        traceability_blocked_cases: set[str] = set()
+        for i in issues:
+            d = i.get("dimension", "")
+            if d in issue_counts:
+                issue_counts[d] += 1
+            if d == "traceability" and i.get("severity") == "blocker":
+                cid = i.get("case_id", "")
+                if cid:
+                    traceability_blocked_cases.add(cid)
+
+        def _clamp(v: float) -> float:
+            return round(max(0.0, min(1.0, v)), 3)
+
+        # 完整性/覆盖率：来自确定性要点覆盖映射
+        completeness_score = 1.0
+        coverage_score = 1.0
+        if point_coverage and point_coverage.get("total_points", 0) > 0:
+            completeness_score = float(point_coverage.get("coverage_rate", 1.0))
+            if point_coverage.get("high_priority_total", 0) > 0:
+                coverage_score = float(point_coverage.get("high_priority_rate", completeness_score))
+            else:
+                coverage_score = completeness_score
+        else:
+            # 无要点数据（无 FP/无 SRR 要点）时完整性/覆盖率不计问题，满分
+            completeness_score = 1.0
+            coverage_score = 1.0
+
+        # 覆盖维度若有 issue（如 test_points_hint 类别未覆盖）则拉低 coverage
+        if issue_counts["coverage"] > 0:
+            coverage_score = min(coverage_score, 1.0 - min(1.0, issue_counts["coverage"] / total))
+
+        return {
+            "completeness": {
+                "score": _clamp(completeness_score),
+                "issue_count": issue_counts["completeness"],
+            },
+            "deduplication": {
+                "score": _clamp(1.0 - min(1.0, issue_counts["deduplication"] / total)),
+                "issue_count": issue_counts["deduplication"],
+            },
+            "executability": {
+                "score": _clamp(1.0 - min(1.0, issue_counts["executability"] / total)),
+                "issue_count": issue_counts["executability"],
+            },
+            "consistency": {
+                "score": _clamp(1.0 - min(1.0, issue_counts["consistency"] / total)),
+                "issue_count": issue_counts["consistency"],
+            },
+            "traceability": {
+                "score": _clamp(1.0 - len(traceability_blocked_cases) / total),
+                "issue_count": issue_counts["traceability"],
+            },
+            "coverage": {
+                "score": _clamp(coverage_score),
+                "issue_count": issue_counts["coverage"],
+            },
         }
 
     def _calc_coverage_summary(self, test_cases: list[dict]) -> dict:
@@ -361,18 +475,22 @@ class ReviewAgent:
         coverage: dict,
         srr: dict,
         test_cases: list[dict],
+        point_coverage: dict | None = None,
     ) -> bool:
         """判断是否需要触发 GenAgent 补充生成。
 
-        触发条件：
+        触发条件（按优先级）：
         - 有 blocker 级问题
-        - 覆盖率不足（test_points_hint 中的类别未覆盖）
+        - 要点级覆盖（映射口径）：要点映射覆盖率 < 0.8 或 P0/P1 要点未 100% 覆盖
+        - 要点级覆盖（回退口径）：数量比覆盖 < 0.5
+        - 兜底：test_points_hint 中的类别未覆盖（v2.48 前旧机制，保留兼容）
 
         Args:
             issues: 问题列表
             coverage: 覆盖率汇总
             srr: SRR JSON
             test_cases: 用例列表
+            point_coverage: 要点级覆盖映射结果（calc_point_coverage 输出）
 
         Returns:
             bool: True 表示需要补充生成
@@ -381,7 +499,21 @@ class ReviewAgent:
         if any(i.get("severity") == "blocker" for i in issues):
             return True
 
-        # 覆盖率检查：test_points_hint 中的类别是否都有用例覆盖
+        # 要点级覆盖判断（RTM 映射口径）
+        if point_coverage and point_coverage.get("total_points", 0) > 0:
+            if point_coverage.get("mapping_based"):
+                # 映射率不足 80% → 补充
+                if point_coverage.get("coverage_rate", 1.0) < 0.8:
+                    return True
+                # P0/P1 要点必须 100% 覆盖
+                if point_coverage.get("high_priority_total", 0) > 0 and \
+                        point_coverage.get("high_priority_covered", 0) < point_coverage["high_priority_total"]:
+                    return True
+            elif point_coverage.get("coverage_rate", 1.0) < 0.5:
+                # 回退口径沿用数量比阈值
+                return True
+
+        # 覆盖率检查：test_points_hint 中的类别是否都有用例覆盖（旧机制兜底）
         hints = srr.get("test_points_hint", [])
         covered_types = {c.get("type", "") for c in test_cases}
         for hint in hints:
@@ -392,12 +524,18 @@ class ReviewAgent:
 
         return False
 
-    def _gen_supplement_hints(self, coverage: dict, srr: dict) -> list[dict]:
+    def _gen_supplement_hints(
+        self,
+        coverage: dict,
+        srr: dict,
+        point_coverage: dict | None = None,
+    ) -> list[dict]:
         """生成补充生成提示。
 
         Args:
             coverage: 覆盖率汇总
             srr: SRR JSON
+            point_coverage: 要点级覆盖映射结果（用于定向补生成未覆盖要点）
 
         Returns:
             list[dict]: 补充提示列表
@@ -412,6 +550,14 @@ class ReviewAgent:
         for cat, reason in hints_by_cat.items():
             if coverage.get(cat, 0) == 0:
                 hints.append({"case_type": cat, "reason": reason})
+
+        # 要点级覆盖缺口：定向补生成未覆盖要点（结构化 hint，编排器映射为 coverage_gaps）
+        if point_coverage and point_coverage.get("uncovered"):
+            hints.append({
+                "case_type": "coverage_gap",
+                "reason": f"{len(point_coverage['uncovered'])} 个 SRR 要点未覆盖，需定向补生成",
+                "uncovered_points": point_coverage["uncovered"][:20],
+            })
 
         # 基于 test_points_hint 补充
         for hint in srr.get("test_points_hint", []):
@@ -436,8 +582,8 @@ class ReviewAgent:
         """将审核通过的用例回流到知识库（PG + Vector DB 双写）。
 
         对应 docs/02 §4.1 闭环回流流程：
-        - 高置信度 (≥0.85) → 自动入库，标记 approved
-        - 中置信度 (0.6~0.85) → 标记 reviewed，等待人工确认
+        - 高置信度 (≥0.70) → 自动入库，标记 approved
+        - 中置信度 (0.6~0.70) → 标记 reviewed，等待人工确认
         - 低置信度 (<0.6) 或 blocker → 记录到 error_cases
 
         Args:
@@ -465,6 +611,7 @@ class ReviewAgent:
             "pending_review": 0,
             "rejected": 0,
             "errors": 0,
+            "vector_write_failed": 0,  # v3.1.3 P1-4: Milvus 写入失败计数，上抛可见
         }
 
         # 获取 blocker 用例 ID 集合
@@ -472,6 +619,41 @@ class ReviewAgent:
         for issue in report.get("issues", []):
             if issue.get("severity") == "blocker":
                 blocked_case_ids.add(issue.get("case_id", ""))
+
+        # R3 修复：入库前按标题级严格去重。
+        # 测试发现同批次出现重复标题（如"版本数据仅作者本人可见"出现 2 条），
+        # 根因是 FP 分片生成 + 补生成各子轮独立调用 gen_agent.generate，
+        # 每个子轮内部去重无法覆盖跨子轮的标题重复，且 persist_to_kb 按
+        # case_id（唯一）去重也无法拦截同标题不同 ID 的用例。
+        # 此处在入库前做最终防线：相同标题只保留置信度最高的一条。
+        title_dedup: dict[str, dict] = {}
+        for case in reviewed_cases:
+            title = str(case.get("title", "")).strip()
+            if not title:
+                continue
+            existing = title_dedup.get(title)
+            if existing is None:
+                title_dedup[title] = case
+            else:
+                conf_new = float(case.get("confidence", 0.0))
+                conf_old = float(existing.get("confidence", 0.0))
+                if conf_new > conf_old:
+                    title_dedup[title] = case
+        deduped_cases = []
+        for case in reviewed_cases:
+            title = str(case.get("title", "")).strip()
+            if title and title in title_dedup:
+                if title_dedup[title] is not case:
+                    continue
+            deduped_cases.append(case)
+        if len(deduped_cases) < len(reviewed_cases):
+            removed = len(reviewed_cases) - len(deduped_cases)
+            logger.info(
+                "[ReviewAgent/KB] 标题级去重: before={}, after={}, removed={}",
+                len(reviewed_cases), len(deduped_cases), removed,
+            )
+            stats["title_dedup_removed"] = removed
+        reviewed_cases = deduped_cases
 
         async with async_session() as session:
             for case in reviewed_cases:
@@ -482,12 +664,29 @@ class ReviewAgent:
                 is_blocked = case_id in blocked_case_ids
 
                 try:
+                    # v4.4 修复 L2 根因：回归复用（v3.4：historical_regression 并入结果集）
+                    # 的用例带历史 id，persist 对其重复 insert 触发 UniqueViolation，导致
+                    # 批次整段丢失。此处先按 id 查库，已存在则判定为"已入过库"并跳过
+                    # （不重复入库、不重复写 traceability/向量），避免误把复用当新生成。
+                    existing_id = (
+                        await session.execute(
+                            select(TestCaseModel.id).where(TestCaseModel.id == case_id)
+                        )
+                    ).scalar_one_or_none()
+                    if existing_id is not None:
+                        stats["reused_skip"] = stats.get("reused_skip", 0) + 1
+                        continue
+
                     # 用 savepoint 隔离每个用例的 DB 写入：
                     # 单个用例 flush 失败时只回滚 savepoint，
                     # 不会让 session 进入 inactive 状态影响后续用例与最终 commit
                     async with session.begin_nested():
-                        if confidence >= 0.85 and not is_blocked:
+                        if confidence >= 0.70 and not is_blocked:
                             # 高置信度：自动入库，标记 approved
+                            # v3.5: 阈值 0.85→0.70。原 0.85 在冷启动（KB 无相似向量
+                            # match_score=0、无模式命中 pattern_bonus=0）时不可达
+                            # （理论上限 0.3+0.2+0.1=0.6~0.7），导致永远无 approved、
+                            # 复用机制（Few-shot/回归基线）死循环
                             record = TestCaseModel(
                                 id=case_id,
                                 req_id=req_id,
@@ -505,8 +704,8 @@ class ReviewAgent:
                             )
                             session.add(record)
 
-                        elif 0.6 <= confidence < 0.85 or (
-                            confidence >= 0.85 and is_blocked
+                        elif 0.6 <= confidence < 0.70 or (
+                            confidence >= 0.70 and is_blocked
                         ):
                             # 中置信度：标记 reviewed，等待人工确认
                             record = TestCaseModel(
@@ -566,18 +765,22 @@ class ReviewAgent:
                         # 记录 "fp:{fp_id}"，建立 test_case↔functional_point 追溯链
                         related_fp = case.get("related_fp", "")
                         req_field = f"fp:{related_fp}" if related_fp else ""
+                        # v4.3.1 修复 P7：原实现 trace_type="direct" if related_fp else "direct"
+                        # 恒为 direct（恒真三目，死代码），且无 FP 关联的用例也被标记为直接
+                        # 验证，语义矛盾。按 docs/02-knowledge-base.md trace_type 取值区分：
+                        # 有关联 FP → direct（直接验证该功能点）；无关联 FP → indirect（间接覆盖）。
                         trace = Traceability(
                             test_case_id=case_id,
                             requirement_id=req_id,
                             requirement_field=req_field,
-                            trace_type="direct" if related_fp else "direct",
+                            trace_type="direct" if related_fp else "indirect",
                             confidence=confidence,
                         )
                         session.add(trace)
                         # begin_nested 退出时自动 flush，失败则回滚到 savepoint
 
                     # savepoint 成功提交后，执行向量库写入与统计（不阻断 DB 事务）
-                    if confidence >= 0.85 and not is_blocked:
+                    if confidence >= 0.70 and not is_blocked:
                         try:
                             await asyncio.to_thread(
                                 vector_store.add_test_case,
@@ -592,14 +795,15 @@ class ReviewAgent:
                                 },
                             )
                         except Exception as ve:
+                            stats["vector_write_failed"] += 1
                             logger.warning(
                                 "[ReviewAgent/KB] 向量库写入失败: case_id={}, err={}",
                                 case_id, str(ve)[:80],
                             )
                         stats["auto_approved"] += 1
 
-                    elif 0.6 <= confidence < 0.85 or (
-                        confidence >= 0.85 and is_blocked
+                    elif 0.6 <= confidence < 0.70 or (
+                        confidence >= 0.70 and is_blocked
                     ):
                         stats["pending_review"] += 1
 
@@ -616,6 +820,7 @@ class ReviewAgent:
                                 product_id=product_id,
                             )
                         except Exception as ve:
+                            stats["vector_write_failed"] += 1
                             logger.warning(
                                 "[ReviewAgent/KB] error_cases 向量库写入失败: {}", str(ve)[:80]
                             )
@@ -632,13 +837,21 @@ class ReviewAgent:
 
         logger.info(
             "[ReviewAgent/KB] 知识库回流完成: "
-            "total={}, auto_approved={}, pending_review={}, rejected={}, errors={}",
+            "total={}, auto_approved={}, pending_review={}, rejected={}, errors={}, vector_write_failed={}",
             stats["total"],
             stats["auto_approved"],
             stats["pending_review"],
             stats["rejected"],
             stats["errors"],
+            stats["vector_write_failed"],
         )
+        if stats["vector_write_failed"]:
+            # P1-4: 双写失败必须显式可见（ERROR 级 + stats 上抛），不能只有 WARNING 淹没
+            logger.error(
+                "[ReviewAgent/KB] ⚠ Milvus 向量写入失败 {} 条，PG 已提交但回归检索基线缺失，"
+                "建议在用例审核页重新批量通过以补写向量",
+                stats["vector_write_failed"],
+            )
         return stats
 
 

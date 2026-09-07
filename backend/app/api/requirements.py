@@ -28,16 +28,22 @@ from __future__ import annotations
 from datetime import datetime, timezone, date
 import asyncio
 import json
+import re
 from typing import Any, Literal
 from pydantic import BaseModel
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Request
 from fastapi.responses import Response
 from sqlalchemy import func, select, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_admin, require_write, get_current_user, CurrentUser
 from app.core.operation_logger import log_operation
+from app.core.product_access import (
+    assert_product_visible,
+    apply_visible_product_filter,
+    get_visible_product_ids,
+)
 from app.config import settings
 from app.agents.clarify_agent import clarify_agent
 from app.agents.impact_agent import ImpactAnalysisAgent
@@ -46,6 +52,7 @@ from app.agents.req_agent import req_agent
 from app.db.database import get_session, async_session
 from app.db.models import Requirement, Project, AnalysisTask, FunctionalPoint, FPDependency
 from app.db.models import TestCase, GenerationBatch, ReqDependency, Traceability
+from app.db.models import ErrorCase  # v3.1.3 P1-3: 删除需求时级联清理异常用例
 from app.db.models import FPDependencyHistory  # v2.3: 依赖审核历史
 from app.models.api_schemas import (
     ApiResponse,
@@ -85,6 +92,28 @@ def _normalize_cross_fp_flow(item: dict) -> dict:
         "interaction_type": item.get("interaction_type", "sequence") or "sequence",
         "description": item.get("description") or item.get("contract", "") or "",
     }
+
+
+# v4.2.9 增强（跨需求依赖）：FP 引用名称归一化。
+# LLM 在 cross_fp_flows / fp_dependencies 中引用历史功能点时常带版本后缀
+# （"权限控制（v1.0）" / "[v1.0]"），而已归档 FP 的 name 是纯名称（"权限控制"），
+# 精确匹配必然落空，导致跨需求依赖边永远无法自动生成。此函数剥离尾部版本标注。
+_FP_REF_VERSION_RE = re.compile(r"[\[（(]\s*v?\s*\d+[\w.\-]*\s*[\]）)]\s*$")
+
+
+def _normalize_fp_ref(name: str) -> str:
+    """去除 FP 引用名称尾部的版本标注（[v1.0]/（v1.0）等），返回纯名称。
+
+    Args:
+        name: LLM 提取的 FP 引用名称
+
+    Returns:
+        str: 纯名称（无版本后缀）；空输入返回空字符串
+    """
+    if not name:
+        return ""
+    cleaned = _FP_REF_VERSION_RE.sub("", name.strip())
+    return (cleaned or name).strip()
 
 
 def _normalize_shared_business_rule(item: dict) -> dict:
@@ -638,6 +667,17 @@ async def _save_fp_dependencies(
 
     依赖关系中的 source_fp_name/target_fp_name 需先映射为实际的 FP ID。
     返回成功创建的依赖条数。
+
+    v4.2.9 增强（跨需求依赖）：
+        原实现只在本需求 FP 内解析名称，LLM 提取到跨需求功能点引用时
+        （如权限回收 -> 权限控制[v1.0]）解析不到即静默跳过，导致跨需求
+        依赖边永远无法自动生成。现扩展两个解析层级：
+          1. 本需求 FP（优先，语义最精确）
+          2. 同产品下其他需求的已归档 FP（历史基线，可被新需求引用）
+        跨需求名称存在多个同名候选（不同需求同名 FP）时判定为歧义，
+        跳过该边并记录告警，避免建错依赖（宁缺毋滥，可人工补边）。
+        跨需求边仍以 pending 状态创建，在本需求确认/归档时随本需求 FP
+        自动审核为 approved 而生效（与既有归档自动审核机制衔接）。
     """
     if not deps:
         return 0
@@ -650,20 +690,78 @@ async def _save_fp_dependencies(
     )
     name_to_id = {row[1]: row[0] for row in fp_result.fetchall()}
 
+    # v4.2.9：加载同产品下其他需求的已归档 FP（跨需求候选）。
+    # 双索引：
+    #   cross_name_to_id —— 精确名称 (name -> {req_id: fp_id})
+    #   cross_norm_to_id —— 归一化名称（剥离 [v1.0]/（v1.0）后缀）后索引
+    # LLM 引用历史功能点常带版本后缀（"权限控制（v1.0）"），归档 FP 名称是
+    # 纯名称（"权限控制"），仅精确匹配必然落空，故构建归一化索引兜底。
+    cross_name_to_id: dict[str, dict[str, str]] = {}
+    cross_norm_to_id: dict[str, dict[str, str]] = {}
+    try:
+        req_obj = await session.get(Requirement, req_id)
+        cross_result = await session.execute(
+            select(FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.requirement_id)
+            .join(Requirement, Requirement.id == FunctionalPoint.requirement_id)
+            .where(
+                Requirement.product_id == req_obj.product_id,
+                FunctionalPoint.requirement_id != req_id,
+                FunctionalPoint.status == "archived",
+            )
+        )
+        for fid, fname, freq_id in cross_result.all():
+            if fname:
+                cross_name_to_id.setdefault(fname, {})[freq_id] = fid
+                norm = _normalize_fp_ref(fname)
+                if norm:
+                    cross_norm_to_id.setdefault(norm, {})[freq_id] = fid
+    except Exception as e:
+        logger.warning("[FP-Dep] 跨需求 FP 候选加载失败（降级仅本需求解析）: {}", str(e)[:150])
+        cross_name_to_id = {}
+        cross_norm_to_id = {}
+
+    def _resolve_fp_id(name: str) -> str | None:
+        """名称解析（按优先级）：
+        1. 本需求精确名
+        2. 本需求归一化名（去版本后缀，兼容 LLM 写法）
+        3. 跨需求已归档精确名（候选唯一时）
+        4. 跨需求已归档归一化名（候选唯一时）
+        歧义（多个同名候选）时跳过该边并告警，避免建错依赖（宁缺毋滥，可人工补边）。
+        """
+        if not name:
+            return None
+        fid = name_to_id.get(name)
+        if fid:
+            return fid
+        norm = _normalize_fp_ref(name)
+        if norm and norm != name:
+            fid = name_to_id.get(norm)
+            if fid:
+                return fid
+        for candidates in (cross_name_to_id.get(name) or {}, cross_norm_to_id.get(norm) or {}):
+            if len(candidates) == 1:
+                return next(iter(candidates.values()))
+            if len(candidates) > 1:
+                logger.warning(
+                    "[FP-Dep] 跨需求功能点名存在歧义（{} 个同名候选），跳过该边: name={}",
+                    len(candidates), name,
+                )
+        return None
+
     saved = 0
     for dep in deps:
         if not isinstance(dep, dict):
             continue
         src_name = dep.get("source_fp_name", "")
         tgt_name = dep.get("target_fp_name", "")
-        src_id = name_to_id.get(src_name)
-        tgt_id = name_to_id.get(tgt_name)
+        src_id = _resolve_fp_id(src_name)
+        tgt_id = _resolve_fp_id(tgt_name)
         if not src_id or not tgt_id or src_id == tgt_id:
             continue
         relation = dep.get("relation_type", "depends_on")
         if relation not in ("depends_on", "data_flows", "invariants", "lifecycle_scenarios", "conflicts_with"):
             relation = "depends_on"
-        # 查重
+        # 查重（含跨需求方向）
         dup = await session.execute(
             select(FPDependency).where(
                 FPDependency.source_fp_id == src_id,
@@ -1008,7 +1106,38 @@ async def _parse_uploaded_files(files: list[UploadFile], session=None) -> tuple[
     return "\n\n---\n\n".join(parts), all_images
 
 
-router = APIRouter()
+async def _guard_product_visibility(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """P1-1 路由级产品隔离守卫。
+
+    从路径参数提取 req_id / task_id，校验关联需求所属产品对当前用户可见：
+    - req_id → Requirement.product_id
+    - task_id → AnalysisTask.req_id → Requirement.product_id
+
+    记录不存在时直接放行（由端点自身返回 404，避免守卫重复报错语义）。
+    """
+    path_params = request.path_params
+    req_id = path_params.get("req_id")
+
+    if not req_id and path_params.get("task_id"):
+        task = await session.get(AnalysisTask, path_params["task_id"])
+        req_id = task.req_id if task else None
+
+    if not req_id:
+        return
+
+    pid_row = await session.execute(
+        select(Requirement.product_id).where(Requirement.id == req_id)
+    )
+    pid = pid_row.scalar_one_or_none()
+    if pid:
+        await assert_product_visible(session, user, pid)
+
+
+router = APIRouter(dependencies=[Depends(_guard_product_visibility)])
 
 
 # ============================================================================
@@ -1039,6 +1168,9 @@ async def upload_requirement(
     """
     if not req.raw_text or not req.raw_text.strip():
         raise HTTPException(status_code=400, detail="需求文本不能为空")
+
+    # P1-1 产品隔离：目标产品必须对当前用户可见（含 PROD-DEFAULT 默认产品）
+    await assert_product_visible(session, current_user, req.product_id or "PROD-DEFAULT")
 
     # v2.8.69: 项目归档后禁止上传新需求
     if req.project_id:
@@ -1584,6 +1716,7 @@ async def upload_requirement_multi(
     priority: str = Form(default="P2", description="优先级 P0-P3"),
     project_id: str = Form(default="", description="项目/版本 ID"),
     modules: str = Form(default="", description="关联模块（逗号分隔）"),
+    current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """上传多个需求文件（.md / .docx），DocMergeAgent 合并后统一分析。
@@ -1604,6 +1737,9 @@ async def upload_requirement_multi(
     module_list = [m.strip() for m in modules.split(",") if m.strip()]
     if not files or len(files) == 0:
         raise HTTPException(status_code=400, detail="请上传至少一个文件")
+
+    # P1-1 产品隔离：目标产品必须对当前用户可见
+    await assert_product_visible(session, current_user, product_id or "PROD-DEFAULT")
 
     # v2.8.69: 项目归档后禁止上传新需求
     if project_id:
@@ -1724,6 +1860,7 @@ async def list_tasks(
     product_id: str | None = Query(default=None, description="按产品筛选"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """列出分析任务（支持按状态/类型/产品筛选，分页）。
@@ -1732,6 +1869,9 @@ async def list_tasks(
     便于前端查询"所有未结束任务"。
     """
     conditions = []
+    # P1-1 产品隔离：仅列出可见产品的任务
+    visible_ids = await get_visible_product_ids(session, user)
+    apply_visible_product_filter(conditions, visible_ids, AnalysisTask.product_id)
     if status:
         status_list = [s.strip() for s in status.split(",") if s.strip()]
         if len(status_list) == 1:
@@ -1899,6 +2039,7 @@ async def list_requirements(
     search: str | None = Query(default=None, description="按标题模糊搜索"),
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
     page_size: int = Query(default=20, ge=1, le=300, description="每页条数，最大 300"),
+    user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """获取需求列表（分页）。
@@ -1917,6 +2058,9 @@ async def list_requirements(
         ApiResponse: data 含 items（RequirementSummary 列表）/ total / page / page_size
     """
     conditions = []
+    # P1-1 产品隔离：仅列出可见产品的需求
+    visible_ids = await get_visible_product_ids(session, user)
+    apply_visible_product_filter(conditions, visible_ids, Requirement.product_id)
     if product_id:
         conditions.append(Requirement.product_id == product_id)
     if project_id:
@@ -4127,6 +4271,12 @@ async def delete_requirement(
     # ---- 级联清理子表（无 ondelete=CASCADE 的 FK，显式删除）----
     from sqlalchemy import delete as sql_delete, update as sql_update
 
+    # v3.1.3 P1-3：error_cases.original_case_id 对 test_cases 是 RESTRICT 外键，
+    # 必须先删该需求下所有用例引用的 ErrorCase，否则整体删除触发 IntegrityError 500
+    tc_ids_sub = select(TestCase.id).where(TestCase.req_id == req_id)
+    ec_count = await session.execute(
+        sql_delete(ErrorCase).where(ErrorCase.original_case_id.in_(tc_ids_sub))
+    )
     # 测试用例
     tc_count = await session.execute(sql_delete(TestCase).where(TestCase.req_id == req_id))
     # 生成批次
@@ -4167,8 +4317,8 @@ async def delete_requirement(
 
     logger.info(
         "[API/requirements] 清理子表: "
-        "test_cases=%d, gen_batches=%d, req_deps=%d, analysis_tasks=%d, traceability=%d, fp=%d",
-        tc_count.rowcount, gb_count.rowcount, dep_count.rowcount, at_count.rowcount, tr_count.rowcount, len(fp_ids),
+        "error_cases=%d, test_cases=%d, gen_batches=%d, req_deps=%d, analysis_tasks=%d, traceability=%d, fp=%d",
+        ec_count.rowcount, tc_count.rowcount, gb_count.rowcount, dep_count.rowcount, at_count.rowcount, tr_count.rowcount, len(fp_ids),
     )
 
     await session.delete(record)
@@ -4566,6 +4716,43 @@ async def confirm_requirement(
                        f"（{', '.join(fp_names)}{suffix}），"
                        f"请先通过影响分析确认功能点后再确认",
             )
+
+    # v4.2.9 增强（跨需求依赖自动生成）:
+    # LLM 的 fp_dependencies 提取通常只覆盖本需求内部 FP，跨需求引用实际落在
+    # SRR.cross_fp_interactions.cross_fp_flows（如 "权限回收 -> 权限控制（v1.0）"），
+    # 此前这些 flows 从未被转换为依赖边，导致"需求内部无法生成跨需求关联关系"。
+    # 确认时统一把 cross_fp_flows 转为依赖描述并补建（_save_fp_dependencies 的
+    # 跨需求解析层会把 "权限控制（v1.0）" 归一化匹配到已归档 FP "权限控制"），
+    # 补建的 pending 边在下方自动审核中置为 approved 而生效，随即参与影响分析。
+    try:
+        cfi = (srr or {}).get("cross_fp_interactions") or {}
+        flows = cfi.get("cross_fp_flows") or []
+        if flows:
+            flow_deps: list[dict] = []
+            for flow in flows:
+                if not isinstance(flow, dict):
+                    continue
+                src = flow.get("source_fp", "") or ""
+                tgt = flow.get("target_fp", "") or ""
+                if src and tgt and src != tgt:
+                    rel = flow.get("relation_type") or flow.get("interaction_type") or "depends_on"
+                    if rel not in ("depends_on", "data_flows", "invariants", "lifecycle_scenarios", "conflicts_with"):
+                        rel = "depends_on"
+                    flow_deps.append({
+                        "source_fp_name": src,
+                        "target_fp_name": tgt,
+                        "relation_type": rel,
+                        "description": flow.get("description", "") or "",
+                    })
+            if flow_deps:
+                flow_saved = await _save_fp_dependencies(session, req_id, flow_deps)
+                if flow_saved:
+                    logger.info(
+                        "[FP-Dep] 需求确认时由 cross_fp_flows 补充创建 {} 条依赖边（含跨需求引用）: req_id={}",
+                        flow_saved, req_id,
+                    )
+    except Exception as e:
+        logger.warning("[FP-Dep] 确认时从 cross_fp_flows 补建依赖边失败（不阻断确认）: {}", str(e)[:200])
 
     # v3.1: 需求确认时自动审核通过该需求产生的依赖关系（无需去依赖图谱人工审核）。
     # 依赖边由本需求 FP 拆分生成（source 属于本需求），确认 SRR 即代表用户认可其依赖关系，
@@ -5311,42 +5498,41 @@ async def run_impact_analysis(
     #   - 仅本次分析存在受影响 FP（或历史残留未确认条目）时写入
     #   - 已确认条目（confirmed_at 存在）保留原确认结果，不覆盖
     #   - 候选中未确认的 FP 写为未确认条目（无 confirmed_at，is_affected=None）
-    #   - 不在本次候选中的旧条目丢弃（重分析后影响范围以最新结果为准）
+    #   - v4.2.7 修复 P6：不在本次候选中的**已确认**旧条目同样保留，
+    #     避免依赖图谱变化后用户已确认的影响范围被静默撤销（回归覆盖无声缩水）。
+    #     只有"从未确认过"的历史残留未确认条目才被清除。
     affected = result.get("affected_fps") or []
     srr = dict(req.srr_json or {})
     existing_list = [e for e in (srr.get("impact_analysis") or []) if isinstance(e, dict)]
     has_unconfirmed = any(not e.get("confirmed_at") for e in existing_list)
     if affected or has_unconfirmed:
         existing_map = {e.get("fp_id"): e for e in existing_list}
-        new_impact: list[dict] = []
+        # 已确认条目原样保留（无论本次是否再次命中候选）
+        new_impact: list[dict] = [e for e in existing_list if e.get("confirmed_at")]
         for a in affected:
             fid = a.get("fp_id") or ""
             if not fid:
                 continue
             old = existing_map.get(fid)
             if old and old.get("confirmed_at"):
-                # 已确认条目：保留原确认结果（is_affected / impact_description / confirmed_at）
-                new_impact.append(old)
-            else:
-                # 未确认候选：无 confirmed_at → confirm_requirement 守卫会拦截
-                new_impact.append({
-                    "fp_id": fid,
-                    "fp_name": a.get("fp_name") or "",
-                    "fp_type": a.get("fp_type") or "",
-                    "module_id": a.get("module_id") or "",
-                    "source_req_id": a.get("req_id") or "",
-                    # None = 未确认（区别于 True=确认受影响 / False=确认不受影响）
-                    "is_affected": None,
-                    "impact_description": a.get("impact_reason") or f"受需求[{req.title}]影响",
-                })
-        if not affected:
-            # 本次分析无受影响 FP：仅清除历史残留的未确认条目，保留已确认历史
-            new_impact = [e for e in existing_list if e.get("confirmed_at")]
+                # 已确认条目已在保留列表中，跳过（以用户确认结果为准）
+                continue
+            # 未确认候选：无 confirmed_at → confirm_requirement 守卫会拦截
+            new_impact.append({
+                "fp_id": fid,
+                "fp_name": a.get("fp_name") or "",
+                "fp_type": a.get("fp_type") or "",
+                "module_id": a.get("module_id") or "",
+                "source_req_id": a.get("req_id") or "",
+                # None = 未确认（区别于 True=确认受影响 / False=确认不受影响）
+                "is_affected": None,
+                "impact_description": a.get("impact_reason") or f"受需求[{req.title}]影响",
+            })
         srr["impact_analysis"] = new_impact
         req.srr_json = srr
         await session.commit()
         logger.info(
-            "[ImpactAnalysis] 候选持久化: req=%s affected={} unconfirmed={}",
+            "[ImpactAnalysis] 候选持久化: req={} affected={} unconfirmed={}",
             req_id, len(affected),
             len([e for e in new_impact if not e.get("confirmed_at")]),
         )
@@ -5415,6 +5601,19 @@ async def confirm_impact_analysis(
             ),
             "confirmed_at": now_iso,
         }
+        # v4.2.7 修复 P1：合并保留旧条目的扩展指导字段。
+        # 旧条目由 FP 影响分析（impact-description/编辑）写入 description/test_focus/
+        # affected_fps/affected_modules 等，而生成 prompt 依赖这些字段构造回归指导。
+        # 原实现整条覆盖会把它们全部抹掉，导致确认后回归用例生成只能靠 FP 名猜测。
+        # confirmed_at/is_affected 仍以本次确认为准（用户最终结论优先）。
+        old_entry = next((e for e in impact_list if e.get("fp_id") == fp_id), None)
+        if isinstance(old_entry, dict):
+            for _key in ("affected_fps", "affected_modules", "description", "test_focus",
+                         "generated_at", "is_auto_generated", "module_name", "depth",
+                         "relation_type", "relation_cn", "source_fp_id", "source_fp_name",
+                         "source_req_title", "impact_reason"):
+                if old_entry.get(_key) is not None:
+                    entry.setdefault(_key, old_entry.get(_key))
         # 覆盖旧条目
         for i, e in enumerate(impact_list):
             if e.get("fp_id") == fp_id:
@@ -5434,7 +5633,7 @@ async def confirm_impact_analysis(
 
     await session.commit()
     logger.info(
-        "[ImpactAnalysis] 确认完成: req=%s affected=%s unaffected=%s removed=%s",
+        "[ImpactAnalysis] 确认完成: req={} affected={} unaffected={} removed={}",
         req_id,
         len([e for e in written_entries if e.get("is_affected")]),
         len([e for e in written_entries if not e.get("is_affected")]),
@@ -5745,18 +5944,17 @@ async def fp_list_reusable(
         .order_by(FunctionalPoint.updated_at.desc())
     )
 
-    if module_id:
-        stmt = stmt.where(
-            (FunctionalPoint.module_id == module_id)
-            | FunctionalPoint.modules.contains([module_id])
-        )
-
     if q:
         stmt = stmt.where(FunctionalPoint.name.ilike(f"%{q}%"))
 
-    stmt = stmt.limit(100)
+    stmt = stmt.limit(200)
     result = await session.execute(stmt)
     rows = result.all()
+
+    # v4.2.2 修复：modules 为 JSON 列，PostgreSQL json 类型不支持 @>（contains）操作符，
+    # 直接 .contains 会抛 "operator does not exist" → HTTP 500「内部错误」。改为内存筛选，语义等价。
+    if module_id:
+        rows = [r for r in rows if r[0].module_id == module_id or module_id in (r[0].modules or [])]
 
     # 查询模块名称映射
     all_module_ids: set[str] = set()
@@ -5929,45 +6127,56 @@ async def fp_delete(
         raise HTTPException(status_code=404, detail="功能点不存在")
 
     # ---- C3 修复：级联清理跨需求 SRR.impact_analysis 中的 fp_id 引用 ----
+    # v4.2.9 修复 P4：srr_json 列类型为 json（非 jsonb），原 SQL 直接用 jsonb_set/
+    # jsonb_array_elements 操作 json 列会导致 "function jsonb_set(json) does not exist"
+    # 运行时报错并被旧 catch 吞掉，跨需求清理实际从未生效。现通过 ::jsonb 显式转型。
     try:
-        # JSONB 清理：impact_analysis = filter(item where item.fp_id != fp_id)
         cleanup_stmt = text(
             """
             UPDATE requirements
                SET srr_json = jsonb_set(
-                   COALESCE(srr_json, '{}'::jsonb),
+                   COALESCE(srr_json::jsonb, '{}'::jsonb),
                    '{impact_analysis}',
                    COALESCE(
                        (SELECT jsonb_agg(elem)
                           FROM jsonb_array_elements(
-                                   COALESCE(srr_json->'impact_analysis', '[]'::jsonb)
+                                   COALESCE((srr_json->'impact_analysis')::jsonb, '[]'::jsonb)
                                ) AS elem
                          WHERE elem->>'fp_id' <> :fp_id),
                        '[]'::jsonb
                    )
-               )
-             WHERE COALESCE(srr_json->'impact_analysis', '[]'::jsonb) @>
+               )::json
+             WHERE COALESCE((srr_json->'impact_analysis')::jsonb, '[]'::jsonb) @>
                    jsonb_build_array(jsonb_build_object('fp_id', :fp_id::text))
             """
         )
         res = await session.execute(cleanup_stmt, {"fp_id": fp_id})
         logger.info(
-            "[FP-Delete] 级联清理 SRR.impact_analysis 引用: fp=%s 行=%s",
+            "[FP-Delete] 级联清理 SRR.impact_analysis 引用: fp={} 行={}",
             fp_id, res.rowcount,
         )
     except Exception as e:  # pragma: no cover - 保护型清理，失败不应阻断删除
         logger.warning(
-            "[FP-Delete] 级联清理 SRR.impact_analysis 引用失败: fp=%s error=%s",
+            "[FP-Delete] 级联清理 SRR.impact_analysis 引用失败: fp={} error={}",
             fp_id, str(e)[:200],
         )
 
     # ---- 清理可追溯性矩阵中的 FP 关联 ----
+    # v4.2.9 修复 P3：使用真实字段 Traceability.requirement_field（review_agent 以
+    # "fp:{fp_id}" 写入），原实现引用不存在的 src_fp_id/dest_fp_id 属性属死代码，
+    # 每次执行必抛 AttributeError 被吞，删除 FP 后追溯记录永远残留。
     try:
         from app.db.models import Traceability  # 局部导入，避免循环依赖
+        from sqlalchemy import or_
         tr_cleanup = delete(Traceability).where(
-            (Traceability.src_fp_id == fp_id) | (Traceability.dest_fp_id == fp_id)
+            Traceability.requirement_field == f"fp:{fp_id}"
         )
         await session.execute(tr_cleanup)
+        # 兼容历史写入格式（related_fp 曾用名称而非 ID 时以 fp:{fp_id} 精确匹配可能漏掉）
+        tr_cleanup2 = delete(Traceability).where(
+            Traceability.requirement_field.like(f"fp:{fp_id}%")
+        )
+        await session.execute(tr_cleanup2)
     except Exception as e:
         # v2.8.60: 静默吞异常改为日志记录（Traceability 表可能不存在或已删除，不阻断主流程但需可追溯）
         logger.warning("清理 FP {} 的 Traceability 关联失败（非阻断）: {}", fp_id, str(e)[:200])
@@ -6123,6 +6332,28 @@ async def export_requirement_xmind(
             }
             for row in fp_rows
         ]
+
+    # v4.2.5：注入"受影响功能点"的最新内容，供 XMind 导出时按其他功能点的内容展示。
+    # 受影响功能点是外部功能点（不在本需求 functional_points 中），需从 DB 查询其 SRR。
+    # 查询"最新版本"：以受影响条目记录的 fp_id 精确取该 FP；同名多版本时由 fp_id 天然区分。
+    impact_raw = srr.get("impact_analysis") or []
+    impact_ids = [e.get("fp_id") for e in impact_raw if isinstance(e, dict) and e.get("fp_id")]
+    if impact_ids:
+        detail_map: dict[str, dict] = {}
+        ifp_res = await session.execute(
+            sa_select(FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.fp_type,
+                      FunctionalPoint.srr_json)
+            .where(FunctionalPoint.id.in_(impact_ids))
+        )
+        for fid, fname, ftype, fsrr in ifp_res.all():
+            detail_map[fid] = {
+                "name": fname,
+                "fp_type": ftype or "",
+                "srr_json": fsrr or {},
+            }
+        if detail_map:
+            srr = dict(srr)
+            srr["impact_fps_detail"] = detail_map
 
     # 安全文件名（去除路径分隔符等特殊字符）
     raw_title = (srr.get("requirement") or {}).get("title") if isinstance(srr.get("requirement"), dict) else record.title

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api import auth, export, generate, knowledge, knowledge_qa, logs, products, prompts, requirements, roles, settings, testcases, users
+from app.api import auth, export, generate, knowledge, knowledge_qa, logs, products, prompts, requirements, review_reports, roles, settings, testcases, users
 
 # 全局路由聚合器，main.py 通过 app.include_router(api_router, prefix="/api") 注册
 api_router = APIRouter()
@@ -36,6 +36,7 @@ api_router.include_router(auth.router, prefix="/auth", tags=["认证"])
 api_router.include_router(requirements.router, prefix="/requirements", tags=["需求管理"])
 api_router.include_router(generate.router, tags=["用例生成"])
 api_router.include_router(testcases.router, prefix="/testcases", tags=["用例管理"])
+api_router.include_router(review_reports.router, prefix="/review-reports", tags=["评审报告"])
 api_router.include_router(knowledge.router, prefix="/knowledge", tags=["知识库"])
 api_router.include_router(knowledge_qa.router, prefix="/knowledge-qa", tags=["知识问答"])
 api_router.include_router(settings.router, prefix="/settings", tags=["系统设置"])

@@ -406,9 +406,10 @@ class ReqAgent:
         req.setdefault("change_type", "new")
 
         # flows 缺失则补空结构
-        flows = srr.get("flows", {})
+        flows = srr.get("flows")
         if not isinstance(flows, dict):
-            logger.warning("[ReqAgent] SRR.flows 非 dict: type={}, 重置", type(flows).__name__)
+            if flows is not None:
+                logger.warning("[ReqAgent] SRR.flows 非 dict: type={}, 重置", type(flows).__name__)
             flows = {}
             srr["flows"] = flows
         # v2.18: 兼容 LLM 返回 happy_path 为数组的情况（应为 {"steps": [...]}）
@@ -873,7 +874,7 @@ class ReqAgent:
             req_meta = srr.get("requirement", {}) if isinstance(srr, dict) else {}
             product_id = req_meta.get("product_id", "")
             project_id = req_meta.get("project_id", "")
-            logger.info("[ReqAgent] FP候选查询: product_id=%r project_id=%r req_meta_keys=%s",
+            logger.info("[ReqAgent] FP候选查询: product_id={!r} project_id={!r} req_meta_keys={}", 
                         product_id, project_id, list(req_meta.keys()) if isinstance(req_meta, dict) else [])
 
             async with async_session() as s:

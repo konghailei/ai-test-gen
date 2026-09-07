@@ -156,6 +156,84 @@ function splitTextIntoBlocks(text: string): Array<
 }
 
 // ============================================================================
+// 可搜索下拉（SearchSelect）：支持输入过滤、多选勾选、点击外部关闭
+// v4.2.2：手动添加受影响功能点使用——模块下拉 + 功能点下拉
+// ============================================================================
+function SearchSelect({ options, selected, onToggle, placeholder, loading, disabled, display }: {
+  options: Array<{ id: string; name: string; desc?: string }>
+  selected: Set<string>
+  onToggle: (id: string) => void
+  placeholder: string
+  loading?: boolean
+  disabled?: boolean
+  display?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const [kw, setKw] = useState('')
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const filtered = kw ? options.filter(o => o.name.toLowerCase().includes(kw.toLowerCase())) : options
+
+  return (
+    <div ref={wrapRef} className="relative w-full" style={{ position: 'relative' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        disabled={disabled}
+        className="text-sm flex items-center justify-between gap-1 w-full"
+        style={{ padding: '7px 10px', borderRadius: 'calc(var(--radius) * 0.5)', border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--foreground-secondary)', cursor: disabled ? 'not-allowed' : 'pointer' }}>
+        <span className="truncate" style={{ color: display || selected.size ? 'var(--foreground-secondary)' : 'var(--foreground-tertiary)' }}>
+          {display || (selected.size ? `已选 ${selected.size} 项` : placeholder)}
+        </span>
+        {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: 'var(--foreground-tertiary)' }} /> : <ChevronDown className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />}
+      </button>
+      {open && (
+        <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 60, background: 'var(--background)', border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.5)', boxShadow: '0 8px 24px rgba(0,0,0,0.10)' }}>
+          <input
+            autoFocus
+            value={kw}
+            onChange={e => setKw(e.target.value)}
+            placeholder="输入关键字过滤..."
+            className="text-sm w-full"
+            style={{ padding: '7px 10px', borderRadius: 6, border: 'none', borderBottom: '1px solid var(--border)', background: 'transparent', outline: 'none', color: 'var(--foreground-secondary)' }}
+          />
+          {loading ? (
+            <div className="flex items-center gap-2 px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />加载中...
+            </div>
+          ) : filtered.length === 0 ? (
+            <p className="px-3 py-2 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>无匹配项</p>
+          ) : (
+            <div className="max-h-52 overflow-y-auto py-1">
+              {filtered.map(o => {
+                const checked = selected.has(o.id)
+                return (
+                  <label key={o.id} className="flex items-center gap-2 px-2 py-1.5 cursor-pointer"
+                    style={{ background: checked ? 'rgba(0,122,255,0.06)' : 'transparent', borderRadius: 'calc(var(--radius) * 0.4)' }}>
+                    <input type="checkbox" checked={checked} onChange={() => onToggle(o.id)} style={{ accentColor: 'var(--brand-500)', width: 15, height: 15, flexShrink: 0 }} />
+                    <span className="text-sm truncate" style={{ color: 'var(--foreground-secondary)' }}>{o.name}</span>
+                    {o.desc && <span className="text-xs truncate ml-auto" style={{ color: 'var(--foreground-tertiary)' }}>{o.desc}</span>}
+                  </label>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ============================================================================
 // 主页面组件
 // ============================================================================
 
@@ -264,6 +342,106 @@ export default function RequirementDetail() {
       return next
     })
   }
+
+  // ===== 手动补选受影响功能点（v4.2 增强） =====
+  // 依赖图谱 BFS 只覆盖已建依赖边；跨需求/漏建边时可由用户按模块+名称检索补选。
+  // 补选 FP 直接并入 confirmedFpIds，复用既有 confirm_impact_analysis 写入 SRR.impact_analysis。
+  const [manualOpen, setManualOpen] = useState(false)
+  const [manualModuleId, setManualModuleId] = useState('')
+  const [manualModules, setManualModules] = useState<{ id: string; name: string }[]>([])
+  const [manualFpPool, setManualFpPool] = useState<Array<{ id: string; name: string; module_id?: string; modules?: string[]; source_req_title?: string; module_names?: string[]; source_req_id?: string }>>([])
+  const [manualFpLoading, setManualFpLoading] = useState(false)
+  const manualFpLoaded = useRef(false)
+
+  useEffect(() => {
+    if (!manualOpen || !req?.product_id) return
+    // v4.2.2：展开即一次性加载模块与已归档 FP 池，后续本地按模块/关键字过滤，无需逐个点检索。
+    if (manualModules.length === 0) {
+      prodApi.listModules(req.product_id).then(m => setManualModules(Array.isArray(m) ? m : [])).catch(() => {})
+    }
+    if (!manualFpLoaded.current && id) {
+      manualFpLoaded.current = true
+      setManualFpLoading(true)
+      reqApi.fpListReusable(id)
+        .then(res => setManualFpPool((res?.items as any) || []))
+        .catch(() => setManualFpPool([]))
+        .finally(() => setManualFpLoading(false))
+    }
+  }, [manualOpen, req?.product_id, id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 功能点下拉选项：按已选模块过滤；默认展示全部已归档 FP（供全库搜索）
+  const manualFpOptions = useMemo(() => {
+    return manualFpPool
+      .filter(fp => !manualModuleId || fp.module_id === manualModuleId || (fp.modules || []).includes(manualModuleId))
+      .map(fp => ({
+        id: fp.id,
+        name: fp.name,
+        desc: [fp.module_names?.join(', '), fp.source_req_title].filter(Boolean).join(' · '),
+      }))
+  }, [manualFpPool, manualModuleId])
+
+  // v4.2.3：手动添加受影响功能点 —— 「选择功能点 → 点添加 → 加入确认列表」。
+  // manualSelFpId：功能点下拉当前选中项（暂存，未加入确认）。
+  const [manualSelFpId, setManualSelFpId] = useState('')
+  // 本次 BFS 候选集：用于区分「图谱分析出的候选」与「手动补选」。
+  const manualCandidateSet = useMemo(
+    () => new Set((impactData?.affected_fps || []).map(x => x.fp_id).filter(Boolean) as string[]),
+    [impactData],
+  )
+  // 已添加列表 = 确认列表中不属于 BFS 候选集的功能点（即手动补选来源），从 SRR 恢复时同样成立。
+  const manualAddedList = useMemo(() => {
+    if (!manualFpPool.length) return []
+    return Array.from(confirmedFpIds)
+      .filter(fpId => !manualCandidateSet.has(fpId))
+      .map(fpId => manualFpPool.find(fp => fp.id === fpId))
+      .filter((fp): fp is { id: string; name: string; module_id?: string; modules?: string[]; module_names?: string[]; source_req_title?: string; source_req_id?: string } => Boolean(fp))
+  }, [confirmedFpIds, manualCandidateSet, manualFpPool])
+
+  // 功能点下拉单选（暂存选中）
+  const handleManualFpPick = (fpId: string) => setManualSelFpId(prev => (prev === fpId ? '' : fpId))
+
+  // 点击「添加」→ 加入确认列表（并入 confirmedFpIds，随确认一并写入 SRR）
+  const addManualFp = (): void => {
+    if (!manualSelFpId) return
+    if (confirmedFpIds.has(manualSelFpId)) { alert('该功能点已在确认列表中'); return }
+    setConfirmedFpIds(prev => { const next = new Set(prev); next.add(manualSelFpId); return next })
+    setManualSelFpId('')
+  }
+
+  // 从确认列表移除一个已添加的功能点
+  const removeManualFp = (fpId: string) => {
+    setConfirmedFpIds(prev => { const next = new Set(prev); next.delete(fpId); return next })
+  }
+
+  // v4.2.3：受影响功能点"合并列表" = BFS 依赖图谱分析结果 + 手动补选的功能点。
+  // 手动补选项复用主列表的行渲染（可点行展开查看功能点最新完整 SRR），
+  // 并携带 is_manual 标记用于展示"手动添加"与行内移除按钮。
+  const allImpactedFps = useMemo(() => {
+    const manualRows = manualAddedList.map(fp => ({
+      fp_id: fp.id,
+      fp_name: fp.name,
+      module_name: fp.module_names?.[0] || '',
+      module_id: '',
+      req_id: fp.source_req_id || '',
+      req_title: fp.source_req_title || '',
+      fp_status: '',
+      source_fp_name: '',
+      kb_context: '',
+      depth: 0,
+      fan_in: 0,
+      existing_cases_count: 0,
+      is_manual: true,
+      impact_reason: `手动添加的受影响功能点${fp.source_req_title ? `（来自「${fp.source_req_title}」）` : ''}`,
+    }))
+    // BFS 项补 is_manual:false，使两侧字段结构一致，避免联合类型字段访问报错
+    const bfsRows = (impactData?.affected_fps || []).map(x => ({ ...x, is_manual: false }))
+    const seen = new Set<string>()
+    return [...bfsRows, ...manualRows].filter(x => {
+      if (seen.has(x.fp_id)) return false
+      seen.add(x.fp_id)
+      return true
+    })
+  }, [impactData, manualAddedList])
 
   // 从 SRR.impact_analysis 恢复已确认的 fp_id
   useEffect(() => {
@@ -510,7 +688,7 @@ export default function RequirementDetail() {
 
   const toggleAllFps = () => {
     if (!impactData) return
-    const all = impactData.affected_fps.map(x => x.fp_id)
+    const all = allImpactedFps.map(x => x.fp_id)
     const allSelected = all.every(id => confirmedFpIds.has(id))
     const next = new Set<string>()
     if (!allSelected) all.forEach(id => next.add(id))
@@ -526,14 +704,21 @@ export default function RequirementDetail() {
     const candidateIds = impactData?.affected_fps.map(x => x.fp_id).filter(Boolean) as string[]
     const candidateSet = new Set(candidateIds || [])
 
-    const confirmed: string[] = Array.from(confirmedFpIds).filter(x => candidateSet.has(x))
+    // v4.2.1 修复：手动补选的功能点（BFS 候选之外，由用户在"手动添加受影响功能点"中检索勾选）
+    // 之前被 candidateSet.has(x) 过滤掉导致无法提交。现放开：候选集的勾选 → 受影响；
+    // 候选集未勾选 → 确认不受影响；候选集之外的勾选（手动补选）→ 也视为受影响一并提交，
+    // 由后端 confirm_impact_analysis 的 _write_entry 以 append 方式写入新条目。
+    const inCandidateConfirmed = Array.from(confirmedFpIds).filter(x => candidateSet.has(x))
+    const manualConfirmed = Array.from(confirmedFpIds).filter(x => !candidateSet.has(x))
+    const confirmed: string[] = Array.from(new Set([...inCandidateConfirmed, ...manualConfirmed]))
     const unaffected: string[] = Array.from(candidateSet).filter(x => !confirmedFpIds.has(x))
 
-    // 需要移除的旧条目：SRR.impact_analysis 中出现但本次候选中没有的 FP
+    // 需要移除的旧条目：SRR.impact_analysis 中出现但本次候选中没有的 FP。
+    // 排除当前仍勾选的（含手动补选），避免把用户明确保留为受影响的功能点误移除。
     const srr = req?.srr_json as Record<string, unknown> | undefined
     const ia = srr?.impact_analysis as Array<{ fp_id?: string }> | undefined
     const oldIds = new Set((Array.isArray(ia) ? ia : []).map(x => x.fp_id).filter(Boolean) as string[])
-    const removed: string[] = Array.from(oldIds).filter(x => !candidateSet.has(x))
+    const removed: string[] = Array.from(oldIds).filter(x => !candidateSet.has(x) && !confirmedFpIds.has(x))
 
     if (confirmed.length === 0 && unaffected.length === 0 && removed.length === 0) {
       alert('请先勾选或取消勾选受影响的功能点')
@@ -1687,19 +1872,97 @@ export default function RequirementDetail() {
           </div>
         )}
 
-        {/* 受影响的功能点（基于 FP 依赖图谱 BFS 分析） */}
-        {impactData.affected_fps.length > 0 ? (
+        {/* 手动补选受影响功能点（v4.2：跨需求/漏建边时人工补选，写入 impact_analysis 生成回归用例） */}
+        <div style={{ border: '1px dashed var(--border)', borderRadius: 'calc(var(--radius) * 0.6)', background: 'var(--background-muted/50)' }}>
+          <button
+            onClick={() => setManualOpen(o => !o)}
+            className="flex items-center justify-between w-full px-4 py-2.5 text-left"
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}>
+            <span className="flex items-center gap-2 text-sm font-medium" style={{ color: 'var(--foreground-secondary)' }}>
+              <Search className="w-4 h-4" style={{ color: 'var(--brand-500)' }} />
+              手动添加受影响功能点
+              <span className="text-xs font-normal" style={{ color: 'var(--foreground-tertiary)' }}>
+                （BFS 依赖图谱外的跨需求/漏建边功能点，可在此检索补选）
+              </span>
+            </span>
+            {manualOpen ? <ChevronDown className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} /> : <ChevronRight className="w-4 h-4" style={{ color: 'var(--foreground-tertiary)' }} />}
+          </button>
+          {manualOpen && (
+            <div className="px-4 pb-4 space-y-3">
+              {/* v4.2.2：两个可搜索下拉框 —— 模块筛选 + 受影响功能点 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>按模块筛选（可搜索）</div>
+                  <SearchSelect
+                    options={manualModules.map(m => ({ id: m.id, name: m.name }))}
+                    selected={manualModuleId ? new Set([manualModuleId]) : new Set()}
+                    onToggle={(mid) => setManualModuleId(prev => (prev === mid ? '' : mid))}
+                    display={manualModuleId ? (manualModules.find(m => m.id === manualModuleId)?.name || '') : undefined}
+                    placeholder="选择模块（可选，默认全部）"
+                  />
+                </div>
+                <div>
+                  <div className="text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>受影响的功能点（可搜索）</div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 min-w-0">
+                      <SearchSelect
+                        options={manualFpOptions}
+                        selected={manualSelFpId ? new Set([manualSelFpId]) : new Set()}
+                        onToggle={handleManualFpPick}
+                        display={manualSelFpId ? (manualFpOptions.find(o => o.id === manualSelFpId)?.name || '') : undefined}
+                        placeholder={manualFpLoading ? '加载中...' : '选择功能点'}
+                        loading={manualFpLoading}
+                      />
+                    </div>
+                    <button onClick={addManualFp} disabled={!manualSelFpId} className="btn-primary text-xs" style={{ whiteSpace: 'nowrap' }}>
+                      添加
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* 已添加（手动补选）列表 */}
+              {manualAddedList.length > 0 && (
+                <div>
+                  <div className="text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>
+                    已添加 {manualAddedList.length} 个受影响功能点（点击 × 移除）
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {manualAddedList.map(fp => (
+                      <span key={fp.id} className="inline-flex items-center gap-1.5 px-2 py-1 text-xs"
+                        style={{ background: 'var(--background)', border: '1px solid var(--brand-300)', borderRadius: 'calc(var(--radius) * 0.4)', color: 'var(--foreground-secondary)' }}>
+                        {fp.name}
+                        {fp.module_names?.length ? <span style={{ color: 'var(--foreground-tertiary)' }}>· {fp.module_names.join(', ')}</span> : null}
+                        <button onClick={() => removeManualFp(fp.id)} title="移除"
+                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--foreground-tertiary)', display: 'inline-flex', padding: 0 }}>
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+                默认展示产品内全部已归档功能点，可用模块 / 关键字过滤；选择后点击「添加」即可计入下方确认列表，随「确认」一并写入 SRR。
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* 受影响的功能点（BFS 依赖图谱分析 + 手动补选） */}
+        {allImpactedFps.length > 0 ? (
           <div>
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>
                 受影响的功能点
-                <span className="text-xs font-normal ml-2" style={{ color: 'var(--foreground-tertiary)' }}>（{impactData.total_affected} 个，按引用热度排序，点击行展开最新完整 SRR）</span>
+                <span className="text-xs font-normal ml-2" style={{ color: 'var(--foreground-tertiary)' }}>（{allImpactedFps.length} 个，按引用热度排序，点击行展开最新完整 SRR，手动项可移除）</span>
               </h3>
               <div className="flex items-center gap-2">
                 <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none" style={{ color: 'var(--foreground-secondary)' }}>
                   <input
                     type="checkbox"
-                    checked={impactData.affected_fps.length > 0 && impactData.affected_fps.every(fp => confirmedFpIds.has(fp.fp_id))}
+                    checked={allImpactedFps.length > 0 && allImpactedFps.every(fp => confirmedFpIds.has(fp.fp_id))}
                     onChange={toggleAllFps}
                     style={{ accentColor: 'var(--brand-500)' }}
                   />
@@ -1708,7 +1971,7 @@ export default function RequirementDetail() {
               </div>
             </div>
             <div className="space-y-3">
-              {impactData.affected_fps.map(fp => {
+              {allImpactedFps.map(fp => {
                 const checked = confirmedFpIds.has(fp.fp_id)
                 const expanded = expandedFpIds.has(fp.fp_id)
                 return (
@@ -1745,7 +2008,23 @@ export default function RequirementDetail() {
                           </span>
                         )}
                       </div>
-                      <span className="text-xs flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>{fp.depth}跳</span>
+                      {fp.is_manual ? (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex-shrink-0"
+                          style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }}>
+                          手动添加
+                        </span>
+                      ) : (
+                        <span className="text-xs flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>{fp.depth}跳</span>
+                      )}
+                      {fp.is_manual && (
+                        <button
+                          onClick={e => { e.stopPropagation(); removeManualFp(fp.fp_id) }}
+                          title="移除该手动添加的功能点"
+                          className="flex-shrink-0"
+                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--state-danger)', display: 'inline-flex', padding: 2, marginLeft: 2 }}>
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 mb-1 ml-[23px] flex-wrap">
                       {/* v3.2: 模块始终显示，未分配时兜底提示 */}
@@ -1797,7 +2076,7 @@ export default function RequirementDetail() {
                 position: 'sticky', bottom: 8, backdropFilter: 'blur(6px)',
               }}>
               <div className="text-xs" style={{ color: 'var(--foreground-secondary)' }}>
-                已勾选 <span className="font-semibold" style={{ color: 'var(--brand-700)' }}>{confirmedFpIds.size}</span> / {impactData.affected_fps.length} 个受影响功能点
+                已勾选 <span className="font-semibold" style={{ color: 'var(--brand-700)' }}>{confirmedFpIds.size}</span> / {allImpactedFps.length} 个受影响功能点
                 <span className="ml-2" style={{ color: 'var(--foreground-tertiary)' }}>（勾选后将生成对应的回归测试用例）</span>
               </div>
               <div className="flex items-center gap-2">

@@ -21,7 +21,8 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import require_write, get_current_user
+from app.core.auth import require_write, get_current_user, CurrentUser
+from app.core.product_access import assert_product_visible
 from app.db.database import get_session
 from app.db.models import TestCase, Requirement, FunctionalPoint, Project
 from app.exporters import export_cases, SUPPORTED_FORMATS
@@ -101,6 +102,7 @@ async def _resolve_case_context(rows: list[TestCase], session: AsyncSession) -> 
 @router.post("", dependencies=[Depends(get_current_user)])
 async def export_testcases(
     req: ExportRequest,
+    user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """导出测试用例为指定格式。
@@ -135,6 +137,10 @@ async def export_testcases(
 
     if not rows:
         raise HTTPException(status_code=404, detail="未找到可导出的用例")
+
+    # P1-1 产品隔离：任一用例所属产品不可见即整体拒绝（fail-fast）
+    for row in rows:
+        await assert_product_visible(session, user, row.product_id)
 
     # 解析 req_title 和 functional_point 名称（与列表 API 一致），注入 case dict
     cases = await _resolve_case_context(rows, session)

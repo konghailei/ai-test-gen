@@ -158,7 +158,24 @@
 └──────────────────┬───────────────────────────┘
                    ▼
 ┌──────────────────────────────────────────────┐
-│ ⑤ GenAgent 用例生成                          │
+│ ④.5 TestDesignAgent 测试设计（架构完善）     │
+│    输入：SRR（总 SRR + FP 子 SRR）+ 影响范围   │
+│    产出：测试设计蓝图（结构化）                │
+│      - techniques_applicable：8 技术适用性     │
+│      - boundary_targets：等价类+边界值目标字段 │
+│      - decision_table_targets：决策表目标FP    │
+│      - state_targets：状态迁移目标FP           │
+│      - error_guess_hints：错误推测检查清单     │
+│      - scenario_targets：场景法目标            │
+│    8 种测试设计技术（docs/03 §2.1.0）：        │
+│      等价类/边界值/决策表/状态迁移/场景/正交/  │
+│      错误推测/因果图                           │
+│    技术选择决策树（SRR 结构扫描自动判定）      │
+│    → 定向指导文本注入 GenAgent Prompt          │
+└──────────────────┬───────────────────────────┘
+                   ▼
+┌──────────────────────────────────────────────┐
+│ ⑤ GenAgent 用例生成（按测试设计蓝图定向）    │
 │    ⚠️ v3.1: 不再从知识库检索历史用例          │
 │    多维并行: 功能|边界|异常|安全|性能         │
 │    + FP 定向生成 (每个 FP ≥ 1 用例)          │
@@ -193,6 +210,13 @@
 │    → 形成闭环                                │
 └──────────────────────────────────────────────┘
 ```
+
+> **v3.3 编排语义补充（强制放行 + 回归基线 + 补生成闭环）**：
+> - **DAG/SSE 对齐**：编排节点为 `parse → select_channel → clarify → gate → impact → test_design → generate → review → done`（SSE stage 同名）；FULL 通道执行澄清，FAST 跳过澄清。
+> - **QualityGate 强制放行**：达到最大澄清轮次（`MAX_CLARIFY_ITERATIONS`）仍不达标时 `forced_pass=True` 继续流水线，不再阻断生成；done 事件 `manual_action_required=True`，前端提示「人工修改需求内容并重新确认后再生成」。
+> - **回归基线复用**：影响分析确认（confirmed_at）的受影响 FP，读取**产品+功能点维度最新版 approved 用例**（`aggregate_latest_cases`）转换为 `type=regression / source=reused` 用例并入结果；无历史用例的 FP 形成覆盖缺口，由 GenAgent 定向补生成。
+> - **审核缺口补生成**：首次审核 `should_supplement=True` 时补生成一次（`supplement_iteration` 最多 1）→ 合并去重（历史回归优先保留）→ **二次审核**，KB 回流使用第二次审核结果。
+> - **归档固化**：项目归档时按「产品+功能点」固化最新版 approved 用例集（`consolidate_fp_cases`），供后续需求回归复用。
 
 ---
 
@@ -232,6 +256,49 @@ sequenceDiagram
     end
 ```
 
+---
+
+### 3.6 从需求分析到测试设计的流程衔接（v2.3 本次完善）
+
+> **背景**：此前核心数据流从「需求分析」直接进入「用例生成」，测试设计技术方法论仅内联在 GenAgent Prompt 层（docs/03 §2.1.0），流程图上缺失「测试设计」独立环节。本次完善将其显式化为独立阶段，形成完整三段式衔接：
+
+```
+┌─────────────────────── 需求分析侧 ───────────────────────┐
+│ ① ReqAgent（需求解析） → ② ClarifyAgent（需求澄清）      │
+│ → ③ QualityGate（质量门禁） → ④ ImpactAnalysisAgent      │
+│ （影响分析：优化需求 → 影响范围报告；新需求 → 轻量版本链） │
+└──────────────────────────┬───────────────────────────────┘
+                           ▼
+┌─────────────────────── 测试设计侧（⭐ 本次完善）──────────┐
+│ ④.5 TestDesignAgent 测试设计                             │
+│  输入：SRR（总 SRR + FP 子 SRR）+ 影响范围报告             │
+│  输出：测试设计蓝图（结构化）+ 定向指导文本                │
+│  · 8 种测试设计技术适用性自动判定（等价类/边界值/决策表/   │
+│    状态迁移/场景/正交/错误推测/因果图）                    │
+│  · boundary_targets / decision_table_targets /            │
+│    state_targets / error_guess_hints / scenario_targets   │
+│  · 技术选择决策树（SRR 结构扫描，docs/03 §2.1.0 同口径）   │
+└──────────────────────────┬───────────────────────────────┘
+                           ▼
+┌─────────────────────── 用例生成侧 ───────────────────────┐
+│ ⑤ GenAgent（按测试设计蓝图定向生成，FP 定向 + Few-shot） │
+│ → ⑥ ReviewAgent（质量审核 + 追溯验证）                   │
+│ → ⑦ FormatEngine（格式输出）→ ⑧ 回流存储（闭环）        │
+└──────────────────────────────────────────────────────────┘
+```
+
+**分层职责（需求分析 vs 测试设计 vs 用例生成）**：
+
+| 层次 | 环节 | 输入 | 输出 | 关注点 |
+|------|------|------|------|--------|
+| 需求分析 | ①~④ | 原始需求 + 澄清 | SRR + 影响范围报告 | **"需求到底是什么"**：完整性、正确性、影响边界 |
+| 测试设计 | ④.5 | SRR + 影响范围 | 测试设计蓝图 + 定向指导 | **"用什么技术、测哪些点"**：技术选择、目标识别、覆盖缺口 |
+| 用例生成 | ⑤~⑧ | SRR + FP + 蓝图 + 影响指导 | 用例集 + 追溯关系 | **"具体怎么测"**：Given-When-Then、可执行步骤、预期结果 |
+
+**与代码实现的对应**：
+- TestDesignAgent 对应 `backend/app/agents/test_design_agent.py`（本次新增），复用 prompts/gen_agent.py 的 `_build_test_design_guidance` 技术扫描口径；
+- GenAgent 的 prompt 注入点 `prompts/gen_agent.py:build_user_prompt` 已消费测试设计指导文本（v3.4 起）；
+- 编排器在 `impact → generate` 之间接入 `test_design` 节点（见 §2 编排层 DAG 结构）。
 
 ---
 
@@ -264,8 +331,9 @@ sequenceDiagram
 | **ClarifyAgent** | 需求澄清器 | SRR JSON + kb_empty 标志 | 细化SRR + 批量问题列表(含冷启动模式) + KB补全记录 | 完整性/歧义性/遗漏检测、KB自动补全；⭐v2.0 基线补全精准化（_detect_baseline_focus）|
 | **QualityGate** | 质量门禁 | 细化SRR + 澄清结果 | 通过/打回 + 质量报告 | Schema校验、关键字段非空、质量评分、Critical问题检查、步骤数检查、冷启动提示（6项，v2.48移除test_points_hint检查） |
 | **ImpactAnalysisAgent** | 影响分析器 | 细化SRR + 优化上下文 | 影响范围报告 + 回归推荐 + 用例操作指导 | **模块依赖图 BFS 遍历**、追溯矩阵定位、回归范围推荐 |
+| **TestDesignAgent** ⭐ v2.3 | 测试设计器 | SRR（总+FP子SRR）+ 影响范围 | 测试设计蓝图（techniques_applicable / boundary_targets / decision_table_targets / state_targets / error_guess_hints / scenario_targets）+ 定向指导文本 | **8 种测试设计技术自动判定与应用**（等价类/边界值/决策表/状态迁移/场景/正交/错误推测/因果图）、技术选择决策树、SRR 结构扫描 → 指导文本注入 GenAgent Prompt |
 | ~~**MatchAgent**~~ | ~~知识匹配器~~ | ~~v3.1 起已移除~~ | ~~生成阶段不再从KB检索历史用例~~ | ~~SRR 已足够详细，替代为 Few-shot 示例 + FP 定向上下文~~ |
-| **GenAgent** | 用例生成器 | SRR+FP列表+影响指导 | 用例集+追溯链接+related_fp | 多维并行、FP定向、Few-shot示例注入、追溯标注 |
+| **GenAgent** | 用例生成器 | SRR+FP列表+影响指导+**测试设计蓝图** | 用例集+追溯链接+related_fp | 多维并行、FP定向、Few-shot示例注入、追溯标注、按测试设计蓝图定向生成 |
 | **ReviewAgent** | 质量审核器 | 候选用例集 | 审核报告+修正 | 完整性校验、去重、追溯验证、FP关系追溯 |
 
 ---

@@ -1,14 +1,25 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle, Folder, ChevronDown } from 'lucide-react'
+import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle, Folder, ChevronDown, RotateCcw } from 'lucide-react'
 import { requirements as reqApi, generateCases, testCases as tcApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
-import type { SSEEvent, Requirement, TestCase, Project } from '../types'
+import type { SSEEvent, Requirement, TestCase, Project, ReviewReport, ReviewIssue, KbFlowback } from '../types'
 import SSEProgress from '../components/SSEProgress'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
 import { caseTypeLabel } from '../utils/labels'
 
-const SSE_STAGES = ['parse', 'select_channel', 'clarify', 'gate', 'impact', 'generate', 'review']
+const SSE_STAGES = ['parse', 'select_channel', 'clarify', 'gate', 'impact', 'test_design', 'generate', 'review']
+
+// v5.0：细粒度 FP 进度卡片
+type FSSubtask = { key?: string; name?: string; status?: string; cases?: number }
+
+// v5.0 续跑状态 → 中文标签
+const SUBTASK_STATUS_LABELS: Record<string, string> = {
+  generating: '生成中',
+  done: '已完成',
+  resumed: '已续跑',
+  failed: '失败',
+}
 
 export default function Generate() {
   const { id: paramId } = useParams<{ id: string }>()
@@ -35,16 +46,24 @@ export default function Generate() {
 
   // Results
   const [generatedCases, setGeneratedCases] = useState<TestCase[]>([])
-  const [reviewReport, setReviewReport] = useState<any>(null)
-  const [kbFlowback, setKbFlowback] = useState<any>(null)
+  const [reviewReport, setReviewReport] = useState<ReviewReport | null>(null)
+  const [kbFlowback, setKbFlowback] = useState<KbFlowback | null>(null)
   // v2.0：新增一致性检查、FP 覆盖率、通道展示
-  const [consistencyCheck, setConsistencyCheck] = useState<any>(null)
-  const [fpCoverage, setFpCoverage] = useState<any>(null)
+  const [consistencyCheck, setConsistencyCheck] = useState<SSEEvent['consistency_check'] | null>(null)
+  const [fpCoverage, setFpCoverage] = useState<SSEEvent['fp_coverage'] | null>(null)
   const [channel, setChannel] = useState<string>('')
+  const [manualActionRequired, setManualActionRequired] = useState(false)
+  const [gateResult, setGateResult] = useState<SSEEvent['gate_result'] | null>(null)
+  const [regressionReuseSummary, setRegressionReuseSummary] = useState<SSEEvent['regression_reuse_summary'] | null>(null)
+  const [supplementIteration, setSupplementIteration] = useState(0)
+  const [shouldSupplement, setShouldSupplement] = useState(false)
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
   // v2.0：导出错误独立状态，避免污染主流程 error
   const [exportError, setExportError] = useState('')
+  // v5.0：细粒度 FP 进度卡片 + 续跑标记
+  const [subtasks, setSubtasks] = useState<FSSubtask[]>([])
+  const [resuming, setResuming] = useState(false)
 
   // 加载当前产品下的项目列表
   useEffect(() => {
@@ -110,12 +129,13 @@ export default function Generate() {
     return r.id.toLowerCase().includes(q) || (r.title || '').toLowerCase().includes(q)
   })
 
-  const handleGenerate = () => {
+  const handleGenerate = (resume = false) => {
     if (!selectedReq) return
     setGenerating(true)
+    setResuming(resume)
     setCurrentStage('')
     setProgress(0)
-    setMessage('正在启动生成流程...')
+    setMessage(resume ? '正在从上次中断处继续生成...' : '正在启动生成流程...')
     setGeneratedCases([])
     setReviewReport(null)
     setKbFlowback(null)
@@ -123,36 +143,65 @@ export default function Generate() {
     setConsistencyCheck(null)
     setFpCoverage(null)
     setChannel('')
+    setManualActionRequired(false)
+    setGateResult(null)
+    setRegressionReuseSummary(null)
+    setSupplementIteration(0)
+    setShouldSupplement(false)
     setDone(false)
     setError('')
+    setSubtasks([])
 
     const ctrl = generateCases(
       selectedReq,
-      (event: any) => {
-        const e = event as SSEEvent
+      (raw) => {
+        const e = raw as SSEEvent
         if (e.stage) setCurrentStage(e.stage)
         if (e.progress !== undefined) setProgress(e.progress)
         if (e.message) setMessage(e.message)
+        // v5.0：细粒度 FP 进度卡片（generate 阶段的 subtasks 快照）
+        if (e.stage === 'generate' && Array.isArray(e.subtasks)) {
+          setSubtasks(e.subtasks as FSSubtask[])
+        }
+        if (e.stage === 'gate') {
+          setManualActionRequired(Boolean(e.manual_action_required))
+          setGateResult(e.gate_result || null)
+        }
+        // 回归复用摘要由 test_design 节点产出，在 test_design 事件中携带
+        if (e.stage === 'test_design') {
+          setRegressionReuseSummary(e.regression_reuse_summary || null)
+        }
+        if (e.stage === 'review') {
+          setSupplementIteration(Number(e.supplement_iteration || 0))
+          setShouldSupplement(Boolean(e.should_supplement))
+        }
         if (e.stage === 'done') {
           setDone(true)
+          setResuming(false)
           setGeneratedCases(e.cases || [])
           setReviewReport(e.review_report || null)
           setKbFlowback(e.kb_flowback || null)
-          // v2.0：提取一致性检查、FP 覆盖率、通道
-          setConsistencyCheck((e as any).consistency_check || null)
-          setFpCoverage((e as any).fp_coverage || null)
+          setConsistencyCheck(e.consistency_check || null)
+          setFpCoverage(e.fp_coverage || null)
           setChannel(e.channel || '')
-          setMessage('生成完成！')
+          setManualActionRequired(Boolean(e.manual_action_required))
+          setGateResult(e.gate_result || null)
+          setRegressionReuseSummary(e.regression_reuse_summary || null)
+          setSupplementIteration(Number(e.supplement_iteration || 0))
+          setShouldSupplement(Boolean(e.review_report?.should_supplement))
+          setMessage(e.message || '生成完成！')
           setProgress(100)
           setGenerating(false)
         }
         if (e.stage === 'error') {
           setError(e.message || '生成过程出错')
           setGenerating(false)
+          setResuming(false)
         }
       },
-      (err) => { setError(err); setGenerating(false) },
-      () => { setGenerating(false) }
+      (err) => { setError(err); setGenerating(false); setResuming(false) },
+      () => { setGenerating(false); setResuming(false) },
+      resume ? { resume: true } : undefined,
     )
     setAbortController(ctrl)
   }
@@ -179,8 +228,8 @@ export default function Generate() {
       a.href = url; a.download = `testcases.${ext}`
       a.click()
       URL.revokeObjectURL(url)
-    } catch (e: any) {
-      setExportError(e?.message || '导出失败')
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : '导出失败')
     }
   }
 
@@ -344,18 +393,32 @@ export default function Generate() {
                 <span className="font-medium text-slate-700">{req.title}</span>
                 <span className={priorityBadge(req.priority)}>{req.priority}</span>
               </div>
-              <button onClick={handleGenerate} disabled={!selectedReq || generating} className="btn-primary">
-                {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                开始生成
-              </button>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button onClick={() => handleGenerate(true)} disabled={!selectedReq || generating} className="btn-secondary"
+                  title="从最近一次中断/作废任务的已生成功能点继续">
+                  {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                  继续生成（续跑）
+                </button>
+                <button onClick={() => handleGenerate(false)} disabled={!selectedReq || generating} className="btn-primary">
+                  {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                  开始生成
+                </button>
+              </div>
             </div>
           )}
           {selectedReq && !req && (
             <div className="flex items-center justify-end">
-              <button onClick={handleGenerate} disabled={!selectedReq || generating} className="btn-primary">
-                {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                开始生成
-              </button>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button onClick={() => handleGenerate(true)} disabled={!selectedReq || generating} className="btn-secondary"
+                  title="从最近一次中断/作废任务的已生成功能点继续">
+                  {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                  继续生成（续跑）
+                </button>
+                <button onClick={() => handleGenerate(false)} disabled={!selectedReq || generating} className="btn-primary">
+                  {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                  开始生成
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -368,6 +431,50 @@ export default function Generate() {
           onCancel={generating ? handleCancel : undefined} />
       )}
 
+      {/* v5.0：细粒度功能点生成明细（卡片） */}
+      {(generating && (subtasks.length > 0 || resuming)) && (
+        <div className="card space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="section-title flex items-center gap-2">
+              <FileText className="w-4 h-4 text-primary-500" /> 功能点生成明细
+              {resuming && (
+                <span className="px-2 py-0.5 text-[11px] rounded-full bg-blue-100 text-blue-700">续跑中</span>
+              )}
+            </h2>
+            <span className="text-xs text-slate-400">
+              {subtasks.filter(s => s.status === 'done' || s.status === 'resumed').length}/{subtasks.filter(s => !s.key?.startsWith('__')).length}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+            {subtasks.map((s) => {
+              const st = s.status || 'pending'
+              const dot =
+                st === 'done' ? 'bg-emerald-500' :
+                st === 'resumed' ? 'bg-blue-500' :
+                st === 'failed' ? 'bg-red-500' :
+                st === 'generating' ? 'bg-amber-500 animate-pulse' : 'bg-slate-300'
+              return (
+                <div key={s.key || s.name} className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-50/70 border" style={{ borderColor: 'var(--border, #e2e8f0)' }}>
+                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${dot}`} />
+                  <span className="text-xs text-slate-600 flex-1 truncate">{s.name}</span>
+                  <span className={`text-[11px] px-1.5 py-0.5 rounded-full ${
+                    st === 'done' ? 'bg-emerald-50 text-emerald-700' :
+                    st === 'resumed' ? 'bg-blue-50 text-blue-700' :
+                    st === 'failed' ? 'bg-red-50 text-red-600' :
+                    st === 'generating' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'
+                  }`}>
+                    {SUBTASK_STATUS_LABELS[st] || '待生成'}
+                  </span>
+                  {(s.status === 'done' || s.status === 'resumed') && (
+                    <span className={`text-[11px] font-mono font-medium ${st === 'done' ? 'text-emerald-600' : 'text-blue-600'}`}>{s.cases ?? 0}</span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Error */}
       {error && (
         <div className="bg-red-50 border border-red-100 rounded-2xl p-4 flex items-start gap-3">
@@ -376,6 +483,46 @@ export default function Generate() {
             <p className="text-sm font-medium text-red-800">生成出错</p>
             <p className="text-xs text-red-600 mt-0.5">{error}</p>
           </div>
+        </div>
+      )}
+
+      {/* QualityGate 强制放行提示（门禁未完全通过但流水线已继续） */}
+      {done && manualActionRequired && (
+        <div className="card space-y-2 border-l-4 border-l-amber-500 bg-amber-50/40">
+          <div className="flex items-start gap-2 text-amber-800">
+            <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold text-sm">需要人工处理</p>
+              <p className="text-xs mt-1">门禁未完全通过但已继续生成，请先人工修改需求内容，再重新确认后生成。</p>
+              {(gateResult?.blockers?.length ?? 0) > 0 && (
+                <div className="mt-2">
+                  <p className="text-xs font-medium">阻断项（{gateResult?.blockers?.length}）：</p>
+                  <ul className="mt-1 list-disc list-inside text-xs space-y-1">
+                    {(gateResult?.blockers || []).map((b, i) => <li key={i}>{b}</li>)}
+                  </ul>
+                </div>
+              )}
+              {(gateResult?.warnings?.length ?? 0) > 0 && (
+                <div className="mt-2">
+                  <p className="text-xs font-medium">警告项：</p>
+                  <ul className="mt-1 list-disc list-inside text-xs space-y-1">
+                    {(gateResult?.warnings || []).map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 回归复用摘要 */}
+      {done && regressionReuseSummary && (
+        <div className="card flex flex-wrap items-center gap-x-4 gap-y-2 border-l-4 border-l-blue-500 text-xs text-slate-600">
+          <span>回归复用 <b className="text-slate-800">{regressionReuseSummary.reused_count || 0}</b> 条历史用例</span>
+          <span>待补覆盖 <b className="text-slate-800">{regressionReuseSummary.gap_count || 0}</b> 个功能点</span>
+          {shouldSupplement && supplementIteration > 0 && (
+            <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-600">审核发现覆盖缺口，已执行 {supplementIteration} 轮补生成并完成二次审核</span>
+          )}
         </div>
       )}
 
@@ -390,7 +537,7 @@ export default function Generate() {
               </span>
             )}
           </h3>
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="text-center p-3 bg-white/60 rounded-xl">
               <p className="text-lg font-bold text-emerald-600">{kbFlowback.auto_approved || 0}</p>
               <p className="text-xs text-emerald-600/70">自动入库</p>
@@ -408,6 +555,12 @@ export default function Generate() {
               <p className="text-xs text-red-500/70">入库错误</p>
             </div>
           </div>
+          {kbFlowback.error && (
+            <p className="text-xs text-red-600 bg-red-50 rounded-lg p-2.5 flex items-start gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>回流过程异常（不影响生成结果，可稍后重试或人工入库）：{kbFlowback.error}</span>
+            </p>
+          )}
         </div>
       )}
 
@@ -434,11 +587,27 @@ export default function Generate() {
             </div>
           </div>
 
-          {reviewReport.issues?.length > 0 && (
+          {reviewReport.should_supplement && (
+            <div className="flex items-start gap-2 p-2.5 rounded-lg bg-blue-50 text-blue-700 text-xs">
+              <Sparkles className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+              <div className="min-w-0">
+                <p>审核发现覆盖缺口，已执行 {supplementIteration > 0 ? `${supplementIteration} 轮补生成并完成二次审核` : '缺口分析（未触发补生成）'}。</p>
+                {(reviewReport.supplement_hints?.length ?? 0) > 0 && (
+                  <ul className="mt-1 list-disc list-inside space-y-0.5">
+                    {reviewReport.supplement_hints!.map((h, i) => (
+                      <li key={i}>{h.reason || h.case_type || '覆盖缺口'}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+
+          {(reviewReport.issues?.length ?? 0) > 0 && (
             <div>
               <h3 className="text-sm font-medium text-slate-600 mb-2">发现的问题</h3>
               <div className="space-y-1.5">
-                {reviewReport.issues.map((issue: any, i: number) => (
+                {reviewReport.issues!.map((issue: ReviewIssue, i: number) => (
                   <div key={i} className={`flex items-start gap-2 p-2.5 rounded-lg text-xs ${
                     issue.severity === 'blocker' ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700'
                   }`}>
@@ -454,7 +623,7 @@ export default function Generate() {
             <div>
               <h3 className="text-sm font-medium text-slate-600 mb-2">覆盖率</h3>
               <div className="flex flex-wrap gap-2">
-                {Object.entries(reviewReport.coverage_summary).map(([type, count]: [string, any]) => (
+                {Object.entries(reviewReport.coverage_summary).map(([type, count]: [string, number]) => (
                   <span key={type} className="badge bg-slate-100 text-slate-600">
                     {caseTypeLabel(type)}: {count}
                   </span>
@@ -519,7 +688,7 @@ export default function Generate() {
       )}
 
       {/* v2.0：FP 覆盖率 */}
-      {fpCoverage && fpCoverage.total_fps > 0 && (
+      {fpCoverage && (fpCoverage.total_fps || 0) > 0 && (
         <div className="card space-y-3">
           <h2 className="section-title flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-primary-500" /> 功能点覆盖
@@ -551,7 +720,7 @@ export default function Generate() {
             <div>
               <h3 className="text-xs font-medium text-red-600 mb-2">未覆盖的功能点</h3>
               <div className="flex flex-wrap gap-1.5">
-                {fpCoverage.uncovered.map((fp: any, i: number) => (
+                {fpCoverage.uncovered.map((fp: { id: string; name?: string }, i: number) => (
                   <span key={i} className="badge bg-red-50 text-red-600 text-xs">
                     {fp.name || fp.id}
                   </span>
@@ -618,7 +787,7 @@ export default function Generate() {
           <button onClick={() => { setDone(false); setGeneratedCases([]) }} className="btn-secondary">
             <FileText className="w-4 h-4" /> 选择其他需求
           </button>
-          <button onClick={handleGenerate} className="btn-primary">
+          <button onClick={() => handleGenerate(false)} className="btn-primary">
             <Play className="w-4 h-4" /> 重新生成
           </button>
         </div>

@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard'
 import RequirementDetail from './pages/RequirementDetail'
 import RequirementClarify from './pages/RequirementClarify'
 import TestCases from './pages/TestCases'
+import XMindEditPage from './pages/XMindEditPage'
 import KnowledgeBase from './pages/KnowledgeBase'
 import DependencyGraph from './pages/DependencyGraph'
 import ProjectsModules from './pages/ProjectsModules'
@@ -26,6 +27,7 @@ import UserManual from './pages/UserManual'
 import Tasks from './pages/Tasks'
 import Logs from './pages/Logs'
 import Generate from './pages/Generate'
+import ReviewReports from './pages/ReviewReports'
 
 /** 路由守卫：未登录 → 登录页 */
 function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -93,6 +95,8 @@ export default function App() {
           {/* v2.0：独立生成页面，支持从 Dashboard 直接访问 */}
           <Route path="/generate" element={<Generate />} />
           <Route path="/testcases" element={<TestCases />} />
+          <Route path="/testcases/xmind-edit" element={<XMindEditPage />} />
+          <Route path="/review-reports" element={<ReviewReports />} />
           <Route path="/knowledge" element={<KnowledgeBase />} />
           <Route path="/knowledge-qa" element={<KnowledgeQA />} />
           <Route path="/corrections" element={<CorrectionReview />} />

@@ -89,6 +89,8 @@ async def init_db() -> None:
         FPDependencyVersionItem, Role,
         # v3.2: 功能点权威完整版 SRR（CRSR）
         FunctionalPointCRSR,
+        # v3.4: 功能点最新版用例集（与 CRSR 对称，回归基线）
+        FunctionalPointCases,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 

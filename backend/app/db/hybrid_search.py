@@ -209,7 +209,7 @@ class HybridSearcher:
                     if rows:
                         break
                 except Exception as e:  # 例如 websearch_to_tsquery 在不支持版本/特殊 query 语法时失败
-                    logger.debug("[HybridSearch] BM25 %s query skipped: %s", lvl_name, e)
+                    logger.debug("[HybridSearch] BM25 {} query skipped: {}", lvl_name, e)
                     continue
 
         # Level C 兜底：若前两级仍 0 条，且 query 非纯符号则做关键词 OR 查询
@@ -237,7 +237,7 @@ class HybridSearcher:
                         })
                         rows = result.all()
                     except Exception as e:
-                        logger.debug("[HybridSearch] BM25 Level-C OR query skipped: %s", e)
+                        logger.debug("[HybridSearch] BM25 Level-C OR query skipped: {}", e)
         return [
             {
                 "id": r.id,

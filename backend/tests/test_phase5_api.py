@@ -28,7 +28,11 @@ from fastapi.testclient import TestClient
 
 from app.core.auth import get_default_token
 from app.db.database import async_session, engine
-from app.db.models import Requirement, TestCase
+from app.db.models import AnalysisTask, Requirement, TestCase
+
+
+# 动态创建的需求 ID（upload 异步模式下由接口生成，测试结束后统一清理）
+DYNAMIC_REQ_IDS: list[str] = []
 
 
 # ============================================================================
@@ -60,6 +64,7 @@ def section(title: str) -> None:
 # ============================================================================
 
 TEST_REQ_ID = "REQ-TEST-0001"
+TEST_REQ_ID2 = "REQ-TEST-0002"
 TEST_CASE_ID = "TC-TEST-0001-0001"
 
 TEST_SRR = {
@@ -102,15 +107,16 @@ async def setup_fixtures() -> None:
     from sqlalchemy import delete
 
     async with async_session() as session:
-        # 先清理残留：用例、需求、mock 数据（幂等，无残留时不会删除任何记录）
-        await session.execute(delete(TestCase).where(TestCase.req_id == TEST_REQ_ID))
+        # 先清理残留：任务、用例、需求、mock 数据（幂等，无残留时不会删除任何记录）
+        await session.execute(delete(AnalysisTask).where(AnalysisTask.req_id.in_([TEST_REQ_ID, TEST_REQ_ID2])))
+        await session.execute(delete(TestCase).where(TestCase.req_id.in_([TEST_REQ_ID, TEST_REQ_ID2])))
         await session.execute(delete(TestCase).where(TestCase.id == TEST_CASE_ID))
-        await session.execute(delete(Requirement).where(Requirement.id == TEST_REQ_ID))
+        await session.execute(delete(Requirement).where(Requirement.id.in_([TEST_REQ_ID, TEST_REQ_ID2])))
         await session.execute(delete(Requirement).where(Requirement.id == "REQ-MOCK-001"))
         await session.commit()
 
     async with async_session() as session:
-        # 插入需求
+        # 插入需求 1（组2/3/4/5 使用；2.8 提交澄清后状态会转 analyzing）
         req = Requirement(
             id=TEST_REQ_ID,
             product_id="PROD-TEST",
@@ -118,13 +124,29 @@ async def setup_fixtures() -> None:
             priority="P2",
             module="auth",
             modules=["auth"],
-            status="active",
+            status="pending_review",
             srr_json=TEST_SRR,
             raw_text="用户登录功能：支持账号密码登录",
             source_type="markdown",
             created_by="test",
         )
         session.add(req)
+
+        # 插入需求 2（组7 专用：完整走 pending_review → confirm → confirmed → generate）
+        req2 = Requirement(
+            id=TEST_REQ_ID2,
+            product_id="PROD-TEST",
+            title="订单查询功能",
+            priority="P2",
+            module="order",
+            modules=["order"],
+            status="pending_review",
+            srr_json=TEST_SRR,
+            raw_text="订单查询功能：支持按订单号查询",
+            source_type="markdown",
+            created_by="test",
+        )
+        session.add(req2)
 
         # 插入用例
         case = TestCase(
@@ -148,8 +170,10 @@ async def cleanup_fixtures() -> None:
     """清理测试夹具数据。"""
     async with async_session() as session:
         from sqlalchemy import delete
+        req_ids = [TEST_REQ_ID, TEST_REQ_ID2, *DYNAMIC_REQ_IDS]
+        await session.execute(delete(AnalysisTask).where(AnalysisTask.req_id.in_(req_ids)))
         await session.execute(delete(TestCase).where(TestCase.req_id == TEST_REQ_ID))
-        await session.execute(delete(Requirement).where(Requirement.id == TEST_REQ_ID))
+        await session.execute(delete(Requirement).where(Requirement.id.in_(req_ids)))
         await session.commit()
 
 
@@ -201,66 +225,47 @@ def test_requirements(client: TestClient) -> None:
     resp = client.get(f"/api/requirements/{TEST_REQ_ID}")
     check("GET /api/requirements/{id} 返回 200", resp.status_code == 200)
     data = resp.json().get("data", {})
-    check("详情含 srr", "srr" in data)
+    check("详情含 srr_json", "srr_json" in data)
     check("详情含 raw_text", "raw_text" in data)
 
     # 2.4 需求详情 - 不存在
     resp = client.get("/api/requirements/REQ-NOT-EXIST")
     check("GET 不存在的需求返回 404", resp.status_code == 404)
 
-    # 2.5 上传需求 - 空文本
+    # 2.5 上传需求 - 空文本（Pydantic min_length 校验 → 422）
     resp = client.post("/api/requirements/upload", json={"raw_text": ""})
-    check("POST upload 空文本返回 400", resp.status_code == 400)
+    check("POST upload 空文本返回 422", resp.status_code == 422)
 
-    # 2.6 上传需求 - mock req_agent.parse
-    mock_srr = {
-        "srr_version": "1.0",
-        "requirement": {
-            "id": "REQ-MOCK-001",
-            "title": "Mock 需求",
-            "summary": "测试需求",
-            "product_id": "PROD-TEST",
-            "priority": "P2",
-            "modules": ["test"],
-        },
-        "flows": {"happy_path": {"steps": []}, "alternate_flows": []},
-    }
-    with patch("app.api.requirements.req_agent.parse", new_callable=AsyncMock) as mock_parse:
-        mock_parse.return_value = mock_srr
+    # 2.6 上传需求 - 异步模式（v2.15）：立即返回 task_id/req_id，后台协程分析
+    # mock 后台协程，避免真实 LLM 调用
+    with patch("app.api.requirements._run_requirement_analysis", new_callable=AsyncMock):
         resp = client.post("/api/requirements/upload", json={
             "raw_text": "测试需求文本",
             "product_id": "PROD-TEST",
         })
-    check("POST upload（mock）返回 200", resp.status_code == 200, f"status={resp.status_code}")
+    check("POST upload（异步）返回 200", resp.status_code == 200, f"status={resp.status_code}")
     data = resp.json().get("data", {})
-    check("upload 返回 req_id", data.get("req_id") == "REQ-MOCK-001")
-    check("upload 返回 srr", "srr" in data)
+    check("upload 返回 task_id", bool(data.get("task_id")))
+    check("upload 返回 req_id", bool(data.get("req_id")))
+    check("upload 返回 analyzing 状态", data.get("status") == "analyzing")
+    if data.get("req_id"):
+        DYNAMIC_REQ_IDS.append(data["req_id"])
 
-    # 清理 mock 数据（Python 3.11+ 不再支持 get_event_loop().run_until_complete()，改用 asyncio.run）
-    asyncio.run(_cleanup_mock_req("REQ-MOCK-001"))
-
-    # 2.7 获取澄清问题 - mock clarify_agent.clarify
-    mock_clarify_result = {
-        "status": "needs_clarification",
-        "questions": [{"id": "Q1", "priority": "important", "question": "密码长度？"}],
-        "auto_augmentations": [],
-        "quality_report": {"overall_score": 0.65, "pass_threshold": 0.70},
-        "kb_status": {"kb_empty": True, "product_first_requirement": True},
-    }
-    with patch("app.api.requirements.clarify_agent.clarify", new_callable=AsyncMock) as mock_clarify:
-        mock_clarify.return_value = mock_clarify_result
-        resp = client.get(f"/api/requirements/{TEST_REQ_ID}/clarify/questions")
-    check("GET clarify/questions（mock）返回 200", resp.status_code == 200)
+    # 2.7 获取澄清问题（读 DB 中的澄清状态，不实时调用 agent）
+    resp = client.get(f"/api/requirements/{TEST_REQ_ID}/clarify/questions")
+    check("GET clarify/questions 返回 200", resp.status_code == 200)
     data = resp.json().get("data", {})
-    check("clarify 返回 questions", len(data.get("questions", [])) == 1)
-    check("clarify 返回 quality_report", "quality_report" in data)
+    check("clarify 返回 questions 列表", isinstance(data.get("questions"), list))
+    check("clarify 返回 status", "status" in data)
 
-    # 2.8 提交澄清答案
-    resp = client.post(f"/api/requirements/{TEST_REQ_ID}/clarify", json={
-        "answers": {"requirement.summary": "支持手机号验证码登录"}
-    })
+    # 2.8 提交澄清答案 - 异步模式（v2.15）：返回 task_id，后台协程重新解析
+    # mock 后台协程，避免真实 LLM 调用
+    with patch("app.api.requirements._run_clarify_reparse", new_callable=AsyncMock):
+        resp = client.post(f"/api/requirements/{TEST_REQ_ID}/clarify", json={
+            "answers": {"requirement.summary": "支持手机号验证码登录"}
+        })
     check("POST clarify 提交答案返回 200", resp.status_code == 200)
-    check("clarify 返回 answers_count", resp.json().get("data", {}).get("answers_count") == 1)
+    check("clarify 返回 task_id", bool(resp.json().get("data", {}).get("task_id")))
 
     # 2.9 提交澄清答案 - 空答案
     resp = client.post(f"/api/requirements/{TEST_REQ_ID}/clarify", json={"answers": {}})
@@ -383,53 +388,86 @@ def test_knowledge(client: TestClient) -> None:
 def test_settings(client: TestClient) -> None:
     section("组5：LLM 配置管理")
 
-    # 5.1 获取 LLM 配置
-    resp = client.get("/api/settings/llm")
-    check("GET /api/settings/llm 返回 200", resp.status_code == 200)
-    data = resp.json().get("data", {})
-    check("配置含 providers 列表", "providers" in data)
-    check("配置含 builtin_providers", "builtin_providers" in data)
+    # 5.0 DB 级快照（asyncpg 原生连接，独立于应用 engine，测试后原样恢复
+    # 防止占位 Key 污染真实环境；应用 engine 绑定 TestClient 事件循环，不可在此复用）
+    import asyncpg
 
-    # 5.2 更新配置 - 重复提供商
-    resp = client.put("/api/settings/llm", json={
-        "providers": [
-            {"provider": "deepseek", "api_key": "sk-test1234567890"},
-            {"provider": "deepseek", "api_key": "sk-test1234567890"},
-        ]
-    })
-    check("PUT 重复提供商返回 400", resp.status_code == 400)
+    from app.config import settings as _app_settings
 
-    # 5.3 更新配置 - 空 providers 列表
-    resp = client.put("/api/settings/llm", json={"providers": []})
-    check("PUT 空 providers 返回 400", resp.status_code == 400)
+    _pg_dsn = _app_settings.pg_async_url.replace("postgresql+asyncpg", "postgresql")
 
-    # 5.4 更新配置 - 有效（mock，不实际调用 LLM）
-    resp = client.put("/api/settings/llm", json={
-        "providers": [{
-            "provider": "deepseek",
-            "api_key": "sk-test1234567890",
-            "model": "deepseek-chat",
-            "is_primary": True,
-        }]
-    })
-    check("PUT 有效配置返回 200", resp.status_code == 200)
-    data = resp.json().get("data", {})
-    providers = data.get("providers", [])
-    check("更新后 providers 非空", len(providers) > 0)
-    primary = next((p for p in providers if p.get("is_primary")), providers[0] if providers else {})
-    check("更新后 provider=deepseek", primary.get("provider") == "deepseek")
-    check("Key 已脱敏", "***" in primary.get("api_key", ""))
+    async def _snapshot_llm_config() -> list[dict]:
+        conn = await asyncpg.connect(_pg_dsn)
+        try:
+            return [dict(r) for r in await conn.fetch("SELECT * FROM llm_config ORDER BY id")]
+        finally:
+            await conn.close()
 
-    # 5.5 测试连通性 - mock litellm.acompletion
-    with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
-        mock_completion.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content="ok"))]
-        )
-        resp = client.post("/api/settings/llm/test")
-    check("POST /api/settings/llm/test（mock）返回 200", resp.status_code == 200)
-    data = resp.json().get("data", {})
-    check("连通测试 success=True", data.get("success") is True)
-    check("连通测试含 latency_ms", "latency_ms" in data)
+    async def _restore_llm_config(rows: list[dict]) -> None:
+        conn = await asyncpg.connect(_pg_dsn)
+        try:
+            await conn.execute("DELETE FROM llm_config")
+            if rows:
+                cols = list(rows[0].keys())
+                stmt = "INSERT INTO llm_config ({}) VALUES ({})".format(
+                    ", ".join(cols), ", ".join(f"${i + 1}" for i in range(len(cols)))
+                )
+                await conn.executemany(stmt, [tuple(r[c] for c in cols) for r in rows])
+        finally:
+            await conn.close()
+
+    snapshot_rows = asyncio.run(_snapshot_llm_config())
+    try:
+        # 5.1 获取 LLM 配置
+        resp = client.get("/api/settings/llm")
+        check("GET /api/settings/llm 返回 200", resp.status_code == 200)
+        data = resp.json().get("data", {})
+        check("配置含 providers 列表", "providers" in data)
+        check("配置含 builtin_providers", "builtin_providers" in data)
+
+        # 5.2 更新配置 - 重复提供商
+        resp = client.put("/api/settings/llm", json={
+            "providers": [
+                {"provider": "deepseek", "api_key": "sk-test1234567890"},
+                {"provider": "deepseek", "api_key": "sk-test1234567890"},
+            ]
+        })
+        check("PUT 重复提供商返回 400", resp.status_code == 400)
+
+        # 5.3 更新配置 - 空 providers 列表
+        resp = client.put("/api/settings/llm", json={"providers": []})
+        check("PUT 空 providers 返回 400", resp.status_code == 400)
+
+        # 5.4 更新配置 - 有效（mock，不实际调用 LLM）
+        resp = client.put("/api/settings/llm", json={
+            "providers": [{
+                "provider": "deepseek",
+                "api_key": "sk-test1234567890",
+                "model": "deepseek-chat",
+                "is_primary": True,
+            }]
+        })
+        check("PUT 有效配置返回 200", resp.status_code == 200)
+        data = resp.json().get("data", {})
+        providers = data.get("providers", [])
+        check("更新后 providers 非空", len(providers) > 0)
+        primary = next((p for p in providers if p.get("is_primary")), providers[0] if providers else {})
+        check("更新后 provider=deepseek", primary.get("provider") == "deepseek")
+        check("Key 已脱敏", "***" in primary.get("api_key", ""))
+
+        # 5.5 测试连通性 - mock litellm.acompletion
+        with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = MagicMock(
+                choices=[MagicMock(message=MagicMock(content="ok"))]
+            )
+            resp = client.post("/api/settings/llm/test")
+        check("POST /api/settings/llm/test（mock）返回 200", resp.status_code == 200)
+        data = resp.json().get("data", {})
+        check("连通测试 success=True", data.get("success") is True)
+        check("连通测试含 latency_ms", "latency_ms" in data)
+    finally:
+        asyncio.run(_restore_llm_config(snapshot_rows))
+        check("已恢复原 LLM 配置（环境保护）", True)
 
 
 # ============================================================================
@@ -439,9 +477,17 @@ def test_settings(client: TestClient) -> None:
 def test_export(client: TestClient) -> None:
     section("组6：导出")
 
-    # 6.1 JSON 导出
+    # 6.1 未指定 case_ids → 400（防止批量数据泄露的契约校验）
     resp = client.post("/api/export", json={"format": "json"})
-    check("POST /api/export JSON 返回 200", resp.status_code == 200)
+    check("POST /api/export 无 case_ids 返回 400", resp.status_code == 400)
+
+    # 6.2 指定 case_ids JSON 导出
+    resp = client.post("/api/export", json={
+        "format": "json",
+        "case_ids": [TEST_CASE_ID],
+    })
+    check("POST /api/export JSON 返回 200", resp.status_code == 200,
+          f"status={resp.status_code}")
     check("JSON 导出 Content-Type 正确",
           "application/json" in resp.headers.get("content-type", ""))
     try:
@@ -451,16 +497,13 @@ def test_export(client: TestClient) -> None:
     except Exception as e:
         check("JSON 导出可解析", False, str(e))
 
-    # 6.2 指定 case_ids 导出
+    # 6.3 Markdown 导出
     resp = client.post("/api/export", json={
-        "format": "json",
+        "format": "markdown",
         "case_ids": [TEST_CASE_ID],
     })
-    check("POST /api/export 指定 case_ids", resp.status_code == 200)
-
-    # 6.3 Markdown 导出
-    resp = client.post("/api/export", json={"format": "markdown"})
-    check("POST /api/export markdown 返回 200", resp.status_code == 200)
+    check("POST /api/export markdown 返回 200", resp.status_code == 200,
+          f"status={resp.status_code}")
     check("Markdown Content-Type 正确",
           "text/markdown" in resp.headers.get("content-type", ""))
     md_content = resp.text
@@ -471,16 +514,24 @@ def test_export(client: TestClient) -> None:
     check("Markdown 含步骤表格", "| 步骤 | 操作 | 预期结果 |" in md_content)
 
     # 6.4 Gherkin 导出
-    resp = client.post("/api/export", json={"format": "gherkin"})
-    check("POST /api/export gherkin 返回 200", resp.status_code == 200)
+    resp = client.post("/api/export", json={
+        "format": "gherkin",
+        "case_ids": [TEST_CASE_ID],
+    })
+    check("POST /api/export gherkin 返回 200", resp.status_code == 200,
+          f"status={resp.status_code}")
     gherkin_content = resp.text
     check("Gherkin 含 Feature", gherkin_content.startswith("Feature:"))
     check("Gherkin 含 Scenario", "Scenario:" in gherkin_content)
     check("Gherkin 含 Given/When/Then", "Given" in gherkin_content or "When" in gherkin_content)
 
     # 6.5 pytest 导出
-    resp = client.post("/api/export", json={"format": "pytest"})
-    check("POST /api/export pytest 返回 200", resp.status_code == 200)
+    resp = client.post("/api/export", json={
+        "format": "pytest",
+        "case_ids": [TEST_CASE_ID],
+    })
+    check("POST /api/export pytest 返回 200", resp.status_code == 200,
+          f"status={resp.status_code}")
     check("pytest Content-Type 正确",
           "text/x-python" in resp.headers.get("content-type", ""))
     py_content = resp.text
@@ -500,23 +551,36 @@ def test_generate_sse(client: TestClient) -> None:
     resp = client.post("/api/generate", json={"req_id": "REQ-NOT-EXIST"})
     check("POST /api/generate 不存在需求返回 404", resp.status_code == 404)
 
-    # 7.2 生成 - mock orchestrator，验证 SSE 流
+    # 7.2 生成 - 非 confirmed 状态（业务规则：仅确认完成的需求可生成）
+    resp = client.post("/api/generate", json={"req_id": TEST_REQ_ID2})
+    check("非 confirmed 状态生成返回 409", resp.status_code == 409,
+          f"status={resp.status_code}")
+
+    # 7.3 需求确认（真实流程：pending_review → confirmed）
+    resp = client.post(f"/api/requirements/{TEST_REQ_ID2}/confirm")
+    check("POST confirm 返回 200", resp.status_code == 200,
+          f"status={resp.status_code} body={str(resp.json())[:120]}")
+    resp = client.get(f"/api/requirements/{TEST_REQ_ID2}")
+    check("确认后状态为 confirmed",
+          resp.json().get("data", {}).get("status") == "confirmed")
+
+    # 7.4 生成 - mock orchestrator，验证 SSE 流
     async def mock_run_pipeline(*args, **kwargs):
         """模拟 orchestrator 产出 SSE 事件流。"""
-        yield {"stage": "parse", "message": "解析中", "progress": 20, "req_id": TEST_REQ_ID}
-        yield {"stage": "select_channel", "message": "通道选择", "progress": 25, "channel": "FAST"}
+        yield {"stage": "parse", "message": "解析中", "progress": 20, "req_id": TEST_REQ_ID2}
+        yield {"stage": "select_channel", "message": "通道选择", "progress": 25, "channel": "FULL"}
         yield {"stage": "gate", "message": "门禁检查", "progress": 40, "gate_passed": True}
         yield {"stage": "generate", "message": "生成中", "progress": 75, "cases_count": 3}
         yield {"stage": "review", "message": "审核中", "progress": 90, "review_passed": 3}
         yield {
             "stage": "done", "message": "完成", "progress": 100,
-            "req_id": TEST_REQ_ID, "channel": "FAST",
+            "req_id": TEST_REQ_ID2, "channel": "FULL",
             "cases": [{"id": "TC-1"}, {"id": "TC-2"}, {"id": "TC-3"}],
             "review_report": {"total_cases": 3, "passed_cases": 3},
         }
 
     with patch("app.api.generate.orchestrator.run_pipeline", side_effect=mock_run_pipeline):
-        resp = client.post("/api/generate", json={"req_id": TEST_REQ_ID})
+        resp = client.post("/api/generate", json={"req_id": TEST_REQ_ID2})
 
     check("POST /api/generate（mock）返回 200", resp.status_code == 200,
           f"status={resp.status_code}")
@@ -540,14 +604,14 @@ def test_generate_sse(client: TestClient) -> None:
         for e in events
     ))
 
-    # 7.3 生成 - mock orchestrator 抛异常
+    # 7.5 生成 - mock orchestrator 抛异常
     async def mock_run_pipeline_error(*args, **kwargs):
         yield {"stage": "parse", "message": "解析中", "progress": 20}
         raise RuntimeError("模拟 LLM 调用失败")
 
     with patch("app.api.generate.orchestrator.run_pipeline",
                side_effect=mock_run_pipeline_error):
-        resp = client.post("/api/generate", json={"req_id": TEST_REQ_ID})
+        resp = client.post("/api/generate", json={"req_id": TEST_REQ_ID2})
 
     check("SSE 异常流返回 200", resp.status_code == 200)
     events = []
@@ -571,17 +635,23 @@ def main() -> int:
     print(f"{YELLOW}║  阶段5 API 路由层测试                                          ║{RESET}")
     print(f"{YELLOW}╚══════════════════════════════════════════════════════════════╝{RESET}")
 
-    # 初始化 DB（建表 + 种子数据）
     from app.db.database import init_db
-    asyncio.run(init_db())
 
-    # 插入测试夹具
-    asyncio.run(setup_fixtures())
+    async def prepare() -> None:
+        await init_db()
+        await setup_fixtures()
+        await engine.dispose(close=False)
+
+    async def cleanup() -> None:
+        await engine.dispose(close=False)
+        await cleanup_fixtures()
+        await engine.dispose(close=False)
+
+    asyncio.run(prepare())
 
     try:
-        # 使用 TestClient（触发 lifespan），默认携带认证头
-        headers = {"Authorization": get_default_token()}
-        with TestClient(app, headers=headers) as client:
+        with TestClient(app) as client:
+            client.headers.update({"Authorization": f"Bearer {get_default_token()}"})
             test_health(client)
             test_requirements(client)
             test_testcases(client)
@@ -589,10 +659,8 @@ def main() -> int:
             test_settings(client)
             test_export(client)
             test_generate_sse(client)
-
     finally:
-        # 清理夹具
-        asyncio.run(cleanup_fixtures())
+        asyncio.run(cleanup())
 
     # 汇总
     total = len(results)

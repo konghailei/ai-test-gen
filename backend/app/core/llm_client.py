@@ -199,6 +199,9 @@ class LLMClient:
     MAX_ATTEMPTS = 5
     BASE_DELAY = 1.0
     MAX_DELAY = 60.0
+    # v4.8 流式空闲超时（秒）：两个 chunk 之间超过该时长无数据视为链路死亡。
+    # 正常生成时 chunk 间隔通常 < 30s；总生成时长不设上限（大 prompt 可达 10-30 分钟）。
+    STREAM_IDLE_TIMEOUT = 180
 
     # 故障转移配置（docs/03 §6.4）
     PROVIDER_FAILURE_THRESHOLD = 3
@@ -536,7 +539,15 @@ class LLMClient:
                         thinking_kwargs = self._build_thinking_kwargs(provider["model"])
                         kwargs.update(thinking_kwargs)
 
-                response = await litellm.acompletion(**kwargs)
+                # 多模态卡死防御（同 838 修复）
+                import asyncio as _aio_llm_v
+                try:
+                    response = await _aio_llm_v.wait_for(
+                        _aio_llm_v.to_thread(lambda: _aio_llm_v.run(litellm.acompletion(**kwargs))),
+                        timeout=provider.get("timeout", 300),
+                    )
+                except (AttributeError, NotImplementedError, RuntimeError):
+                    response = await _aio_llm_v.wait_for(litellm.acompletion(**kwargs), timeout=provider.get("timeout", 300))
                 content = response.choices[0].message.content
                 if not content:
                     raise _RetryableError("多模态 LLM 返回空内容")
@@ -835,26 +846,142 @@ class LLMClient:
                         thinking_kwargs = self._build_thinking_kwargs(provider["model"])
                         kwargs.update(thinking_kwargs)
 
-                response = await litellm.acompletion(**kwargs)
-                content = response.choices[0].message.content
+                # v4.8 流式优先 + 空闲超时（取代固定总时长超时）：
+                # 非流式整体响应要求服务端完整生成全部输出后才返回，大 prompt（116K 字符）
+                # + 32K max_tokens 的总生成时长可达 10-30 分钟，任何固定总时长超时（如 300s）
+                # 都会在生成完成前掐断连接——表现为任务长期 running、API 平台无完成调用记录、
+                # 固定 5 分钟间隔反复超时重试。流式模式下 chunk 持续到达，超时语义改为：
+                # - 首 chunk 等待（连接 + prefill）按 prompt 长度动态放宽（上限 1800s）
+                # - 后续 chunk 仅施加空闲超时（STREAM_IDLE_TIMEOUT，无新数据=链路死亡）
+                # - 总生成时长不设上限
+                import asyncio as _aio_llm
+                _prompt_len = sum(
+                    len(m.get("content", "") or "") if isinstance(m, dict) else 0
+                    for m in messages
+                )
+                _base_timeout = provider.get("timeout", 300)
+                _first_chunk_timeout = _base_timeout
+                if _prompt_len > 30000:
+                    _first_chunk_timeout = max(
+                        _base_timeout, min(1800, 300 + _prompt_len // 100)
+                    )
+                    if _first_chunk_timeout > _base_timeout:
+                        logger.debug(
+                            "[LLM] 长 prompt 首 chunk 动态超时: prompt_len={}, timeout={}s (base={}s)",
+                            _prompt_len, _first_chunk_timeout, _base_timeout,
+                        )
+
+                content = ""
+                usage: dict = {}
+                _finish_reason = None
+                _stream_done = False
+                _gen = None
+                try:
+                    _stream_kwargs = dict(kwargs)
+                    _stream_kwargs["stream"] = True
+                    _stream_kwargs["stream_options"] = {"include_usage": True}
+                    # v4.11 修复：await litellm.acompletion(stream=True) 取得流式对象本身
+                    # 会等待服务端 TTFB（首 token 前的 prefill）。大 prompt（如 158K 复核
+                    # prompt）prefill 极慢，若提供商短暂停滞，该 await 若无超时保护会永久
+                    # 挂起——表现为任务长期 running、无任何 LLM 日志/心跳/进度、重试机制
+                    # 永不触发（用户的"卡死/死循环"）。此处施加与下方 __anext__ 首 chunk
+                    # 完全一致的动态首 chunk 超时，确保 TTFB 停滞最坏在预算内触发重试。
+                    _gen = await _aio_llm.wait_for(
+                        litellm.acompletion(**_stream_kwargs),
+                        timeout=_first_chunk_timeout,
+                    )
+                    _parts: list[str] = []
+                    _t_stream_start = time.time()
+                    _last_progress_log = time.time()
+                    while True:
+                        try:
+                            _chunk = await _aio_llm.wait_for(
+                                _gen.__anext__(),
+                                timeout=(
+                                    _first_chunk_timeout if not _parts
+                                    else self.STREAM_IDLE_TIMEOUT
+                                ),
+                            )
+                        except StopAsyncIteration:
+                            break
+                        # include_usage 模式下最后一个 chunk 携带累计用量
+                        if getattr(_chunk, "usage", None):
+                            usage = {
+                                "prompt_tokens": getattr(_chunk.usage, "prompt_tokens", 0) or 0,
+                                "completion_tokens": getattr(_chunk.usage, "completion_tokens", 0) or 0,
+                                "total_tokens": getattr(_chunk.usage, "total_tokens", 0) or 0,
+                            }
+                        if getattr(_chunk, "choices", None):
+                            _delta = getattr(_chunk.choices[0], "delta", None)
+                            _piece = getattr(_delta, "content", None) if _delta is not None else None
+                            if _piece:
+                                _parts.append(_piece)
+                            _fr = getattr(_chunk.choices[0], "finish_reason", None)
+                            if _fr:
+                                _finish_reason = _fr
+                        # 心跳日志：证明生成仍在进行，避免"看起来没调 LLM"的误判
+                        if time.time() - _last_progress_log > 30:
+                            logger.debug(
+                                "[LLM] 流式生成中: provider={}, chars={}, elapsed={:.0f}s",
+                                provider["key"], sum(map(len, _parts)),
+                                time.time() - _t_stream_start,
+                            )
+                            _last_progress_log = time.time()
+                    content = "".join(_parts)
+                    _stream_done = True
+                    logger.debug(
+                        "LLM 流式调用成功 [provider={}, attempt={}, chars={}, elapsed={:.0f}s]",
+                        provider["key"], attempt, len(content),
+                        time.time() - _t_stream_start,
+                    )
+                except Exception as _stream_err:
+                    # 清理未消费完的流，避免连接泄漏
+                    try:
+                        if _gen is not None:
+                            await _gen.aclose()
+                    except Exception:
+                        pass
+                    _se = str(_stream_err).lower()
+                    _unsupported = "stream" in _se and any(
+                        k in _se for k in ("support", "invalid", "unknown", "not found")
+                    )
+                    if not _unsupported:
+                        raise
+                    logger.warning(
+                        "[LLM] 提供商疑似不支持流式（{}），回退非流式调用",
+                        str(_stream_err)[:120],
+                    )
+                if not _stream_done:
+                    # 非流式回退：保留 to_thread 卡死防御 + 动态总时长超时（上限 1800s）
+                    try:
+                        response = await _aio_llm.wait_for(
+                            _aio_llm.to_thread(lambda: _aio_llm.run(litellm.acompletion(**kwargs))),
+                            timeout=_first_chunk_timeout,
+                        )
+                    except (AttributeError, NotImplementedError, RuntimeError):
+                        # 极老 Python / 嵌套 asyncio.run 失败时回退旧逻辑
+                        response = await _aio_llm.wait_for(
+                            litellm.acompletion(**kwargs),
+                            timeout=_first_chunk_timeout,
+                        )
+                    content = response.choices[0].message.content
+                    _finish_reason = getattr(response.choices[0], "finish_reason", None)
+                    # 提取 token 使用量（可能为 None）
+                    usage_obj = getattr(response, "usage", None)
+                    if usage_obj:
+                        usage = {
+                            "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+                            "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+                            "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+                        }
                 if not content:
                     raise _RetryableError("LLM 返回空内容")
                 # v2.24: 检测输出是否因 max_tokens 截断
-                finish_reason = getattr(response.choices[0], "finish_reason", None)
-                if finish_reason == "length":
+                if _finish_reason == "length":
                     logger.warning(
                         "[LLM] 输出被 max_tokens={} 截断 (content_len={})，JSON 解析可能失败",
                         kwargs.get("max_tokens"), len(content),
                     )
-                # 提取 token 使用量（可能为 None）
-                usage_obj = getattr(response, "usage", None)
-                usage: dict = {}
-                if usage_obj:
-                    usage = {
-                        "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
-                        "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
-                        "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
-                    }
                 logger.debug("LLM 调用成功 [provider={}, attempt={}]", provider["key"], attempt)
                 return content, usage, provider["model"]
 
@@ -868,12 +995,14 @@ class LLMClient:
                     raise _NonRetryableError(str(e)) from e
                 if attempt < self.MAX_ATTEMPTS:
                     delay = self._jitter_delay(attempt)
+                    # TimeoutError 的 str() 为空串，用 repr 兜底保证超时可诊断
+                    _err_brief = str(e)[:120] or repr(e)[:120]
                     logger.debug(
                         "LLM 调用失败 [attempt={}/{}], {} 后重试: {}",
                         attempt,
                         self.MAX_ATTEMPTS,
                         f"{delay:.2f}s",
-                        str(e)[:120],
+                        _err_brief,
                     )
                     await asyncio.sleep(delay)
 
@@ -1153,9 +1282,22 @@ def _extract_json_block(text: str) -> dict | list | None:
     import re
 
     # 1. 优先提取 ```json ... ``` 或 ``` ... ``` 代码块（兼容 [ 与 { 开头）
-    code_block = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.DOTALL)
+    # v3.x fix: 兼容 ```json+language / ```json5 / ```lang 等变体，
+    #           即 fence 上 json 后紧跟 +/5/_/-/数字或其他语言后缀（没有空白分隔）时，
+    #           原来 (?:json)? 吃掉 "json" 后留下 "+" / "5" 开头字符，导致 block 非 JSON。
+    code_block = re.search(r"```(?:json[0-9a-zA-Z_\-+]*|[\-\+\.A-Za-z0-9_]+)?\s*([\s\S]*?)```", text, re.DOTALL)
     if code_block:
         block = code_block.group(1).strip()
+        # 再兜底：如果 block 不是以 { / [ 开头，向里找第一个 { 或 [ 做截断，
+        # 兼容 ```foo json {\n ...} 这种混合标注或多余前导字符。
+        first_ob = min(
+            [i for i in (block.find("{"), block.find("[")) if i >= 0],
+            default=-1,
+        )
+        if first_ob > 0:
+            block = block[first_ob:]
+        elif first_ob == -1:
+            pass  # 无括号，留给 parse 层直接报错
         data = _try_parse_json(block)
         if data is not None:
             return data

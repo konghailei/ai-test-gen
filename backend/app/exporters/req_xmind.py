@@ -554,8 +554,13 @@ def _filter_impact_entries(impact_list: list) -> list[dict]:
     return entries
 
 
-def _build_impact_node(impact_list: list) -> Element | None:
-    """构建影响功能分析节点（XML 版）：一级节点，子节点为各受影响 FP。"""
+def _build_impact_node(impact_list: list, detail_map: dict | None = None) -> Element | None:
+    """构建影响功能分析节点（XML 版）：一级节点，子节点为各受影响 FP。
+
+    v4.2.5：若传入 detail_map（受影响 FP 的最新内容，由导出端点注入），
+    则每个受影响功能点按与其他功能点一致的方式展示其完整内容
+    （摘要/主流程/业务规则/数据约束/非功能），并保留"影响说明"。
+    """
     entries = _filter_impact_entries(impact_list)
     if not entries:
         return None
@@ -563,17 +568,33 @@ def _build_impact_node(impact_list: list) -> Element | None:
     kids = []
     for e in entries:
         entry_node = _topic(_impact_entry_title(e))
+        entry_kids: list[Element] = []
         desc = _as_str(e.get("impact_description"))
         if desc:
-            _children(entry_node, [_topic(f"影响说明: {desc}")])
+            entry_kids.append(_topic(f"影响说明: {desc}"))
+        detail = detail_map.get(e.get("fp_id")) if isinstance(detail_map, dict) else None
+        if isinstance(detail, dict):
+            content = _build_fp_content_nodes({
+                "name": detail.get("name") or e.get("fp_name") or "",
+                "fp_type": detail.get("fp_type") or e.get("fp_type") or "",
+                "srr_json": detail.get("srr_json") or {},
+                "summary": detail.get("summary") or "",
+            })
+            entry_kids.extend(content)
+        if entry_kids:
+            _children(entry_node, entry_kids)
         kids.append(entry_node)
     if kids:
         _children(node, kids)
     return node
 
 
-def _jbuild_impact_node(impact_list: list) -> dict | None:
-    """构建影响功能分析节点（JSON 版）：一级节点，子节点为各受影响 FP。"""
+def _jbuild_impact_node(impact_list: list, detail_map: dict | None = None) -> dict | None:
+    """构建影响功能分析节点（JSON 版）：一级节点，子节点为各受影响 FP。
+
+    v4.2.5：若传入 detail_map（受影响 FP 的最新内容），则每个受影响功能点
+    按与其他功能点一致的方式展示其完整内容，并保留"影响说明"。
+    """
     entries = _filter_impact_entries(impact_list)
     if not entries:
         return None
@@ -581,27 +602,36 @@ def _jbuild_impact_node(impact_list: list) -> dict | None:
     kids = []
     for e in entries:
         entry_node = _jtopic(_impact_entry_title(e))
+        entry_kids = []
         desc = _as_str(e.get("impact_description"))
         if desc:
-            _jattach(entry_node, [_jtopic(f"影响说明: {desc}")])
+            entry_kids.append(_jtopic(f"影响说明: {desc}"))
+        detail = detail_map.get(e.get("fp_id")) if isinstance(detail_map, dict) else None
+        if isinstance(detail, dict):
+            entry_kids.extend(_jbuild_fp_content_nodes({
+                "name": detail.get("name") or e.get("fp_name") or "",
+                "fp_type": detail.get("fp_type") or e.get("fp_type") or "",
+                "srr_json": detail.get("srr_json") or {},
+                "summary": detail.get("summary") or "",
+            }))
+        if entry_kids:
+            _jattach(entry_node, entry_kids)
         kids.append(entry_node)
     if kids:
         _jattach(node, kids)
     return node
 
 
-def _build_fp_node(fp: dict) -> Element | None:
-    """构建单个功能点节点。"""
-    if not isinstance(fp, dict):
-        return None
-    name = _as_str(fp.get("name") or "未命名功能点")
-    fp_type = _fp_type_cn(_as_str(fp.get("fp_type") or fp.get("type") or ""))  # v2.48 中文化
-    title = f"[{fp_type}] {name}" if fp_type else name
-    fp_node = _topic(title)
+def _build_fp_content_nodes(fp: dict) -> list[Element]:
+    """构建单个功能点的"内容子节点"（摘要/主流程/业务规则/数据约束/非功能）。
 
+    v4.2.5 抽取：既被功能点节点使用，也被"影响功能分析"节点复用——
+    使受影响功能点按与其他功能点一致的方式展示其内容。
+    """
+    if not isinstance(fp, dict):
+        return []
     sub_nodes: list[Element] = []
 
-    # 子 SRR 中的字段（v2.28 精简为 6 个核心字段）
     sub_srr = fp.get("srr_json") or fp.get("sub_srr") or {}
     if isinstance(sub_srr, dict):
         # 1. summary（兼容旧格式 requirement.summary / fp 顶层 summary）
@@ -620,8 +650,7 @@ def _build_fp_node(fp: dict) -> Element | None:
             if alt_node:
                 sub_nodes.append(alt_node)
 
-        # 3-4. 业务规则（v2.48 已合并验收标准） / 数据约束
-        # v2.48: 移除 acceptance_criteria 独立导出（已合并到 business_rules）
+        # 3-4. 业务规则 / 数据约束
         for field, label in [
             ("business_rules", "业务规则"),
             ("data_constraints", "数据约束"),
@@ -645,8 +674,19 @@ def _build_fp_node(fp: dict) -> Element | None:
                 _children(nf_node, nf_items)
                 sub_nodes.append(nf_node)
 
-    # v2.48: 移除 test_hints（测试提示）导出 — 不再生成该字段
+    return sub_nodes
 
+
+def _build_fp_node(fp: dict) -> Element | None:
+    """构建单个功能点节点。"""
+    if not isinstance(fp, dict):
+        return None
+    name = _as_str(fp.get("name") or "未命名功能点")
+    fp_type = _fp_type_cn(_as_str(fp.get("fp_type") or fp.get("type") or ""))  # v2.48 中文化
+    title = f"[{fp_type}] {name}" if fp_type else name
+    fp_node = _topic(title)
+
+    sub_nodes = _build_fp_content_nodes(fp)
     if sub_nodes:
         _children(fp_node, sub_nodes)
     return fp_node
@@ -801,7 +841,7 @@ def export_requirement_to_xmind(
         root_kids.append(total_srr_node)
 
     # ===== 1.5 影响功能分析（v3.4：受影响 FP 标【影响功能】前缀，未确认加 🚩 标记）=====
-    impact_node = _build_impact_node(srr.get("impact_analysis") or [])
+    impact_node = _build_impact_node(srr.get("impact_analysis") or [], srr.get("impact_fps_detail"))
     if impact_node:
         root_kids.append(impact_node)
 
@@ -959,18 +999,15 @@ def _jbuild_alt_flows(alt_flows: list) -> dict | None:
     return node
 
 
-def _jbuild_fp(fp: dict) -> dict | None:
-    """构建单个功能点节点（JSON 版）。"""
-    if not isinstance(fp, dict):
-        return None
-    name = _as_str(fp.get("name") or "未命名功能点")
-    fp_type = _fp_type_cn(_as_str(fp.get("fp_type") or fp.get("type") or ""))  # v2.48 中文化
-    title = f"[{fp_type}] {name}" if fp_type else name
-    fp_node = _jtopic(title)
+def _jbuild_fp_content_nodes(fp: dict) -> list[dict]:
+    """构建单个功能点的"内容子节点"（JSON 版）。
 
+    v4.2.5 抽取：既被功能点节点使用，也被"影响功能分析"节点复用。
+    """
+    if not isinstance(fp, dict):
+        return []
     sub_nodes: list[dict] = []
 
-    # 子 SRR 中的字段（v2.28 精简为 6 个核心字段）
     sub_srr = fp.get("srr_json") or fp.get("sub_srr") or {}
     if isinstance(sub_srr, dict):
         # 1. summary（兼容旧格式 requirement.summary / fp 顶层 summary）
@@ -989,8 +1026,7 @@ def _jbuild_fp(fp: dict) -> dict | None:
             if alt_node:
                 sub_nodes.append(alt_node)
 
-        # 3-4. 业务规则（v2.48 已合并验收标准） / 数据约束
-        # v2.48: 移除 acceptance_criteria 独立导出（已合并到 business_rules）
+        # 3-4. 业务规则 / 数据约束
         for field, label in [
             ("business_rules", "业务规则"),
             ("data_constraints", "数据约束"),
@@ -1014,8 +1050,19 @@ def _jbuild_fp(fp: dict) -> dict | None:
                 _jattach(nf_node, nf_items)
                 sub_nodes.append(nf_node)
 
-    # v2.48: 移除 test_hints（测试提示）导出 — 不再生成该字段
+    return sub_nodes
 
+
+def _jbuild_fp(fp: dict) -> dict | None:
+    """构建单个功能点节点（JSON 版）。"""
+    if not isinstance(fp, dict):
+        return None
+    name = _as_str(fp.get("name") or "未命名功能点")
+    fp_type = _fp_type_cn(_as_str(fp.get("fp_type") or fp.get("type") or ""))  # v2.48 中文化
+    title = f"[{fp_type}] {name}" if fp_type else name
+    fp_node = _jtopic(title)
+
+    sub_nodes = _jbuild_fp_content_nodes(fp)
     if sub_nodes:
         _jattach(fp_node, sub_nodes)
     return fp_node
@@ -1173,7 +1220,7 @@ def export_requirement_to_xmind_json(
         root_kids.append(total_srr_node)
 
     # ===== 1.5 影响功能分析（v3.4：受影响 FP 标【影响功能】前缀，未确认加 🚩 标记）=====
-    impact_node = _jbuild_impact_node(srr.get("impact_analysis") or [])
+    impact_node = _jbuild_impact_node(srr.get("impact_analysis") or [], srr.get("impact_fps_detail"))
     if impact_node:
         root_kids.append(impact_node)
 

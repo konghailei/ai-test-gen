@@ -34,6 +34,7 @@ from app.core.llm_client import llm_client
 from app.core import prompt_manager
 from app.db.milvus_store import vector_store
 from app.prompts import gen_agent as prompts
+from app.utils.coverage import calc_min_cases, calc_point_coverage
 from app.utils.id_gen import gen_test_case_id, gen_batch_id
 from app.utils.logger import logger
 
@@ -58,6 +59,10 @@ class GenAgent:
         enable_multi_type: bool = True,
         impact_guidance: str = "",
         functional_points: list[dict] | None = None,
+        historical_regression: list[dict] | None = None,
+        coverage_gaps: list[dict] | None = None,
+        fp_scope: dict | None = None,
+        global_srr: dict | None = None,
     ) -> list[dict]:
         """根据 SRR 生成测试用例集。
 
@@ -68,16 +73,28 @@ class GenAgent:
             functional_points: 需求已拆分的功能点列表（v1.4 新增）。传入时
                 LLM 按每个 FP 定向生成用例，并在用例中标注 related_fp 字段，
                 供 persist_to_kb 写入 test_case↔functional_point 追溯关系。
+            historical_regression: v3.4 回归复用基线——影响分析确认的受影响 FP
+                最新版 approved 用例（functional_point_cases 聚合），直接并入本次生成集。
+            coverage_gaps: v3.4 覆盖缺口——无历史用例/覆盖不足的受影响 FP，
+                注入 prompt 让 LLM 定向补生成回归用例。
+            fp_scope: v5.0 FP 分片生成——传入单个 FP（含其 srr_json）时，prompt 仅注入
+                该功能点子 SRR + 该 FP 定义，产出该 FP 定向小集合（相关用例强标 related_fp），
+                大幅缩小 prompt（避免全量 SRR 一次生成）。同时传入 global_srr 可附带注入
+                跨功能点共享规则片段，保证该 FP 用例不遗漏跨 FP/共享约束。
+            global_srr: v5.0 全局/跨功能点通道——仅注入总 SRR 的跨功能点/共享规则/顶层
+                数据约束（不起整段全量 SRR），用于"跨功能点/集成"用例的独立生成，
+                避免跨 FP 组合用例因按 FP 拆分而丢失。
 
         Returns:
             list[dict]: UTCF 用例列表，每个用例为字典格式
 
         Note:
             生成流程（docs/03 §2，v3.1 起跳过 KB 检索）：
-                1. 构建 Prompt（分类/批量 + FP 定向，直接基于 SRR）
+                1. 构建 Prompt（分类/批量 + FP 定向 + 覆盖缺口引导）
                 2. 调用 LLM 生成
                 3. 解析用例 JSON + 生成 ID
                 4. gen_confidence 放入 gen_metadata
+                5. v3.4: 合并回归复用基线（historical_regression）进入结果集
         """
         req_id = srr.get("requirement", {}).get("id", "")
         product_id = srr.get("requirement", {}).get("product_id", "")
@@ -96,13 +113,19 @@ class GenAgent:
                 from sqlalchemy import select as _select
                 async with async_session() as _s:
                     cases_in_module = await _s.execute(
-                        _select(TestCase.case_json, TestCase.id)
+                        _select(TestCase.case_json, TestCase.id, TestCase.modules)
                         .where(TestCase.product_id == product_id, TestCase.status == "approved")
                         .order_by(TestCase.updated_at.desc())
                         .limit(10)
                     )
-                    for cj, cid in cases_in_module.all():
+                    for cj, cid, db_modules in cases_in_module.all():
                         if not isinstance(cj, dict):
+                            continue
+                        # 模块过滤优先使用独立列 modules，其次回退 case_json 内字段
+                        case_modules = list(db_modules or []) if isinstance(db_modules, (list, tuple)) else []
+                        if not case_modules:
+                            case_modules = cj.get("modules") or ([cj.get("module")] if cj.get("module") else [])
+                        if not any(module in modules for module in case_modules):
                             continue
                         few_shot_cases.append({
                             "id": cid,
@@ -123,18 +146,72 @@ class GenAgent:
                     few_shot_cases = uniq[:3]
             except Exception as e:
                 logger.debug("[GenAgent] 轻量 KB 检索失败（不阻断）: {}", str(e)[:120])
+
+        # v3.4: 测试模式库检索——按需求语义检索经人工验证的模式骨架（test_patterns），
+        # 注入 prompt 让 LLM 照着骨架生成，提升覆盖率与风格一致性（等价类/边界值/决策表等）。
+        if modules:
+            try:
+                query_text = (
+                    f"{' / '.join(modules)} "
+                    f"{srr.get('requirement', {}).get('summary', '') or srr.get('requirement', {}).get('title', '')}"
+                ).strip()[:200]
+                # v3.1.3 P2-8: search_patterns 含 Milvus 网络调用，改 to_thread 防止阻塞事件循环
+                hits = await asyncio.to_thread(vector_store.search_patterns, query_text, top_k=3)
+                for h in hits:
+                    meta = h.get("metadata", {}) or {}
+                    doc = h.get("document") or h.get("content") or h.get("text") or ""
+                    name = meta.get("name", "")
+                    cat = meta.get("category", "")
+                    pattern_json = None
+                    try:
+                        pattern_json = json.loads(doc) if doc else None
+                    except Exception:
+                        pattern_json = None
+                    if not pattern_json and isinstance(meta, dict):
+                        pattern_json = meta.get("pattern_json")
+                    if name and (pattern_json or cat):
+                        matched_patterns.append({
+                            "name": name,
+                            "category": cat,
+                            "pattern_json": pattern_json if isinstance(pattern_json, dict) else str(pattern_json),
+                        })
+            except Exception as e:
+                logger.debug("[GenAgent] 测试模式库检索失败（不阻断）: {}", str(e)[:120])
         logger.info("[GenAgent] 轻量 KB 检索: few_shot_cases={}, matched_patterns={}",
                     len(few_shot_cases), len(matched_patterns))
 
-        # 3. 构建 Prompt（含 FP 定向上下文）
+        # 3. 构建 Prompt（含 FP 定向上下文 + 覆盖缺口引导）
+        # 要点级覆盖驱动：动态生成数量下限由要点规模推导，随 prompt 注入硬约束
+
+        # v5.0 FP 分片 / 全局通道：确定本次生成使用的"有效 SRR"与"有效功能点集"。
+        # - fp_scope 传入单个 FP 时，prompt 只注入该功能点子 SRR（小而聚焦），
+        #   避免全量 SRR 一次生成造成 prompt 过大、易超时/字数爆炸。
+        # - global_srr 传入时，只注入跨功能点/共享规则/顶层约束片段，用于
+        #   独立生成"跨功能点/集成"用例，保证按 FP 拆分后组合用例不丢失。
+        _srr_effective = srr
+        _fp_effective: list[dict] = functional_points or []
+        if fp_scope is not None:
+            _srr_effective = fp_scope.get("srr_json") or fp_scope
+            _fp_effective = [fp_scope]
+            # 强制将生成范围限定为该 FP，避免混入其它功能点
+            _fp_effective[0].pop("points", None)
+        elif global_srr is not None:
+            _srr_effective = global_srr
+            _fp_effective = []
+
+        gen_min_cases, est_total_points = calc_min_cases(_srr_effective, _fp_effective)
         user_prompt = prompts.build_user_prompt(
-            srr=srr,
+            srr=_srr_effective,
             few_shot_cases=few_shot_cases or None,
             matched_patterns=matched_patterns or None,
             impact_guidance=impact_guidance,
             enable_multi_type=enable_multi_type,
-            functional_points=functional_points,
+            functional_points=_fp_effective,
+            coverage_gaps=coverage_gaps or None,
+            regression_anchors=historical_regression or None,
+            min_cases=gen_min_cases,
         )
+        logger.info("[GenAgent] 动态数量下限: min_cases={}, 要点总数={}", gen_min_cases, est_total_points)
         logger.debug("[GenAgent] Prompt 构建完成: len={}", len(user_prompt))
 
         # 4. 调用 LLM 生成用例（max_tokens=32768，确保能生成足够的用例）
@@ -163,7 +240,22 @@ class GenAgent:
         module_prefix = self._derive_module_prefix(srr)
         batch_id = gen_batch_id()
         gen_model = self._get_model_name()
-        cases = self._post_process_cases(cases, req_id, module_prefix, batch_id, gen_model)
+        cases = self._post_process_cases(cases, req_id, module_prefix, batch_id, gen_model, matched_patterns=matched_patterns)
+
+        # v4.9: 要点标注系统兜底——LLM 可能未在 notes/cover_points 输出方括号要点 ID，
+        # 导致覆盖映射永远失效（回退数量比、补生成无法聚焦缺口）。这里依据用例文本
+        # 与要点描述的关键词命中，为未标注用例确定性回填覆盖的要点 ID。
+        # 已标注的用例跳过，仅补明显种子，避免污染。
+        try:
+            from app.utils.coverage import backfill_cases_point_ids
+            _backfilled = backfill_cases_point_ids(cases, srr, functional_points or [])
+            if _backfilled:
+                logger.info(
+                    "[GenAgent] 要点标注系统兜底回填: {}/{} 条用例已自动标注覆盖要点",
+                    _backfilled, len(cases),
+                )
+        except Exception as e:
+            logger.debug("[GenAgent] 要点标注兜底回填失败（不阻断）: {}", str(e)[:120])
 
         # v2.0: 四级去重（精确→语义→子集→LLM等价判定），对应 docs/03 §2.3
         before_dedup = len(cases)
@@ -181,67 +273,48 @@ class GenAgent:
         logger.info("[GenAgent] 后处理完成: cases={}, module_prefix={}, type_dist={}",
                     len(cases), module_prefix, type_dist)
 
-        # v3.3：SRR 覆盖率校验日志——统计 SRR 要点数 vs 生成用例数，评估覆盖情况
-        self._log_coverage_stats(srr, functional_points, cases)
+        # v3.4: 合并回归复用基线——影响分析确认的受影响 FP 最新版 approved 用例。
+        joined = self.merge_regression_cases(historical_regression or [], cases)
+        reuse_count = len(historical_regression or [])
+        if reuse_count:
+            for c in joined:
+                if c.get("source") == "reused":
+                    c["gen_batch_id"] = batch_id
+            logger.info(
+                "[GenAgent] 合并回归复用基线: reused={}, total={}",
+                reuse_count, len(joined),
+            )
+
+        # v3.3：覆盖率统计必须基于最终用例集，包含回归复用基线。
+        self._log_coverage_stats(srr, functional_points, joined)
 
         # 7. 向量库写入延后至 ReviewAgent.persist_to_kb（v2.0 修正，对应 docs/03 §1 Phase 6）
         # 仅写入 PG 供 ReviewAgent 读取，向量库由 persist_to_kb 统一写入 approved 用例
         # 避免未审核用例污染 Few-shot 检索结果
-        product_id = srr.get("requirement", {}).get("product_id", "")
         logger.info("[GenAgent] ◀ 生成完成 ▶ 下一节点 ReviewAgent: "
                     "cases={}, types={}, batch_id={}",
-                    len(cases), type_dist, batch_id)
-        return cases
+                    len(joined), type_dist, batch_id)
+        return joined
 
     # ========================================================================
     # SRR 覆盖率校验（v3.3）
     # ========================================================================
 
     def _log_coverage_stats(self, srr: dict, functional_points: list[dict], cases: list[dict]) -> None:
-        """统计 SRR 要点数 vs 生成用例数，输出覆盖率日志。
+        """要点级覆盖映射统计（RTM 实践），输出映射率/高优覆盖/未覆盖要点告警。
 
         不阻断流水线，仅用于监控和可观测性。
         v3.4 增强：新增测试设计技术覆盖率分析（等价类/边界值/决策表/状态迁移/场景法/错误推测）
         """
         try:
-            # 统计 SRR 要点总数
-            total_points = 0
-            hp_count = 0
-            alt_count = 0
-            rule_count = 0
-            data_count = 0
-            # v2.48: boundary_count / acceptance_count 已移除（boundary 合并到 business_rules/alternate_flows，acceptance 合并到 business_rules）
-
-            # 总 SRR
-            flows = srr.get("flows", {}) if isinstance(srr, dict) else {}
-            hp_steps = flows.get("happy_path", {}).get("steps", []) if isinstance(flows.get("happy_path"), dict) else []
-            hp_count += len(hp_steps)
-            alt_flows = flows.get("alternate_flows", [])
-            alt_count += len(alt_flows)
-
-            # 各功能点
-            for fp in functional_points:
-                fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
-                fp_flows = fp_srr.get("flows", {})
-                fp_hp = fp_flows.get("happy_path", {})
-                fp_hp_steps = fp_hp.get("steps", []) if isinstance(fp_hp, dict) else []
-                hp_count += len(fp_hp_steps)
-                alt_count += len(fp_flows.get("alternate_flows", []))
-                rule_count += len(fp_srr.get("business_rules", []))
-                data_count += len(fp_srr.get("data_constraints", []))
-                # v2.48: acceptance_criteria 已合并到 business_rules，不再单独统计
-
-            total_points = hp_count + alt_count + rule_count + data_count
-            case_count = len(cases)
+            point_cov = calc_point_coverage(srr, functional_points or [], cases)
+            case_count = point_cov["case_count"]
 
             # 按 related_fp 统计各功能点的用例数
             fp_coverage: dict[str, int] = {}
             for c in cases:
                 rfp = c.get("related_fp", c.get("related_requirement", ""))
                 fp_coverage[rfp] = fp_coverage.get(rfp, 0) + 1
-
-            # 覆盖率 = 用例数 / SRR要点数（粗略估计，>1.0 表示平均每个要点有多个用例）
-            coverage_ratio = case_count / max(total_points, 1)
 
             # v3.4：测试设计技术覆盖率分析
             type_dist: dict[str, int] = {}
@@ -254,23 +327,41 @@ class GenAgent:
                 srr, functional_points, cases, type_dist
             )
 
+            mode = "映射" if point_cov["mapping_based"] else "回退(数量比)"
             logger.info(
-                "[GenAgent/coverage] SRR 要点统计: total={}, hp={}, alt={}, rules={}, data={} | "
-                "用例数={}, 覆盖比={:.2f}, FP分布={}",
-                total_points, hp_count, alt_count, rule_count, data_count,
-                case_count, coverage_ratio, fp_coverage,
+                "[GenAgent/coverage] 要点级覆盖[{}]: 要点总数={}, 已覆盖={}, 覆盖率={:.1%}, "
+                "P0/P1 要点={}/{}, 高优覆盖={:.1%} | 用例数={}, 类型分布={}, FP分布={}, 要点构成={}",
+                mode,
+                point_cov["total_points"], point_cov["covered_points"], point_cov["coverage_rate"],
+                point_cov["high_priority_covered"], point_cov["high_priority_total"],
+                point_cov["high_priority_rate"],
+                case_count, type_dist, fp_coverage, point_cov["point_stats"],
             )
             logger.info(
                 "[GenAgent/coverage] 测试设计技术分析: type_dist={}, techniques={}",
                 type_dist, technique_analysis,
             )
 
-            # 覆盖率过低时告警
-            if total_points > 0 and coverage_ratio < 0.5:
+            # 覆盖告警（口径与 ReviewAgent._should_supplement 一致）
+            uncovered_top = point_cov["uncovered"][:5]
+            if point_cov["mapping_based"]:
+                if point_cov["coverage_rate"] < 0.8:
+                    logger.warning(
+                        "[GenAgent/coverage] ⚠️ 要点映射覆盖率偏低: {:.1%} (<80%)，未覆盖要点示例: {}",
+                        point_cov["coverage_rate"],
+                        [p["id"] for p in uncovered_top],
+                    )
+                if point_cov["high_priority_total"] > 0 and point_cov["high_priority_covered"] < point_cov["high_priority_total"]:
+                    logger.warning(
+                        "[GenAgent/coverage] ⚠️ P0/P1 要点未全覆盖: {}/{}，缺失: {}",
+                        point_cov["high_priority_covered"], point_cov["high_priority_total"],
+                        [p["id"] for p in point_cov["uncovered"] if p.get("priority") in ("P0", "P1")][:10],
+                    )
+            elif point_cov["total_points"] > 0 and point_cov["coverage_rate"] < 0.5:
                 logger.warning(
-                    "[GenAgent/coverage] ⚠️ 覆盖率偏低: SRR 有 {} 个要点，但仅生成 {} 个用例（覆盖比 {:.2f}），"
-                    "建议检查 prompt 或增加 max_tokens",
-                    total_points, case_count, coverage_ratio,
+                    "[GenAgent/coverage] ⚠️ 覆盖比偏低（回退口径）: SRR 有 {} 个要点，仅 {} 个用例（{:.2f}），"
+                    "且用例未标注任何要点 ID，请检查 notes 覆盖标注",
+                    point_cov["total_points"], case_count, point_cov["coverage_rate"],
                 )
 
             # v3.4：测试设计技术覆盖缺口告警
@@ -423,6 +514,7 @@ class GenAgent:
         module_prefix: str,
         batch_id: str,
         gen_model: str,
+        matched_patterns: list[dict] | None = None,
     ) -> list[dict]:
         """后处理：生成 ID、补全字段、整理 gen_metadata。
 
@@ -432,6 +524,8 @@ class GenAgent:
             module_prefix: 模块前缀（用于生成用例 ID）
             batch_id: 生成批次 ID
             gen_model: 生成模型名
+            matched_patterns: 本次生成检索命中的测试模式列表（v3.5），
+                LLM 未回填 source_pattern 时主动写入，保证 pattern_bonus 生效
 
         Returns:
             list[dict]: 后处理后的用例列表
@@ -493,6 +587,9 @@ class GenAgent:
             # ⚠️ 始终覆盖 LLM 生成的占位 ID（如 TC-AUTH-0001-0001），
             # 避免同模块重复生成时 UniqueViolationError
             case["id"] = gen_test_case_id(module_prefix)
+
+            # v5.2: 批次 ID 写入用例（评审报告中心关联生成批次用）
+            case.setdefault("gen_batch_id", batch_id)
 
             # 补全关联需求
             case.setdefault("related_requirement", req_id)
@@ -556,18 +653,45 @@ class GenAgent:
                 case["steps"] = valid_steps
             else:
                 case["steps"] = []
-            # assertions：确保每个断言都有合法 type（required，没有则默认 equal）
+            # assertions：确保每个断言都有合法 type（required，没有则默认 equals）。
+            # v4.4 修复 L1：原归一化白名单采用旧枚举风格（equal/greater/less/not_contains），
+            # 与 UTCF schema 的合法枚举（equals/contains/matches/status_code/gt/lt/not_null/custom）
+            # 不一致，导致 LLM 输出的合法 "equals" 被误判为非法并默认改写为 "equal"，
+            # 使全部用例 UTCF 校验失败、落入 construct 兜底（置信度被强制压到 0.2）。
+            # 现改为按 schema 枚举 + 常见误写映射归一化。
+            assert_type_map = {
+                # 规范合法值直接透传
+                "equals": "equals", "contains": "contains", "matches": "matches",
+                "status_code": "status_code", "gt": "gt", "lt": "lt",
+                "not_null": "not_null", "custom": "custom",
+                # 常见误写/旧风格 → 映射到规范值（保持原语义）
+                "equal": "equals",            # 缺 s
+                "equal_to": "equals",
+                "==": "equals", "=": "equals",
+                "not_equals": "custom",       # 无直接枚举，归为 custom（含 message 语义）
+                "not_equal": "custom",
+                "greater": "gt", "greater_than": "gt", ">": "gt",
+                "less": "lt", "less_than": "lt", "<": "lt",
+                "greater_or_equal": "gt", "less_or_equal": "lt",
+                "not_contains": "custom",
+                "not_contain": "custom",
+                "regex": "matches",
+                "exists": "not_null", "not_exists": "custom",
+                "contains_text": "contains",
+                "eq": "equals", "in": "contains",
+            }
             assertions_in = case.get("assertions") or []
             if isinstance(assertions_in, list):
                 normalized_assertions = []
                 for a in assertions_in:
                     if not isinstance(a, dict):
                         continue
-                    if a.get("type") not in {
-                        "equal", "not_equal", "greater", "less", "contains", "not_contains",
-                        "regex", "exists", "not_exists", "status_code",
-                    }:
-                        a["type"] = "equal"
+                    raw_t = a.get("type")
+                    if not isinstance(raw_t, str):
+                        a["type"] = "equals"
+                    else:
+                        key = raw_t.strip().lower()
+                        a["type"] = assert_type_map.get(key, "equals")
                     a.setdefault("target", "")
                     a.setdefault("expected_value", None)
                     a.setdefault("message", "")
@@ -622,12 +746,21 @@ class GenAgent:
                 case["execution"] = execution
 
             # source_pattern 同步到 gen_metadata 和顶层
-            if "source_pattern" in case:
-                sp = case["source_pattern"]
-                if isinstance(sp, str):
-                    gen_metadata.setdefault("source_pattern", sp)
+            # v3.5: LLM 实际很少回填该字段（schema 标注"可选"），导致 review 的
+            # pattern_bonus 恒为 0。这里以检索命中的模式名主动兜底写入，
+            # 不覆盖 LLM 已填的值。
+            llm_sp = case.get("source_pattern")
+            if isinstance(llm_sp, str) and llm_sp.strip():
+                gen_metadata.setdefault("source_pattern", llm_sp)
             else:
-                case.setdefault("source_pattern", "")
+                fallback_sp = ",".join(
+                    p.get("name", "") for p in (matched_patterns or []) if p.get("name")
+                )
+                if fallback_sp:
+                    case["source_pattern"] = fallback_sp
+                    gen_metadata.setdefault("source_pattern", fallback_sp)
+                else:
+                    case.setdefault("source_pattern", "")
 
             # ---- H2: Pydantic UTCF 强校验（最后一道关卡），失败则 construct 兜底 ----
             try:
@@ -668,6 +801,24 @@ class GenAgent:
     def _get_model_name(self) -> str:
         """获取当前 LLM 模型名。"""
         return settings.llm_config.get("model", "unknown")
+
+    def merge_regression_cases(self, regression_cases: list[dict], generated_cases: list[dict]) -> list[dict]:
+        """合并回归用例与新生成用例（标题+步骤去重）。
+
+        公开方法：编排层（orchestrator._review_node 补生成合并）直接调用。
+        """
+        merged = []
+        seen = set()
+        for case in list(regression_cases) + list(generated_cases):
+            key = (
+                str(case.get("title", "")).strip().lower(),
+                json.dumps(case.get("steps", []), sort_keys=True, ensure_ascii=False),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(case)
+        return merged
 
     # ========================================================================
     # 四级去重（v2.0，对应 docs/03 §2.3）
@@ -731,11 +882,10 @@ class GenAgent:
             return cases
 
         try:
-            from app.db.hybrid_search import kb_cache
-            # 批量获取标题 Embedding
+            # 批量获取标题 Embedding（同步模型调用，用线程包装避免阻塞事件循环）
             titles = [c.get("title", "") for c in cases]
             embeddings = await asyncio.to_thread(
-                kb_cache.embed_batch, titles
+                vector_store.embed_texts, titles
             )
         except Exception as e:
             logger.debug("[GenAgent/Dedup] L2 语义去重跳过（Embedding 失败）: {}", str(e)[:100])
@@ -752,7 +902,7 @@ class GenAgent:
             for j in range(i + 1, len(cases)):
                 if j in to_remove:
                     continue
-                sim = self._cosine_similarity(embeddings[i], embeddings[j])
+                sim = self.cosine_similarity(embeddings[i], embeddings[j])
                 if sim >= threshold:
                     # 保留置信度更高的
                     conf_i = cases[i].get("gen_metadata", {}).get("gen_confidence", 0.5)
@@ -811,9 +961,8 @@ class GenAgent:
 
         # 1. 计算所有对的 Embedding 相似度，筛选疑似对
         try:
-            from app.db.hybrid_search import kb_cache
             titles = [c.get("title", "") for c in cases]
-            embeddings = await asyncio.to_thread(kb_cache.embed_batch, titles)
+            embeddings = await asyncio.to_thread(vector_store.embed_texts, titles)
         except Exception:
             return cases
 
@@ -823,7 +972,7 @@ class GenAgent:
         suspicious_pairs: list[tuple[int, int, float]] = []
         for i in range(len(cases)):
             for j in range(i + 1, len(cases)):
-                sim = self._cosine_similarity(embeddings[i], embeddings[j])
+                sim = self.cosine_similarity(embeddings[i], embeddings[j])
                 if similarity_range[0] <= sim < similarity_range[1]:
                     suspicious_pairs.append((i, j, sim))
 
@@ -880,8 +1029,8 @@ class GenAgent:
         return [c for idx, c in enumerate(cases) if idx not in to_remove]
 
     @staticmethod
-    def _cosine_similarity(vec_a: list, vec_b: list) -> float:
-        """计算余弦相似度。"""
+    def cosine_similarity(vec_a: list, vec_b: list) -> float:
+        """计算余弦相似度（公开静态方法，供编排层一致性检查复用）。"""
         if not vec_a or not vec_b or len(vec_a) != len(vec_b):
             return 0.0
         import math

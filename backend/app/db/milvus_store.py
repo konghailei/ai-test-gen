@@ -294,6 +294,12 @@ class MilvusVectorStore:
         embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
         return embeddings.tolist()
 
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """批量文本 → 向量（供语义去重 / 一致性相似度比对等同步场景调用）。"""
+        if not texts:
+            return []
+        return self._embed(texts)
+
     def _get_collection(self, coll_key: str) -> Collection:
         """获取已加载的 Collection。"""
         self._ensure_connected()

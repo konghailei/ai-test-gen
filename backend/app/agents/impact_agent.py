@@ -360,10 +360,6 @@ class ImpactAnalysisAgent:
         all_module_ids: set[str] = set()
         if fp_info["module_id"]:
             all_module_ids.add(fp_info["module_id"])
-        for affected_fp in affected_fps:
-            # 从 affected_fps 中获取 module_id（需要从数据库查询）
-            pass
-        
         # 批量查询受影响 FPs 的 module_id
         if affected_fps:
             affected_fp_ids = [fp["fp_id"] for fp in affected_fps]
@@ -422,9 +418,12 @@ class ImpactAnalysisAgent:
             "test_focus": test_focus,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "is_auto_generated": True,
-            # 默认未确认；confirm_impact_analysis 端点确认后会覆盖为 True
-            # 避免 confirm_requirement 校验 `not item.get("is_affected")` 误判缺失字段
-            "is_affected": False,
+            # 默认未确认（None = 候选，区别于 True=确认受影响 / False=确认不受影响）。
+            # v4.2.9 修复 P5：原默认 False 会被展示层误读为「确认不受影响」，
+            # 与 run_impact_analysis 写入的未确认候选语义（is_affected=None）不一致。
+            # confirm_impact_analysis 确认后会覆盖为 True/False；confirm_requirement
+            # 守卫只认 confirmed_at，不受此值影响。
+            "is_affected": None,
         }
 
     async def _bfs_fp_reverse(self, fp_id: str, session) -> list[dict]:

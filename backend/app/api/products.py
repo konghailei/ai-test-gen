@@ -54,6 +54,7 @@ class CreateProductRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128, description="产品名称")
     description: str = Field(default="", max_length=1024, description="产品描述")
     id: str | None = Field(default=None, max_length=64, description="产品 ID（可选，留空自动生成）")
+    visible_to_user_ids: list[int] | None = Field(default=None, description="可查看此产品的用户ID列表（P1-1 隔离，空=全员可见）")
 
 
 class UpdateProductRequest(BaseModel):
@@ -130,7 +131,10 @@ async def create_product(body: CreateProductRequest, session: AsyncSession = Dep
         rand_suffix = random.randint(100, 999)
         pid = f"PROD-{ts:05d}-{rand_suffix}"
 
-    record = Product(id=pid, name=body.name, description=body.description)
+    record = Product(
+        id=pid, name=body.name, description=body.description,
+        visible_to_user_ids=body.visible_to_user_ids,  # P1-1 隔离名单随创建落库
+    )
     session.add(record)
     try:
         await session.commit()
@@ -297,6 +301,9 @@ async def list_projects(
     避免 r.created_at=None 时 .isoformat() 崩溃或未登录态绕过导致的前端异常。
     """
     from app.core.auth import CurrentUser
+    from app.core.product_access import assert_product_visible
+    # P1-1 产品隔离：父产品不可见则列出项目同样拒绝
+    await assert_product_visible(session, _user, pid)
     result = await session.execute(
         select(Project).where(Project.product_id == pid).order_by(Project.created_at.desc())
     )
@@ -736,12 +743,16 @@ async def archive_project(
         )
         session.add(item)
 
-    # 10. 冻结当前 FPDependency（is_active=False，关联版本快照）
-    # v2.45 修复：同步写入 FPDependencyHistory 审计记录，使用模型已设计的 is_active/version_pk 追踪字段
+    # 10. 保留依赖边生效（不冻结 is_active），仅关联最新版本快照用于追溯。
+    # v4.2.4 修复：依赖边应跟随功能点状态——功能点随项目归档置 archived 后，
+    #        其依赖关系客观存在，应继续参与影响分析与引用统计（is_active 保持生效）。
+    #        原 v2.45 在此把 is_active 置 False「冻结」，导致已归档依赖边对影响分析
+    #        BFS 与 fan_in(is_active==True 过滤)完全失效，出现「引用全 0、跨需求影响漏检」
+    #        （如 REQ-1787730895940-3104：权限回收 -> 权限控制(跨需求) 边 approved 但 inactive）。
+    #        版本追溯仍由 FPDependencyVersionItem 快照 + version_pk 关联保证，不依赖冻结。
     for d in all_deps:
         old_is_active = d.is_active
         old_version_pk = d.version_pk
-        d.is_active = False
         d.version_pk = version.id
         session.add(FPDependencyHistory(
             dependency_id=d.id,
@@ -749,11 +760,11 @@ async def archive_project(
             target_fp_id=d.target_fp_id,
             relation_type=d.relation_type,
             description=d.description or "",
-            action="modified",
+            action="archived",
             old_review_status=d.review_status,
             new_review_status=d.review_status,
             old_is_active=old_is_active,
-            new_is_active=False,
+            new_is_active=d.is_active,
             old_version_pk=old_version_pk,
             new_version_pk=version.id,
             changed_by=current_user.username,
@@ -930,10 +941,43 @@ async def archive_project(
             logger.error("[ArchiveProject] CRSR 固化失败（不阻断）: {}", str(crsr_e)[:200])
             crsr_failed.append({"error": str(crsr_e)[:200]})
 
+    # v3.4: 功能点最新版用例集固化（与 CRSR 对称）——各 FP 聚合最新线获批用例，
+    # 供受影响功能点回归时直接取用（回归测试选择 RTS）。失败不阻断归档。
+    fpc_count = 0
+    fpc_failed: list[dict] = []
+    if product_id_for_cache:
+        try:
+            from app.core.fp_cases import consolidate_fp_cases
+            fp_records = sorted(
+                (f for f in all_fps if f.name),
+                key=lambda f: (f.name, f.id),
+            )
+            seen_fp_ids: set[str] = set()
+            for fp in fp_records:
+                if fp.id in seen_fp_ids:
+                    continue
+                seen_fp_ids.add(fp.id)
+                ok = await consolidate_fp_cases(
+                    session,
+                    product_id_for_cache,
+                    fp.name,
+                    version_id=version_id,
+                    fp_id=fp.id,
+                )
+                if ok:
+                    fpc_count += 1
+                else:
+                    fpc_failed.append({"fp_name": fp.name})
+            await session.commit()
+        except Exception as fpc_e:
+            await session.rollback()
+            logger.error("[ArchiveProject] FP 用例集固化失败（不阻断）: {}", str(fpc_e)[:200])
+            fpc_failed.append({"error": str(fpc_e)[:200]})
+
     logger.info(
-        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量派发={}, 失败={}, celery={}, crsr={}",
+        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量派发={}, 失败={}, celery={}, crsr={}, fpc={}",
         proj_id, version_id, len(requirements), len(all_fps), len(all_deps), kb_count, len(kb_failed),
-        "async" if _celery_available else "sync", crsr_count,
+        "async" if _celery_available else "sync", crsr_count, fpc_count,
     )
     # v2.8.58: 异步派发时提示用户向量化进行中，同步写入时提示完成状态
     msg = f"项目已归档，版本号: {version_id}"
@@ -958,6 +1002,9 @@ async def archive_project(
             # v3.2: CRSR 固化结果
             "crsr_consolidated": crsr_count,
             "crsr_failed": crsr_failed,
+            # v3.4: FP 最新用例集固化结果
+            "fpc_consolidated": fpc_count,
+            "fpc_failed": fpc_failed,
         },
     )
 

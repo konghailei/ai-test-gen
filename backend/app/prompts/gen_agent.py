@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 
+from app.utils.coverage import calc_min_cases
+
 # ============================================================================
 # 系统指令
 # ============================================================================
@@ -295,7 +297,8 @@ UTCF_CASE_SCHEMA = """每个用例的 JSON 结构：
 def _build_coverage_checklist(srr: dict, functional_points: list[dict]) -> str:
     """从 SRR 中显式提取所有必须覆盖的要点，构建覆盖率检查清单。
 
-    让 LLM 清楚知道需要覆盖多少个点，提高覆盖率和生成稳定性。
+    v4.0：改为基于 app.utils.coverage.collect_points 统一抽取，
+    保证清单中的要点 ID 与覆盖映射统计（calc_point_coverage）完全一致。
 
     Args:
         srr: SRR JSON 字典
@@ -304,114 +307,79 @@ def _build_coverage_checklist(srr: dict, functional_points: list[dict]) -> str:
     Returns:
         str: 覆盖率检查清单文本（注入 prompt）
     """
-    items: list[str] = []
+    from app.utils.coverage import collect_points
 
-    # 1. 总 SRR 的 happy_path
-    flows = srr.get("flows", {}) if isinstance(srr, dict) else {}
-    happy_path = flows.get("happy_path", {})
-    hp_steps = happy_path.get("steps", []) if isinstance(happy_path, dict) else []
-    if hp_steps:
-        items.append(f"### 总 SRR 主流程（happy_path）：{len(hp_steps)} 个步骤")
-        for i, step in enumerate(hp_steps, 1):
-            if isinstance(step, dict):
-                action = step.get("action", step.get("desc", ""))
-                items.append(f"  - [happy_path.{i}] {action}")
-            else:
-                items.append(f"  - [happy_path.{i}] {step}")
-
-    # 2. 总 SRR 的 alternate_flows
-    alt_flows = flows.get("alternate_flows", [])
-    if alt_flows:
-        items.append(f"### 总 SRR 异常分支（alternate_flows）：{len(alt_flows)} 个分支")
-        for i, af in enumerate(alt_flows, 1):
-            if isinstance(af, dict):
-                name = af.get("name", af.get("trigger", ""))
-                items.append(f"  - [alternate_flow.{i}] {name}")
-            else:
-                items.append(f"  - [alternate_flow.{i}] {af}")
-
-    # 3. 总 SRR 的 preconditions
-    preconds = srr.get("preconditions", [])
-    if preconds:
-        items.append(f"### 总 SRR 前置条件（preconditions）：{len(preconds)} 条")
-        for i, p in enumerate(preconds, 1):
-            items.append(f"  - [precondition.{i}] {p}")
-
-    # 4. 总 SRR 的跨 FP 交互规则
-    cfi = srr.get("cross_fp_interactions", {}) if isinstance(srr, dict) else {}
-    shared_rules = cfi.get("shared_business_rules", [])
-    if shared_rules:
-        items.append(f"### 跨 FP 共享业务规则：{len(shared_rules)} 条")
-        for i, r in enumerate(shared_rules, 1):
-            if isinstance(r, dict):
-                desc = r.get("rule", r.get("description", ""))
-                items.append(f"  - [shared_rule.{i}] {desc}")
-            else:
-                items.append(f"  - [shared_rule.{i}] {r}")
-
-    # 5. 各功能点的覆盖要点
-    for fp in functional_points:
-        fp_id = fp.get("id", "")
-        fp_name = fp.get("name", fp_id)
-        fp_srr = fp.get("srr_json", {}) if isinstance(fp.get("srr_json"), dict) else {}
-
-        items.append(f"### 功能点 [{fp_id}] {fp_name}")
-
-        # FP happy_path
-        fp_flows = fp_srr.get("flows", {})
-        fp_hp = fp_flows.get("happy_path", {})
-        fp_hp_steps = fp_hp.get("steps", []) if isinstance(fp_hp, dict) else []
-        if fp_hp_steps:
-            items.append(f"  主流程步骤：{len(fp_hp_steps)} 个")
-            for i, step in enumerate(fp_hp_steps, 1):
-                if isinstance(step, dict):
-                    action = step.get("action", step.get("desc", ""))
-                    items.append(f"  - [{fp_id}.happy_path.{i}] {action}")
-                else:
-                    items.append(f"  - [{fp_id}.happy_path.{i}] {step}")
-
-        # FP alternate_flows
-        fp_alt = fp_flows.get("alternate_flows", [])
-        if fp_alt:
-            items.append(f"  异常分支：{len(fp_alt)} 个")
-            for i, af in enumerate(fp_alt, 1):
-                if isinstance(af, dict):
-                    name = af.get("name", af.get("trigger", ""))
-                    items.append(f"  - [{fp_id}.alt_flow.{i}] {name}")
-                else:
-                    items.append(f"  - [{fp_id}.alt_flow.{i}] {af}")
-
-        # FP business_rules
-        fp_rules = fp_srr.get("business_rules", [])
-        if fp_rules:
-            items.append(f"  业务规则：{len(fp_rules)} 条")
-            for i, r in enumerate(fp_rules, 1):
-                if isinstance(r, dict):
-                    desc = r.get("rule", r.get("description", r.get("condition", "")))
-                    items.append(f"  - [{fp_id}.rule.{i}] {desc}")
-                else:
-                    items.append(f"  - [{fp_id}.rule.{i}] {r}")
-
-        # FP data_constraints
-        fp_dc = fp_srr.get("data_constraints", [])
-        if fp_dc:
-            items.append(f"  数据约束：{len(fp_dc)} 条")
-            for i, d in enumerate(fp_dc, 1):
-                if isinstance(d, dict):
-                    field = d.get("field", "")
-                    cons = d.get("constraints", d.get("constraint", ""))
-                    items.append(f"  - [{fp_id}.data.{i}] {field}: {cons}")
-                else:
-                    items.append(f"  - [{fp_id}.data.{i}] {d}")
-
-        # v2.48: boundary_conditions 已合并到 business_rules / alternate_flows，不再单独列出
-        # v2.48: acceptance_criteria 已合并到 business_rules（type=validation），不再单独列出
-        # v2.48: test_hints 已移除，测试提示由用例生成阶段自行推导
-
-    if not items:
+    points = collect_points(srr, functional_points or [], include_preconditions=True)
+    if not points:
         return ""
 
-    return "## SRR 覆盖率检查清单（必须覆盖以下所有要点）\n\n" + "\n".join(items)
+    items: list[str] = []
+
+    def _bullets(pts: list[dict]) -> None:
+        for p in pts:
+            items.append(f"  - [{p['id']}] {p['desc']}")
+
+    top_hp = [p for p in points if p["ptype"] == "happy_path" and not p["fp_id"]]
+    if top_hp:
+        items.append(f"### 总 SRR 主流程（happy_path）：{len(top_hp)} 个步骤")
+        _bullets(top_hp)
+
+    top_alt = [p for p in points if p["ptype"] == "alternate_flow"]
+    if top_alt:
+        items.append(f"### 总 SRR 异常分支（alternate_flows）：{len(top_alt)} 个分支")
+        _bullets(top_alt)
+
+    top_pre = [p for p in points if p["ptype"] == "precondition"]
+    if top_pre:
+        items.append(f"### 总 SRR 前置条件（preconditions）：{len(top_pre)} 条")
+        _bullets(top_pre)
+
+    top_shared = [p for p in points if p["ptype"] == "shared_rule"]
+    if top_shared:
+        items.append(f"### 跨 FP 共享业务规则：{len(top_shared)} 条")
+        _bullets(top_shared)
+
+    # 各功能点的覆盖要点（按 fp_id 分组，保持首次出现顺序）
+    fp_order: list[str] = []
+    fp_groups: dict[str, list[dict]] = {}
+    for p in points:
+        if p["fp_id"]:
+            if p["fp_id"] not in fp_groups:
+                fp_groups[p["fp_id"]] = []
+                fp_order.append(p["fp_id"])
+            fp_groups[p["fp_id"]].append(p)
+
+    for fp_id in fp_order:
+        group = fp_groups[fp_id]
+        fp_name = group[0].get("fp_name", "") or fp_id
+        items.append(f"### 功能点 [{fp_id}] {fp_name}")
+
+        g_hp = [p for p in group if p["ptype"] == "happy_path"]
+        if g_hp:
+            items.append(f"  主流程步骤：{len(g_hp)} 个")
+            _bullets(g_hp)
+        g_alt = [p for p in group if p["ptype"] == "alt_flow"]
+        if g_alt:
+            items.append(f"  异常分支：{len(g_alt)} 个")
+            _bullets(g_alt)
+        g_rule = [p for p in group if p["ptype"] == "rule"]
+        if g_rule:
+            items.append(f"  业务规则：{len(g_rule)} 条")
+            _bullets(g_rule)
+        g_data = [p for p in group if p["ptype"] == "data"]
+        if g_data:
+            items.append(f"  数据约束：{len(g_data)} 条")
+            _bullets(g_data)
+
+    # v2.48: boundary_conditions 已合并到 business_rules / alternate_flows，不再单独列出
+    # v2.48: acceptance_criteria 已合并到 business_rules（type=validation），不再单独列出
+    # v2.48: test_hints 已移除，测试提示由用例生成阶段自行推导
+
+    total_points = sum(1 for p in points if p["ptype"] != "precondition")
+    return (
+        "## SRR 覆盖率检查清单（必须覆盖以下所有要点，方括号编号为要点唯一 ID）\n\n"
+        f"要点总数：{total_points}\n\n" + "\n".join(items)
+    )
 
 
 # ============================================================================
@@ -584,11 +552,15 @@ def build_user_prompt(
     impact_guidance: str = "",
     enable_multi_type: bool = True,
     functional_points: list[dict] | None = None,
+    coverage_gaps: list[dict] | None = None,
+    regression_anchors: list[dict] | None = None,
+    min_cases: int | None = None,
 ) -> str:
     """构建 GenAgent 的用户指令。
 
     Args:
         srr: SRR JSON 字典
+        min_cases: 动态生成数量下限（由要点规模推导）；None 时内部按 SRR/FP 自动计算
         few_shot_cases: 从知识库检索的相似历史用例（Top-K），用于 Few-shot 注入
         matched_patterns: 匹配到的测试模式列表，每项含 {name, pattern_json, category}
         impact_guidance: 影响分析指导文本（仅优化需求时传入，来自 ImpactAnalysisAgent）
@@ -597,6 +569,10 @@ def build_user_prompt(
             {id, name, fp_type, test_hints, atomicity_check, summary}。
             传入时 LLM 将按 FP 定向生成用例，并在每个用例的 related_fp 字段
             标注对应的功能点 ID，用于后续 test_case↔functional_point 追溯。
+        coverage_gaps: v3.4 覆盖缺口（无历史用例/覆盖不足的受影响 FP），
+            注入 prompt 引导 LLM 定向补生成回归用例。
+        regression_anchors: v3.4 回归复用锚点（历史最新版 approved 用例），
+            作为风格/覆盖参考注入（不重复生成，仅对齐既有回归风格）。
 
     Returns:
         str: 完整的用户指令
@@ -670,7 +646,7 @@ def build_user_prompt(
 - 若 data_constraints 中有 required=true 的字段：补充必填校验用例
 - 若 business_rules 中有 type=security/validation/workflow 的规则：生成对应类型的用例
 - v2.48: business_rules 已包含原验收标准（type=validation/business），验收用例从 business_rules 推导
-- 在每个用例中添加 "related_fp" 字段，值为此用例对应的功能点 ID
+- 在每个用例中添加 "related_fp" 字段，值为此用例对应功能点的 id 字段（形如 "REQ-xxx" 的唯一 ID，必须与功能点清单中的 id 完全一致，禁止填 name 中文名称）
 - preconditions 作为用例前置条件"""
 
     # v3.0：注入 SRR 中的影响功能说明（来自依赖图谱 FP 节点点击生成）
@@ -714,27 +690,91 @@ def build_user_prompt(
 - 受影响模块下的关键需求，至少生成 1 个跨模块影响验证用例
 - 在回归用例的 related_fp 字段中标注受影响的 fp_id
 - 对每个用户确认受影响的功能点，生成独立回归用例，type必须为"regression"
-- 回归用例标题加前缀[回归]，related_fp标注源FP，priority默认P1"""
+- 回归用例标题加前缀[回归]，related_fp标注源FP的 fp_id（功能点唯一 ID，禁止填中文名称），priority默认P1"""
 
     # v3.3：SRR 覆盖率检查清单——从 SRR 中显式提取所有必须覆盖的要点
     # 让 LLM 清楚知道需要覆盖多少个点，提高覆盖率和稳定性
     coverage_checklist = _build_coverage_checklist(srr, functional_points or [])
+
+    # 要点级覆盖驱动：动态生成数量下限（由要点规模推导，未显式传入时自动计算）
+    if min_cases is None:
+        min_cases, _ = calc_min_cases(srr, functional_points or [])
+    min_cases = max(int(min_cases), 1)
 
     # v3.4：测试设计技术指导--从 SRR 中分析可应用的设计技术，定向指导生成
     test_design_guidance = _build_test_design_guidance(srr, functional_points or [])
 
     if enable_multi_type:
         regression_line = f"\n7. **回归测试** (根据确认的影响功能点数生成)" if confirmed_affected_count > 0 else ""
-        gen_requirements = f"""## 生成要求
+        gen_requirements = f"""## 生成要求（数量硬约束）
+0. **数量下限（硬约束）**：本次必须生成 **至少 {min_cases} 个** 用例（按 SRR 要点规模动态推导；下方各类型数量为最低分类要求，合计不得低于该下限）
 1. **功能测试** (≥ 3个) — 覆盖 happy_path 和 alternate_flows
 2. **边界值测试** (≥ 2个) — 覆盖 data_constraints 中的边界
 3. **异常测试** (≥ 2个) — 覆盖可预见的异常场景
 4. **安全测试** (≥ 1个) — 覆盖安全关注点{regression_line}"""
     else:
-        regression_line = f"\n7. **回归测试** (根据确认的影响功能点数生成)" if confirmed_affected_count > 0 else ""
-        gen_requirements = f"""## 生成要求
-- 生成核心测试用例（覆盖正常流程和主要异常场景），数量 3-5 个
+        regression_line = f"\n- **回归测试**：根据确认的影响功能点数生成" if confirmed_affected_count > 0 else ""
+        gen_requirements = f"""## 生成要求（数量硬约束）
+- 生成核心测试用例（覆盖正常流程和主要异常场景），**数量硬约束：至少 {min_cases} 个**（按 SRR 要点规模动态推导，禁止少于该数量）
 - 不需要按类型分类，聚焦 happy_path 和关键 alternate_flows{regression_line}"""
+
+    # v3.4: 覆盖缺口（regeneration）与回归复用锚点 section
+    gap_section = ""
+    if coverage_gaps:
+        gap_brief = [
+            {
+                "fp_id": g.get("fp_id", ""),
+                "fp_name": g.get("fp_name", ""),
+                "test_focus": g.get("test_focus", ""),
+                "reason": g.get("reason", ""),
+            }
+            for g in coverage_gaps
+        ]
+        gap_section = f"""
+
+## 覆盖缺口（受影响功能点无历史回归用例，必须定向补生成）
+{json.dumps(gap_brief, ensure_ascii=False, indent=2)}
+### 覆盖缺口生成要求
+- 对每个缺口功能点生成回归用例，type 必为 "regression"，标题加[回归]前缀，related_fp 标注其 fp_id（功能点唯一 ID，与功能点清单中的 id 字段一致，不要填中文名称）
+- test_focus 列出的场景必须全部覆盖
+- 复用历史情况：若下列回归锚点已覆盖某场景，可跳过该场景"""
+    anchor_section = ""
+    if regression_anchors:
+        anchor_brief = [
+            {
+                "title": a.get("title", ""),
+                "type": a.get("type", ""),
+                "priority": a.get("priority", ""),
+                "steps": a.get("steps", [])[:3],
+                "related_fp": a.get("related_fp", ""),
+            }
+            for a in regression_anchors[:5]
+        ]
+        anchor_section = f"""
+
+## 已复用回归用例（来自受影响功能点最新版 approved 用例，无需重复生成）
+{json.dumps(anchor_brief, ensure_ascii=False, indent=2)}
+### 复用说明
+- 下列用例已作为回归基线并入本次结果集，请不要重复生成相同/等价用例
+- 可将它们作为风格与覆盖参考，补生成未覆盖的回归场景"""
+
+    # v4.10: 补生成聚焦——存在 coverage_gaps 时，不再注入全量 SRR（否则补生成退化成
+    # "重新全量生成"，既浪费 LLM 调用时长，又导致二次 review 合并集过大、review
+    # prompt 爆炸）。改为注入精简的当前需求骨架（标题/概述/模块），把重心放在
+    # gap_section 里的缺口罩点清单上，让补生成严格围绕未覆盖要点定向产出。
+    if coverage_gaps:
+        _req = srr.get("requirement", {}) if isinstance(srr, dict) else {}
+        _srr_slim = {
+            "requirement": {
+                "title": _req.get("title", ""),
+                "summary": _req.get("summary", ""),
+                "modules": _req.get("modules", []),
+            },
+            "note": "补生成场景：仅提供需求骨架。下方「覆盖缺口」清单中列出的要点是本次必须定向覆盖的，请严格围绕它们生成，不要重复已覆盖的其他要点。",
+        }
+        _srr_inject = json.dumps(_srr_slim, ensure_ascii=False, indent=2)
+    else:
+        _srr_inject = json.dumps(srr, ensure_ascii=False, indent=2)
 
     return f"""请根据以下需求，生成完整的测试用例集。
 
@@ -744,13 +784,15 @@ def build_user_prompt(
 {impact_section}
 {fp_section}
 {impact_analysis_section}
+{gap_section}
+{anchor_section}
 
 {coverage_checklist}
 
 {test_design_guidance}
 
 ## 当前需求
-{json.dumps(srr, ensure_ascii=False, indent=2)}
+{_srr_inject}
 
 {gen_requirements}
 {fp_requirements}
@@ -764,7 +806,20 @@ def build_user_prompt(
 5. 确认多条件组合规则已用决策表法覆盖
 6. 确认状态变更场景已用状态迁移法覆盖（正向 + 反向）
 7. 确认错误推测检查清单中的场景已覆盖
-8. 生成完成后，在 notes 字段中标注该用例覆盖了检查清单中的哪些条目，以及使用了哪种测试设计技术（如 "覆盖: happy_path.step1, 技术: 场景法"）
+
+## 重点要求：每条用例必须标注要点ID（硬性，关系到覆盖统计）
+**每个用例都必须在其 `notes` 字段中，明确写出该用例覆盖的「SRR 覆盖率检查清单」条目编号**。
+
+- 格式：`notes: "覆盖: [happy_path.1], [REQ-001.rule.2]；技术: 场景法"`（编号用方括号包住，是清单中出现的唯一 ID）
+- 编号必须是检查清单里**原样出现**的 `[xxx.yyy.n]`，不要改写、缩写或自造
+- 一个用例通常覆盖 1-3 个要点；宁可准确（宁缺毋滥），不要编造无关编号
+- 必须为 `notes` 字段赋值，**禁止省略 notes**；空用例将被判定为未覆盖
+
+示例（正确）：
+{{"id": "TC-AUTH-0001-0001", "title": "...", ..., "notes": "覆盖: [happy_path.1], [REQ-001.rule.2]；技术: 场景法", ...}}
+
+示例（错误——缺少编号，会导致该用例被判为未覆盖）：
+{{"id": "...", ..., "notes": "验证登录功能", ...}}
 
 ## 输出格式
 输出 JSON 数组，每个元素为一个测试用例（符合上述 UTCF_CASE_SCHEMA）。

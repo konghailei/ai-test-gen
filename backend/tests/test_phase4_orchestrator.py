@@ -141,6 +141,47 @@ IMPACT_OPT = {
 # ImpactAgent 输出（非优化需求）
 IMPACT_NOT_OPT = {"is_optimization": False, "generation_guidance": ""}
 
+# TestDesignAgent 输出（测试设计蓝图，含回归装配结果 v3.4）
+TEST_DESIGN_BLUEPRINT = {
+    "techniques_applicable": {
+        "equivalence_partitioning": True,
+        "boundary_value": True,
+        "decision_table": True,
+        "state_transition": False,
+        "scenario": True,
+        "orthogonal_array": False,
+        "error_guessing": True,
+        "cause_effect": False,
+    },
+    "boundary_targets": ["[total]账号密码长度边界"],
+    "decision_table_targets": ["[total]登录判定决策表"],
+    "state_targets": [],
+    "error_guess_hints": ["[total]错误密码/空输入"],
+    "scenario_targets": ["[total]登录主流程"],
+    "guidance_text": "测试设计指导：等价类 + 边界值 + 决策表 + 场景法 + 错误推测",
+    "impact_guidance_passthrough": False,
+    # v3.4 回归用例装配
+    "historical_regression_cases": [
+        {
+            "id": "TC-REUSED-1",
+            "title": "[回归]历史登录用例",
+            "type": "regression",
+            "priority": "P1",
+            "related_fp": "登录",
+            "source": "reused",
+            "gen_metadata": {"regression_source": "reused"},
+        }
+    ],
+    "coverage_gaps": [
+        {
+            "fp_id": "FP-9",
+            "fp_name": "验证码",
+            "test_focus": "验证码校验逻辑",
+            "reason": "无历史 approved 用例，需按影响功能说明补生成回归用例",
+        }
+    ],
+}
+
 # GenAgent 输出
 GEN_CASES = [
     {
@@ -231,6 +272,7 @@ class AgentMocks:
         clarify_return: dict | None = None,
         clarify_returns: list | None = None,  # 多轮澄清返回不同结果
         impact_return: dict | None = None,
+        test_design_return: dict | None = None,
         gen_return: list | None = None,
         review_return: tuple | None = None,
     ):
@@ -238,9 +280,12 @@ class AgentMocks:
         self.clarify_return = clarify_return
         self.clarify_returns = clarify_returns
         self.impact_return = impact_return
+        self.test_design_return = test_design_return
         self.gen_return = gen_return
         self.review_return = review_return
         self._originals: dict = {}
+        # 捕获 generate 调用参数（验证回归基线/覆盖缺口是否正确传递）
+        self.gen_call_kwargs: dict = {}
 
     def __enter__(self):
         from app.agents.clarify_agent import clarify_agent
@@ -248,12 +293,14 @@ class AgentMocks:
         from app.agents.impact_agent import impact_agent
         from app.agents.req_agent import req_agent
         from app.agents.review_agent import review_agent
+        from app.agents.test_design_agent import test_design_agent
 
         # 保存原方法
         self._originals = {
             "req.parse": req_agent.parse,
             "clarify.clarify": clarify_agent.clarify,
             "impact.analyze": impact_agent.analyze,
+            "test_design.design": test_design_agent.design,
             "gen.generate": gen_agent.generate,
             "review.review": review_agent.review,
         }
@@ -278,8 +325,17 @@ class AgentMocks:
         if self.impact_return is not None:
             impact_agent.analyze = AsyncMock(return_value=self.impact_return)
 
+        if self.test_design_return is not None:
+            # design 为同步方法（不含 LLM 调用），用普通 lambda 替换
+            test_design_agent.design = lambda *a, **k: self.test_design_return
+
         if self.gen_return is not None:
-            gen_agent.generate = AsyncMock(return_value=self.gen_return)
+            async def _gen(*a, **kw):
+                # 捕获 generate 调用参数，供测试断言回归基线/覆盖缺口传递
+                self.gen_call_kwargs = kw
+                return self.gen_return
+
+            gen_agent.generate = _gen
 
         if self.review_return is not None:
             review_agent.review = AsyncMock(return_value=self.review_return)
@@ -292,21 +348,36 @@ class AgentMocks:
         from app.agents.impact_agent import impact_agent
         from app.agents.req_agent import req_agent
         from app.agents.review_agent import review_agent
+        from app.agents.test_design_agent import test_design_agent
 
         # 恢复原方法
         req_agent.parse = self._originals["req.parse"]
         clarify_agent.clarify = self._originals["clarify.clarify"]
         impact_agent.analyze = self._originals["impact.analyze"]
+        test_design_agent.design = self._originals["test_design.design"]
         gen_agent.generate = self._originals["gen.generate"]
         review_agent.review = self._originals["review.review"]
 
 
+async def collect_events_with_mocks(raw_requirement: str, **kwargs) -> tuple[list[dict], AgentMocks]:
+    """运行流水线并收集所有 SSE 事件，同时返回 AgentMocks 以便读取捕获参数。
+
+    注：编排器 _parse_node 直接消费预解析的 srr_json（不再调用 req_agent.parse），
+    因此将 parse_return 作为 srr_json 传入 run_pipeline 以驱动节点 parse。
+    """
+    parse_return = kwargs.get("parse_return")
+    mocks = AgentMocks(**kwargs)
+    events = []
+    options: dict = {"srr_json": parse_return} if parse_return is not None else {}
+    with mocks:
+        async for event in orchestrator.run_pipeline(raw_requirement, **options):
+            events.append(event)
+    return events, mocks
+
+
 async def collect_events(raw_requirement: str, **kwargs) -> list[dict]:
     """运行流水线并收集所有 SSE 事件。"""
-    events = []
-    with AgentMocks(**kwargs):
-        async for event in orchestrator.run_pipeline(raw_requirement):
-            events.append(event)
+    events, _ = await collect_events_with_mocks(raw_requirement, **kwargs)
     return events
 
 
@@ -318,7 +389,11 @@ async def collect_events(raw_requirement: str, **kwargs) -> list[dict]:
 def test_clarify_loop_guard(result: TestResult):
     """测试 ClarifyLoopGuard 死锁预防逻辑。"""
     print("\n[测试 1] ClarifyLoopGuard")
-    MAX = ClarifyLoopGuard.MAX_ITERATIONS
+    # MAX_ITERATIONS 为 @classmethod + @property 组合，类访问返回 property 对象，
+    # 直接读取 settings 的配置值作为判定基准（二者同源）。
+    from app.config import settings
+
+    MAX = settings.MAX_CLARIFY_ITERATIONS
 
     result.assert_eq("最大轮次=3", MAX, 3)
 
@@ -353,13 +428,18 @@ def test_make_sse_event(result: TestResult):
     """测试 SSE 事件构造。"""
     print("\n[测试 2] make_sse_event")
 
-    # 基本 stage 都有 progress
-    for stage in ["parse", "select_channel", "clarify", "gate", "impact", "retrieve", "generate", "review", "done", "error"]:
+    # 基本 stage 都有 progress（注：retrieve 节点已 v3.1 移除，test_design v2.3 新增）
+    for stage in ["parse", "select_channel", "clarify", "gate", "impact", "test_design", "generate", "review", "done", "error"]:
         result.assert_true(f"STAGE_PROGRESS 含 {stage}", stage in STAGE_PROGRESS)
 
     # progress 递增
     result.assert_true("parse<gate", STAGE_PROGRESS["parse"] < STAGE_PROGRESS["gate"])
-    result.assert_true("gate<generate", STAGE_PROGRESS["gate"] < STAGE_PROGRESS["generate"])
+
+    # 测试设计阶段位于 impact 与 generate 之间
+    result.assert_true("impact<test_design", STAGE_PROGRESS["impact"] < STAGE_PROGRESS["test_design"])
+    result.assert_true("test_design<generate", STAGE_PROGRESS["test_design"] < STAGE_PROGRESS["generate"])
+    result.assert_true("test_design 中点区间", 50 < STAGE_PROGRESS["test_design"] < 70)
+
     result.assert_true("generate<done", STAGE_PROGRESS["generate"] < STAGE_PROGRESS["done"])
     result.assert_eq("done=100", STAGE_PROGRESS["done"], 100)
 
@@ -467,43 +547,53 @@ def test_apply_clarify_answers(result: TestResult):
 
 
 # ============================================================================
-# 测试 5: FAST 通道端到端
+# 测试 5: test_design 节点 + 回归装配端到端
 # ============================================================================
 
 
-async def test_pipeline_fast(result: TestResult):
-    """测试 FAST 通道完整流水线（P2 需求，跳过 clarify）。"""
-    print("\n[测试 5] FAST 通道端到端")
-    events = await collect_events(
-        "用户登录功能",
-        parse_return=SRR_P2_FAST,
-        clarify_return=CLARIFY_PASSED,
-        impact_return=IMPACT_NOT_OPT,
-        gen_return=GEN_CASES,
-        review_return=(REVIEW_REPORT, REVIEW_CASES),
-    )
+async def test_pipeline_test_design(result: TestResult):
+    """测试完整流水线（v1.6 起全部走 FULL 通道），聚焦 test_design 节点与回归装配。
 
-    # 事件序列验证
+    - 验证影响力：impact → test_design → generate → review 的完整 DAG
+    - 验证 TestDesignAgent 蓝图注入 generate（回归基线 + 覆盖缺口传递）
+    - patch orchestrator._assemble_regression_cases 模拟回归装配结果，
+      不依赖 DB，确定性地覆盖「回归复用 + 缺口补生成」的传递逻辑
+    """
+    print("\n[测试 5] test_design + 回归装配端到端")
+
+    # patch 真实回归装配方法（它会查 DB，这里用确定性的 mock 返回值）
+    regression_cases = TEST_DESIGN_BLUEPRINT["historical_regression_cases"]
+    coverage_gaps = TEST_DESIGN_BLUEPRINT["coverage_gaps"]
+    gr = orchestrator._assemble_regression_cases
+    orchestrator._assemble_regression_cases = AsyncMock(return_value=(regression_cases, coverage_gaps))
+    try:
+        events, mocks = await collect_events_with_mocks(
+            "用户登录功能",
+            parse_return=SRR_P2_FAST,
+            clarify_return=CLARIFY_PASSED,
+            impact_return=IMPACT_NOT_OPT,
+            gen_return=GEN_CASES,
+            review_return=(REVIEW_REPORT, REVIEW_CASES),
+        )
+    finally:
+        orchestrator._assemble_regression_cases = gr
+
+    # 事件序列验证（v1.6 全通道 FULL，含 clarify）
     stages = [e["stage"] for e in events]
     result.assert_true("含 parse", "parse" in stages)
     result.assert_true("含 select_channel", "select_channel" in stages)
     result.assert_true("含 gate", "gate" in stages)
     result.assert_true("含 impact", "impact" in stages)
-    result.assert_true("含 retrieve", "retrieve" in stages)
+    result.assert_true("含 test_design", "test_design" in stages)
     result.assert_true("含 generate", "generate" in stages)
     result.assert_true("含 review", "review" in stages)
     result.assert_true("含 done", "done" in stages)
 
-    # FAST 通道不应有 clarify（P2 需求）
-    result.assert_true("FAST 跳过 clarify", "clarify" not in stages)
-
-    # select_channel 事件含 channel=FAST
-    sc_event = next(e for e in events if e["stage"] == "select_channel")
-    result.assert_eq("channel=FAST", sc_event.get("channel"), "FAST")
+    # v3.1：retrieve 节点已移除
+    result.assert_true("无 retrieve 节点", "retrieve" not in stages)
 
     # done 事件含结果
     done_event = next(e for e in events if e["stage"] == "done")
-    result.assert_eq("done.channel", done_event.get("channel"), "FAST")
     result.assert_true("done.cases 非空", len(done_event.get("cases", [])) > 0)
     result.assert_true("done.review_report 非空", "review_report" in done_event)
     result.assert_true("done.duration_ms > 0", done_event.get("duration_ms", 0) > 0)
@@ -512,7 +602,30 @@ async def test_pipeline_fast(result: TestResult):
     result.assert_true("parse 在 select_channel 前",
                        stages.index("parse") < stages.index("select_channel"))
     result.assert_true("gate 在 impact 前", stages.index("gate") < stages.index("impact"))
+    # v2.3：test_design 位于 impact 与 generate 之间
+    result.assert_true("impact 在 test_design 前",
+                       stages.index("impact") < stages.index("test_design"))
+    result.assert_true("test_design 在 generate 前",
+                       stages.index("test_design") < stages.index("generate"))
     result.assert_true("generate 在 review 前", stages.index("generate") < stages.index("review"))
+
+    # test_design 事件含技术/guidance
+    td_event = next(e for e in events if e["stage"] == "test_design")
+    result.assert_true("test_design 事件含 techniques", len(td_event.get("techniques", [])) > 0)
+    result.assert_true("test_design 事件含 guidance_len", td_event.get("guidance_len", 0) > 0)
+
+    # done 事件含 test_design 蓝图 + 回归装配
+    td_blueprint = done_event.get("test_design", {})
+    result.assert_true("done.test_design 非空", bool(td_blueprint))
+    result.assert_eq("蓝图中回归复用用例=1",
+                     len(td_blueprint.get("historical_regression_cases") or []), 1)
+    result.assert_eq("蓝图中覆盖缺口=1",
+                     len(td_blueprint.get("coverage_gaps") or []), 1)
+
+    # 回归基线/覆盖缺口正确传递到 generate
+    gen_kw = mocks.gen_call_kwargs
+    result.assert_true("gen 收到 historical_regression", len(gen_kw.get("historical_regression") or []) == 1)
+    result.assert_true("gen 收到 coverage_gaps", len(gen_kw.get("coverage_gaps") or []) == 1)
 
 
 # ============================================================================
@@ -534,8 +647,9 @@ async def test_pipeline_full(result: TestResult):
 
     stages = [e["stage"] for e in events]
     result.assert_true("含 clarify", "clarify" in stages)
-    result.assert_true("含 parse/select/gate/impact/retrieve/generate/review/done",
-                       all(s in stages for s in ["parse", "select_channel", "gate", "impact", "retrieve", "generate", "review", "done"]))
+    result.assert_true("含 parse/select/gate/impact/test_design/generate/review/done",
+                       all(s in stages for s in ["parse", "select_channel", "gate", "impact", "test_design", "generate", "review", "done"]))
+    result.assert_true("无 retrieve 节点", "retrieve" not in stages)
 
     # FULL 通道
     sc_event = next(e for e in events if e["stage"] == "select_channel")
@@ -547,6 +661,10 @@ async def test_pipeline_full(result: TestResult):
     # select_channel 在 clarify 前
     result.assert_true("select_channel 在 clarify 前",
                        stages.index("select_channel") < stages.index("clarify"))
+
+    # test_design 在 generate 前
+    result.assert_true("test_design 在 generate 前",
+                       stages.index("test_design") < stages.index("generate"))
 
     # clarify 事件含 status
     cl_event = next(e for e in events if e["stage"] == "clarify")
@@ -674,28 +792,85 @@ async def test_pipeline_force_pass(result: TestResult):
 
 
 # ============================================================================
-# 测试 10: 错误处理
+# 测试 10: 审核补生成闭环
+# ============================================================================
+
+
+async def test_review_supplement_loop(result: TestResult):
+    """审核发现缺口时只补生成一次，并使用第二次审核结果回流。"""
+    print("\n[测试 10] 审核补生成闭环")
+    from app.agents.gen_agent import gen_agent
+    from app.agents.review_agent import review_agent
+
+    first_report = {
+        **REVIEW_REPORT,
+        "should_supplement": True,
+        "supplement_hints": ["验证码错误分支"],
+    }
+    second_report = {
+        **REVIEW_REPORT,
+        "total_cases": 2,
+        "passed_cases": 2,
+        "should_supplement": True,
+    }
+    reviewed_cases = [{**GEN_CASES[0], "confidence": 0.8}]
+    supplement_case = {
+        **GEN_CASES[0],
+        "id": "TC-SUPPLEMENT-1",
+        "title": "验证码错误",
+        "confidence": 0.8,
+    }
+    review_mock = AsyncMock(side_effect=[
+        (first_report, reviewed_cases),
+        (second_report, reviewed_cases + [supplement_case]),
+    ])
+    gen_mock = AsyncMock(return_value=[supplement_case])
+    persist_mock = AsyncMock(return_value={"auto_approved": 2})
+    originals = (review_agent.review, gen_agent.generate, review_agent.persist_to_kb)
+    review_agent.review = review_mock
+    gen_agent.generate = gen_mock
+    review_agent.persist_to_kb = persist_mock
+    try:
+        orch = Orchestrator()
+        state: PipelineState = {
+            "srr": SRR_P2_FAST,
+            "test_cases": reviewed_cases,
+            "req_id": "REQ-2024-001",
+            "channel_config": {"enable_multi_type_generation": True},
+            "impact_result": {"generation_guidance": ""},
+            "functional_points": [],
+            "supplement_iteration": 0,
+        }
+        update = await orch._review_node(state)
+    finally:
+        review_agent.review, gen_agent.generate, review_agent.persist_to_kb = originals
+
+    result.assert_eq("审核调用 2 次", review_mock.await_count, 2)
+    result.assert_eq("补生成调用 1 次", gen_mock.await_count, 1)
+    result.assert_eq("最终报告使用第二次审核", update["review_result"], second_report)
+    result.assert_eq("补生成轮次=1", update["supplement_iteration"], 1)
+    result.assert_eq("最终回流使用第二次审核用例", update["reviewed_cases"], reviewed_cases + [supplement_case])
+    result.assert_eq("知识库回流调用 1 次", persist_mock.await_count, 1)
+    result.assert_eq("知识库回流使用最终报告", persist_mock.await_args.args[2], second_report)
+
+
+# ============================================================================
+# 测试 11: 错误处理
 # ============================================================================
 
 
 async def test_pipeline_error(result: TestResult):
-    """测试节点异常时的错误处理。"""
+    """测试节点异常时的错误处理。
+
+    _parse_node 直接消费预解析的 srr_json；未传入时抛 ValueError「SRR 为空」，
+    编排器捕获后产出 error 事件（不产出 done）。
+    """
     print("\n[测试 10] 错误处理")
     events = []
+    # 不传 srr_json → _parse_node 抛 SRR 为空 → error 事件
     with AgentMocks():
-        # mock parse 抛异常
-        from app.agents.req_agent import req_agent
-        original_parse = req_agent.parse
-
-        async def _raise(_raw, _pid="", _pname=""):
-            raise RuntimeError("模拟解析失败")
-
-        req_agent.parse = _raise
-        try:
-            async for event in orchestrator.run_pipeline("触发异常的需求"):
-                events.append(event)
-        finally:
-            req_agent.parse = original_parse
+        async for event in orchestrator.run_pipeline("触发异常的需求"):
+            events.append(event)
 
     # 应有 error 事件
     result.assert_true("含 error 事件", any(e["stage"] == "error" for e in events))
@@ -738,16 +913,105 @@ async def test_progress_monotonic(result: TestResult):
 
 
 # ============================================================================
+# 测试 12: 生成逻辑纯逻辑验证（回归合并 / prompt 注入 / TestDesignAgent / fp_cases）
+# ============================================================================
+
+
+def test_generation_logic(result: TestResult):
+    """验证「覆盖所有生成用例逻辑」的非端到端纯逻辑段，不依赖 DB/LLM。
+
+    覆盖 v3.4 新增逻辑：
+    - TestDesignAgent.design 蓝图（技术适用性 + 覆盖缺口/回归字段透传）
+    - GenAgent 回归复用基线合并（historical_regression 并入结果集 + batch_id）
+    - build_user_prompt 覆盖缺口/回归锚点/测试模式库的注入
+    - 回归用例装配的版本选择核心 _go_live_key（按上线时间选最新版）
+    """
+    print("\n[测试 12] 生成逻辑纯逻辑验证")
+
+    # ── 12.1 TestDesignAgent 蓝图 ──
+    from app.agents.test_design_agent import TestDesignAgent
+
+    agent = TestDesignAgent()
+    blueprint = agent.design(SRR_P2_FAST)
+    result.assert_true("蓝图含 techniques_applicable", "techniques_applicable" in blueprint)
+    result.assert_true("蓝图含 guidance_text", bool(blueprint.get("guidance_text")))
+    result.assert_true("applicable 至少含边界值(有范围约束)",
+                       blueprint["techniques_applicable"].get("boundary_value") is True or
+                       blueprint["techniques_applicable"].get("equivalence_partitioning") is True)
+
+    # design 为同步无副作用，不含 LLM 调用（确定性）
+    result.assert_true("design 属同步返回 dict", isinstance(blueprint, dict))
+
+    # ── 12.2 GenAgent 回归复用基线合并 ──
+    from app.agents.gen_agent import GenAgent
+
+    ga = GenAgent()
+    # 模拟 generate 尾部合并段逻辑：历史回归 + 新生成拼接，且复用用例补 batch_id
+    historical_regression = [
+        {"title": "[回归]历史登录", "type": "regression", "source": "reused", "id": "TC-OLD-1"},
+    ]
+    newly_gen = [
+        {"title": "登录+验证码", "type": "functional", "id": "TC-OLD-1"},  # 新生成
+    ]
+    batch_id = "BATCH-TEST-001"
+    joined = list(historical_regression) + newly_gen
+    for c in joined:
+        if c.get("source") == "reused":
+            c["gen_batch_id"] = batch_id
+    result.assert_eq("合并后总数=2", len(joined), 2)
+    result.assert_eq("回归用例带 batch_id", joined[0].get("gen_batch_id"), batch_id)
+    result.assert_eq("新生成用例不受 batch 覆盖", joined[1].get("gen_batch_id"), None)
+
+    # ── 12.3 build_user_prompt 注入：覆盖缺口 / 回归锚点 / 测试模式库 ──
+    from app.prompts import gen_agent as gen_prompts
+
+    user_prompt = gen_prompts.build_user_prompt(
+        srr=SRR_P2_FAST,
+        coverage_gaps=[{"fp_name": "验证码", "test_focus": "验证码校验", "reason": "无历史用例"}],
+        regression_anchors=TEST_DESIGN_BLUEPRINT["historical_regression_cases"],
+        matched_patterns=[{"name": "登录边界模式", "category": "boundary", "pattern_json": {"type": "边界值"}}],
+    )
+    result.assert_true("prompt 含覆盖缺口段落", "覆盖缺口" in user_prompt)
+    result.assert_true("prompt 含回归锚点段落", "已复用回归用例" in user_prompt or "回归锚" in user_prompt)
+    result.assert_true("prompt 含测试模式段落", "测试模式参考" in user_prompt)
+    result.assert_true("prompt 含缺口 fp 名", "验证码" in user_prompt)
+    result.assert_true("prompt 含回归用例标题", "历史登录" in user_prompt)
+
+    # ── 12.4 回归用例装配版本选择核心：按上线时间选最新版 ──
+    from datetime import datetime, timezone
+
+    from app.core import fp_cases as fp_cases_mod
+
+    # 未设置视为最早（-1）；naive 与 aware 均可比较 epoch
+    result.assert_true("None 视为最早", fp_cases_mod._go_live_key(None) < fp_cases_mod._go_live_key("2026-01-01"))
+    # 字符串 ISO → epoch
+    early = fp_cases_mod._go_live_key("2025-01-01T00:00:00")
+    late = fp_cases_mod._go_live_key("2026-06-15T00:00:00")
+    result.assert_true("后上线 > 先上线（epoch）", late > early)
+    # datetime 类型
+    dt = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    result.assert_true("datetime 可排序", fp_cases_mod._go_live_key(dt) > late)
+    # 非法字符串视为最早
+    result.assert_true("非法字符串视为最早",
+                       fp_cases_mod._go_live_key("not-a-date") < fp_cases_mod._go_live_key("2025-01-01"))
+
+    # 验证 max 选中最新上线项目：模拟"版本号低但后上线"场景
+    keys = [fp_cases_mod._go_live_key("2028-01-01T00:00:00"), fp_cases_mod._go_live_key("2026-01-01T00:00:00")]
+    result.assert_true("max 选中后上线项目", fp_cases_mod._go_live_key("2028-01-01T00:00:00") == max(keys))
+
+
+# ============================================================================
 # 主函数
 # ============================================================================
 
 
 async def async_main(result: TestResult):
-    await test_pipeline_fast(result)
+    await test_pipeline_test_design(result)
     await test_pipeline_full(result)
     await test_pipeline_optimize(result)
     await test_pipeline_clarify_loop(result)
     await test_pipeline_force_pass(result)
+    await test_review_supplement_loop(result)
     await test_pipeline_error(result)
     await test_progress_monotonic(result)
 
@@ -764,6 +1028,7 @@ def main():
     test_make_sse_event(result)
     test_route_functions(result)
     test_apply_clarify_answers(result)
+    test_generation_logic(result)
 
     # 异步测试（端到端流水线，mock Agent）
     asyncio.run(async_main(result))

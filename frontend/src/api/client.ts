@@ -462,16 +462,21 @@ export function generateCases(
   onEvent: (event: Record<string, unknown>) => void,
   onError?: (err: string) => void,
   onDone?: () => void,
+  opts?: { resume?: boolean; resume_from_task?: string },
 ): AbortController {
   const controller = new AbortController()
   const token = getToken()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (token) headers['Authorization'] = `Bearer ${token}`
 
+  const body: Record<string, unknown> = { req_id: reqId }
+  if (opts?.resume) body.resume = true
+  if (opts?.resume_from_task) body.resume_from_task = opts.resume_from_task
+
   fetch(`${BASE}/generate`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ req_id: reqId }),
+    body: JSON.stringify(body),
     signal: controller.signal,
   }).then(async (res) => {
     // 错误响应处理：后端可能返回 400/404/409 等，body 为 JSON 错误信息而非 SSE 流
@@ -1007,6 +1012,79 @@ export const dependencyGraph = {
   /** v3.2: 功能点权威完整版 SRR（跨版本聚合，最新最完整内容） */
   fpCrsr: (fpId: string) =>
     request<import('../types').FpCrsrResult>(`/products/fp-crsr/${fpId}`),
+}
+
+// ============================================================
+// 评审报告中心（v5.2 P1）
+// ============================================================
+export const reviewReportsApi = {
+  /** 报告列表（产品隔离 + 类型/需求筛选 + 分页） */
+  list: (params?: {
+    product_id?: string
+    report_type?: string
+    req_id?: string
+    task_id?: string
+    page?: number
+    page_size?: number
+  }) => {
+    const query = new URLSearchParams()
+    if (params?.product_id) query.append('product_id', params.product_id)
+    if (params?.report_type) query.append('report_type', params.report_type)
+    if (params?.req_id) query.append('req_id', params.req_id)
+    if (params?.task_id) query.append('task_id', params.task_id)
+    if (params?.page) query.append('page', String(params.page))
+    if (params?.page_size) query.append('page_size', String(params.page_size))
+    const qs = query.toString()
+    return request<{ items: import('../types').ReviewReportSummary[]; total: number; page: number; page_size: number }>(
+      `/review-reports${qs ? '?' + qs : ''}`
+    )
+  },
+  /** 报告详情（含维度置信度、问题列表、原始报告） */
+  get: (reportId: string) =>
+    request<import('../types').ReviewReportDetail>(`/review-reports/${reportId}`),
+  /** 类型统计（顶部概览卡片） */
+  stats: (productId?: string) => {
+    const params = productId ? `?product_id=${productId}` : ''
+    return request<Record<string, { count: number; avg_confidence: number }>>(`/review-reports/stats${params}`)
+  },
+  /** P2: 批量采纳/驳回报告意见 */
+  adoptIssues: (
+    reportId: string,
+    items: Array<{ issue_id: string; accepted: boolean; comment?: string }>,
+  ) =>
+    request<{
+      updated: number
+      not_found?: string[]
+      adoption_summary?: { total: number; accepted: number; rejected: number; pending: number }
+    }>(`/review-reports/${reportId}/issues/adopt`, {
+      method: 'POST',
+      body: JSON.stringify({ items }),
+    }),
+  /** P3: 可整合的目标提示词列表 */
+  evolutionTargets: () =>
+    request<{ items: import('../types').EvolutionTarget[] }>('/review-reports/prompt-evolution/targets'),
+  /** P3: 执行多报告意见整合 → 提示词新版本 */
+  runEvolution: (params: {
+    product_id: string
+    report_ids: string[]
+    target_prompt_id: string
+    manual_notes?: string
+  }) =>
+    request<import('../types').EvolutionResult>('/review-reports/prompt-evolution', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+  /** P3: 整合历史列表 */
+  evolutionHistory: (params?: { product_id?: string; target_prompt_id?: string; limit?: number }) => {
+    const query = new URLSearchParams()
+    if (params?.product_id) query.append('product_id', params.product_id)
+    if (params?.target_prompt_id) query.append('target_prompt_id', params.target_prompt_id)
+    if (params?.limit) query.append('limit', String(params.limit))
+    const qs = query.toString()
+    return request<{ items: import('../types').EvolutionHistoryItem[]; total: number }>(
+      `/review-reports/prompt-evolution${qs ? '?' + qs : ''}`
+    )
+  },
 }
 
 // ============================================================

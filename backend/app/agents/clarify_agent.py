@@ -361,7 +361,7 @@ class ClarifyAgent:
             if is_guess:
                 removed.append(q)
                 logger.info(
-                    "[ClarifyAgent] 过滤猜想上限类问题: id=%s field=%s question=%s",
+                    "[ClarifyAgent] 过滤猜想上限类问题: id={} field={} question={}",
                     q.get("id", ""), field, q_text[:60],
                 )
                 continue
@@ -380,12 +380,12 @@ class ClarifyAgent:
 
         if removed:
             logger.info(
-                "[ClarifyAgent] 问题必要性过滤完成: 原始%d条 → 保留%d条（删除%d条猜想型上限问题）",
+                "[ClarifyAgent] 问题必要性过滤完成: 原始{}条 → 保留{}条（删除{}条猜想型上限问题）",
                 len(questions), len(kept), len(removed),
             )
         else:
             logger.debug(
-                "[ClarifyAgent] 问题必要性过滤完成: 原始%d条 → 保留%d条（无猜想型删除）",
+                "[ClarifyAgent] 问题必要性过滤完成: 原始{}条 → 保留{}条（无猜想型删除）",
                 len(questions), len(kept),
             )
         return kept
@@ -445,14 +445,14 @@ class ClarifyAgent:
             if drop:
                 removed.append(q)
                 logger.info(
-                    "[ClarifyAgent] 过滤过度宽泛追问: id=%s field=%s reason=%s question=%s",
+                    "[ClarifyAgent] 过滤过度宽泛追问: id={} field={} reason={} question={}",
                     q.get("id", ""), field, reason, qt[:60],
                 )
             else:
                 kept.append(q)
         if removed:
             logger.info(
-                "[ClarifyAgent] 过度宽泛追问过滤: 原始%d条 -> 保留%d条(删除%d条设计阶段细节)",
+                "[ClarifyAgent] 过度宽泛追问过滤: 原始{}条 -> 保留{}条(删除{}条设计阶段细节)",
                 len(questions), len(kept), len(removed),
             )
         return kept
@@ -536,14 +536,14 @@ class ClarifyAgent:
                 fixed.append(q2)
                 fixed_count += 1
                 logger.info(
-                    "[ClarifyAgent] options不匹配已降级: id=%s field=%s question=%s",
+                    "[ClarifyAgent] options不匹配已降级: id={} field={} question={}",
                     q2.get("id", ""), q2.get("field", ""), q_text[:50],
                 )
             else:
                 fixed.append(q)
 
         if fixed_count > 0:
-            logger.info("[ClarifyAgent] options校验完成: 共修复%d条（LLM options index错乱）", fixed_count)
+            logger.info("[ClarifyAgent] options校验完成: 共修复{}条（LLM options index错乱）", fixed_count)
         return fixed
 
     async def clarify(
@@ -766,7 +766,7 @@ class ClarifyAgent:
                         _q["_ref_theme_label"] = "引用的规则"
             if _patched:
                 logger.warning(
-                    "[ClarifyAgent] v2.8.69 兜底防泄漏：LLM语义问题发现 theme_grp_N 泄漏 %d 条，已替换为通用主题名",
+                    "[ClarifyAgent] v2.8.69 兜底防泄漏：LLM语义问题发现 theme_grp_N 泄漏 {} 条，已替换为通用主题名",
                     _patched,
                 )
             if llm_semantic_questions:
@@ -905,14 +905,14 @@ class ClarifyAgent:
                     _q_theme = _llm_extract_theme(q)
                     if any(_llm_theme_overlaps(_q_theme, _rt) for _rt in _llm_resolved_themes):
                         logger.info(
-                            "[ClarifyAgent] 收敛跳过 LLM 层已答引用未定义主题: theme=%s",
+                            "[ClarifyAgent] 收敛跳过 LLM 层已答引用未定义主题: theme={}",
                             _q_theme,
                         )
                         continue
                 # v2.8.66: 跳过 LLM 生成的 legacy_data_impact 专项字段（与固定优化问题重复）
                 if any(f in field for f in _LDI_DUP_FIELDS):
                     logger.info(
-                        "[ClarifyAgent] 跳过 LLM 生成的 legacy_data_impact 专项问题(与固定优化问题重复): field=%s",
+                        "[ClarifyAgent] 跳过 LLM 生成的 legacy_data_impact 专项问题(与固定优化问题重复): field={}",
                         field,
                     )
                     continue
@@ -929,7 +929,7 @@ class ClarifyAgent:
                 )
                 if _is_opt_dup_q1 or _is_opt_dup_q2:
                     logger.info(
-                        "[ClarifyAgent] 跳过 LLM 生成的优化影响语义重复问题: qtext[:60]=%s",
+                        "[ClarifyAgent] 跳过 LLM 生成的优化影响语义重复问题: qtext[:60]={}",
                         qtext[:60],
                     )
                     continue
@@ -1030,7 +1030,7 @@ class ClarifyAgent:
                     q for i, q in enumerate(_UNIFIED_CANDIDATES) if i not in dedup_skip
                 ]
                 logger.info(
-                    "[ClarifyAgent] 统一分流池-引用未定义同主题去重: 原 %d 条 → 现 %d 条, 跳过 %d 条",
+                    "[ClarifyAgent] 统一分流池-引用未定义同主题去重: 原 {} 条 → 现 {} 条, 跳过 {} 条",
                     before, len(_UNIFIED_CANDIDATES), len(dedup_skip),
                 )
         except Exception as _dedup_e:
@@ -1161,7 +1161,7 @@ class ClarifyAgent:
                     q for i, q in enumerate(llm_kb_eligible_questions) if i not in skip2
                 ]
                 logger.info(
-                    "[ClarifyAgent] 引用未定义跨来源去重(LLM语义 vs 规则层): 原 %d 条 → 现 %d 条, 跳过 %d 条",
+                    "[ClarifyAgent] 引用未定义跨来源去重(LLM语义 vs 规则层): 原 {} 条 → 现 {} 条, 跳过 {} 条",
                     before, len(llm_kb_eligible_questions), len(skip2),
                 )
         except Exception as _dedup_e2:
@@ -1269,7 +1269,7 @@ class ClarifyAgent:
                         suffixes = ["保留数量", "上限", "策略"]
                     short_query = theme_label + (" " + " ".join(suffixes) if suffixes else "")
                     logger.debug(
-                        "[ClarifyAgent] ref_undef 类生成短 KB 查询: theme=%s short=%s",
+                        "[ClarifyAgent] ref_undef 类生成短 KB 查询: theme={} short={}",
                         theme_label, short_query,
                     )
                 derived = {
@@ -1334,7 +1334,7 @@ class ClarifyAgent:
                     q for i, q in enumerate(kb_questions) if i not in _merge_skip
                 ]
                 logger.info(
-                    "[ClarifyAgent] N4 合并同主题细分 KB 查询: 原 %d 条 → 现 %d 条, 合并跳过 %d 条",
+                    "[ClarifyAgent] N4 合并同主题细分 KB 查询: 原 {} 条 → 现 {} 条, 合并跳过 {} 条",
                     _before_merge, len(kb_questions), len(_merge_skip),
                 )
         except Exception as _merge_e:
@@ -1675,7 +1675,7 @@ class ClarifyAgent:
                 _ik = f"id::{q.get('id', '')}"
                 if _fk in _existing_keys or _ik in _existing_keys or "sem::opt_impact_dup" in _existing_keys:
                     logger.info(
-                        "[ClarifyAgent] 优化配套末位问题去重跳过（已有同语义）: id=%s field=%s",
+                        "[ClarifyAgent] 优化配套末位问题去重跳过（已有同语义）: id={} field={}",
                         q.get("id"), q.get("field"),
                     )
                     continue
@@ -1844,7 +1844,7 @@ class ClarifyAgent:
                     cov = eval_by_id.get(qid) or {}
                     decision = str(cov.get("coverage", "") or "").lower()
                     if decision in ("covered", "yes", "y"):
-                        logger.info("[ClarifyAgent] 答案已覆盖，收敛: id=%s question=%s",
+                        logger.info("[ClarifyAgent] 答案已覆盖，收敛: id={} question={}",
                                     qid, (it["question"].get("question", "") or "")[:40])
                         continue
                     # 未覆盖 / 模糊 / 不完整 → 追问（保留原问题，标记追问）
@@ -1852,7 +1852,7 @@ class ClarifyAgent:
                     qi["_followup"] = True
                     qi["_followup_reason"] = str(cov.get("reason", "") or "")[:200]
                     followup.append(qi)
-                logger.info("[ClarifyAgent] eval_answer_coverage: answered=%d, followup=%d, skipped=%d",
+                logger.info("[ClarifyAgent] eval_answer_coverage: answered={}, followup={}, skipped={}",
                             len(answered), len(followup), len(unanswered_or_skipped))
             except Exception as e:
                 logger.warning("[ClarifyAgent] 答案覆盖评估失败，保守处理：全部视为未覆盖追问: {}", str(e)[:200])
@@ -2746,7 +2746,7 @@ class ClarifyAgent:
                     _kb_q_source = "short" if q.get("_kb_short_query") else "full_question"
                     if _kb_q_source == "short":
                         logger.debug(
-                            "[ClarifyAgent] KB 查询使用短 query: source=%s short=%r (原长=%d)",
+                            "[ClarifyAgent] KB 查询使用短 query: source={} short={!r} (原长={})",
                             _kb_q_source, _kb_q, len(q["question"]),
                         )
                     matched = await hybrid_searcher.search_requirements(
@@ -4843,7 +4843,7 @@ class ClarifyAgent:
         candidate_items = prio_list
         if len(candidate_items) >= MAX_ITEMS:
             logger.info(
-                "[ClarifyAgent] 候选条目较多，已截断到 %d 条（优先保留主题敏感条目）以控制O(n²)开销",
+                "[ClarifyAgent] 候选条目较多，已截断到 {} 条（优先保留主题敏感条目）以控制O(n²)开销",
                 MAX_ITEMS,
             )
 
@@ -4949,7 +4949,7 @@ class ClarifyAgent:
                             continue
                         seen_contradictions.add(dedup_key)
                         logger.info(
-                            "[ClarifyAgent] 条目级冲突命中 theme=%s: 「%s...」vs「%s...」pair=(%s vs %s)",
+                            "[ClarifyAgent] 条目级冲突命中 theme={}: 「{}...」vs「{}...」pair=({} vs {})",
                             th, ti[:40], tj[:40], side_A, side_B,
                         )
                         # v3.0.1 按主题收集，末尾统一合并为一条问题
@@ -5116,7 +5116,7 @@ class ClarifyAgent:
                 continue
             seen_contradictions.add(seen_key)
             logger.info(
-                "[ClarifyAgent] 引用未定义规则级兜底命中: source=%s key=%s text=%s (n=%d)",
+                "[ClarifyAgent] 引用未定义规则级兜底命中: source={} key={} text={} (n={})",
                 rep_s, k, rep_t[:90], len(group),
             )
             # 构建合并版 question 和 context
@@ -5217,7 +5217,7 @@ class ClarifyAgent:
             # v2.8.70 收敛：已答引用未定义主题不再重复提问
             # 通过 _ref_theme_label / 主题关键词重叠判断，命中已答主题则跳过本轮生成。
             if any(_theme_overlaps(theme_label, _rt) for _rt in resolved_themes):
-                logger.info("[ClarifyAgent] 收敛跳过已答引用未定义主题: theme=%s", theme_label)
+                logger.info("[ClarifyAgent] 收敛跳过已答引用未定义主题: theme={}", theme_label)
                 continue
 
             questions.append({

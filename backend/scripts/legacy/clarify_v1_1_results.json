@@ -1,0 +1,98 @@
+[
+  {
+    "label": "文档1: v1.1 优化需求",
+    "doc_path": "/app/tests/博客创作平台-v1.1优化需求文档.md",
+    "elapsed_sec": 66.7,
+    "status": "needs_clarification",
+    "quality": {
+      "overall_score": 0.685,
+      "pass_threshold": 0.75
+    },
+    "questions_count": 9,
+    "issues_count": 0,
+    "expected_passed": 3,
+    "expected_total": 5,
+    "expected_failed": 2,
+    "questions_summary": [
+      {
+        "id": "kb_cross_fp_interactions_shared_business_rules",
+        "priority": "important",
+        "category": "completeness",
+        "field": "cross_fp_interactions.shared_business_rules",
+        "question": "【编辑器优化与内容安全】跨功能模块（如编辑器、素材库、举报处置等）之间共享的全局业务规则有哪些？请选择需要覆盖的规则（可多选）："
+      },
+      {
+        "id": "llm_Q001",
+        "priority": "critical",
+        "category": "conflict",
+        "field": "functional_points[OPT-A-02].validation_criteria",
+        "question": "OPT-A-02 手动标记版本的保留数量上限应如何统一？优化方案中要求“手动版最多保留 50 个，超出提示清理”，但验收标准中要求“手动标记版本长期保留，不设数量上限”，两者存在直接矛盾。"
+      },
+      {
+        "id": "llm_Q002",
+        "priority": "important",
+        "category": "ambiguity",
+        "field": "functional_points[OPT-A-03].diagnostic_rule.minor_edit",
+        "question": "OPT-A-03 中“小修订”的判定标准“正文改动 < 5%”具体如何计算？是按字符数、段落数还是其他度量单位？是否包含标点、空格、格式变化？"
+      },
+      {
+        "id": "llm_Q003",
+        "priority": "important",
+        "category": "gap",
+        "field": "functional_points[OPT-A-01].data_constraints.image",
+        "question": "OPT-A-01 中“现有图片上传规则”具体指哪些格式和单文件大小限制？请明确支持的图片格式（如 JPEG、PNG、GIF 等）以及单文件最大容量（如 5MB、10MB）？"
+      },
+      {
+        "id": "llm_Q004",
+        "priority": "important",
+        "category": "gap",
+        "field": "legacy_data_impact.impact_scope",
+        "question": "本次迭代为优化升级，涉及多个已有模块（素材库、版本、发布等），请明确哪些历史数据或表结构会受到影响？例如：素材库的图片存储表、版本历史表、草稿内容表等是否需要迁移或扩展字段？"
+      },
+      {
+        "id": "llm_Q005",
+        "priority": "important",
+        "category": "gap",
+        "field": "legacy_data_impact.migration_plan",
+        "question": "本次优化涉及数据库结构变更，请明确采用的迁移策略（如全量迁移、增量迁移、双写、停机维护等）？如何保证数据兼容性（如旧版本文章仍可正常加载）？"
+      },
+      {
+        "id": "llm_Q006",
+        "priority": "important",
+        "category": "gap",
+        "field": "legacy_data_impact.rollback_and_validation",
+        "question": "本次优化若迁移失败，如何回滚？请明确回滚条件、回滚窗口（如保留数据备份时长）、触发条件（如迁移脚本执行失败、数据校验不一致）？如何验证迁移数据正确性（如数量校验、并行比对）？"
+      },
+      {
+        "id": "kb_optimization_impact",
+        "priority": "critical",
+        "category": "impact_analysis",
+        "field": "optimization_impact",
+        "question": "【DevBlog 博客创作平台 v1.1 迭代需求文档】检测到这是优化/改进类需求，请问此次优化是否会影响已有历史数据？"
+      },
+      {
+        "id": "kb_optimization_impact_scope",
+        "priority": "important",
+        "category": "impact_analysis",
+        "field": "legacy_data_impact.user_clarification",
+        "question": "请描述此次优化具体影响的历史数据范围（可留空）"
+      }
+    ]
+  },
+  {
+    "label": "文档2: v1.0 产品PRD",
+    "doc_path": "/app/tests/博客创作平台-产品需求文档PRD.md",
+    "elapsed_sec": 20.8,
+    "status": "passed",
+    "quality": {
+      "overall_score": 0.685,
+      "pass_threshold": 0.75
+    },
+    "questions_count": 0,
+    "issues_count": 0,
+    "expected_passed": 0,
+    "expected_total": 4,
+    "expected_failed": 4,
+    "questions_summary": []
+  }
+]

@@ -204,6 +204,17 @@ export interface KnowledgeStats {
   kb_empty: boolean
 }
 
+/** v3.3: QualityGate 门禁结果（SSE gate/done 事件 gate_result 字段） */
+export interface GateResult {
+  passed?: boolean
+  blockers?: string[]
+  warnings?: string[]
+  pass_score?: number
+  cold_start?: boolean
+  recommendation?: string
+  forced_pass?: boolean
+}
+
 export interface SSEEvent {
   stage: string
   message: string
@@ -213,10 +224,20 @@ export interface SSEEvent {
   cases?: TestCase[]
   review_report?: ReviewReport
   impact_result?: Record<string, unknown>
-  gate_result?: Record<string, unknown>
+  gate_result?: GateResult
   clarify_result?: Record<string, unknown>
-  kb_flowback?: Record<string, unknown>
-  // v2.0：一致性检查与 FP 覆盖率
+  kb_flowback?: KbFlowback
+  manual_action_required?: boolean
+  forced_pass?: boolean
+  blockers_count?: number
+  warnings?: string[]
+  regression_reuse_summary?: {
+    reused_count?: number
+    gap_count?: number
+  }
+  supplement_iteration?: number
+  should_supplement?: boolean
+  test_design?: Record<string, unknown>
   consistency_check?: {
     is_inconsistent?: boolean
     count_diff_pct?: number
@@ -242,7 +263,8 @@ export interface ReviewReport {
   should_supplement: boolean
   issues?: ReviewIssue[]
   coverage_summary?: Record<string, number>
-  supplement_hints?: string[]
+  /** 后端 hint 结构为 {case_type, reason} 对象 */
+  supplement_hints?: Array<{ case_type?: string; reason?: string }>
 }
 
 export interface ReviewIssue {
@@ -251,6 +273,92 @@ export interface ReviewIssue {
   severity: string
   message: string
   suggestion: string
+}
+
+// ============================================================
+// 评审报告中心（v5.2 P1）
+// ============================================================
+
+/** 维度级置信度：{score: 0-1, issue_count} */
+export interface DimensionScore {
+  score: number
+  issue_count: number
+}
+
+/** 报告 issue（含 P2 采纳状态） */
+export interface ReportIssue {
+  issue_id: string
+  dimension: string
+  severity: 'blocker' | 'warning' | 'info' | string
+  message: string
+  suggestion: string
+  case_id?: string
+  adoption_status?: 'pending' | 'accepted' | 'rejected' | string
+  adoption_comment?: string
+  adopted_by?: string
+  adopted_at?: string
+}
+
+/** 报告列表项 */
+export interface ReviewReportSummary {
+  id: string
+  report_type: 'srr' | 'case' | string
+  req_id: string
+  req_title: string
+  product_id: string
+  task_id: string | null
+  gen_batch_id: string
+  overall_confidence: number
+  passed: boolean
+  issue_count: number
+  accepted_count?: number
+  dimension_scores: Record<string, DimensionScore>
+  created_by: string
+  created_at: string
+}
+
+/** 报告详情 */
+export interface ReviewReportDetail extends ReviewReportSummary {
+  issues: ReportIssue[]
+  summary: Record<string, any>
+}
+
+/** P3 可整合的目标提示词 */
+export interface EvolutionTarget {
+  prompt_id: string
+  module: string
+  name: string
+  label: string
+  description: string
+  report_types: string[]
+  history_count: number
+}
+
+/** P3 整合结果 */
+export interface EvolutionResult {
+  integration_id: string
+  target_prompt_id: string
+  report_count: number
+  accepted_count: number
+  integration_summary: string
+  prompt_history_id: number
+  new_section: string
+  old_section: string
+}
+
+/** P3 整合历史记录 */
+export interface EvolutionHistoryItem {
+  id: string
+  product_id: string
+  report_ids: string[]
+  report_types: string[]
+  target_prompt_id: string
+  accepted_count: number
+  manual_notes: string
+  integration_summary: string
+  prompt_history_id: number
+  created_by: string
+  created_at: string
 }
 
 export interface ApiResponse<T = unknown> {
@@ -302,10 +410,13 @@ export interface HealthStatus {
 }
 
 export interface KbFlowback {
+  total?: number
   auto_approved: number
   pending_review: number
   rejected: number
   errors: number
+  /** v3.3: 回流整体失败时的错误详情（后端兜底不阻断主流程） */
+  error?: string
 }
 
 export interface Product {

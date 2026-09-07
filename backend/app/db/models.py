@@ -785,6 +785,55 @@ class FunctionalPointCRSR(Base):
 
 
 # ============================================================================
+# 15.6 功能点权威完整版用例集（functional_point_cases，与 CRSR 对称）
+# ============================================================================
+
+class FunctionalPointCases(Base):
+    """功能点最新版用例集（Consolidated Test Cases，各版本 approved 用例聚合）。
+
+    背景：同一功能点常被多个项目版本分别完善，各版本下都可能有各自的已批准用例，
+    库中无"该 FP 当前应回归的权威用例集"。参考腾讯 Agent Memory L0-L3 分层：
+    - L0/L1（证据层）：各版本 test_cases.case_json（保留，不删改）
+    - L2（场景层）：本表固化的聚合"最新版用例集"，项目归档时重建
+
+    聚合规则（与 fp_crsr 同构对称）：
+    - 同一 FP 的 approved 用例按最新版判定口径（项目上线时间 go_live_date 最大者；
+      同项目内按用例 updated_at 取最新）收敛为一份回归基线；
+    - 消费方：影响分析确认受影响功能点时，直接取本表最新版用例归入回归测试，
+      避免每次从历史堆里现场挑选（回归测试选择 RTS 思路）。
+
+    设计依据：
+    - docs/00 §3 阶段④.5（影响分析 → 测试设计）与 docs/03 §5（回归）
+    - fp_crsr.py（功能点跨版本聚合 SRR）的同构实现
+    """
+    __tablename__ = "functional_point_cases"
+    __table_args__ = (
+        UniqueConstraint("product_id", "fp_name", name="uq_fpc_product_fpname"),
+        Index("idx_fpc_product", "product_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    fp_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 聚合后的最新版用例集（Toolbox 列表，来自各版本 approved 用例按版本身份收敛）
+    content: Mapped[list] = mapped_column(JSON, default=list)
+    # 来源维度：最新判定命中的上线时间（ISO），用于追溯"为什么认为它最新"
+    go_live_date: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    project_version: Mapped[str] = mapped_column(String(32), default="", comment="命中最新版的项目版本号（快照，来自 project.version）")
+    # 证据链：参与聚合的用例 ID 列表
+    source_case_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # 固化历史（追溯用）：[{version_id, snapshot_at, source_case_ids}]
+    version_refs: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc)
+    )
+
+
+# ============================================================================
 # 16. 功能点依赖表（fp_dependencies，v1.4）
 # ============================================================================
 
@@ -1096,4 +1145,87 @@ class OperationLog(Base):
     __table_args__ = (
         Index("idx_oplog_action_created", "action", "created_at"),
         Index("idx_oplog_user_created", "username", "created_at"),
+    )
+
+
+# ============================================================================
+# 19. 评审报告表（review_reports，v5.2 评审报告中心）
+# ============================================================================
+
+class ReviewReportRecord(Base):
+    """评审报告表（v5.2 新增，评审报告中心 P1）。
+
+    持久化两类评审报告，改变此前报告仅随 SSE 事件"飘过"不落库的问题：
+    - report_type="srr"：需求分析阶段 QualityGate 质量门禁报告
+    - report_type="case"：用例生成阶段 ReviewAgent 6 维度审核报告
+
+    设计要点：
+    - dimension_scores：维度级置信度 JSON，人工审核时给出各维度参考方向。
+      结构 {dim: {"score": float, "issue_count": int}}
+    - issues：问题列表 JSON，每项含稳定 issue_id 与 adoption_status 字段，
+      预留 P2 逐条采纳（pending/accepted/rejected）与 P3 多报告聚合整合
+      生成新版提示词的消费入口
+    - summary：原始报告全文（gate_dict / review report dict），详情页渲染用
+    """
+    __tablename__ = "review_reports"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="报告 ID: RR-{时间戳}-{随机}")
+    report_type: Mapped[str] = mapped_column(String(8), index=True, comment="报告类型: srr / case")
+    req_id: Mapped[str] = mapped_column(String(64), index=True, comment="关联需求 ID")
+    product_id: Mapped[str] = mapped_column(String(64), index=True, comment="产品隔离")
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True, comment="关联生成任务 ID")
+    req_title: Mapped[str] = mapped_column(String(512), default="", comment="需求标题快照（列表展示用）")
+    gen_batch_id: Mapped[str] = mapped_column(String(64), default="", comment="关联生成批次（case 报告）")
+    overall_confidence: Mapped[float] = mapped_column(Float, default=0.0, comment="总体置信度（case=avg_confidence / srr=overall_score）")
+    passed: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否通过（case=无 blocker 且不补生成 / srr=gate passed）")
+    issue_count: Mapped[int] = mapped_column(Integer, default=0, comment="问题总数")
+    dimension_scores: Mapped[dict] = mapped_column(JSON, default=dict, comment="维度级置信度 {dim: {score, issue_count}}")
+    issues: Mapped[list] = mapped_column(JSON, default=list, comment="问题列表，含 adoption_status 预留采纳状态")
+    summary: Mapped[dict] = mapped_column(JSON, default=dict, comment="原始报告全文")
+    created_by: Mapped[str] = mapped_column(String(64), default="pipeline", comment="来源: pipeline / backfill / api")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        Index("idx_rreport_product_type", "product_id", "report_type", "created_at"),
+        Index("idx_rreport_req", "req_id", "created_at"),
+    )
+
+
+# ============================================================================
+# 20. 提示词整合记录表（prompt_integrations，v5.2 评审报告中心 P3）
+# ============================================================================
+
+class PromptIntegrationRecord(Base):
+    """提示词整合记录表（v5.2 P3 新增）。
+
+    记录每次"多报告已采纳意见 + 人工意见 → LLM 整合 → 提示词新版本"操作：
+    - 消费来源：report_ids + accepted_issues（哪些报告的哪些意见被整合）
+    - 整合产物：target_prompt_id 指向 prompt_overrides，prompt_history_id
+      指向本次写入产生的 prompt_history 记录（回退锚点，配合
+      POST /api/admin/prompts/{module}/{name}/restore/{history_id} 使用）
+    - 增量补丁式设计：prompt 主体不动，只更新末尾"历史评审沉淀规则"区段
+      （见 app/core/prompt_evolution.py 的标记协议）
+    """
+    __tablename__ = "prompt_integrations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="整合 ID: PI-{时间戳}-{随机}")
+    product_id: Mapped[str] = mapped_column(String(64), index=True, comment="产品隔离")
+    report_ids: Mapped[list] = mapped_column(JSON, default=list, comment="本次消费的评审报告 ID 列表")
+    report_types: Mapped[list] = mapped_column(JSON, default=list, comment="报告类型快照 [srr/case]")
+    target_prompt_id: Mapped[str] = mapped_column(String(128), comment="目标提示词 ID（module.name）")
+    accepted_count: Mapped[int] = mapped_column(Integer, default=0, comment="消费的已采纳意见数")
+    accepted_issues: Mapped[list] = mapped_column(JSON, default=list, comment="消费的意见摘要列表")
+    manual_notes: Mapped[str] = mapped_column(Text, default="", comment="人工补充意见")
+    integration_summary: Mapped[str] = mapped_column(Text, default="", comment="LLM 生成的整合摘要")
+    prompt_history_id: Mapped[int] = mapped_column(Integer, default=0, comment="本次写入产生的 prompt_history 记录 ID（回退锚点）")
+    created_by: Mapped[str] = mapped_column(String(64), default="api", comment="操作人")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        Index("idx_pinteg_product", "product_id", "created_at"),
+        Index("idx_pinteg_target", "target_prompt_id", "created_at"),
     )

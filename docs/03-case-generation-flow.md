@@ -30,6 +30,15 @@
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
+│  Phase 2.5: 测试设计 (v2.3 新增独立阶段，见 §1.6)               │
+│  TestDesignAgent:                                                │
+│  - SRR（总 SRR + FP 子 SRR）8 种技术适用性判定                   │
+│  - 产出测试设计蓝图 (boundary/decision/state/error/scenario)    │
+│  - 定向指导文本注入 GenAgent Prompt（复用 _build_test_design_    │
+│    guidance 同源口径，见 §2.1.0）                                │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
 │  Phase 3: 多维度生成                                             │
 │  GenAgent 并行生成:                                              │
 │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐                   │
@@ -73,6 +82,13 @@
 ```
 
 > **v3.1 架构变更说明**：移除独立 `retrieve` 节点，SRR 已足够详细无需 KB 检索阶段。Few-shot 检索下沉到 GenAgent 内部（轻量检索同模块 approved 用例 Top-3）。
+
+> **v3.3 流程语义补充（回归复用 + 补生成闭环 + 强制放行）**：
+> - **回归基线装配**（Phase 1.5 之后、生成之前）：影响分析确认的受影响 FP 读取**产品+功能点维度最新版 approved 用例**（`fp_cases.aggregate_latest_cases`），转换为 `type=regression / source=reused / source_case_id` 用例并入结果集；无历史用例的 FP 形成覆盖缺口，注入 GenAgent 定向补生成。SSE `test_design`/`done` 事件携带 `regression_reuse_summary`（reused_count / gap_count）。
+> - **审核缺口补生成**（Phase 4）：首次审核 `should_supplement=True` 时按 `supplement_hints` 补生成一次 → `_merge_regression_cases` 合并去重（合并键 `(title.lower(), steps)`，历史回归优先保留）→ **二次审核**；`supplement_iteration` 最多 1。
+> - **KB 回流**（Phase 6）：使用**第二次审核结果**入库；失败时兜底 `{"error": ...}` 不阻断主流程。
+> - **归档固化**：项目归档时按「产品+功能点」固化最新版 approved 用例集（`consolidate_fp_cases`），构成下一次回归复用的基线。
+> - **QualityGate 强制放行**：达最大澄清轮次仍不达标 → `forced_pass=True` 继续流水线，done 事件 `manual_action_required=True` 提示人工修改需求后重新确认（不回滚当次结果）。
 
 > **v2.0 优化要点**（基于 CoverUp / Meta ACH / 天猫 / 字节 SmartUnit 等业界案例）：
 > - **迭代闭环**：GenAgent → ReviewAgent → 若有 blocker → issues 回灌 prompt → 重生成（最多 3 轮）
@@ -535,6 +551,38 @@ async def analyze_requirement_impact(self, req_id: str) -> dict:
 - `MAX_GRAPH_NODES=5000`：图谱节点数超阈值 → 切换 PG recursive CTE
 - `TIMEOUT_SECONDS=5.0`：单次分析超时 → 截断 indirect 列表 + 标记 `truncated=True`
 - 大图谱降级：返回空 indirect + warning，由 ReviewAgent 触发人工补充
+
+---
+
+## 1.6 从需求分析到测试设计（v2.3 补齐）
+
+> **定位**：测试设计是连接「需求分析」与「用例生成」的独立阶段（docs/00 §3.6）。
+> 需求分析回答"需求到底是什么"（①~④），测试设计回答"用什么技术、测哪些点"（④.5 阶段），
+> 用例生成回答"具体怎么测"（⑤~⑧）。v2.3 起测试设计显式化为独立 Agent 与独立编排节点。
+
+```
+需求分析侧                   测试设计侧 ⭐                     用例生成侧
+① ReqAgent ──► ② Clarify   ──► ④.5 TestDesignAgent ──►    ⑤ GenAgent
+③ QualityGate ──► ④ Impact      · 8 技术适用性判定          ⑥ ReviewAgent
+                                  · boundary/decision/       ⑦ FormatEngine
+                                  · state/error/scenario     ⑧ 回流存储
+```
+
+### TestDesignAgent（backend/app/agents/test_design_agent.py）
+
+- **输入**：SRR（总 SRR + FP 子 SRR）+ 影响范围报告
+- **输出**：测试设计蓝图 `test_design_blueprint`（结构化）：
+  - `techniques_applicable`：8 种测试设计技术适用性（等价类/边界值/决策表/状态迁移/场景/正交/错误推测/因果图）
+  - `boundary_targets / decision_table_targets / state_targets / error_guess_hints / scenario_targets`：定向目标清单
+  - `guidance_text`：注入 GenAgent Prompt 的定向指导文本
+  - `impact_guidance_passthrough`：是否有影响分析指导透传
+- **实现要点**：
+  - 纯结构分析（无 LLM 调用），快速、确定、无额外成本；
+  - 技术扫描口径与 `prompts/gen_agent.py:_build_test_design_guidance` 同源（v3.4 系统化方法论），
+    既产出独立蓝图，又不改变 GenAgent 生成结果的既有结构；
+  - 与 GenAgent 单向衔接：TestDesignAgent 只分析产出蓝图，实际 prompt 注入复用 GenAgent 内部逻辑。
+- **编排接入**：orchestrator 在 `impact → test_design → generate` 之间注册 `test_design` 节点，
+  进度为 `test_design=62`，SSE 事件带 `techniques` / `guidance_len`，done 事件带完整 `test_design` 蓝图。
 
 ---
 

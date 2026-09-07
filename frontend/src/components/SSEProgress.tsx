@@ -10,11 +10,12 @@ interface Props {
 }
 
 const stageLabels: Record<string, string> = {
-  parse: '需求解析',
-  select_channel: '通道选择',
-  clarify: '需求澄清',
-  gate: '质量门禁',
+  parse: '加载已确认需求',
+  select_channel: '选择生成通道',
+  clarify: '需求校验',
+  gate: '用例质量门禁',
   impact: '影响分析',
+  test_design: '测试设计',
   generate: '用例生成',
   review: '质量审核',
   done: '完成',
@@ -28,6 +29,7 @@ const stageIcons: Record<string, string> = {
   clarify: '💬',
   gate: '🛡️',
   impact: '🎯',
+  test_design: '🧭',
   generate: '⚙️',
   review: '✅',
   done: '✅',
