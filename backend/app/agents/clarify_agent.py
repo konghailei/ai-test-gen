@@ -1740,7 +1740,9 @@ class ClarifyAgent:
                 "llm_kb_query_gen_ms": _d3,
                 "kb_qa_ms": _d4,
                 "kb_apply_ms": _d5,
-                "llm_question_refine_ms": _d_refine if unresolved_qa else 0,
+                # v3.1.7 fix: 选项精炼环节已在 v3.1.6 移除（含 _t_refine/_d_refine 计时），
+                # 此处残留引用会在含 KB 未答问题的轮次直接 NameError——保留 key 兼容前端，恒为 0
+                "llm_question_refine_ms": 0,
             },
         }
 

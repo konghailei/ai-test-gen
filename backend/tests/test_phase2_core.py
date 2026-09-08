@@ -221,14 +221,13 @@ def test_channel_selector(result: TestResult):
     result.assert_true("is_full 属性", cfg.is_full)
     result.assert_true("is_fast 属性为 False", not cfg.is_fast)
 
-    # 1.2 P2 简单需求（步骤=1）→ FAST 通道
+    # 1.2 P2 简单需求 → v1.6 起统一 FULL 通道（避免通道误判导致漏生成用例）
     cfg = select_channel(SIMPLE_SRR_P2)
-    result.assert_eq("P2 简单需求 → FAST 通道", cfg.channel, "FAST")
-    result.assert_true("FAST 不启用 clarify", not cfg.enable_clarify)
-    result.assert_true("FAST 不启用 impact_analysis", not cfg.enable_impact_analysis)
-    result.assert_true("FAST 不启用 multi_type", not cfg.enable_multi_type_generation)
-    result.assert_true("FAST 不启用 full_review", not cfg.enable_full_review)
-    result.assert_true("is_fast 属性", cfg.is_fast)
+    result.assert_eq("P2 简单需求 → FULL 通道（v1.6 全 FULL）", cfg.channel, "FULL")
+    result.assert_true("FULL 启用 clarify", cfg.enable_clarify)
+    result.assert_true("FULL 启用 multi_type", cfg.enable_multi_type_generation)
+    result.assert_true("FULL 启用 full_review", cfg.enable_full_review)
+    result.assert_true("is_full 属性", cfg.is_full)
 
     # 1.3 优化需求（含 optimization_context）→ FULL + impact_analysis
     cfg = select_channel(OPT_SRR)
@@ -244,9 +243,9 @@ def test_channel_selector(result: TestResult):
     cfg = select_channel(long_srr)
     result.assert_eq("步骤>5 → FULL 通道", cfg.channel, "FULL")
 
-    # 1.5 缺失字段容错（空 SRR）
+    # 1.5 缺失字段容错（空 SRR）→ v1.6 起统一 FULL
     cfg = select_channel({})
-    result.assert_eq("空 SRR → FAST 通道", cfg.channel, "FAST")
+    result.assert_eq("空 SRR → FULL 通道（v1.6 全 FULL）", cfg.channel, "FULL")
 
 
 # ============================================================================
@@ -352,8 +351,16 @@ def test_prompts(result: TestResult):
     """测试提示词模板模块。"""
     print("\n[测试 3] prompts 提示词模板")
     from app.prompts import (
-        req_agent, clarify_agent, impact_agent, gen_agent, review_agent
+        req_agent, clarify_agent, gen_agent, review_agent
     )
+    # v3.1.7: prompts/impact_agent.py 已下线（影响分析为纯规则实现），
+    # import 失败才是正确行为
+    try:
+        import app.prompts.impact_agent  # noqa: F401
+        impact_prompts_gone = False
+    except ModuleNotFoundError:
+        impact_prompts_gone = True
+    result.assert_true("impact_agent 提示词已下线（v3.1.7）", impact_prompts_gone)
 
     # 3.1 ReqAgent
     result.assert_true("req_agent.SYSTEM_PROMPT 非空", bool(req_agent.SYSTEM_PROMPT))
@@ -375,22 +382,18 @@ def test_prompts(result: TestResult):
     result.assert_true("clarify_agent.build_user_prompt 返回非空", bool(cp))
     result.assert_true("clarify prompt 含 SRR JSON", "REQ-2024-001" in cp)
 
-    # 3.3 ImpactAnalysisAgent
-    result.assert_true("impact_agent.SYSTEM_PROMPT 非空", bool(impact_agent.SYSTEM_PROMPT))
-    result.assert_true("impact_agent.IMPACT_REPORT_SCHEMA 非空", bool(impact_agent.IMPACT_REPORT_SCHEMA))
-    ip = impact_agent.build_user_prompt(OPT_SRR, [{"id": "TC-1", "title": "原用例"}])
-    result.assert_true("impact_agent.build_user_prompt 返回非空", bool(ip))
-    result.assert_true("impact prompt 含 optimization_context", "optimization_context" in ip)
-    # 测试生成指导模板
-    guidance = impact_agent.build_generation_guidance(
-        {"update": [{"case_id": "TC-1"}], "add": [{"reason": "新功能"}],
-         "delete": [], "keep": []},
-        [{"case_id": "TC-2"}],
-        {"added": {"验证码": "v"}, "removed": {}, "modified": {}},
+    # 3.3 ImpactAnalysisAgent（v3.1.7: 提示词下线，规则实现）
+    from app.agents.impact_agent import ImpactAnalysisAgent
+    _ia = ImpactAnalysisAgent.__new__(ImpactAnalysisAgent)
+    d, tf = ImpactAnalysisAgent._build_fp_impact_description(
+        _ia, {"fp_id": "FP-1", "fp_name": "用户登录"},
+        [{"fp_name": "权限校验", "depth": 0}], [{"module_name": "用户中心", "reason": "直接模块"}],
     )
-    result.assert_true("build_generation_guidance 返回非空", bool(guidance))
-    result.assert_true("guidance 含影响分析指导", "影响分析指导" in guidance)
-    result.assert_true("guidance 含变更内容", "变更内容" in guidance)
+    result.assert_true("impact 影响说明规则版非空", bool(d) and bool(tf))
+    result.assert_true("影响说明含受影响 FP", "权限校验" in d)
+    d2, _ = ImpactAnalysisAgent._build_fp_impact_description(
+        _ia, {"fp_id": "FP-1", "fp_name": "用户登录"}, [], [])
+    result.assert_true("无影响时兜底文案", "无被依赖关系" in d2)
 
     # 3.4 GenAgent
     result.assert_true("gen_agent.SYSTEM_PROMPT 非空", bool(gen_agent.SYSTEM_PROMPT))
@@ -423,7 +426,8 @@ def test_prompts(result: TestResult):
     ]
     rp = review_agent.build_user_prompt(VALID_SRR_P0, test_cases, [0.8])
     result.assert_true("review_agent.build_user_prompt 返回非空", bool(rp))
-    result.assert_true("review prompt 含 SRR", "REQ-2024-001" in rp)
+    # v5.0 降载：不再注入全量 SRR JSON，仅注入需求标题与测试点提示
+    result.assert_true("review prompt 含需求标题（降载后）", str((VALID_SRR_P0.get("requirement") or {}).get("title", ""))[:20] in rp)
     # 测试置信度计算
     conf = review_agent.calculate_confidence(test_cases[0], [{"similarity": 0.9}])
     result.assert_true("calculate_confidence 返回 [0,1]", 0.0 <= conf <= 1.0)

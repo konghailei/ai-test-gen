@@ -286,6 +286,7 @@ class AgentMocks:
         self._originals: dict = {}
         # 捕获 generate 调用参数（验证回归基线/覆盖缺口是否正确传递）
         self.gen_call_kwargs: dict = {}
+        self.gen_call_kwargs_list: list[dict] = []
 
     def __enter__(self):
         from app.agents.clarify_agent import clarify_agent
@@ -331,8 +332,10 @@ class AgentMocks:
 
         if self.gen_return is not None:
             async def _gen(*a, **kw):
-                # 捕获 generate 调用参数，供测试断言回归基线/覆盖缺口传递
+                # 捕获 generate 调用参数（累积所有调用——v4.6 审核后补生成会额外
+                # 调用一次且不带 historical_regression，最后一次 ≠ 主生成调用）
                 self.gen_call_kwargs = kw
+                self.gen_call_kwargs_list.append(kw)
                 return self.gen_return
 
             gen_agent.generate = _gen
@@ -470,8 +473,10 @@ def test_route_functions(result: TestResult):
     print("\n[测试 3] 路由函数")
     orch = Orchestrator()
 
-    # _route_after_channel
-    state_full: PipelineState = {"channel": "FULL"}
+    # _route_after_channel（v3.x: enable_clarify 由 channel_config 决定，
+    # 生产路径 select_channel 节点总会写入 config；缺失视为禁用走 gate）
+    state_full: PipelineState = {"channel": "FULL",
+                                 "channel_config": {"channel": "FULL", "enable_clarify": True}}
     state_fast: PipelineState = {"channel": "FAST"}
     result.assert_eq("FULL → clarify", orch._route_after_channel(state_full), "clarify")
     result.assert_eq("FAST → gate", orch._route_after_channel(state_fast), "gate")
@@ -484,8 +489,11 @@ def test_route_functions(result: TestResult):
     state_forced: PipelineState = {"gate_result": {"passed": False, "forced_pass": True}, "clarify_iteration": 3}
     result.assert_eq("forced → impact", orch._route_after_gate(state_forced), "impact")
 
-    # _route_after_gate：未通过 & iteration < MAX → clarify
-    state_retry: PipelineState = {"gate_result": {"passed": False, "forced_pass": False}, "clarify_iteration": 1}
+    # _route_after_gate：未通过 & iteration < MAX & clarify 启用 → clarify
+    state_retry: PipelineState = {"gate_result": {"passed": False, "forced_pass": False},
+                                  "clarify_iteration": 1,
+                                  "channel": "FULL",
+                                  "channel_config": {"channel": "FULL", "enable_clarify": True}}
     result.assert_eq("未通过(第1轮) → clarify", orch._route_after_gate(state_retry), "clarify")
 
     # _route_after_gate：未通过 & iteration >= MAX → impact（兜底）
@@ -622,8 +630,12 @@ async def test_pipeline_test_design(result: TestResult):
     result.assert_eq("蓝图中覆盖缺口=1",
                      len(td_blueprint.get("coverage_gaps") or []), 1)
 
-    # 回归基线/覆盖缺口正确传递到 generate
-    gen_kw = mocks.gen_call_kwargs
+    # 回归基线/覆盖缺口正确传递到主生成调用（首次 FP 分片调用；
+    # v4.6 审核后补生成的最后一次调用不带回归参数，故不能断言最后一次）
+    main_gen_calls = [kw for kw in mocks.gen_call_kwargs_list
+                      if "historical_regression" in kw]
+    result.assert_true("存在主生成调用（含回归参数）", len(main_gen_calls) >= 1)
+    gen_kw = main_gen_calls[0] if main_gen_calls else {}
     result.assert_true("gen 收到 historical_regression", len(gen_kw.get("historical_regression") or []) == 1)
     result.assert_true("gen 收到 coverage_gaps", len(gen_kw.get("coverage_gaps") or []) == 1)
 

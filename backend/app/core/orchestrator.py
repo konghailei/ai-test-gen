@@ -1016,6 +1016,35 @@ class Orchestrator:
             except Exception as e:
                 logger.debug("[Orchestrator] checkpoint 写入失败（不阻断）: {}", str(e)[:120])
 
+        # v3.1.7 修复：FP 为空时的批量兜底通道。
+        # v5.0 FP 分片改造后，无功能点需求（FP 拆分失败/被跳过/极简需求）会静默
+        # 生成 0 条用例（FP 循环不执行、集成通道无 cross_fp 数据也不执行）。
+        # 恢复单次全量 SRR 生成，保证任何需求至少有一轮生成。
+        if not fp_list:
+            await _emit_gen("无功能点拆分，按完整需求单次生成...", None)
+            try:
+                batch_cases = await gen_agent.generate(
+                    srr,
+                    enable_multi_type=enable_multi_type,
+                    impact_guidance=impact_guidance,
+                    functional_points=[],
+                    historical_regression=state.get("test_design_blueprint", {}).get(
+                        "historical_regression_cases", []
+                    ),
+                    coverage_gaps=state.get("test_design_blueprint", {}).get(
+                        "coverage_gaps", []
+                    ),
+                )
+                for c in batch_cases or []:
+                    resolved_cases.append(c)
+                logger.info(
+                    "[Orchestrator] FP 为空批量兜底生成: {} 条", len(batch_cases or []),
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Orchestrator] 全量批量生成失败（不阻断）: {}", str(e)[:150],
+                )
+
         # 2) 全局/跨功能点通道：独立生成集成/共享规则用例，保证按 FP 拆分后组合用例不丢失
         _global_srr: dict = {}
         try:

@@ -219,12 +219,16 @@ def test_req_agent(result: TestResult):
     result.assert_eq("默认 priority P2", processed["requirement"]["priority"], "P2")
     result.assert_eq("默认 change_type new", processed["requirement"]["change_type"], "new")
     result.assert_true("补全 flows", "happy_path" in processed["flows"])
-    result.assert_true("补全 data_constraints", "data_constraints" in processed)
+    # v2.48: data_constraints 从顶层 SRR 移除（下沉到功能点 SRR）
+    result.assert_true("v2.48 起不再补顶层 data_constraints", "data_constraints" not in processed)
 
-    # 1.2 _post_process：已有 ID 不覆盖
+    # 1.2 _post_process：ID 策略（不信任 LLM/文档自带 ID 防冲突，原值存 reference_id）
     raw_srr2 = {"requirement": {"id": "REQ-2024-999", "title": "已有ID", "summary": "概述"}}
     processed2 = agent._post_process(raw_srr2)
-    result.assert_eq("已有 ID 不覆盖", processed2["requirement"]["id"], "REQ-2024-999")
+    result.assert_true("LLM 自带 ID 被替换为新唯一 ID",
+                       processed2["requirement"]["id"] != "REQ-2024-999"
+                       and processed2["requirement"]["id"].startswith("REQ-"))
+    result.assert_eq("原 ID 保留为 reference_id", processed2["requirement"].get("reference_id"), "REQ-2024-999")
 
     # 1.3 全局单例
     from app.agents.req_agent import req_agent as singleton
@@ -248,34 +252,41 @@ def test_clarify_agent(result: TestResult):
     result.assert_true("完整 SRR completeness_score > 0.8", comp["completeness_score"] > 0.8)
     result.assert_true("完整 SRR passed=True", comp["passed"])
 
-    # 2.2 _check_completeness：不完整 SRR → 有缺失
+    # 2.2 _check_completeness：v2.34 checklist 瘦身后 critical 仅 requirement.summary
     comp2 = agent._check_completeness(INCOMPLETE_SRR)
-    result.assert_true("不完整 SRR 有 critical 缺失", len(comp2["critical_missing"]) > 0)
-    result.assert_true("不完整 SRR passed=False", not comp2["passed"])
-    result.assert_true("缺失 flows.happy_path", any(f["field"] == "flows.happy_path" for f in comp2["critical_missing"]))
-    result.assert_true("缺失 data_constraints", any(f["field"] == "data_constraints" for f in comp2["critical_missing"]))
+    result.assert_true("骨架 SRR 无 critical 缺失（critical 仅 summary，v2.34 设计）",
+                       len(comp2["critical_missing"]) == 0)
+    result.assert_true("缺失 flows.happy_path 计入 important（v2.34 降级）",
+                       any(f["field"] == "flows.happy_path" for f in comp2["important_missing"]))
+    result.assert_true("低分反映缺失（<0.7）", comp2["completeness_score"] < 0.7)
 
-    # 2.3 _detect_ambiguity：模糊量词检测
+    # 2.3 _detect_ambiguity：v2.9 起移除关键词量词匹配（语义判断交给 LLM），
+    # 规则层仅保留跨文档矛盾候选预检测（单文档恒为空）
     ambs = agent._detect_ambiguity(INCOMPLETE_SRR)
-    result.assert_true("检测到模糊量词", len(ambs) > 0)
-    result.assert_true("含 vague_quantifier 类型", any(a["type"] == "vague_quantifier" for a in ambs))
+    result.assert_eq("单文档无跨文档候选（v2.9 设计）", len(ambs), 0)
 
-    # 2.4 _detect_ambiguity：无歧义 SRR
-    ambs2 = agent._detect_ambiguity(VALID_SRR)
-    result.assert_eq("无歧义 SRR 检测结果为空", len(ambs2), 0)
+    # 2.3b 跨文档候选：多文档标记时产出候选
+    multi_doc_srr = {
+        "requirement": {"id": "REQ-X", "title": "多文档", "summary": "s"},
+        "_raw_text": "【文档：A】用户角色为管理员，上传图片大小限制5MB\n【文档：B】用户角色为操作员，上传图片大小限制10MB",
+    }
+    ambs_md = agent._detect_ambiguity(multi_doc_srr)
+    result.assert_true("多文档产出跨文档候选", len(ambs_md) > 0)
 
-    # 2.5 _rule_based_questions：规则降级问题生成
-    questions = agent._rule_based_questions(comp2, ambs)
-    result.assert_true("规则降级生成问题列表", len(questions["questions"]) > 0)
-    result.assert_true("问题含 critical 优先级", any(q["priority"] == "critical" for q in questions["questions"]))
-    result.assert_true("问题数量 ≤ 5", len(questions["questions"]) <= 5)
-    result.assert_true("含 quality_report", "quality_report" in questions)
+    # 2.5 规则兜底（v3.1.6 起问题生成合并到 LLM 主流程，规则层仅兜底 KB 查询）
+    fq = agent._fallback_gap_queries(comp2, False, set())
+    result.assert_true("规则兜底为缺口生成 KB 查询", len(fq) > 0)
+    result.assert_true("兜底查询含 happy_path 缺口",
+                       any("flows.happy_path" in (q.get("field") or "") for q in fq))
+    # 字段模板：KB 未答问题转人工时的选项注入
+    from app.agents.clarify_agent import FIELD_QUESTION_TEMPLATES
+    result.assert_true("字段问题模板表非空", len(FIELD_QUESTION_TEMPLATES) > 0)
 
     # 2.6 _calc_quality_score：质量评分
     score = agent._calc_quality_score(comp, [], {"quality_report": {"overall_score": 0.9}})
     result.assert_eq("LLM 评分优先", score, 0.9)
 
-    score2 = agent._calc_quality_score(comp2, ambs, {})
+    score2 = agent._calc_quality_score(comp2, ambs_md, {})
     result.assert_true("规则降级评分 < 0.8", score2 < 0.8)
     result.assert_true("规则降级评分 >= 0", score2 >= 0)
 
