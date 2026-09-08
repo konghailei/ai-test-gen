@@ -60,8 +60,7 @@ FIELD_PRIORITY: dict[str, int] = {
 # ============================================================================
 # v2.25: 字段到问题的智能映射表 — 降级时生成具体、可回答的澄清问题
 # ============================================================================
-# 当 LLM 不可用（如配额耗尽）导致 _generate_kb_queries / _refine_unresolved_to_questions
-# 降级时，使用此映射表为每个缺口字段生成：
+# 当 LLM 不可用（如配额耗尽）导致主问题生成降级时，使用此映射表为每个缺口字段生成：
 # 1. 具体的问题文案（含需求标题 + 字段业务含义）
 # 2. 上下文描述（含功能点信息，帮助用户理解"是哪部分的规则"）
 # 3. 默认 input_type（优先 multi_select，让用户多选降低回答成本）
@@ -663,10 +662,9 @@ class ClarifyAgent:
         await _report("KB 状态检查完成，正在检测需求类型（优化/新建）...", 41)
 
         # ② 规则检测：完整性 + 歧义性
-        # v2.8.54: 判断是否优化需求（v3.1.5: LLM 轮子已砍，改回规则匹配），
-        # 结果存入 srr 供 _check_completeness 和 _detect_optimization_impact 共用
-        self._detect_optimization_rule(srr)
-        await _report("需求类型检测完成，正在生成知识库查询...", 44)
+        # v3.1.6: 优化需求专项检测整个移除（用户裁定多余）——不管需求类型直接查 KB，
+        # 查不到返回空不影响流程；优化类特有的「历史数据影响」问题由主问题生成的
+        # 语义检测覆盖（优化类需求原文必然涉及存量数据，LLM 会自然生成该问题）
         completeness = self._check_completeness(srr)
         ambiguities = self._detect_ambiguity(srr)
         logger.info("[ClarifyAgent] 规则检测: completeness_score={:.3f}, critical_missing={}, "
@@ -679,14 +677,12 @@ class ClarifyAgent:
             logger.debug("[ClarifyAgent] 歧义详情: types={}",
                          [a["type"] for a in ambiguities])
 
-        # ②b PRD 专项检测（v2.8.64 新增：仅对新建功能/非优化需求执行）
-        # 对应 optimize 路径的 _detect_optimization_impact，在新建功能场景下执行 5 项规则层前置检测：
+        # ②b PRD 专项检测（v2.8.64 新增；v3.1.6 起对所有需求执行——
+        # 优化需求检测已移除，不再区分新建/优化路径。5 项规则层前置检测：
         # a)上限落地规则 b)降级触发/恢复 c)风险能力与权限一致性 d)立场不一致 e)模糊条件判定
         # 结果分别注入 completeness.important_missing（gap类）和 ambiguities（ambiguity/conflict类）
-        # 并为 completeness 新增 prd_missing / prd_ambiguities 键，供 build_user_prompt 展示给 LLM
-        llm_opt = srr.get("_llm_is_optimization") or {}
-        is_opt_detected = bool(llm_opt.get("is_optimization", False)) if isinstance(llm_opt, dict) else False
-        if not is_opt_detected:
+        # 并为 completeness 新增 prd_missing / prd_ambiguities 键，供 build_user_prompt 展示给 LLM）
+        if True:
             try:
                 prd_gaps, prd_ambg = self._detect_prd_specific_gaps(srr)
                 if prd_gaps:
@@ -956,11 +952,6 @@ class ClarifyAgent:
         # ====================================================================
         _UNIFIED_CANDIDATES: list[dict] = []
 
-        # 来源 A：⑨b 优化需求专项问题（legacy_data_impact / optimization_impact）
-        # 之前这里直接 extend 人工 → 现在并入统一池，impact_analysis 类走 KB（KB 中可能已有同类
-        # 优化需求的迁移/回滚经验），只有用户上轮已答过的「不影响历史数据」才跳过
-        _UNIFIED_CANDIDATES.extend((self._detect_optimization_impact(srr) or []))
-
         # 来源 B：v2.8.65 规则层逻辑矛盾检测（_detect_logical_contradictions）
         # 之前这里直接 extend 人工（原 L1114）→ 现在并入统一池：
         #   - contradiction / conflict：直接人工（KB 无法解决文档内部"50个 vs 不设上限"自相矛盾）
@@ -1214,42 +1205,18 @@ class ClarifyAgent:
         # v2.8.59: 彻底清理残留的空变量和 kb_access_log 占位条目
 
         _t3 = time.time()
-        # ③ KB 查询生成（v2.10）：LLM 动态生成上下文感知的搜索查询。
-        #    不再使用固定模板，LLM 失败时直接抛异常上报，确保查询质量。
-        #    注入原始需求全文，让 KB 查询生成器能参考原始文档，避免对已有内容的重复提问。
-        # v2.8.52: 使用局部 raw_text 变量，不污染调用方 srr 字典
-        raw_text_for_query = srr.get("_raw_text", "")
-        if not raw_text_for_query:
-            try:
-                from sqlalchemy import select as _select
-                from app.db.models import Requirement as _ReqModel
-                req_id = srr.get("requirement", {}).get("id", "")
-                if req_id:
-                    from app.db.database import async_session as _as
-                    async with _as() as rt_sess:
-                        r = await rt_sess.execute(
-                            _select(_ReqModel.raw_text).where(_ReqModel.id == req_id)
-                        )
-                        raw = r.scalar_one_or_none()
-                        if raw:
-                            raw_text_for_query = raw
-            except Exception:
-                pass
-        kb_questions = await self._generate_kb_queries(
-            srr, completeness, srr.get("_is_incremental", False), kb_provider=kb_provider
-        )
-        # v2.8.66: KB 查询生成后立即做必要性过滤——双重保险（源头已过滤，调用点再检查）
-        kb_questions = self._filter_questions_by_necessity(kb_questions)
-        await _report(f"知识库查询生成完成（{len(kb_questions)} 条），正在检索同类需求并校验答案...", 48)
+        # ③ KB 查询（v3.1.6 合并到问题生成）：KB 查询不再独立生成。
+        # 主问题生成（SYSTEM_PROMPT）为每个问题直接给出 kb_query 短关键词检索词；
+        # conflict 类（文档内部矛盾）不查 KB 直接人工；规则缺口由 _fallback_gap_queries 兜底。
+        kb_questions: list[dict] = []
 
-        # v2.8.65: 将 LLM 语义检测中「适合 KB 查询」的问题转为额外 KB 查询
+        # v2.8.65: 将 LLM 语义检测中「适合 KB 查询」的问题转为 KB 查询
         # 这些问题（如「现有图片上传规则是什么」「自动保存保留策略是什么」）很可能在 KB
         # 历史需求中已有定义，应先查 KB，未答的才在步骤⑧ 转为人工澄清问题。
         # field 加 llm_semantic. 前缀标记来源，便于步骤⑧c 去重时识别。
-        # v2.8.67: 对「引用未定义 ref_undef」类问题（来自统一分流池）额外生成
-        #   短主题关键词作为 KB 检索 query——原问题含大量上下文（来源、原文引用），
-        #   长句做 BM25 分词后核心词被稀释，导致 KB 查不到明明有的内容。
-        #   典型案例：图片上传规则的长question在KB零命中，换"图片上传规则 格式 大小"即命中。
+        # v2.8.67: ref_undef 类问题用短主题关键词检索——长句做 BM25 分词后核心词被稀释，
+        #   导致 KB 查不到明明有的内容。典型案例：图片上传规则的长question零命中，
+        #   换"图片上传规则 格式 大小"即命中。v3.1.6 起优先用问题自带的 kb_query 字段。
         if llm_kb_eligible_questions:
             llm_derived_queries: list[dict] = []
             for q in llm_kb_eligible_questions:
@@ -1258,10 +1225,14 @@ class ClarifyAgent:
                 question_text = q.get("question", "") or ""
                 if not question_text:
                     continue
-                # v2.8.67: ref_undef 类问题生成短关键词 KB 查询
+                # v3.1.6: 优先用主问题生成给出的 kb_query（上下文感知、主题聚焦）
+                # v2.8.67: kb_query 为空时兜底用 ref_undef 主题标签追加常见检索词
                 short_query: str | None = None
+                kbq = str(q.get("kb_query", "") or "").strip()
+                if kbq:
+                    short_query = kbq[:60]
                 theme_label = q.get("_ref_theme_label") or ""
-                if theme_label and isinstance(theme_label, str) and len(theme_label) <= 40:
+                if not short_query and theme_label and isinstance(theme_label, str) and len(theme_label) <= 40:
                     # 根据主题追加常见检索词，提升召回
                     suffixes: list[str] = []
                     if any(tk in theme_label for tk in ["图片", "上传", "素材"]):
@@ -1303,6 +1274,36 @@ class ClarifyAgent:
                     "[ClarifyAgent] LLM 语义问题转 KB 查询: {} 个（去重后新增 {}）",
                     len(llm_derived_queries), _added,
                 )
+
+        # v3.1.6 规则兜底：LLM 问题未覆盖的规则缺口（critical/important missing +
+        # baseline gaps）仍须查 KB，防止缺口静默丢失。已由 LLM 问题覆盖的缺口（按
+        # field 匹配）不再重复生成查询。
+        covered_fields = {
+            str(q.get("field", "") or "").removeprefix("llm_semantic.")
+            for q in llm_semantic_questions
+        }
+        try:
+            fallback_queries = self._fallback_gap_queries(
+                completeness, srr.get("_is_incremental", False), covered_fields, srr=srr
+            )
+            if fallback_queries:
+                _fk = {f"{q.get('field','')}::{q.get('question','')[:40]}" for q in kb_questions}
+                _fadded = 0
+                for fq in fallback_queries:
+                    _fdk = f"{fq['field']}::{fq['question'][:40]}"
+                    if _fdk in _fk:
+                        continue
+                    kb_questions.append(fq)
+                    _fk.add(_fdk)
+                    _fadded += 1
+                logger.info(
+                    "[ClarifyAgent] 规则兜底缺口转 KB 查询: {} 个（去重后新增 {}）",
+                    len(fallback_queries), _fadded,
+                )
+            kb_questions = self._filter_questions_by_necessity(kb_questions)
+        except Exception as fb_err:
+            logger.warning("[ClarifyAgent] 规则兜底 KB 查询失败（不阻断）: {}", str(fb_err)[:150])
+        await _report(f"知识库查询准备完成（{len(kb_questions)} 条），正在检索同类需求并校验答案...", 48)
 
         # v2.8.73 N4 优化：合并同主题细分 KB 查询，提升命中率。
         # 根因：LLM 语义层会为同一主题生成多个细粒度查询（如「图片上传」的格式/超限提示/批量
@@ -1490,7 +1491,7 @@ class ClarifyAgent:
                         len(completeness["important_missing"]))
 
         # ⑧ KB 未答上的问题 → 直接作为人工澄清问题（不需要 LLM 再生成一套）
-        # KB 查询已经通过了 _generate_kb_queries 的质量审查和 _verify_kb_answers 的答案审核，
+        # KB 查询已经通过规则兜底/语义转换的质量把控和 _verify_kb_answers 的答案审核，
         # 能答的已自动补全，不能答的就是真正需要人工介入的缺口。
         # v2.25: 使用 _build_field_question 丰富 context/options，即使 LLM 精炼失败也有可用选项
         # v2.29: 按 field+question 双重去重——
@@ -1591,17 +1592,14 @@ class ClarifyAgent:
                     seen_ids.add(qid)
                 deduped.append(q)
             questions = deduped
-            # ⭐ 精炼：为 KB 未答转人工的澄清问题补充可选项（input_type/options），
-            # 降低用户回答成本。LLM 失败则保留原 text + 空选项降级。
-            _t_refine = time.time()
-            questions = await self._refine_unresolved_to_questions(questions, augmented_srr, kb_provider=kb_provider)
-            _d_refine = int((time.time() - _t_refine) * 1000)
-            # v2.31: 精炼后去重——LLM 精炼时可能修改 question 文本导致重复
+            # v3.1.6: 选项精炼环节已移除——主问题生成（SYSTEM_PROMPT）每题直接带
+            # options；KB 未答问题的 options 在步骤⑧构建处已从上游/模板注入。
+            # 仅保留去重 + 必要性过滤 + options 修复三道收尾。
             questions = self._dedup_questions(questions, stage="after_refine")
             # v2.8.66: 过滤猜想上限类问题 + 修复options错乱（conflict/ambiguity真实问题不截数量）
             questions = self._filter_questions_by_necessity(questions)
             questions = self._validate_and_fix_options(questions)
-            await _report(f"待澄清问题精炼完成（{len(questions)} 个），正在汇总...", 70)
+            await _report(f"待澄清问题整理完成（{len(questions)} 个），正在汇总...", 70)
         else:
             questions = []
             await _report("无需 KB 补全的缺口，正在基于原始文本进行语义检测...", 70)
@@ -1914,37 +1912,9 @@ class ClarifyAgent:
             "passed": True,
         }
 
-        # v2.8.54: 判断是否为优化需求——优先使用 LLM 语义判断结果（srr["_llm_is_optimization"]），
-        # 降级到 legacy_data_impact.is_optimization，最后降级到关键词匹配
-        ldi = srr.get("legacy_data_impact") or {}
-        is_opt = bool(ldi.get("is_optimization")) if isinstance(ldi, dict) else False
-        # v2.8.54: LLM 判断结果优先于 legacy_data_impact.is_optimization
-        llm_opt = srr.get("_llm_is_optimization")
-        if isinstance(llm_opt, dict):
-            is_opt = bool(llm_opt.get("is_optimization", is_opt))
-        # v2.8.53: 用户已明确"不影响历史数据" -> 视为非优化需求，跳过 optimization 缺口检查
-        # （避免 _run_clarify_reparse 二次验证时再次报 legacy_data_impact.* 缺失）
-        if is_opt and isinstance(ldi, dict):
-            impact_scope = str(ldi.get("impact_scope", "") or "")
-            user_clarification = str(ldi.get("user_clarification", "") or "")
-            no_impact_markers = ("不影响历史数据", "仅新增功能", "无影响")
-            if any(m in impact_scope or m in user_clarification for m in no_impact_markers):
-                is_opt = False
-                logger.info(
-                    "[ClarifyAgent] 用户已确认不影响历史数据，completeness 跳过 optimization 检查",
-                )
-        # v2.8.54: 关键词仅作为最终兜底（LLM 未返回结果时），且仅匹配强词
-        # 弱词（完善/增强/调整等）不再作为判断依据——它们在新功能描述中太常见
-        if not is_opt and not isinstance(llm_opt, dict):
-            title = (srr.get("requirement") or {}).get("title", "")
-            summary = (srr.get("requirement") or {}).get("summary", "")
-            detect_text = f"{title}\n{summary}".lower()
-            is_opt = any(kw in detect_text for kw in self.OPTIMIZATION_KEYWORDS_STRONG)
-
+        # v3.1.6: 优化需求判断已移除（COMPLETENESS_CHECKLIST 的 optimization 级别也已注释停用），
+        # 历史数据影响类问题由主问题生成的语义检测按原文内容自然覆盖
         for level, fields in prompts.COMPLETENESS_CHECKLIST.items():
-            # v2.34: optimization 级别仅对优化需求检查
-            if level == "optimization" and not is_opt:
-                continue
             for field, desc in fields.items():
                 val = self._get_nested_value(srr, field)
                 if not self._has_meaningful_content(field, val):
@@ -2144,28 +2114,25 @@ class ClarifyAgent:
     # LLM 生成的查询包含功能名、关键特征、技术术语，检索更精准。
     # ========================================================================
 
-    async def _generate_kb_queries(
-        self, srr: dict, completeness: dict, is_incremental: bool,
-        kb_provider: str | None = None,
+    def _fallback_gap_queries(
+        self, completeness: dict, is_incremental: bool, covered_fields: set[str],
+        srr: dict | None = None,
     ) -> list[dict]:
-        """规则生成 KB 搜索查询（v3.1.5 改造：砍掉 KB_QUERY_GENERATOR LLM 轮子）。
+        """规则兜底：未被主问题生成覆盖的规则缺口 → KB 查询（v3.1.6）。
 
-        v2.10-v2.8.x 曾用独立 LLM 生成上下文感知查询，与主问题生成（SYSTEM_PROMPT）、
-        LLM 语义检测职责重叠（语义遗漏由 _generate_questions 检测并经 llm_semantic.
-        前缀转成 KB 查询，见 clarify() 步骤②c/③），属于重复轮子。
+        v2.10-v3.1.5 曾是独立的 KB 查询生成环节（先 LLM 后规则），v3.1.6 起合并到
+        主问题生成（SYSTEM_PROMPT 每题直接给出 kb_query），本方法仅作为兜底保留：
+        LLM 问题未覆盖的缺口（按 field 匹配 covered_fields）仍须查 KB，
+        防止规则层检测到的缺口静默丢失。
 
-        新逻辑（纯规则）：把规则层检测到的每个缺口（critical/important/optimization
-        missing + baseline_gaps）直接映射为 1 条 KB 查询——优先用缺口自带的
-        _suggested_question，否则用缺口描述。缺口的描述本身就带业务语义，
-        作为 hybrid（向量+BM25）查询足够有效。
-
-        保留：field 校验、field+question 双重去重、必要性过滤（与旧版一致）。
+        映射逻辑：每个缺口 1 条查询——优先用缺口自带的 _suggested_question，
+        否则用缺口描述（本身带业务语义，作为 hybrid 向量+BM25 查询足够有效）。
 
         Args:
-            srr: SRR 字典
             completeness: _check_completeness 的输出
             is_incremental: 是否增量澄清（含 baseline_gaps）
-            kb_provider: 兼容旧签名（规则版不再需要）
+            covered_fields: 已被 LLM 问题覆盖的 field 集合（这些缺口不再生成）
+            srr: SRR 字典（增量澄清时读取 _baseline_gaps，可为 None）
 
         Returns:
             list[dict]: KB 查询列表 [{field, missing_desc, priority, question, _is_baseline}]
@@ -2199,16 +2166,24 @@ class ClarifyAgent:
                 "_is_baseline": False,
             })
 
+        def _not_covered(gap: dict) -> bool:
+            """LLM 问题已覆盖的缺口（field 命中）不再生成兜底查询。"""
+            f = str(gap.get("field", "") or "").strip()
+            return not f or f not in covered_fields
+
         for gap in completeness.get("critical_missing", []) or []:
-            _add_gap(gap, "critical")
+            if _not_covered(gap):
+                _add_gap(gap, "critical")
         for gap in completeness.get("important_missing", []) or []:
-            _add_gap(gap, "important")
+            if _not_covered(gap):
+                _add_gap(gap, "important")
         for gap in completeness.get("optimization_missing", []) or []:
-            _add_gap(gap, "important")
+            if _not_covered(gap):
+                _add_gap(gap, "important")
 
         # 增量澄清：baseline 缺口同样转查询
         if is_incremental:
-            baseline = srr.get("_baseline_gaps")
+            baseline = (srr or {}).get("_baseline_gaps")
             if isinstance(baseline, list):
                 for g in baseline:
                     if isinstance(g, dict):
@@ -2922,57 +2897,6 @@ class ClarifyAgent:
             logger.warning("[ClarifyAgent] 注入功能点归属失败（跳过，不影响问题生成）: {}", str(e)[:120])
         return questions
 
-    async def _refine_unresolved_to_questions(
-        self, questions: list[dict], srr: dict, kb_provider: str | None = None,
-    ) -> list[dict]:
-        """为 KB 未答转人工的澄清问题确定回答形式与候选选项（v3.1.5 规则版）。
-
-        v2.x 曾调用独立 LLM（UNRESOLVED_REFINER_SYSTEM_PROMPT）为每个问题生成
-        input_type/options——但主问题生成（SYSTEM_PROMPT v3.1.5）已硬性要求每个问题
-        直接带备选答案，且 FIELD_QUESTION_TEMPLATES 提供了字段级模板选项，
-        独立精炼属于重复轮子，故砍掉。
-
-        规则逻辑（不编造原则与旧版一致）：
-        - input_type：问题已带的保留；否则用 FIELD_QUESTION_TEMPLATES 模板；否则 text
-        - options：问题已带的保留（LLM 语义问题/冲突检测自带高质量选项）；
-          否则用模板 options；模板也没有则 text + 空选项（不编造原文不存在的选项）
-        - default_answer：已带的保留；否则用 missing_desc（KB 查询时携带的缺口描述）
-        - question/context：一律保留上游生成值（不再让 LLM 改写，避免改写后重复）
-
-        Args:
-            questions: 第⑧步构建的人工澄清问题列表
-            srr: 当前需求的 SRR（保留签名兼容）
-            kb_provider: 保留签名兼容（规则版不再需要）
-
-        Returns:
-            list[dict]: 补充了 input_type/options/default_answer 的问题列表
-        """
-        for q in questions:
-            field = q.get("field", "") or ""
-            template = FIELD_QUESTION_TEMPLATES.get(field, {})
-
-            # 1) input_type：已有保留，否则模板，否则 text
-            if not q.get("input_type"):
-                q["input_type"] = template.get("input_type", "text")
-
-            # 2) options：已带非空保留；否则模板 options（multi_select 语义）
-            if not q.get("options"):
-                tpl_opts = template.get("options") or []
-                if tpl_opts:
-                    q["options"] = [str(o) for o in tpl_opts][:6]
-                    if q.get("input_type") == "text" and tpl_opts:
-                        # 模板提供了可多选的标准选项 → 升级为 multi_select 降低回答成本
-                        q["input_type"] = template.get("input_type", "multi_select")
-                else:
-                    q["options"] = []
-
-            # 3) default_answer：为空时用缺口描述兜底（有据可依，非编造）
-            if not q.get("default_answer"):
-                q["default_answer"] = str(q.get("missing_desc", "") or "")
-
-        logger.info("[ClarifyAgent] 未答问题选项规则化完成: {} 题", len(questions))
-        return questions
-
     async def _resolve_field_conflict(
         self,
         existing_value: Any,
@@ -3543,175 +3467,6 @@ class ClarifyAgent:
     OPTIMIZATION_KEYWORDS: tuple[str, ...] = (
         OPTIMIZATION_KEYWORDS_STRONG + OPTIMIZATION_KEYWORDS_WEAK
     )
-
-    def _detect_optimization_rule(self, srr: dict) -> None:
-        """规则判断需求是否为优化/改进已有系统类需求（v3.1.5 改造）。
-
-        v2.8.54 曾用 LLM 判断（OPTIMIZATION_DETECTOR_SYSTEM_PROMPT），v3.1.5 按用户要求
-        砍掉该独立 LLM 轮子，退回规则匹配：强词全文命中 或 弱词命中标题/摘要。
-        规则判断足够可靠——强词（重构/迁移/改造）误报率极低；弱词（优化/完善）仅当
-        出现在标题/摘要才算（正文命中不算，如"图标排版调整为水平居中"是新功能细节）。
-
-        判断结果写入 srr["_llm_is_optimization"]（键名保留以兼容下游读取）：
-            {"is_optimization": bool, "reason": str, "confidence": str}
-
-        Args:
-            srr: SRR JSON 字典（会被原地修改）
-        """
-        # 若已有判断结果（如重新生成时上一轮已判断），直接复用
-        if isinstance(srr.get("_llm_is_optimization"), dict):
-            return
-
-        # 用户已明确"不影响历史数据" -> 无需再判断
-        ldi = srr.get("legacy_data_impact") or {}
-        if isinstance(ldi, dict):
-            impact_scope = str(ldi.get("impact_scope", "") or "")
-            user_clarification = str(ldi.get("user_clarification", "") or "")
-            no_impact_markers = ("不影响历史数据", "仅新增功能", "无影响")
-            if any(m in impact_scope or m in user_clarification for m in no_impact_markers):
-                srr["_llm_is_optimization"] = {"is_optimization": False, "reason": "用户已确认不影响历史数据", "confidence": "high"}
-                return
-
-        req = srr.get("requirement", {}) or {}
-        title = (req.get("title", "") or "").lower()
-        summary = (req.get("summary", "") or "").lower()
-        raw_text = (srr.get("_raw_text", "") or "")[:5000].lower()
-        title_summary = f"{title}\n{summary}"
-
-        strong_hits = [kw for kw in self.OPTIMIZATION_KEYWORDS_STRONG if kw in title_summary or kw in raw_text]
-        weak_hits_title = [kw for kw in self.OPTIMIZATION_KEYWORDS_WEAK if kw in title_summary]
-        is_opt = bool(strong_hits or weak_hits_title)
-
-        if strong_hits:
-            reason = f"强关键词命中: {','.join(strong_hits[:3])}"
-            confidence = "high"
-        elif weak_hits_title:
-            reason = f"弱关键词命中标题/摘要: {','.join(weak_hits_title[:3])}"
-            confidence = "medium"
-        else:
-            reason = "无优化关键词命中"
-            confidence = "high"
-
-        srr["_llm_is_optimization"] = {
-            "is_optimization": is_opt,
-            "reason": reason,
-            "confidence": confidence,
-        }
-        logger.info(
-            "[ClarifyAgent] 优化需求规则判断: is_optimization={}, {}",
-            is_opt, reason,
-        )
-
-    def _detect_optimization_impact(self, srr: dict) -> list[dict]:
-        """检测需求是否为优化/改进类，若是则返回「历史数据影响」问题列表。
-
-        v2.8.54: 改用 LLM 语义判断（结果存于 srr["_llm_is_optimization"]），
-        替代关键词匹配。LLM 能理解需求本质（"改已有的"vs"建全新的"），
-        避免弱关键词（完善/增强/调整）在新功能描述中误判。
-        LLM 不可用时降级到强关键词匹配（仅重构/迁移/改造等强词）。
-
-        v2.32: 扩展为返回两个问题：
-        1. multi_select 问题：判断是否影响历史数据及影响类型
-        2. text 输入问题：让用户填写具体影响的历史数据范围（受影响的表/字段/数据量等）
-           该问题的答案将写入 SRR.legacy_data_impact.user_clarification
-
-        Args:
-            srr: SRR JSON 字典
-
-        Returns:
-            list[dict]: 若为优化需求，返回澄清问题列表（含 multi_select + text 两个问题）；
-                        否则返回空列表
-        """
-        req = srr.get("requirement", {}) or {}
-
-        # v2.8.53: 尊重用户已答结果--若上一轮澄清用户已选择"不影响历史数据"，
-        # 不再重复生成历史数据影响问题（避免重新生成后死循环提问）
-        ldi = srr.get("legacy_data_impact") or {}
-        if isinstance(ldi, dict):
-            impact_scope = str(ldi.get("impact_scope", "") or "")
-            user_clarification = str(ldi.get("user_clarification", "") or "")
-            # 用户已明确"不影响历史数据" -> 跳过优化需求检测
-            no_impact_markers = ("不影响历史数据", "仅新增功能", "无影响")
-            if any(m in impact_scope or m in user_clarification for m in no_impact_markers):
-                logger.info(
-                    "[ClarifyAgent] 用户已确认不影响历史数据，跳过优化需求检测: impact_scope={!r}",
-                    impact_scope[:80],
-                )
-                return []
-
-        # v2.8.54: 优先使用 LLM 语义判断结果
-        llm_opt = srr.get("_llm_is_optimization")
-        is_optimization = False
-        detect_source = ""
-        if isinstance(llm_opt, dict):
-            is_optimization = bool(llm_opt.get("is_optimization", False))
-            detect_source = f"LLM({llm_opt.get('reason', '')[:30]})"
-        else:
-            # 降级：LLM 未返回结果时，仅用强词匹配（重构/迁移/改造等）
-            title = (req.get("title", "") or "").lower()
-            summary = (req.get("summary", "") or "").lower()
-            raw_text = (srr.get("_raw_text", "") or "")[:5000].lower()
-            title_summary = f"{title}\n{summary}"
-            strong_hits = [kw for kw in self.OPTIMIZATION_KEYWORDS_STRONG if kw in title_summary or kw in raw_text]
-            is_optimization = bool(strong_hits)
-            detect_source = f"强词兜底({','.join(strong_hits[:3])})" if strong_hits else "无命中"
-
-        if not is_optimization:
-            logger.info("[ClarifyAgent] 优化需求检测: {} -> 非优化需求", detect_source)
-            return []
-
-        logger.info("[ClarifyAgent] 优化需求检测: {} -> 是优化需求，生成历史数据影响问题", detect_source)
-
-        # 生成历史数据影响问题
-        req_title = req.get("title", "当前需求") or "当前需求"
-        keyword_hint = detect_source
-
-        # 问题1：multi_select——判断是否影响历史数据及影响类型
-        impact_type_question = {
-            "id": "kb_optimization_impact",
-            "field": "optimization_impact",
-            "priority": "critical",
-            "category": "impact_analysis",
-            "question": f"【{req_title}】检测到这是优化/改进类需求，请问此次优化是否会影响已有历史数据？",
-            "context": (
-                f"需求文档中检测到优化关键词（{keyword_hint}）。"
-                "优化类需求可能涉及数据结构变更、接口变更、业务逻辑调整等，"
-                "可能影响已有历史数据的可用性、一致性或完整性。"
-                "请明确影响范围，以便生成对应的回归测试和数据迁移测试用例。"
-            ),
-            "default_answer": "",
-            "input_type": "multi_select",
-            "options": [
-                "不影响历史数据，仅新增功能",
-                "影响历史数据结构（需数据迁移）",
-                "影响历史数据内容（需数据清洗）",
-                "影响接口兼容性（需向后兼容）",
-                "影响业务逻辑（需回归测试）",
-                "不确定，需要进一步评估",
-            ],
-        }
-
-        # 问题2：text 输入——让用户填写具体影响的历史数据范围
-        # 答案将写入 SRR.legacy_data_impact.user_clarification，供 LLM 生成完整影响分析
-        impact_scope_question = {
-            "id": "kb_optimization_impact_scope",
-            "field": "legacy_data_impact.user_clarification",
-            "priority": "important",
-            "category": "impact_analysis",
-            "question": f"请描述此次优化具体影响的历史数据范围（可留空）",
-            "context": (
-                "请列出受影响的数据实体/数据库表/字段、预估数据量、上下游系统等。"
-                "例如：「影响 user 表的 phone 字段（约 50 万行），需从 varchar(11) 扩展为 varchar(20)；"
-                "订单表 order 的 status 枚举值需新增 2 个状态（约 1000 万行）。」"
-                "该描述将作为历史数据影响分析的输入，用于生成数据迁移与回归测试用例。"
-                "若上一题已选择「不影响历史数据」，本题可留空。"
-            ),
-            "default_answer": "",
-            "input_type": "text",
-            "options": [],
-        }
-
-        return [impact_type_question, impact_scope_question]
 
     # ========================================================================
     # 新建功能 / PRD 专项检测（v2.8.64 新增）

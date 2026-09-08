@@ -319,6 +319,15 @@ SRR 草稿的其他结构化字段作为辅助参考。跨节矛盾、引用未�
 - Critical/Important 问题全部展示，不限定数量；Optional 字段永远不生成问题
 - **字段值冲突直接作为问题输出（v3.1.5 明确）**——检测到同一字段/同一约束在文档不同位置取值矛盾时，
   不要试图自动裁决选边，直接按上面第 4 维度的 conflict 问题输出，由用户确认采用哪个值
+- **每题必须给出 kb_query（v3.1.6，KB 查询合并到问题生成）**——为每个问题生成一个用于
+  知识库（历史需求档案）检索的短关键词查询（2-8 个词，核心名词+维度词，如「图片上传 格式 大小限制」
+  「账号锁定 阈值 时长」）。规则：①抽出问题的主题名词与待确认维度，不要复制整个问句；
+  ②conflict 类问题（文档内部矛盾，KB 不可能给出答案）kb_query 留空字符串 ""；
+  ③开放数值类问题也给出主题词查询（KB 查不到就转人工，不影响流程）
+- **用户提示词中的【规则检测缺口】清单优先处理（v3.1.6）**——清单中的每一项（缺失字段/歧义点）
+  优先生成对应的 question 条目（category 按缺口类型、priority 按清单级别）；
+  若你判断某项在原文中语义上已明确（清单误报），可以不生成人工问题，
+  系统会用兜底查询自动核对该项，无需你处理
 
 示例格式（default_answer 必填 + 每题必带 options，开放数值类除外）：
 
@@ -372,6 +381,7 @@ QUESTIONS_SCHEMA = """输出 JSON 必须符合以下结构：
       "priority": "critical|important|optional",
       "category": "completeness|ambiguity|gap",
       "question": "针对该字段的具体问题（完整问句，含候选选项如适用）",
+      "kb_query": "用于知识库检索的短关键词查询（2-8 个词，如「图片上传 格式 大小限制」；conflict 类或确无检索价值时留空字符串）",
       "context": "为何需要澄清——影响哪个测试维度、缺失会导致什么后果",
       "default_answer": "建议的默认答案（供用户参考，降低回答成本）",
       "input_type": "text|select|multi_select",
@@ -499,6 +509,31 @@ def build_user_prompt(
             )
             prd_rule_hint = "\n".join(hint_parts)
 
+    # v3.1.6: 注入常规规则缺口清单（critical/important missing）——配合 SYSTEM_PROMPT
+    # 的「【规则检测缺口】清单优先处理」要求。PRD 专项缺口已在 prd_rule_hint 展示，
+    # 此处按 field 去重避免重复。
+    rule_gap_hint = ""
+    if completeness:
+        _gap_items = (completeness.get("critical_missing") or []) + (completeness.get("important_missing") or [])
+        _prd_fields = {str(m.get("field", "")) for m in (completeness.get("prd_missing") or []) if isinstance(m, dict)}
+        _gap_items = [g for g in _gap_items if isinstance(g, dict) and str(g.get("field", "")) not in _prd_fields]
+        if _gap_items:
+            _rg_parts = [
+                f"\n\n⚠️ 规则检测缺失字段清单（共 {len(_gap_items)} 项 — 请优先逐项处理："
+                f"确认缺失则生成对应 question 条目；若你判断原文已覆盖（清单误报）可不生成人工问题，"
+                f"系统会用兜底 KB 查询自动核对该项）："
+            ]
+            for i, g in enumerate(_gap_items, 1):
+                sq = str(g.get("_suggested_question") or g.get("suggested_question", ""))[:200]
+                so = g.get("_suggested_options") or g.get("suggested_options") or []
+                opts_str = f"，建议候选选项: {so}" if so else ""
+                _rg_parts.append(
+                    f"  {i}. field={g.get('field','?')} / priority={g.get('priority','?')}\n"
+                    f"     描述: {str(g.get('description',''))[:150]}\n"
+                    f"     建议问句: {sq}{opts_str}"
+                )
+            rule_gap_hint = "\n".join(_rg_parts)
+
     # v2.8.64: 注入规则层检测到的歧义 / 跨文档矛盾候选线索（ambiguities）。
     # 主要目的：让 LLM 明确知道「这是一个多文档上传场景」，重点排查跨文档矛盾；
     # 同时将跨文档同名词候选列表展示给 LLM，作为重点排查线索。
@@ -543,6 +578,7 @@ def build_user_prompt(
 {similar_hint}
 {reference_check_hint}
 {prd_rule_hint}
+{rule_gap_hint}
 {cross_doc_hint}
 
 【待分析的需求与初步草稿】
