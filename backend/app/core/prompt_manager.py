@@ -42,17 +42,16 @@ _PROMPT_REGISTRY: list[dict] = [
     # 导致 DB 中残留的旧版 SYSTEM_PROMPT（3981字）长期覆盖代码里持续迭代的最新版
     # （含 v2.8.65 引用未定义/跨节矛盾专项 + v2.8.67 设计阶段细节抑制）。
     # 重新注册后，register_default 会因 value==default 将 DB 的 value/default 同步为最新代码值。
+    # v3.1.5: 按用户要求精简——原 6 个提示词收敛为 2 个：
+    #   保留 SYSTEM_PROMPT（问题生成，含字段冲突检测+每题必带 options）
+    #   保留 KB_ANSWER_VERIFIER_SYSTEM_PROMPT（KB 答案校验）
+    #   砍掉 KB_QUERY_GENERATOR / UNRESOLVED_REFINER / FIELD_CONFLICT_RESOLVER /
+    #   OPTIMIZATION_DETECTOR 四个重复轮子（对应逻辑改回规则实现，见 clarify_agent.py）。
     {
         "module": "clarify_agent",
         "name": "SYSTEM_PROMPT",
         "default": clarify_agent.SYSTEM_PROMPT,
-        "description": "ClarifyAgent 系统指令 - LLM 语义检测生成澄清问题（完整性/充分性/遗漏/歧义/矛盾/引用未定义）",
-    },
-    {
-        "module": "clarify_agent",
-        "name": "UNRESOLVED_REFINER_SYSTEM_PROMPT",
-        "default": clarify_agent.UNRESOLVED_REFINER_SYSTEM_PROMPT,
-        "description": "ClarifyAgent 未答缺口精炼 - 为 KB 无法回答的缺口生成带可选项的澄清问题",
+        "description": "ClarifyAgent 系统指令 - LLM 语义检测生成澄清问题（完整性/充分性/遗漏/歧义/矛盾/引用未定义，每题必带备选答案）",
     },
     # GenAgent（用例生成）
     {
@@ -75,30 +74,12 @@ _PROMPT_REGISTRY: list[dict] = [
         "default": impact_agent.SYSTEM_PROMPT,
         "description": "ImpactAnalysis 系统指令 — 变更影响分析",
     },
-    # ClarifyAgent KB 相关提示词（v2.12 补充注册）
-    {
-        "module": "clarify_agent",
-        "name": "KB_QUERY_GENERATOR_SYSTEM_PROMPT",
-        "default": clarify_agent.KB_QUERY_GENERATOR_SYSTEM_PROMPT,
-        "description": "ClarifyAgent KB 查询生成器 — LLM 动态生成上下文感知的搜索查询",
-    },
+    # ClarifyAgent KB 相关提示词（v2.12 补充注册；v3.1.5 仅保留答案校验器）
     {
         "module": "clarify_agent",
         "name": "KB_ANSWER_VERIFIER_SYSTEM_PROMPT",
         "default": clarify_agent.KB_ANSWER_VERIFIER_SYSTEM_PROMPT,
         "description": "ClarifyAgent KB 答案校验器 — LLM 审核检索结果的相关性与准确性",
-    },
-    {
-        "module": "clarify_agent",
-        "name": "FIELD_CONFLICT_RESOLVER_SYSTEM_PROMPT",
-        "default": clarify_agent.FIELD_CONFLICT_RESOLVER_SYSTEM_PROMPT,
-        "description": "ClarifyAgent 字段冲突裁决 — LLM 判断字段冲突是否可自动裁决",
-    },
-    {
-        "module": "clarify_agent",
-        "name": "OPTIMIZATION_DETECTOR_SYSTEM_PROMPT",
-        "default": clarify_agent.OPTIMIZATION_DETECTOR_SYSTEM_PROMPT,
-        "description": "ClarifyAgent 优化需求检测 — LLM 语义判断需求是否为优化/改进已有系统类",
     },
     # KnowledgeQA（知识问答）
     {
