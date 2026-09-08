@@ -31,7 +31,6 @@ from app.db.models import (
     ModuleDependency, Module, Requirement, TestCase as TestCaseModel,
     FunctionalPoint, FPDependency,
 )
-from app.prompts import impact_agent as prompts
 from app.utils.logger import logger
 
 
@@ -404,8 +403,8 @@ class ImpactAnalysisAgent:
                         "depth": 0,
                     })
 
-        # 4. LLM 合成 description + test_focus
-        description, test_focus = await self._build_fp_impact_description(
+        # 4. 规则合成 description + test_focus（v3.1.7：不再调 LLM）
+        description, test_focus = self._build_fp_impact_description(
             fp_info, affected_fps, affected_modules_raw
         )
 
@@ -546,59 +545,66 @@ class ImpactAnalysisAgent:
 
         return affected
 
-    async def _build_fp_impact_description(
+    def _build_fp_impact_description(
         self,
         fp: dict,
         affected_fps: list[dict],
         affected_modules: list[dict],
     ) -> tuple[str, str]:
-        """用 LLM 合成自然语言影响描述 + 测试关注点。
+        """规则合成影响描述 + 测试关注点（v3.1.7 改造：砍掉 LLM 文字润色轮子）。
 
-        v2.35: 移除 affected_requirements 参数（不再分析受影响的需求）。
+        v2.x-v3.1.6 曾调用 LLM 把图谱分析结果润色成自然语言——但图谱分析
+        （反向 BFS + 模块传播）本身已是确定性代码，LLM 只是复读输入且存在
+        编造风险（可能虚构未被图谱识别的依赖）。v3.1.7 起改为纯规则拼接：
+        输出确定、无幻觉、省一次 LLM 调用。
 
         Args:
-            fp: 当前功能点信息
-            affected_fps: 受影响 FP 列表
-            affected_modules: 受影响模块列表
+            fp: 当前功能点信息 {fp_id, fp_name, ...}
+            affected_fps: 受影响 FP 列表（反向 BFS 结果，含 depth/reason 可选）
+            affected_modules: 受影响模块列表（含 module_name/reason/depth 可选）
 
         Returns:
             tuple: (description, test_focus)
         """
-        # 无任何影响时，直接返回降级文本（不调用 LLM）
+        fp_name = fp.get("fp_name", "")
         if not affected_fps and not affected_modules:
             return (
-                f"功能点「{fp.get('fp_name', '')}」当前无被依赖关系，变更影响范围仅限自身。",
-                f"重点验证功能点「{fp.get('fp_name', '')}」自身的 happy_path 和边界条件。",
+                f"功能点「{fp_name}」当前无被依赖关系，变更影响范围仅限自身。",
+                f"重点验证功能点「{fp_name}」自身的 happy_path 和边界条件。",
             )
 
-        try:
-            result = await llm_client.call_json(
-                prompt=prompts.build_fp_impact_description_prompt(
-                    fp, affected_fps, affected_modules,
-                ),
-                system_prompt=prompts.FP_IMPACT_DESCRIPTION_SYSTEM_PROMPT,
-                schema_hint={"description": str, "test_focus": str},
-                temperature=0.3,
-                agent_name="FpAgent",
-            )
-            description = result.get("description", "")
-            test_focus = result.get("test_focus", "")
-            if not description:
-                description = f"功能点「{fp.get('fp_name', '')}」变更影响 {len(affected_fps)} 个功能点、{len(affected_modules)} 个模块。"
-            if not test_focus:
-                test_focus = "重点回归受影响功能点的核心流程。"
-            return description, test_focus
-        except Exception as e:
-            logger.warning("[ImpactAgent] FP 影响描述 LLM 合成失败，降级: {}", str(e)[:200])
-            # 降级：纯规则拼接
-            fp_names = ", ".join(f.get("fp_name", "") for f in affected_fps[:5])
-            mod_names = ", ".join(m.get("module_name", "") for m in affected_modules[:5])
-            description = (
-                f"功能点「{fp.get('fp_name', '')}」变更影响："
-                f"功能点[{fp_names or '无'}]; 模块[{mod_names or '无'}]。"
-            )
-            test_focus = "重点回归受影响功能点的 happy_path 和关键 alternate_flows。"
-            return description, test_focus
+        # 受影响功能点：同名合并，按深度排序展示（近的在前）
+        fp_parts = []
+        for f_ in affected_fps[:8]:
+            name = f_.get("fp_name", "") or f_.get("fp_id", "")
+            if name:
+                depth = f_.get("depth")
+                fp_parts.append(f"{name}（{'直接' if depth == 0 else f'间接{depth}层'}）" if isinstance(depth, int) else name)
+        mod_parts = []
+        for m in affected_modules[:8]:
+            name = m.get("module_name", "") or m.get("module_id", "")
+            reason = m.get("reason", "")
+            if name:
+                mod_parts.append(f"{name}（{reason}）" if reason and reason not in name else name)
+
+        desc_lines = [f"功能点「{fp_name}」变更影响："]
+        if fp_parts:
+            desc_lines.append(f"- 受影响功能点：{'、'.join(fp_parts)}")
+        if mod_parts:
+            desc_lines.append(f"- 受影响模块：{'、'.join(mod_parts)}")
+        if len(affected_fps) > 8:
+            desc_lines.append(f"- 另有 {len(affected_fps) - 8} 个间接功能点未逐一列出")
+        description = "\n".join(desc_lines)
+
+        test_focus = (
+            f"重点回归受影响功能点（{affected_fps[0].get('fp_name', '')} 等）的 happy_path "
+            "和关键 alternate_flows，并验证与「"
+            + fp_name
+            + "」交互的边界数据是否兼容新逻辑。"
+            if affected_fps
+            else "重点验证所属模块内的关联流程与数据兼容性。"
+        )
+        return description, test_focus
 
     # ========================================================================
     # v1.7: 需求级影响分析（模块+FP 依赖全景 + KB 上下文 + 人工审核）

@@ -12,7 +12,6 @@ from app.prompts import (
     clarify_agent,
     gen_agent,
     review_agent,
-    impact_agent,
     knowledge_qa,
     fp_agent,
     vision,
@@ -60,6 +59,12 @@ _PROMPT_REGISTRY: list[dict] = [
         "default": gen_agent.SYSTEM_PROMPT,
         "description": "GenAgent 系统指令 — 资深测试工程师生成 UTCF 用例",
     },
+    {
+        "module": "gen_agent",
+        "name": "DEDUP_EQUIVALENCE_SYSTEM_PROMPT",
+        "default": gen_agent.DEDUP_EQUIVALENCE_SYSTEM_PROMPT,
+        "description": "GenAgent 语义去重 — 机械相似度预筛后，LLM 判定用例对是否测试同一场景（v3.1.7 从内联提取注册）",
+    },
     # ReviewAgent（用例审核）
     {
         "module": "review_agent",
@@ -67,19 +72,21 @@ _PROMPT_REGISTRY: list[dict] = [
         "default": review_agent.SYSTEM_PROMPT,
         "description": "ReviewAgent 系统指令 — 6 维度用例审核",
     },
-    # ImpactAnalysisAgent（影响分析）
-    {
-        "module": "impact_agent",
-        "name": "SYSTEM_PROMPT",
-        "default": impact_agent.SYSTEM_PROMPT,
-        "description": "ImpactAnalysis 系统指令 — 变更影响分析",
-    },
+    # v3.1.7: ImpactAnalysisAgent 的 SYSTEM_PROMPT 注册项已删除——
+    # 影响分析为纯规则实现（图谱 BFS + diff 规划），该提示词从未被任何代码引用（孤儿）；
+    # FP 影响说明也改为规则拼接（LLM 仅在复读图谱输出，且有编造依赖的风险）。
     # ClarifyAgent KB 相关提示词（v2.12 补充注册；v3.1.5 仅保留答案校验器）
     {
         "module": "clarify_agent",
         "name": "KB_ANSWER_VERIFIER_SYSTEM_PROMPT",
         "default": clarify_agent.KB_ANSWER_VERIFIER_SYSTEM_PROMPT,
         "description": "ClarifyAgent KB 答案校验器 — LLM 审核检索结果的相关性与准确性",
+    },
+    {
+        "module": "clarify_agent",
+        "name": "CLARIFY_COVERAGE_EVAL_SYSTEM_PROMPT",
+        "default": clarify_agent.CLARIFY_COVERAGE_EVAL_SYSTEM_PROMPT,
+        "description": "ClarifyAgent 收敛评估 — 多轮澄清时判断用户回答是否已覆盖问题核心（覆盖则收敛，未覆盖生成追问）",
     },
     # KnowledgeQA（知识问答）
     {

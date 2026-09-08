@@ -1832,7 +1832,7 @@ class ClarifyAgent:
                         raw_text=(srr.get("_raw_text", "") or "")[:12000],
                         items=json.dumps(items, ensure_ascii=False),
                     ),
-                    system_prompt="你是一个需求澄清收敛评估助手。只基于给定问题与回答，判断回答是否已充分覆盖问题。",
+                    system_prompt=prompt_manager.get("clarify_agent", "CLARIFY_COVERAGE_EVAL_SYSTEM_PROMPT"),
                     schema_hint={"items": list},
                     temperature=0.1,
                     agent_name="ClarifyAgent.CoverageEval",

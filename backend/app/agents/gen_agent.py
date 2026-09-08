@@ -999,7 +999,7 @@ class GenAgent:
         try:
             result = await self._llm.call_json(
                 prompt=prompt,
-                system_prompt="你是测试用例去重专家，只判定两用例是否测试同一场景。",
+                system_prompt=prompt_manager.get("gen_agent", "DEDUP_EQUIVALENCE_SYSTEM_PROMPT"),
                 temperature=0.0,
                 max_tokens=2048,
                 allow_array=True,
