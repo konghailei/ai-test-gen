@@ -281,7 +281,12 @@ def _calc_completeness(case: dict) -> float:
 
 
 def _check_consistency(case: dict) -> float:
-    """检查用例内部一致性。
+    """检查用例内部一致性 + 内容深度（v3.1.4 置信度校准）。
+
+    v3.1.4 修复报告 §5「置信度无区分度」：原实现只查步骤序号与断言数，
+    格式完整的用例恒得 1.0，导致 final_confidence 全部 ≥0.85。
+    新增内容深度检查——空洞预期、单薄步骤、重复步骤都会真实扣分，
+    使「格式正确但内容空洞」的用例与「步骤具体、预期可判定」的用例拉开分差。
 
     Args:
         case: UTCF 用例字典
@@ -300,4 +305,20 @@ def _check_consistency(case: dict) -> float:
     # 步骤数与断言数合理性（无断言且步骤>3 扣分）
     if len(steps) > 3 and not case.get("assertions"):
         score -= 0.2
+
+    # ---- v3.1.4 内容深度检查 ----
+    # 1) 空洞预期：最终预期过短（如只有「正常」「成功」），不可判定
+    final_expected = str(case.get("expected") or "").strip()
+    if final_expected and len(final_expected) < 6:
+        score -= 0.3
+    # 2) 单薄步骤：功能/边界/异常类用例只有 1 步（覆盖深度不足）
+    case_type = (case.get("type") or "").strip()
+    if case_type in ("functional", "boundary", "exception", "security") and len(steps) < 2:
+        score -= 0.15
+    # 3) 重复步骤：action 文本去重后数量明显少于步骤数（复制粘贴凑数）
+    if len(steps) >= 3:
+        actions = [str(s.get("action") or "").strip() for s in steps]
+        unique_actions = {a for a in actions if a}
+        if unique_actions and len(unique_actions) < len(actions) * 0.7:
+            score -= 0.2
     return max(score, 0.0)

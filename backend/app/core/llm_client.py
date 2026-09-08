@@ -217,8 +217,37 @@ class LLMClient:
         # 最近一次调用使用的模型名（用于错误报告）
         self._last_model: str = ""
         # 优化 4：LLM 响应缓存（进程内 LRU，仅缓存 temperature=0 的确定性调用）
-        self._response_cache: dict[str, str] = {}
+        # v3.1.4 修复报告 §8.7：缓存条目带时间戳 + TTL 过期（防止跨轮次拿到陈旧响应）；
+        # key 中加入 agent_name，不同 Agent 即使 prompt 文本相同也互不串缓存。
+        # 注意：缓存键已包含完整 prompt+system_prompt，需求文本/KB 上下文不同则键必不同，
+        # 跨需求命中仅在 prompt 完全一致（确定性等价输入）时发生，语义安全。
+        self._response_cache: dict[str, tuple[str, float]] = {}
         self._CACHE_MAX_SIZE = 100
+        self._CACHE_TTL_SECONDS = 600  # 10 分钟：覆盖单次流水线时长即可，避免陈旧响应长期存活
+
+    def _cache_get(self, key: str) -> str | None:
+        """读取缓存条目，带 TTL 过期检查；过期即删除并返回 None。"""
+        entry = self._response_cache.get(key)
+        if entry is None:
+            return None
+        content, ts = entry
+        if time.time() - ts > self._CACHE_TTL_SECONDS:
+            self._response_cache.pop(key, None)
+            return None
+        return content
+
+    def _cache_put(self, key: str, content: str) -> None:
+        """写入缓存；先清理过期条目，再按 FIFO 淘汰超限条目。"""
+        if len(self._response_cache) >= self._CACHE_MAX_SIZE:
+            # 先尝试清过期（腾位而不误杀活跃条目）
+            now = time.time()
+            expired = [k for k, (_, ts) in self._response_cache.items()
+                       if now - ts > self._CACHE_TTL_SECONDS]
+            for k in expired:
+                self._response_cache.pop(k, None)
+        while len(self._response_cache) >= self._CACHE_MAX_SIZE:
+            self._response_cache.pop(next(iter(self._response_cache)))
+        self._response_cache[key] = (content, time.time())
 
     async def call(
         self,
@@ -274,11 +303,11 @@ class LLMClient:
         # 优化 4：LLM 响应缓存（仅缓存 temperature=0 的确定性调用）
         import hashlib
         cache_key = hashlib.md5(
-            f"{prompt}|{system_prompt or ''}|{temperature}|{model or ''}".encode()
+            f"{agent_name}|{prompt}|{system_prompt or ''}|{temperature}|{model or ''}".encode()
         ).hexdigest()
-        if temperature == 0 and cache_key in self._response_cache:
+        cached = self._cache_get(cache_key) if temperature == 0 else None
+        if cached is not None:
             logger.debug("[LLM] 缓存命中: key={}", cache_key[:12])
-            cached = self._response_cache[cache_key]
             # 缓存命中非真实 LLM 调用，不写日志
             if return_usage:
                 return cached, {}, "", ""
@@ -311,9 +340,7 @@ class LLMClient:
                 self._provider_failures.pop(provider["key"], None)
                 # 优化 4：写入缓存（仅 temperature=0 的确定性调用）
                 if temperature == 0:
-                    if len(self._response_cache) >= self._CACHE_MAX_SIZE:
-                        self._response_cache.pop(next(iter(self._response_cache)))
-                    self._response_cache[cache_key] = content
+                    self._cache_put(cache_key, content)
                     logger.debug("[LLM] 缓存写入: key={}", cache_key[:12])
                 duration_ms = int((time.time() - start_ts) * 1000)
                 if not _skip_log:
