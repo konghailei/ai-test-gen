@@ -1056,53 +1056,143 @@ async def kqa_approve_correction(
                 )
 
         else:
-            # ===== 需求级别完整纠正（复用 /archive 逻辑）=====
-            archived_id = gen_requirement_id()
-            title = f"知识问答纠正 - {record.question[:50]}"
-            new_req = Requirement(
-                id=archived_id,
-                product_id=real_product_id,
-                title=title,
-                priority="P2",
-                status="archived",
-                srr_json={
-                    "requirement": {
-                        "title": title,
-                        "summary": final_content[:500],
-                        "product_id": real_product_id,
-                    },
-                    "flows": {},
-                    "business_rules": [],
-                    "boundary_conditions": [],
-                },
-                raw_text=final_content,
-                source_type="knowledge_qa",
-                created_by="system",
-                created_at=archived_now,
-                updated_at=archived_now,
-                archived_at=archived_now,
-            )
-            session.add(new_req)
+            # ===== 需求级别纠正（v3.2.0 方案A：指定来源需求 → 原位合并到最新版）=====
+            # 大哥裁定：纠正应作用在最新版本的整理内容上，而非新增孤儿片段需求。
+            # correction_target_id 指向有效来源需求（同产品）时：
+            #   ① 纠正内容以「纠正补充」段落追加进原需求 raw_text（人读）
+            #   ② 同步追加进 srr_json.requirement.summary（向量嵌入源——_srr_to_text 只吃 SRR）
+            #   ③ 删原向量 → 原位重嵌（检索即时拿到纠正后内容）
+            #   ④ 联动刷新该需求下所有 FP 的 CRSR
+            # 未指定来源（target_id 为空/不存在/跨产品）→ 维持旧行为：独立片段归档。
+            target_req: Requirement | None = None
+            if record.correction_target_id:
+                _trow = await session.execute(
+                    select(Requirement).where(Requirement.id == record.correction_target_id)
+                )
+                _cand = _trow.scalar_one_or_none()
+                if _cand is not None and _cand.product_id == real_product_id:
+                    target_req = _cand
+                else:
+                    logger.warning(
+                        "[API/knowledge-qa] 纠正目标需求无效或跨产品: target={}, product={}",
+                        record.correction_target_id, real_product_id,
+                    )
 
-            archive_meta = {
-                "title": title,
-                "type": "knowledge_qa",
-                "qa_id": record_id,
-                "product_id": real_product_id,
-                "status": "archived",
-                "corrected_by": "knowledge_qa_review",
-                "archived_at": archived_now.isoformat(),
-            }
-            await asyncio.to_thread(
-                vector_store.add_requirement, archived_id, new_req.srr_json, metadata=archive_meta
-            )
-            archived_type = "requirement"
+            if target_req is not None:
+                _stamp = archived_now.strftime("%Y-%m-%d %H:%M")
+                _addendum = f"【纠正补充 {_stamp}，来源: 知识问答 {record_id}】{final_content}"
+                _note = f"（纠错说明: {record.correction_notes or '无'}）" if record.correction_notes else ""
+                # ① raw_text 追加（人读溯源）
+                target_req.raw_text = (
+                    (target_req.raw_text or "").rstrip()
+                    + f"\n\n## 纠正补充（{_stamp}）{_note}\n{final_content}\n"
+                )
+                # ② SRR summary 追加（向量嵌入源）
+                # 注意：必须 deepcopy——SQLAlchemy JSON 列对"同一引用的原地变异"不产生
+                # 变更历史，直接改嵌套 dict 再赋值回自身会导致 UPDATE 不含该列
+                import copy as _copy
+                _srr = _copy.deepcopy(target_req.srr_json) if isinstance(target_req.srr_json, dict) else {}
+                _req_node = _srr.get("requirement") if isinstance(_srr.get("requirement"), dict) else {}
+                _req_node["summary"] = (
+                    str(_req_node.get("summary", "") or "").rstrip()
+                    + "\n" + _addendum
+                )
+                _srr["requirement"] = _req_node
+                target_req.srr_json = _srr
+                target_req.updated_at = archived_now
+
+                # ③ 原位重嵌：删旧向量 → 按最新 SRR 重新嵌入（同 req_id，不产生新需求）
+                try:
+                    await asyncio.to_thread(vector_store.delete_requirement, target_req.id)
+                except Exception as e:
+                    logger.warning("[API/knowledge-qa] 删除原需求向量失败（继续重嵌）: {}", str(e)[:100])
+                _meta = {
+                    "title": target_req.title,
+                    "type": "requirement",
+                    "product_id": real_product_id,
+                    "project_id": target_req.project_id or "",
+                    "status": target_req.status,
+                    "corrected_by": "knowledge_qa_review",
+                    "qa_id": record_id,
+                    "archived_at": archived_now.isoformat(),
+                }
+                await asyncio.to_thread(
+                    vector_store.add_requirement, target_req.id, target_req.srr_json, metadata=_meta
+                )
+
+                # ④ 联动刷新该需求下所有 FP 的 CRSR（纠正事实进入权威固化；失败不阻断）
+                _fps = (await session.execute(
+                    select(FunctionalPoint).where(FunctionalPoint.requirement_id == target_req.id)
+                )).scalars().all()
+                _crsr_ok = 0
+                try:
+                    from app.core.fp_crsr import consolidate_crsr
+                    for _fp in _fps:
+                        try:
+                            if await consolidate_crsr(session, real_product_id, _fp.name):
+                                _crsr_ok += 1
+                        except Exception as e:
+                            logger.warning("[API/knowledge-qa] CRSR 刷新失败 fp={}: {}", _fp.name, str(e)[:100])
+                except Exception as e:
+                    logger.warning("[API/knowledge-qa] CRSR 模块导入失败（跳过刷新）: {}", str(e)[:100])
+
+                logger.info(
+                    "[API/knowledge-qa] 需求级纠正原位合并: target={}, raw_len={}, crsr={}/{}",
+                    target_req.id, len(target_req.raw_text or ""), _crsr_ok, len(_fps),
+                )
+                archived_id = target_req.id
+                archived_type = "requirement"
+                inplace = True
+            else:
+                # 未指定有效来源需求 → 独立片段归档（旧行为兜底）
+                archived_id = gen_requirement_id()
+                title = f"知识问答纠正 - {record.question[:50]}"
+                new_req = Requirement(
+                    id=archived_id,
+                    product_id=real_product_id,
+                    title=title,
+                    priority="P2",
+                    status="archived",
+                    srr_json={
+                        "requirement": {
+                            "title": title,
+                            "summary": final_content[:500],
+                            "product_id": real_product_id,
+                        },
+                        "flows": {},
+                        "business_rules": [],
+                        "boundary_conditions": [],
+                    },
+                    raw_text=final_content,
+                    source_type="knowledge_qa",
+                    created_by="system",
+                    created_at=archived_now,
+                    updated_at=archived_now,
+                    archived_at=archived_now,
+                )
+                session.add(new_req)
+
+                archive_meta = {
+                    "title": title,
+                    "type": "knowledge_qa",
+                    "qa_id": record_id,
+                    "product_id": real_product_id,
+                    "status": "archived",
+                    "corrected_by": "knowledge_qa_review",
+                    "archived_at": archived_now.isoformat(),
+                }
+                await asyncio.to_thread(
+                    vector_store.add_requirement, archived_id, new_req.srr_json, metadata=archive_meta
+                )
+                archived_type = "requirement"
 
         # 更新问答记录状态
         record.correction_status = "approved"
         record.archived = True
         record.archived_type = archived_type
         record.archived_id = archived_id
+        if locals().get("inplace"):
+            record.correction_notes = (record.correction_notes or "") + "［已原位合并至来源需求］"
         record.reviewed_by = username
         record.reviewed_at = archived_now
         record.review_notes = req.review_notes
