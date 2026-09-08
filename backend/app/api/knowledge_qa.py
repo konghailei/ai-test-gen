@@ -344,21 +344,12 @@ async def _stream_qa_answer(
         full_answer = error_msg
         yield {"event": "chunk", "data": error_msg}
 
-    # 最后发送完成事件（含记录 ID）
+    # v3.1.9 修复：记录保存必须在 done 事件之前完成。
+    # 旧实现把保存放在流尾部（done yield 之后）——客户端（前端/脚本）收到 done
+    # 即断开连接，sse-starlette 取消生成器，保存代码永不执行：
+    # 问答记录静默丢失 → 纠错/审核 404、历史缺失。单条 insert 毫秒级，无需异步。
     import uuid
     record_id = f"KQA-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-    yield {
-        "event": "done",
-        "data": json.dumps({
-            "id": record_id,
-            "question": question,
-            "answer_full": full_answer,
-            "reference_sources": reference_sources,
-            "kb_status": kb_status or {"search_ok": True, "error": "", "total": len(reference_sources)},
-        }, ensure_ascii=False),
-    }
-
-    # 异步保存记录（不阻塞 SSE 流）
     try:
         conversation_history = [
             {"role": "user", "content": question},
@@ -382,6 +373,18 @@ async def _stream_qa_answer(
     except Exception as e:
         logger.error("[API/knowledge-qa] 保存问答记录失败: {}", str(e)[:200])
 
+
+    # 最后发送完成事件（含记录 ID；此时记录已落库，纠正/审核立即可用）
+    yield {
+        "event": "done",
+        "data": json.dumps({
+            "id": record_id,
+            "question": question,
+            "answer_full": full_answer,
+            "reference_sources": reference_sources,
+            "kb_status": kb_status or {"search_ok": True, "error": "", "total": len(reference_sources)},
+        }, ensure_ascii=False),
+    }
 
 @router.post("/ask", dependencies=[Depends(get_current_user)])
 async def kqa_ask(
