@@ -65,6 +65,8 @@ class ReqAgent:
         product_id: str = "",
         product_name: str = "",
     ) -> ParseResult:
+        """ReqAgent 主入口：解析需求文本为结构化 SRR，并拆分功能点。
+        """
         """解析原始需求为 SRR JSON + FP 提取产物。
 
         v2.8.52: 返回 ParseResult 替代实例属性，消除并发污染。
@@ -465,7 +467,7 @@ class ReqAgent:
         # data_constraints / acceptance_criteria / business_rules，迁移到对应位置
         # v2.40: 移除 additional_details 兜底字段，所有内容归入标准字段
         # - business_rules → cross_fp_interactions.shared_business_rules（去重）
-        # - boundary_conditions → cross_fp_interactions.global_constraints
+        # - 边界条件（boundary_conditions）→ 已迁移到 cross_fp_interactions.global_constraints
         # - data_constraints / acceptance_criteria → assumptions（标注类型）
         _legacy_bc = srr.pop("boundary_conditions", None) or []
         _legacy_dc = srr.pop("data_constraints", None) or []
@@ -797,7 +799,7 @@ class ReqAgent:
                     rule["type"] = biz_type_map[t]
 
         # AcceptanceCriterion.type 规范化（合法值见 srr.py AcceptanceCriterion.type Literal）
-        #   functional / performance / security / usability / compatibility / reliability
+        #   合法类型：功能 / 性能 / 安全 / 可用性 / 兼容性 / 可靠性
         # 保留合法值；非规范别名（availability/maintainability/portability）归一；
         # 空值或无法识别的值默认 functional（保证下游 Pydantic Literal 校验通过）。
         # 注意：performance / security 为合法值，必须保留，不得误重置为 functional（见 Bug 2）。

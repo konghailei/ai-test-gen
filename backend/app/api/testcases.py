@@ -30,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, get_current_user, require_admin, require_write
+from app.utils.pagination import paginate
 from app.core.product_access import (
     apply_visible_product_filter,
     assert_product_visible,
@@ -112,19 +113,11 @@ async def list_testcases(
     if search:
         conditions.append(TestCase.title.ilike(f"%{search}%"))
 
-    # 计算总数
-    count_stmt = select(func.count(TestCase.id))
-    for cond in conditions:
-        count_stmt = count_stmt.where(cond)
-    total = (await session.execute(count_stmt)).scalar() or 0
-
-    # 分页查询（按创建时间倒序）
+    # 分页查询（按创建时间倒序）—— v3.2.2 收敛：count+分页统一走 utils.pagination
     stmt = select(TestCase).order_by(TestCase.created_at.desc())
     for cond in conditions:
         stmt = stmt.where(cond)
-    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-    result = await session.execute(stmt)
-    rows = result.scalars().all()
+    rows, total = await paginate(session, stmt, page, page_size)
 
     # 批量查询功能点名称（fp_id → fp_name 映射），避免前端显示 fp_id
     from app.db.models import FunctionalPoint, Requirement as ReqModel, Project

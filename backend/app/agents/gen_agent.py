@@ -30,6 +30,8 @@ from datetime import datetime
 from typing import Any
 
 from app.config import settings
+from app.core.constants import Confidence
+from app.utils.numbers import clamp01
 from app.core.llm_client import llm_client
 from app.core import prompt_manager
 from app.db.milvus_store import vector_store
@@ -64,6 +66,10 @@ class GenAgent:
         fp_scope: dict | None = None,
         global_srr: dict | None = None,
     ) -> list[dict]:
+        """GenAgent 主入口：按功能点分片/批量生成测试用例。
+
+    注入影响分析指导、回归基线与覆盖缺口，返回用例列表。
+        """
         """根据 SRR 生成测试用例集。
 
         Args:
@@ -621,10 +627,10 @@ class GenAgent:
             if "confidence" in case:
                 try:
                     c = float(case["confidence"])
-                    case["confidence"] = max(0.0, min(1.0, c))
+                    case["confidence"] = clamp01(c, None)
                 except (TypeError, ValueError):
                     case.pop("confidence", None)
-            case.setdefault("confidence", 0.6)
+            case.setdefault("confidence", Confidence.DEFAULT)
 
             # --- H2: steps / assertions 规范化（Pydantic 要求的字段强制对齐）---
             def _normalize_step(s: object) -> dict | None:
@@ -713,18 +719,18 @@ class GenAgent:
             if top_level_conf is not None:
                 try:
                     top_level_conf = float(top_level_conf)
-                    top_level_conf = max(0.0, min(1.0, top_level_conf))
+                    top_level_conf = clamp01(top_level_conf, None)
                 except (TypeError, ValueError):
                     top_level_conf = 0.7
                 gen_metadata.setdefault("gen_confidence", top_level_conf)
             if "gen_confidence" in gen_metadata:
                 try:
                     c = float(gen_metadata["gen_confidence"])
-                    gen_metadata["gen_confidence"] = max(0.0, min(1.0, c))
+                    gen_metadata["gen_confidence"] = clamp01(c, None)
                 except (TypeError, ValueError):
-                    gen_metadata["gen_confidence"] = 0.7
+                    gen_metadata["gen_confidence"] = Confidence.GEN_DEFAULT
             else:
-                gen_metadata.setdefault("gen_confidence", 0.7)  # 默认置信度
+                gen_metadata.setdefault("gen_confidence", Confidence.GEN_DEFAULT)  # 默认置信度
             gen_metadata.setdefault("gen_model", gen_model)
             gen_metadata.setdefault("gen_at", now)
 
@@ -777,7 +783,7 @@ class GenAgent:
                     for err in (e.errors() if hasattr(e, "errors") else [])[:10]
                 ]
                 # 用 construct 跳过校验，保证最终可写库（但标记为低置信度 0.2）
-                case["confidence"] = min(float(case.get("confidence") or 0.6), 0.2)
+                case["confidence"] = min(float(case.get("confidence") or Confidence.DEFAULT), Confidence.LOW)
                 processed.append(case)
 
         return processed

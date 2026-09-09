@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_admin
+from app.utils.pagination import paginate
 from app.db.database import get_session
 from app.db.models import LLMCallLog, OperationLog
 from app.models.api_schemas import ApiResponse
@@ -89,21 +90,11 @@ async def list_llm_logs(
     if dt_end:
         conditions.append(LLMCallLog.created_at <= dt_end)
 
-    # 总数
-    count_stmt = select(func.count()).select_from(LLMCallLog)
-    for cond in conditions:
-        count_stmt = count_stmt.where(cond)
-    total_result = await session.execute(count_stmt)
-    total = total_result.scalar() or 0
-
-    # 分页查询（按创建时间倒序）
+    # 分页查询（按创建时间倒序）—— v3.2.2 收敛
     stmt = select(LLMCallLog).order_by(LLMCallLog.created_at.desc())
     for cond in conditions:
         stmt = stmt.where(cond)
-    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-
-    result = await session.execute(stmt)
-    logs = result.scalars().all()
+    logs, total = await paginate(session, stmt, page, page_size)
 
     items = [
         {
@@ -206,21 +197,11 @@ async def list_operation_logs(
     if dt_end:
         conditions.append(OperationLog.created_at <= dt_end)
 
-    # 总数
-    count_stmt = select(func.count()).select_from(OperationLog)
-    for cond in conditions:
-        count_stmt = count_stmt.where(cond)
-    total_result = await session.execute(count_stmt)
-    total = total_result.scalar() or 0
-
-    # 分页查询（按创建时间倒序）
+    # 分页查询（按创建时间倒序）—— v3.2.2 收敛
     stmt = select(OperationLog).order_by(OperationLog.created_at.desc())
     for cond in conditions:
         stmt = stmt.where(cond)
-    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-
-    result = await session.execute(stmt)
-    logs = result.scalars().all()
+    logs, total = await paginate(session, stmt, page, page_size)
 
     items = [
         {

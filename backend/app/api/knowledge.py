@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_admin, require_write
+from app.utils.pagination import paginate
 from app.db.database import get_session
 from app.db.models import GenerationBatch, Project, Requirement, TestCase, TestPattern, KBSetting, LLMConfig
 from app.db.milvus_store import vector_store
@@ -164,19 +165,11 @@ async def list_patterns(
     Returns:
         ApiResponse: data 含 items / total / page / page_size
     """
-    # 计算总数
-    count_stmt = select(func.count(TestPattern.id))
-    if category:
-        count_stmt = count_stmt.where(TestPattern.category == category)
-    total = (await session.execute(count_stmt)).scalar() or 0
-
-    # 分页查询
+    # 分页查询 —— v3.2.2 收敛
     stmt = select(TestPattern).order_by(TestPattern.usage_count.desc())
     if category:
         stmt = stmt.where(TestPattern.category == category)
-    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-    result = await session.execute(stmt)
-    rows = result.scalars().all()
+    rows, total = await paginate(session, stmt, page, page_size)
 
     items = [
         {

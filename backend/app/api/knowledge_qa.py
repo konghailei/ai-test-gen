@@ -26,6 +26,7 @@ from sqlalchemy import func, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_write
+from app.utils.pagination import paginate
 from app.core.llm_client import llm_client
 from app.core import prompt_manager
 from app.db.database import get_session
@@ -915,23 +916,12 @@ async def kqa_corrections(
     if product_id:
         conditions.append(KnowledgeQA.product_id == product_id)
 
-    # 总数查询
-    count_stmt = select(func.count(KnowledgeQA.id))
-    for cond in conditions:
-        count_stmt = count_stmt.where(cond)
-    total = (await session.execute(count_stmt)).scalar() or 0
-
-    # 分页查询
+    # 分页查询 —— v3.2.2 收敛
     stmt = select(KnowledgeQA)
     for cond in conditions:
-        stmt = stmt.where(cond)
-    stmt = (
-        stmt.order_by(KnowledgeQA.updated_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    )
-    result = await session.execute(stmt)
-    records = result.scalars().all()
+        stmt = stmt.where(cond).order_by(KnowledgeQA.updated_at.desc())
+    rows, total = await paginate(session, stmt, page, page_size)
+    records = rows
 
     items = [_record_to_dict(r) for r in records]
 

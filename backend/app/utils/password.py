@@ -64,7 +64,7 @@ def verify_password(password: str, password_hash: str) -> bool:
         if len(parts) != 5 or parts[0] != "":
             return False
 
-        # parts: ['', algorithm, iterations, salt, hash]
+        # 密码哈希分段：[算法, 迭代次数, 盐, 哈希值]
         alg = parts[1]
         iterations = int(parts[2])
         salt = parts[3]

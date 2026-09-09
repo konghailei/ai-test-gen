@@ -38,6 +38,7 @@ from sqlalchemy import func, select, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_admin, require_write, get_current_user, CurrentUser
+from app.utils.pagination import paginate
 from app.core.operation_logger import log_operation
 from app.core.product_access import (
     assert_product_visible,
@@ -1451,7 +1452,7 @@ async def _run_requirement_analysis(
             logger.info("[Task] 任务已取消（kb_search 前），提前退出: task_id={}", task_id)
             return
 
-        # ===== phase 2: kb_search + clarify =====
+        # ===== 阶段 2：知识库检索（kb_search）+ 澄清（clarify） =====
         await _update_task(task_id, phase="kb_search", progress=40,
                            message="正在检索知识库历史需求并补充缺失字段...")
 
@@ -2079,19 +2080,11 @@ async def list_requirements(
     if search:
         conditions.append(Requirement.title.ilike(f"%{search}%"))
 
-    # 计算总数
-    count_stmt = select(func.count(Requirement.id))
-    for cond in conditions:
-        count_stmt = count_stmt.where(cond)
-    total = (await session.execute(count_stmt)).scalar() or 0
-
-    # 分页查询（按创建时间倒序）
+    # 分页查询（按创建时间倒序）—— v3.2.2 收敛
     stmt = select(Requirement).order_by(Requirement.created_at.desc())
     for cond in conditions:
         stmt = stmt.where(cond)
-    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-    result = await session.execute(stmt)
-    rows = result.scalars().all()
+    rows, total = await paginate(session, stmt, page, page_size)
 
     items = [
         RequirementSummary(
@@ -4218,7 +4211,7 @@ async def delete_preview(
     fp_count = await session.scalar(
         select(sql_func.count()).select_from(FunctionalPoint).where(FunctionalPoint.requirement_id == req_id)
     )
-    # superseded_by / supersedes
+    # 版本关系字段：superseded_by（被谁取代）/ supersedes（取代谁）
     super_count = await session.scalar(
         select(sql_func.count()).select_from(Requirement).where(
             (Requirement.superseded_by == req_id) | (Requirement.supersedes == req_id)

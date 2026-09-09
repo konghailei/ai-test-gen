@@ -30,6 +30,7 @@ import json
 from typing import Any
 
 from app.core.llm_client import llm_client
+from app.core.constants import Confidence
 from app.db.milvus_store import vector_store
 from app.models.utcf import ReviewReport
 from app.prompts import review_agent as prompts
@@ -62,6 +63,10 @@ class ReviewAgent:
         test_cases: list[dict],
         functional_points: list[dict] | None = None,
     ) -> tuple[dict, list[dict]]:
+        """ReviewAgent 主入口：规则预检 + 6 维 LLM 审核 + 置信度计算 + 要点级覆盖。
+
+    返回 (report, reviewed_cases)。
+        """
         """对测试用例集执行 6 维度审核。
 
         Args:
@@ -434,8 +439,7 @@ class ReviewAgent:
                 if cid:
                     traceability_blocked_cases.add(cid)
 
-        def _clamp(v: float) -> float:
-            return round(max(0.0, min(1.0, v)), 3)
+        from app.utils.numbers import clamp01 as _clamp  # v3.2.2 收敛：原局部 _clamp 去重
 
         # 完整性/覆盖率：来自确定性要点覆盖映射
         completeness_score = 1.0
@@ -703,7 +707,7 @@ class ReviewAgent:
                     # 单个用例 flush 失败时只回滚 savepoint，
                     # 不会让 session 进入 inactive 状态影响后续用例与最终 commit
                     async with session.begin_nested():
-                        if confidence >= 0.70 and not is_blocked:
+                        if confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
                             # 高置信度：自动入库，标记 approved
                             # v3.5: 阈值 0.85→0.70。原 0.85 在冷启动（KB 无相似向量
                             # match_score=0、无模式命中 pattern_bonus=0）时不可达
@@ -726,7 +730,7 @@ class ReviewAgent:
                             )
                             session.add(record)
 
-                        elif 0.6 <= confidence < 0.70 or (
+                        elif Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
                             confidence >= 0.70 and is_blocked
                         ):
                             # 中置信度：标记 reviewed，等待人工确认
@@ -802,7 +806,7 @@ class ReviewAgent:
                         # begin_nested 退出时自动 flush，失败则回滚到 savepoint
 
                     # savepoint 成功提交后，执行向量库写入与统计（不阻断 DB 事务）
-                    if confidence >= 0.70 and not is_blocked:
+                    if confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
                         try:
                             await asyncio.to_thread(
                                 vector_store.add_test_case,
@@ -824,7 +828,7 @@ class ReviewAgent:
                             )
                         stats["auto_approved"] += 1
 
-                    elif 0.6 <= confidence < 0.70 or (
+                    elif Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
                         confidence >= 0.70 and is_blocked
                     ):
                         stats["pending_review"] += 1

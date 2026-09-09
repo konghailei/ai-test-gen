@@ -177,8 +177,7 @@ def build_srr_report(
         })
         issues = raw_issues
 
-    def _clamp(v: float) -> float:
-        return round(max(0.0, min(1.0, v)), 3)
+    from app.utils.numbers import clamp01 as _clamp  # v3.2.2 收敛：原 _clamp 去重
 
     gate_score = 1.0 if passed else (0.6 if forced else 0.3)
     if completeness_score is None:

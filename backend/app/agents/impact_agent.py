@@ -45,6 +45,8 @@ class ImpactAnalysisAgent:
         srr: dict,
         original_cases: list[dict] | None = None,
     ) -> dict:
+        """ImpactAnalysisAgent 主入口：规则化影响分析（BFS 依赖图），输出受影响 FP 与生成指导。
+        """
         """分析变更影响范围。
 
         Args:

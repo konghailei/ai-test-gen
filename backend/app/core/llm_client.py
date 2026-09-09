@@ -262,6 +262,11 @@ class LLMClient:
         return_usage: bool = False,
         _skip_log: bool = False,
     ) -> str | tuple:
+        """调用 LLM 生成文本（核心入口）。
+
+    支持多供应商故障转移、响应缓存、限流、重试与可观测性日志。
+    返回 (content, usage, model_used, provider_key) 或仅 content（依 return_usage）。
+        """
         """调用 LLM 生成文本（主入口）。
 
         Args:
@@ -394,6 +399,10 @@ class LLMClient:
         task_id: str = "",
         req_id: str = "",
     ) -> dict | list:
+        """调用 LLM 并以容错方式解析 JSON（call + _parse_json）。
+
+    返回解析后的 dict/list；解析失败时抛 LLMJsonParseError。
+        """
         """调用 LLM 并解析为 JSON 对象或数组。
 
         Args:
@@ -465,6 +474,8 @@ class LLMClient:
         provider: str | None = None,
         mime_type: str = "image/png",
     ) -> str:
+        """调用视觉模型（多模态输入）。
+        """
         """调用多模态 LLM 识别图片内容（流程图/架构图/表格图等）。
 
         v2.18: 新增多模态能力。图片以 base64 编码传入，LLM 返回结构化文本描述。
@@ -1254,6 +1265,18 @@ class LLMClient:
                 logger.warning("JSON 输出缺失字段: {}", missing)
 
         return data
+
+
+def parse_llm_json(text: str, schema_hint: dict | None = None):
+    """公共容错 JSON 解析入口（v3.2.2 收敛重复）。
+
+    复用 llm_client._parse_json 的完整容错（围栏/前后缀/尾随逗号/截断补全），
+    但失败时返回 None 而非抛异常，供各 Agent 替代裸 json.loads 直接调用。
+    """
+    try:
+        return llm_client._parse_json(text, schema_hint)
+    except Exception:
+        return None
 
 
 # ============================================================================

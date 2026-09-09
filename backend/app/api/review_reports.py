@@ -31,6 +31,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, get_current_user, require_write
+from app.utils.pagination import paginate
 from app.db import prompt_store
 from app.core import prompt_manager
 from app.core.prompt_evolution import evolve_prompt
@@ -68,16 +69,11 @@ async def list_review_reports(
     if task_id:
         conditions.append(ReviewReportRecord.task_id == task_id)
 
-    count_stmt = select(func.count(ReviewReportRecord.id))
-    for cond in conditions:
-        count_stmt = count_stmt.where(cond)
-    total = (await session.execute(count_stmt)).scalar() or 0
-
+    # v3.2.2 收敛：count+分页统一走 utils.pagination
     stmt = select(ReviewReportRecord).order_by(ReviewReportRecord.created_at.desc())
     for cond in conditions:
         stmt = stmt.where(cond)
-    stmt = stmt.offset((page - 1) * page_size).limit(page_size)
-    rows = (await session.execute(stmt)).scalars().all()
+    rows, total = await paginate(session, stmt, page, page_size)
 
     items = [
         {
