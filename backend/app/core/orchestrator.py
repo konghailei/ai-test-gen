@@ -1533,6 +1533,9 @@ class Orchestrator:
     ) -> AsyncGenerator[dict, None]:
         """运行完整流水线，流式 yield SSE 事件。
 
+        P3-6: 入口设置任务环境上下文（contextvars），该任务链内所有
+        LLM 调用自动携带 task_id/req_id 落 llm_call_logs，打通 trace 树。
+
         使用 LangGraph compiled.astream(stream_mode="updates") 流式执行，
         每个节点完成后 yield 一个 SSE 事件，最终 yield done 事件含完整结果。
 
@@ -1559,6 +1562,10 @@ class Orchestrator:
             - Clarify 回环（最多 3 轮）会多次 yield clarify/gate 事件
             - 最终 done 事件含 reviewed_cases / review_report / 各节点结果
         """
+        from app.core.task_context import set_task_context
+        # 任务环境上下文：整个 generator 生命周期内生效（asyncio 任务链继承），
+        # 进程内常驻无害——同名任务再次运行会被下一次 set 覆盖。
+        set_task_context(task_id=task_id or "", req_id=existing_req_id or "")
         initial_state: PipelineState = {
             "raw_requirement": raw_requirement,
             "srr_json": srr_json,

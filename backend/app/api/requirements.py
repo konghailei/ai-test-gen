@@ -1362,6 +1362,9 @@ async def _run_requirement_analysis(
     """
     from app.db.models import Requirement as ReqModel
     from sqlalchemy import update as sa_update
+    # P3-6: 后台协程设置任务环境上下文，LLM 日志自动关联 task/req
+    from app.core.task_context import set_task_context
+    set_task_context(task_id=task_id, req_id=req_id)
 
     async def _is_cancelled() -> bool:
         """检测任务是否被用户取消（status=interrupted）。"""
@@ -2619,6 +2622,9 @@ async def _run_clarify_reparse(
         4. status=completed
     """
     from sqlalchemy import update as sa_update, delete as sa_del
+    # P3-6: 后台协程设置任务环境上下文，LLM 日志自动关联 task/req
+    from app.core.task_context import set_task_context
+    set_task_context(task_id=task_id, req_id=req_id)
     try:
         await _update_task(task_id, status="running", phase="parse", progress=20,
                            message="正在调用 LLM 重新生成 SRR...")

@@ -168,6 +168,7 @@ async def evolve_prompt(
     target_name: str,
     manual_notes: str = "",
     username: str = "api",
+    activate: bool = False,
 ) -> dict:
     """执行一次提示词进化整合（P3 主入口）。
 
@@ -214,16 +215,17 @@ async def evolve_prompt(
     if not new_section:
         raise ValueError("LLM 未返回有效的整合规则（new_section 为空），已放弃写入")
 
-    # 4) 组装新 prompt 并写入（自动产生 prompt_history）
+    # 4) 组装新 prompt（P2-5: 默认只进候选区，激活后才写 override）
     new_prompt = merge_prompt(body, new_section)
-    prompt_store.update_prompt(
-        target_module, target_name, new_prompt,
-        changed_by=f"evolution:{username}",
-    )
-
-    # 5) 取回本次写入的 history id（本会话刚写入的最新记录）
-    history = prompt_store.list_prompt_history(target_module, target_name, limit=1)
-    prompt_history_id = history[0]["id"] if history else 0
+    prompt_history_id = 0
+    if activate:
+        # 显式 activate=True（旧路径）：直接写入 override（自动产生 prompt_history）
+        prompt_store.update_prompt(
+            target_module, target_name, new_prompt,
+            changed_by=f"evolution:{username}",
+        )
+        history = prompt_store.list_prompt_history(target_module, target_name, limit=1)
+        prompt_history_id = history[0]["id"] if history else 0
 
     # 6) 落库整合记录
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -238,6 +240,8 @@ async def evolve_prompt(
         manual_notes=manual_notes.strip(),
         integration_summary=summary,
         prompt_history_id=prompt_history_id,
+        candidate_prompt=("" if activate else new_prompt),
+        status=("activated" if activate else "pending"),
         created_by=username,
     )
     session.add(record)

@@ -1829,9 +1829,10 @@ class ClarifyAgent:
                 })
             try:
                 prompt = prompts.ANSWER_COVERAGE_EVAL_PROMPT
+                from app.utils.external_content import wrap_external_content
                 result = await self._llm.call_json(
                     prompt=prompt.format(
-                        raw_text=(srr.get("_raw_text", "") or "")[:12000],
+                        raw_text=wrap_external_content((srr.get("_raw_text", "") or "")[:12000]),
                         items=json.dumps(items, ensure_ascii=False),
                     ),
                     system_prompt=prompt_manager.get("clarify_agent", "CLARIFY_COVERAGE_EVAL_SYSTEM_PROMPT"),

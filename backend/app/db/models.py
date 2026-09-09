@@ -1220,6 +1220,11 @@ class PromptIntegrationRecord(Base):
     manual_notes: Mapped[str] = mapped_column(Text, default="", comment="人工补充意见")
     integration_summary: Mapped[str] = mapped_column(Text, default="", comment="LLM 生成的整合摘要")
     prompt_history_id: Mapped[int] = mapped_column(Integer, default=0, comment="本次写入产生的 prompt_history 记录 ID（回退锚点）")
+    # P2-5 候选区（书 6.10.4/8.3）：进化产物先进候选区，回归确认后才激活落 override
+    candidate_prompt: Mapped[str] = mapped_column(Text, default="", comment="候选提示词全文（status=pending 时非空）")
+    status: Mapped[str] = mapped_column(String(16), default="activated", comment="pending=候选待激活 / activated=已激活 / discarded=已废弃")
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="激活时间")
+    activated_by: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="激活操作人")
     created_by: Mapped[str] = mapped_column(String(64), default="api", comment="操作人")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True

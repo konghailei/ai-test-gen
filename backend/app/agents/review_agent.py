@@ -275,14 +275,36 @@ class ReviewAgent:
 
         user_prompt = prompts.build_user_prompt(srr, test_cases, gen_confidences)
 
+        # P1-1 评审异构路由：评审可配置专属供应商（与生成模型家族不同 → 偏见正交，
+        # 依据《深入理解 AI Agent》6.5.1 同源偏见）。未配置/失败时回退主力池，尽力而为。
+        judge_provider = None
         try:
-            result = await self._llm.call_json(
-                prompt=user_prompt,
-                system_prompt=prompt_manager.get("review_agent", "SYSTEM_PROMPT"),
-                schema_hint={"issues": list, "avg_confidence": float},
-                temperature=0.2,
-                agent_name="ReviewAgent",
-            )
+            from app.db.database import async_session as _as
+            from app.api.settings import get_review_llm_provider
+            async with _as() as _s:
+                judge_provider = await get_review_llm_provider(_s)
+        except Exception as e:
+            logger.debug("[ReviewAgent] 读取评审供应商设置失败（跟随主力）: {}", str(e)[:100])
+
+        _review_kwargs = dict(
+            prompt=user_prompt,
+            system_prompt=prompt_manager.get("review_agent", "SYSTEM_PROMPT"),
+            schema_hint={"issues": list, "avg_confidence": float},
+            temperature=0.2,
+            agent_name="ReviewAgent",
+        )
+        if judge_provider:
+            try:
+                result = await self._llm.call_json(**_review_kwargs, provider=judge_provider)
+                logger.info("[ReviewAgent] 评审走异构供应商: {}", judge_provider)
+                return result
+            except Exception as e:
+                logger.warning(
+                    "[ReviewAgent] 评审供应商 {} 失败，回退主力池: {}",
+                    judge_provider, str(e)[:150],
+                )
+        try:
+            result = await self._llm.call_json(**_review_kwargs)
             return result
         except Exception as e:
             logger.warning("[ReviewAgent] LLM 审核失败，使用规则降级: {}", str(e)[:200])

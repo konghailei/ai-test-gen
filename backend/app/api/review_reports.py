@@ -31,6 +31,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, get_current_user, require_write
+from app.db import prompt_store
 from app.core import prompt_manager
 from app.core.prompt_evolution import evolve_prompt
 from app.db.database import get_session
@@ -193,12 +194,20 @@ async def list_evolution_targets() -> ApiResponse:
     return ApiResponse(success=True, message="ok", data={"items": items})
 
 
+class PromptCandidateActivateRequest(BaseModel):
+    """候选激活请求（P2-5）。confirmed_eval=false 时拒绝——回归门槛。"""
+    confirmed_eval: bool = Field(False, description="是否已在评估集完成回归验证")
+    eval_notes: str = Field("", max_length=500, description="回归结果备注")
+
+
 class PromptEvolutionRequest(BaseModel):
     """P3 整合请求。"""
     product_id: str = Field(..., description="产品隔离 ID")
     report_ids: list[str] = Field(..., min_length=1, description="参与整合的评审报告 ID 列表")
     target_prompt_id: str = Field(..., description="目标提示词 ID（module.name，须在白名单内）")
     manual_notes: str = Field("", description="人工补充意见（最高优先级）")
+    # P2-5: 默认 False——产物先进候选区（status=pending），回归确认后经 activate 端点激活
+    activate: bool = Field(False, description="是否直接激活（True=旧行为直写 override；False=进候选区）")
 
 
 @router.post(
@@ -235,6 +244,7 @@ async def run_prompt_evolution(
             target_name=target["name"],
             manual_notes=req.manual_notes,
             username=user.username,
+            activate=req.activate,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)[:300])
@@ -427,3 +437,66 @@ async def adopt_issues(
             },
         },
     )
+
+
+# ============================================================================
+# P2-5: 提示词候选区激活（书 6.10.4/8.3——回归确认后才落 override）
+# ============================================================================
+
+@router.get("/prompt-evolution/candidates", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def list_candidates(
+    status: str = "pending",
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """列出提示词进化候选（默认 pending）。"""
+    rows = (await session.execute(
+        select(PromptIntegrationRecord).where(PromptIntegrationRecord.status == status)
+        .order_by(PromptIntegrationRecord.created_at.desc())
+    )).scalars().all()
+    return ApiResponse(success=True, message="ok", data=[{
+        "id": r.id, "target_prompt_id": r.target_prompt_id,
+        "accepted_count": r.accepted_count, "summary": r.integration_summary[:200],
+        "status": r.status, "created_by": r.created_by,
+    } for r in rows])
+
+
+@router.post("/prompt-evolution/{record_id}/activate", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def activate_candidate(
+    record_id: str,
+    req: PromptCandidateActivateRequest,
+    session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
+) -> ApiResponse:
+    """激活候选提示词（回归门槛）。
+
+    confirmed_eval=False 时拒绝——候选必须先在评估集完成回归
+    （P2-3 统计口径 + P2-4 金标校准通过），确认后才允许落 override。
+    激活写入自动产生 prompt_history（回退锚点不变）。
+    """
+    record = (await session.execute(
+        select(PromptIntegrationRecord).where(PromptIntegrationRecord.id == record_id)
+    )).scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"整合记录不存在: {record_id}")
+    if record.status != "pending":
+        raise HTTPException(status_code=400, detail=f"记录状态为 {record.status}，仅 pending 可激活")
+    if not req.confirmed_eval:
+        raise HTTPException(
+            status_code=400,
+            detail="回归门槛未满足：请先在评估集完成回归验证（建议口径 Pass^k + 金标 kappa>0.7），再以 confirmed_eval=true 激活",
+        )
+    if not record.candidate_prompt:
+        raise HTTPException(status_code=400, detail="候选内容为空，无法激活")
+
+    module, name = record.target_prompt_id.split(".", 1)
+    prompt_store.update_prompt(module, name, record.candidate_prompt, changed_by=f"candidate:{user.username}")
+    history = prompt_store.list_prompt_history(module, name, limit=1)
+    record.status = "activated"
+    record.activated_at = datetime.now(timezone.utc)
+    record.activated_by = user.username
+    record.prompt_history_id = history[0]["id"] if history else record.prompt_history_id
+    await session.commit()
+    return ApiResponse(success=True, message="候选提示词已激活（可经 prompt_history 回退）", data={
+        "record_id": record.id, "target_prompt_id": record.target_prompt_id,
+        "prompt_history_id": record.prompt_history_id,
+    })

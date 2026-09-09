@@ -1,0 +1,5 @@
+{"query": "附件图片上传规则是什么？支持哪些格式？单文件大小限制多少？", "product_id": "PROD-86544-123", "expected_req_ids": ["REQ-1788844886566-9917"]}
+{"query": "敏感词校验规则是什么？分几级？", "product_id": "PROD-86544-123", "expected_req_ids": ["REQ-1788844886566-9917"]}
+{"query": "工单超时处理规则是什么？多久自动挂起？", "product_id": "PROD-86544-123", "expected_req_ids": ["REQ-1788844886566-9917"]}
+{"query": "挂起的工单如何恢复？管理员可以代恢复吗？", "product_id": "PROD-86544-123", "expected_req_ids": ["REQ-1788844886566-9917"]}
+{"query": "访客可以查看哪些工单？", "product_id": "PROD-86544-123", "expected_req_ids": ["REQ-1788844886566-9917"]}

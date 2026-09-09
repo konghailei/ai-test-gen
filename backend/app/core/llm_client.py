@@ -605,6 +605,40 @@ class LLMClient:
     # 内部实现
     # ========================================================================
 
+    @staticmethod
+    def _normalize_usage(usage_obj) -> dict:
+        """归一化 usage 字典（P1-2）：标准三字段 + 供应商侧 prompt cache 命中观测。
+
+        缓存字段随供应商不同：
+        - OpenAI 兼容（dashscope/qwen、deepseek 等）: prompt_tokens_details.cached_tokens
+        - Anthropic: cache_read_input_tokens / cache_creation_input_tokens
+        - litellm 统一透传: prompt_cache_hit_tokens
+        前置条件：system prompt 字节级稳定（提示词管理保证）+ 工具定义顺序固定，
+        否则前缀缓存全量失效——动态内容一律放 user 消息（本书 2.3 原则）。
+        """
+        if usage_obj is None:
+            return {}
+        u = {
+            "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
+            "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
+            "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
+        }
+        for attr in ("cache_read_input_tokens", "cache_creation_input_tokens", "prompt_cache_hit_tokens"):
+            v = getattr(usage_obj, attr, None)
+            if v:
+                u["cache_hit_tokens"] = v
+                break
+        details = getattr(usage_obj, "prompt_tokens_details", None)
+        if details is not None and "cache_hit_tokens" not in u:
+            cached = None
+            if isinstance(details, dict):
+                cached = details.get("cached_tokens")
+            else:
+                cached = getattr(details, "cached_tokens", None)
+            if cached:
+                u["cache_hit_tokens"] = cached
+        return u
+
     def _candidate_providers(self, model: str | None, provider: str | None = None) -> list[dict]:
         """构建候选提供商列表（跳过被禁用的）。
 
@@ -933,11 +967,7 @@ class LLMClient:
                             break
                         # include_usage 模式下最后一个 chunk 携带累计用量
                         if getattr(_chunk, "usage", None):
-                            usage = {
-                                "prompt_tokens": getattr(_chunk.usage, "prompt_tokens", 0) or 0,
-                                "completion_tokens": getattr(_chunk.usage, "completion_tokens", 0) or 0,
-                                "total_tokens": getattr(_chunk.usage, "total_tokens", 0) or 0,
-                            }
+                            usage = self._normalize_usage(_chunk.usage)
                         if getattr(_chunk, "choices", None):
                             _delta = getattr(_chunk.choices[0], "delta", None)
                             _piece = getattr(_delta, "content", None) if _delta is not None else None
@@ -996,11 +1026,7 @@ class LLMClient:
                     # 提取 token 使用量（可能为 None）
                     usage_obj = getattr(response, "usage", None)
                     if usage_obj:
-                        usage = {
-                            "prompt_tokens": getattr(usage_obj, "prompt_tokens", 0) or 0,
-                            "completion_tokens": getattr(usage_obj, "completion_tokens", 0) or 0,
-                            "total_tokens": getattr(usage_obj, "total_tokens", 0) or 0,
-                        }
+                        usage = self._normalize_usage(usage_obj)
                 if not content:
                     raise _RetryableError("LLM 返回空内容")
                 # v2.24: 检测输出是否因 max_tokens 截断
@@ -1138,6 +1164,11 @@ class LLMClient:
         try:
             from app.db.database import async_session
             from app.db.models import LLMCallLog
+            # P3-6: task_id/req_id 未显式传入时，从环境上下文兜底（编排器入口 set）
+            if not task_id or not req_id:
+                from app.core.task_context import get_task_id as _gtid, get_req_id as _grid
+                task_id = task_id or _gtid()
+                req_id = req_id or _grid()
             # settings 已在顶部导入，无需重复导入
 
             # v2.27: 优先使用实际供应商 key，回退到全局主供应商

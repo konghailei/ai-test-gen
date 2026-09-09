@@ -17,13 +17,14 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.auth import require_admin, require_write, CurrentUser, get_current_user
 from app.db.database import get_session
-from app.db.models import LLMConfig as LLMConfigModel
+from app.db.models import LLMConfig as LLMConfigModel, KBSetting
 from app.models.api_schemas import (
     ApiResponse,
     BUILTIN_PROVIDERS,
@@ -43,6 +44,11 @@ def _sanitize_error(msg: str) -> str:
     # 匹配 Bearer 格式的 Key
     msg = _re.sub(r'Bearer\s+sk-[A-Za-z0-9]{10,}', 'Bearer sk-****', msg)
     return msg
+
+
+class ReviewLLMSettingRequest(BaseModel):
+    """评审专属 LLM 供应商设置。"""
+    provider: str = Field(default="", max_length=64, description="供应商名（空=清除，跟随主力）")
 
 
 router = APIRouter()
@@ -169,6 +175,25 @@ def _build_item(row: LLMConfigModel) -> LLMConfigItem:
 # ============================================================================
 # 启动时加载：将 DB 中的配置写入 settings 单例
 # ============================================================================
+
+# P1-1: 评审专属 LLM 供应商设置（kb_settings 作通用 KV 复用，key 隔离）
+REVIEW_LLM_SETTING_KEY = "review_provider"
+
+
+async def get_review_llm_provider(session: AsyncSession) -> str | None:
+    """读取评审专属 LLM 供应商（供 ReviewAgent 异构路由使用）。
+
+    返回 None 表示未设置，调用方应使用全局主 LLM（同源模式）。
+    """
+    try:
+        result = await session.execute(
+            select(KBSetting).where(KBSetting.key == REVIEW_LLM_SETTING_KEY)
+        )
+        row = result.scalar_one_or_none()
+        return row.value if row and row.value else None
+    except Exception:
+        return None
+
 
 async def load_db_config_to_settings(session: AsyncSession) -> None:
     """应用启动时调用：从 DB 读取持久化配置。
@@ -608,3 +633,49 @@ async def _do_test(provider: str, model: str, base_url: str,
             message=f"「{label}」连接失败",
             data=data.model_dump(),
         )
+
+
+# ============================================================================
+# P1-1: 评审专属 LLM 供应商（异构路由机制；选型由用户在设置页/调用方决定）
+# ============================================================================
+
+@router.get("/review-llm", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_review_llm_config(
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """获取评审专属 LLM 供应商（None/空 = 未启用异构，跟随全局主力）。"""
+    provider = await get_review_llm_provider(session)
+    available = list((getattr(settings, "_all_provider_configs", {}) or {}).keys())
+    return ApiResponse(success=True, message="ok", data={
+        "provider": provider or "",
+        "available_providers": available,
+    })
+
+
+@router.put("/review-llm", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def set_review_llm_config(
+    req: ReviewLLMSettingRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """设置/清除评审专属 LLM 供应商。
+
+    provider 为空字符串表示清除（评审跟随全局主力，同源模式）。
+    指定供应商调用失败时 ReviewAgent 自动回退主力池，异构是尽力而为。
+    """
+    provider = (req.provider or "").strip()
+    if provider:
+        all_configs = getattr(settings, "_all_provider_configs", {}) or {}
+        if provider not in all_configs:
+            raise HTTPException(status_code=400, detail=f"供应商 {provider} 未配置")
+    result = await session.execute(
+        select(KBSetting).where(KBSetting.key == REVIEW_LLM_SETTING_KEY)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = KBSetting(key=REVIEW_LLM_SETTING_KEY, value=provider)
+        session.add(row)
+    else:
+        row.value = provider
+    await session.commit()
+    return ApiResponse(success=True, message="评审 LLM 供应商已更新" if provider else "评审 LLM 已恢复跟随主力",
+                       data={"provider": provider})
