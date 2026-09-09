@@ -19,7 +19,7 @@ from app.db.database import get_session
 from app.db.models import AnalysisTask, LLMCallLog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter(prefix="/observability", tags=["observability"])
+router = APIRouter(tags=["可观测性"])
 
 
 @router.get("/trace/{task_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
