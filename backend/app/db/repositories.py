@@ -15,7 +15,14 @@ from typing import Any
 from sqlalchemy import select
 
 from app.db.database import async_session
-from app.db.models import AnalysisTask, FunctionalPoint, TestCase
+from app.db.models import (
+    AnalysisTask,
+    FPDependency,
+    FunctionalPoint,
+    Project,
+    Requirement,
+    TestCase,
+)
 
 
 async def load_functional_points(req_id: str) -> list[dict]:
@@ -123,3 +130,64 @@ async def load_cases_by_req(req_id: str) -> list[dict]:
             }
             for r in result.scalars().all()
         ]
+
+
+# ============================================================================
+# v3.2.5: 高频查询模式收敛（api/agents 裸 select() 收敛到仓储层）
+# ============================================================================
+
+async def get_requirement_by_id(req_id: str):
+    """按 ID 获取需求 ORM 对象（最高频查询模式）。"""
+    if not req_id:
+        return None
+    async with async_session() as session:
+        result = await session.execute(
+            select(Requirement).where(Requirement.id == req_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_project_by_id(project_id: str):
+    """按 ID 获取项目 ORM 对象。"""
+    if not project_id:
+        return None
+    async with async_session() as session:
+        result = await session.execute(
+            select(Project).where(Project.id == project_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def list_fps_by_requirement_id(requirement_id: str):
+    """按需求 ID 获取全部功能点 ORM 对象。"""
+    if not requirement_id:
+        return []
+    async with async_session() as session:
+        result = await session.execute(
+            select(FunctionalPoint).where(
+                FunctionalPoint.requirement_id == requirement_id
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def list_fp_dependencies_by_req(req_id: str):
+    """按需求 ID 获取全部 FP 依赖边。"""
+    if not req_id:
+        return []
+    async with async_session() as session:
+        result = await session.execute(
+            select(FPDependency).where(FPDependency.requirement_id == req_id)
+        )
+        return list(result.scalars().all())
+
+
+async def list_cases_by_req_id(req_id: str):
+    """按需求 ID 获取全部测试用例 ORM 对象（含所有字段）。"""
+    if not req_id:
+        return []
+    async with async_session() as session:
+        result = await session.execute(
+            select(TestCase).where(TestCase.req_id == req_id)
+        )
+        return list(result.scalars().all())
