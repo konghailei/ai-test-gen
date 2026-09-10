@@ -2,10 +2,10 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Plus, Trash2, FolderOpen, Loader2, Edit3, Save, X, Search,
-  TestTube, Archive, RotateCcw, AlertTriangle,
+  TestTube, Archive, RotateCcw,
   Upload, MessageCircle,
 } from 'lucide-react'
-import { products as prodApi, requirements as reqApi } from '../api/client'
+import { products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Project } from '../types'
 import UploadRequirementModal from '../components/UploadRequirementModal'
@@ -209,13 +209,8 @@ export default function ProjectManagementPage() {
 
   // v2.8.52: 条件筛选
   const [filterProjStatus, setFilterProjStatus] = useState('')   // 项目状态: ''/active/archived
-  const [filterReqStatus, setFilterReqStatus] = useState('')     // 需求状态: ''/analyzing/draft/pending_review/confirmed/archived
-  const [filterReqPriority, setFilterReqPriority] = useState('') // 需求优先级: ''/P0/P1/P2/P3
   const [filterGoLiveStart, setFilterGoLiveStart] = useState('')  // v3.2.9 上线时间范围-起
   const [filterGoLiveEnd, setFilterGoLiveEnd] = useState('')      // v3.2.9 上线时间范围-止
-
-  // 搜索模式：匹配需求的项目 ID 集合（用于在搜索时额外显示项目名不匹配但需求匹配的项目）
-  const [searchMatchedProjectIds, setSearchMatchedProjectIds] = useState<Set<string> | null>(null)
 
   // 上传需求弹窗状态
   const [showUpload, setShowUpload] = useState(false)
@@ -228,8 +223,6 @@ export default function ProjectManagementPage() {
     setEditModal(null)
     setArchiveModal(null)
     setShowAdd(false)
-    // v3.2.8: 切换产品时清空搜索匹配状态（折叠面板已移除）
-    setSearchMatchedProjectIds(null)
     if (selectedProductId) loadData(selectedProductId)
   }, [selectedProductId])
 
@@ -280,33 +273,6 @@ export default function ProjectManagementPage() {
 
 
 
-  // v2.46 统一搜索：搜索关键词变化时，并行查询匹配需求的项目 ID 集合
-  useEffect(() => {
-    if (!activeProductId || !search.trim()) {
-      setSearchMatchedProjectIds(null)
-      return
-    }
-    let cancelled = false
-    const t = setTimeout(async () => {
-      try {
-        // 查询所有匹配关键词+筛选条件的需求，提取对应 project_id 集合
-        const r = await reqApi.list(1, 200, activeProductId, undefined, {
-          search: search.trim(),
-          status: filterReqStatus || undefined,
-          priority: filterReqPriority || undefined,
-        })
-        if (cancelled) return
-        const ids = new Set<string>()
-        for (const req of (r.items || [])) {
-          if (req.project_id) ids.add(req.project_id)
-        }
-        setSearchMatchedProjectIds(ids)
-      } catch {
-        if (!cancelled) setSearchMatchedProjectIds(new Set())
-      }
-    }, 400)
-    return () => { cancelled = true; clearTimeout(t) }
-  }, [search, activeProductId, filterReqStatus, filterReqPriority])
 
 
 
@@ -355,7 +321,7 @@ export default function ProjectManagementPage() {
     navigate(`/projects/${encodeURIComponent(projectId)}`)
   }
 
-  // v2.8.52 统一搜索 + 条件筛选
+  // v3.2.10 项目搜索（仅项目名称/版本）+ 条件筛选
   const filtered = useMemo(() => {
     const all = projects[activeProductId || ''] || []
     let result = all
@@ -363,14 +329,12 @@ export default function ProjectManagementPage() {
     if (filterProjStatus) {
       result = result.filter(p => (p.status || 'active') === filterProjStatus)
     }
-    // 搜索关键词
+    // 搜索关键词（仅项目名称与版本，不含需求标题）
     if (search.trim()) {
       const q = search.toLowerCase()
-      const matchedReqProjectIds = searchMatchedProjectIds || new Set<string>()
       result = result.filter(p =>
         p.name.toLowerCase().includes(q) ||
-        (p.version || '').toLowerCase().includes(q) ||
-        matchedReqProjectIds.has(p.id)
+        (p.version || '').toLowerCase().includes(q)
       )
     }
     // v3.2.9 上线时间范围筛选（按 YYYY-MM-DD 比较，未设上线时间的项目在启用范围筛选时排除）
@@ -384,7 +348,7 @@ export default function ProjectManagementPage() {
       })
     }
     return result
-  }, [projects, activeProductId, search, searchMatchedProjectIds, filterProjStatus, filterGoLiveStart, filterGoLiveEnd])
+  }, [projects, activeProductId, search, filterProjStatus, filterGoLiveStart, filterGoLiveEnd])
 
   return (
     <div className="space-y-6">
@@ -440,7 +404,7 @@ export default function ProjectManagementPage() {
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 className="input-field text-sm py-1.5 pl-9"
-                placeholder="搜索项目名称或需求标题..."
+                placeholder="搜索项目名称或版本..."
               />
             </div>
             {/* v2.8.52: 项目状态筛选 */}
@@ -453,33 +417,6 @@ export default function ProjectManagementPage() {
               <option value="">全部状态</option>
               <option value="active">活跃</option>
               <option value="archived">已归档</option>
-            </select>
-            {/* v2.8.52: 需求状态筛选 */}
-            <select
-              value={filterReqStatus}
-              onChange={e => setFilterReqStatus(e.target.value)}
-              className="input-field text-sm py-1.5 w-auto"
-              title="筛选需求状态"
-            >
-              <option value="">需求状态</option>
-              <option value="analyzing">分析中</option>
-              <option value="draft">待澄清</option>
-              <option value="pending_review">待确认</option>
-              <option value="confirmed">已确认</option>
-              <option value="archived">已归档</option>
-            </select>
-            {/* v2.8.52: 需求优先级筛选 */}
-            <select
-              value={filterReqPriority}
-              onChange={e => setFilterReqPriority(e.target.value)}
-              className="input-field text-sm py-1.5 w-auto"
-              title="筛选需求优先级"
-            >
-              <option value="">优先级</option>
-              <option value="P0">P0</option>
-              <option value="P1">P1</option>
-              <option value="P2">P2</option>
-              <option value="P3">P3</option>
             </select>
             {/* v3.2.9: 上线时间范围检索 */}
             <div className="flex items-center gap-1.5">
@@ -500,6 +437,14 @@ export default function ProjectManagementPage() {
                 title="上线时间（止）"
               />
             </div>
+            {/* v3.2.10: 重置搜索与筛选条件 */}
+            <button
+              onClick={() => { setSearch(''); setFilterProjStatus(''); setFilterGoLiveStart(''); setFilterGoLiveEnd('') }}
+              className="btn-secondary text-xs whitespace-nowrap flex items-center gap-1"
+              title="清空搜索与筛选条件"
+            >
+              <RotateCcw className="w-3 h-3" /> 重置
+            </button>
             <button onClick={() => setShowAdd(true)} className="btn-primary text-xs whitespace-nowrap">
               <Plus className="w-3 h-3" /> 添加项目
             </button>
@@ -530,9 +475,6 @@ export default function ProjectManagementPage() {
                 <tbody>
                   {filtered.map(proj => {
                     const statusStyle = PROJECT_STATUS_STYLES[proj.status || 'active'] || PROJECT_STATUS_STYLES.active
-                    const isMatchedByReq = search.trim() !== '' &&
-                      searchMatchedProjectIds?.has(proj.id) &&
-                      !proj.name.toLowerCase().includes(search.toLowerCase())
                     return (
                       <tr
                         key={proj.id}
@@ -546,11 +488,6 @@ export default function ProjectManagementPage() {
                               <FolderOpen className={`w-3.5 h-3.5 ${statusStyle.iconColor}`} />
                             </div>
                             <span className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }}>{proj.name}</span>
-                            {isMatchedByReq && (
-                              <span className="text-[11px] px-1.5 py-0.5 flex items-center gap-1 font-medium flex-shrink-0" style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
-                                <AlertTriangle className="w-3 h-3" /> 需求匹配
-                              </span>
-                            )}
                           </div>
                         </td>
                         <td className="px-3 py-3 text-center">
