@@ -258,20 +258,10 @@ export default function TestCases({ fixedProjectId, embedded = false }: TestCase
   // 未选项目时不展示用例信息
   const noProject = !filterProject
 
-  return (
-    <div className="space-y-6">
-      {/* 标题栏 */}
-      <div className={`flex items-center ${embedded ? 'justify-end' : 'justify-between'}`}>
-        {!embedded && (
-          <div>
-            <h1 className="page-title">测试用例</h1>
-            <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
-              {noProject ? '请先选择一个项目，再查看该项目的测试用例' : `${total} 个用例`}
-            </p>
-          </div>
-        )}
-        <div className="flex items-center gap-2">
-          <button onClick={handleGenerate} className="btn-primary flex items-center gap-2" disabled={noProject}>
+  // v3.2.9: 操作按钮组（非嵌入时在标题栏右侧；嵌入时并入筛选栏同一行）
+  const actionButtons = (
+    <>
+      <button onClick={handleGenerate} className="btn-primary flex items-center gap-2" disabled={noProject}>
             <FileText className="w-4 h-4" />生成用例
           </button>
           <button onClick={openXMindEditor} className="btn-secondary flex items-center gap-2 disabled:opacity-50"
@@ -305,8 +295,25 @@ export default function TestCases({ fixedProjectId, embedded = false }: TestCase
               </label>
             </div>
           </div>
+    </>
+  )
+
+
+  return (
+    <div className="space-y-6">
+      {/* 标题栏（嵌入模式隐藏，操作按钮并入筛选栏） */}
+      {!embedded && (
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="page-title">测试用例</h1>
+            <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
+              {noProject ? '请先选择一个项目，再查看该项目的测试用例' : `${total} 个用例`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">{actionButtons}</div>
         </div>
-      </div>
+      )}
+
 
       {/* 筛选栏 */}
       <div className="card py-3 px-5">
@@ -376,6 +383,9 @@ export default function TestCases({ fixedProjectId, embedded = false }: TestCase
             <button onClick={() => { setFilterReq(''); setFilterProject(''); setFilterSearch(''); setProjectSearch('') }}
               className="text-xs hover:underline shrink-0" style={{ color: 'var(--brand-500)' }}>清除全部</button>
           )}
+
+          {/* v3.2.9: 嵌入模式操作按钮并入筛选栏同一行，避免按钮独立成行显乱 */}
+          {embedded && <div className="ml-auto flex items-center gap-2 shrink-0">{actionButtons}</div>}
         </div>
       </div>
 

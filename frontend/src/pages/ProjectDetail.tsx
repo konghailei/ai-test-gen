@@ -94,9 +94,9 @@ export default function ProjectDetail() {
   const st = statusInfo(project.status)
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-6">
+    <div className="space-y-6">
       {/* 返回 + 精简标题行（详情信息收进"项目信息"标签，避免挤占空间） */}
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-3">
         <button
           className="flex items-center gap-1.5 text-sm transition-colors hover:opacity-70"
           style={{ color: 'var(--foreground-tertiary)' }}
@@ -112,8 +112,8 @@ export default function ProjectDetail() {
         <span className={`text-xs px-2 py-0.5 rounded shrink-0 ${st.cls}`}>{st.text}</span>
       </div>
 
-      {/* 三标签栏 */}
-      <div className="flex items-center gap-1 mb-4" style={{ borderBottom: '1px solid var(--border)' }}>
+      {/* 三标签栏（样式对齐系统 RequirementDetail：border-b-2 + brand-700） */}
+      <div className="flex items-center gap-1" style={{ borderBottom: '1px solid var(--border)' }}>
         {([
           ['info', '项目信息', Info, null],
           ['reqs', '需求管理', FileText, reqs.length],
@@ -121,11 +121,10 @@ export default function ProjectDetail() {
         ] as const).map(([key, label, Icon, count]) => (
           <button
             key={key}
-            className="flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors duration-150"
-            style={{
-              borderBottom: tab === key ? '2px solid var(--brand-500)' : '2px solid transparent',
-              color: tab === key ? 'var(--brand-600)' : 'var(--foreground-tertiary)',
-            }}
+            className="flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-all duration-150"
+            style={tab === key
+              ? { borderColor: 'var(--brand-500)', color: 'var(--brand-700)' }
+              : { borderColor: 'transparent', color: 'var(--foreground-tertiary)' }}
             onClick={() => setTab(key)}
           >
             <Icon className="w-4 h-4" />
@@ -213,7 +212,11 @@ export default function ProjectDetail() {
       {/* ===== 需求管理 ===== */}
       {tab === 'reqs' && (
         <div className="space-y-3">
-          <div className="flex items-center justify-end">
+          {/* 工具栏：需求统计 + 上传按钮 同行，避免按钮孤立 */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3 text-sm" style={{ color: 'var(--foreground-tertiary)' }}>
+              <span>共 <span className="font-mono font-medium" style={{ color: 'var(--foreground-secondary)' }}>{reqs.length}</span> 条需求</span>
+            </div>
             <button className="btn-primary flex items-center gap-2" onClick={() => setShowUpload(true)}>
               <Upload className="w-4 h-4" />上传需求
             </button>

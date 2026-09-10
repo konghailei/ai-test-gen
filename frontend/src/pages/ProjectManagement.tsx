@@ -2,13 +2,12 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Plus, Trash2, FolderOpen, Loader2, Edit3, Save, X, Search,
-  TestTube, Archive, RotateCcw, ChevronRight, AlertTriangle,
+  TestTube, Archive, RotateCcw, AlertTriangle,
   Upload, MessageCircle,
 } from 'lucide-react'
 import { products as prodApi, requirements as reqApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Project } from '../types'
-import { formatDate, priorityBadge, STATUS_LABELS } from '../utils'
 import UploadRequirementModal from '../components/UploadRequirementModal'
 
 // v2.45 修复：本地时区日期格式化，避免 slice(0,10) 在带时区 ISO 字符串上截取到 UTC 日期
@@ -212,6 +211,8 @@ export default function ProjectManagementPage() {
   const [filterProjStatus, setFilterProjStatus] = useState('')   // 项目状态: ''/active/archived
   const [filterReqStatus, setFilterReqStatus] = useState('')     // 需求状态: ''/analyzing/draft/pending_review/confirmed/archived
   const [filterReqPriority, setFilterReqPriority] = useState('') // 需求优先级: ''/P0/P1/P2/P3
+  const [filterGoLiveStart, setFilterGoLiveStart] = useState('')  // v3.2.9 上线时间范围-起
+  const [filterGoLiveEnd, setFilterGoLiveEnd] = useState('')      // v3.2.9 上线时间范围-止
 
   // 搜索模式：匹配需求的项目 ID 集合（用于在搜索时额外显示项目名不匹配但需求匹配的项目）
   const [searchMatchedProjectIds, setSearchMatchedProjectIds] = useState<Set<string> | null>(null)
@@ -368,13 +369,22 @@ export default function ProjectManagementPage() {
       const matchedReqProjectIds = searchMatchedProjectIds || new Set<string>()
       result = result.filter(p =>
         p.name.toLowerCase().includes(q) ||
-        (p.description || '').toLowerCase().includes(q) ||
         (p.version || '').toLowerCase().includes(q) ||
         matchedReqProjectIds.has(p.id)
       )
     }
+    // v3.2.9 上线时间范围筛选（按 YYYY-MM-DD 比较，未设上线时间的项目在启用范围筛选时排除）
+    if (filterGoLiveStart || filterGoLiveEnd) {
+      result = result.filter(p => {
+        const d = (p.go_live_date || '').slice(0, 10)
+        if (!d) return false
+        if (filterGoLiveStart && d < filterGoLiveStart) return false
+        if (filterGoLiveEnd && d > filterGoLiveEnd) return false
+        return true
+      })
+    }
     return result
-  }, [projects, activeProductId, search, searchMatchedProjectIds, filterProjStatus])
+  }, [projects, activeProductId, search, searchMatchedProjectIds, filterProjStatus, filterGoLiveStart, filterGoLiveEnd])
 
   return (
     <div className="space-y-6">
@@ -471,6 +481,25 @@ export default function ProjectManagementPage() {
               <option value="P2">P2</option>
               <option value="P3">P3</option>
             </select>
+            {/* v3.2.9: 上线时间范围检索 */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs whitespace-nowrap" style={{ color: 'var(--foreground-tertiary)' }}>上线时间</span>
+              <input
+                type="date"
+                value={filterGoLiveStart}
+                onChange={e => setFilterGoLiveStart(e.target.value)}
+                className="input-field text-sm py-1.5 w-auto"
+                title="上线时间（起）"
+              />
+              <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>~</span>
+              <input
+                type="date"
+                value={filterGoLiveEnd}
+                onChange={e => setFilterGoLiveEnd(e.target.value)}
+                className="input-field text-sm py-1.5 w-auto"
+                title="上线时间（止）"
+              />
+            </div>
             <button onClick={() => setShowAdd(true)} className="btn-primary text-xs whitespace-nowrap">
               <Plus className="w-3 h-3" /> 添加项目
             </button>
@@ -487,126 +516,91 @@ export default function ProjectManagementPage() {
               {search ? '未找到匹配的项目或需求' : '暂无项目'}
             </p>
           ) : (
-            <div className="space-y-1.5">
-              {filtered.map(proj => {
-                const statusStyle = PROJECT_STATUS_STYLES[proj.status || 'active'] || PROJECT_STATUS_STYLES.active
-                // v2.46 搜索模式下高亮提示：项目名不匹配但需求匹配的项目
-                const isMatchedByReq = search.trim() !== '' &&
-                  searchMatchedProjectIds?.has(proj.id) &&
-                  !proj.name.toLowerCase().includes(search.toLowerCase())
-
-                return (
-                  <div
-                    key={proj.id}
-                    className="border transition-all"
-                    style={{
-                      borderRadius: 'calc(var(--radius) * 0.6)',
-                      borderColor: 'var(--border)',
-                      background: isMatchedByReq ? 'var(--state-warning-surface)' : 'var(--background)',
-                    }}
-                  >
-                    {/* 项目头部（点击进入详情页）v3.2.8: 由原地展开改为跳转项目详情页 */}
-                    <div className="flex items-center justify-between px-4 py-3.5 group">
-                      {/* 左侧：图标 + 项目信息 */}
-                      <div className="flex items-start gap-2.5 min-w-0 flex-1 cursor-pointer" onClick={() => toggleExpand(proj.id)}>
-                        <ChevronRight className="w-4 h-4 flex-shrink-0 mt-0.5" style={{ color: 'var(--foreground-tertiary)' }} />
-                        {/* 项目图标 v2.8.53: 对齐设计稿 — 活跃使用蓝色背景，归档使用灰色背景 */}
-                        <div
-                          className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 ${statusStyle.iconBg}`}
-                        >
-                          <FolderOpen className={`w-4 h-4 ${statusStyle.iconColor}`} />
-                        </div>
-                        {/* 项目信息 */}
-                        <div className="min-w-0 pt-0.5">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <p className="text-sm font-semibold truncate" style={{ color: 'var(--foreground-secondary)' }}>{proj.name}</p>
-                            {proj.version && (
-                              <span className="text-[11px] px-2 py-0.5 font-mono font-medium" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
-                                v{proj.version}
-                              </span>
-                            )}
-                            {/* 搜索匹配提示 */}
+            <div className="overflow-hidden" style={{ border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.6)' }}>
+              <table className="w-full">
+                <thead>
+                  <tr style={{ background: 'var(--background-muted)' }}>
+                    <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-4 py-2.5" style={{ color: 'var(--foreground-tertiary)' }}>项目名称</th>
+                    <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2.5 w-24" style={{ color: 'var(--foreground-tertiary)' }}>版本</th>
+                    <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2.5 w-24" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
+                    <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2.5 w-36" style={{ color: 'var(--foreground-tertiary)' }}>上线时间</th>
+                    <th className="text-right text-[11px] font-semibold uppercase tracking-wider px-4 py-2.5 w-40" style={{ color: 'var(--foreground-tertiary)' }}>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map(proj => {
+                    const statusStyle = PROJECT_STATUS_STYLES[proj.status || 'active'] || PROJECT_STATUS_STYLES.active
+                    const isMatchedByReq = search.trim() !== '' &&
+                      searchMatchedProjectIds?.has(proj.id) &&
+                      !proj.name.toLowerCase().includes(search.toLowerCase())
+                    return (
+                      <tr
+                        key={proj.id}
+                        className="transition-colors duration-150 cursor-pointer hover:bg-slate-50"
+                        style={{ borderTop: '1px solid var(--border)' }}
+                        onClick={() => toggleExpand(proj.id)}
+                      >
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className={`w-6 h-6 rounded-md flex items-center justify-center flex-shrink-0 ${statusStyle.iconBg}`}>
+                              <FolderOpen className={`w-3.5 h-3.5 ${statusStyle.iconColor}`} />
+                            </div>
+                            <span className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }}>{proj.name}</span>
                             {isMatchedByReq && (
-                              <span className="text-[11px] px-2 py-0.5 flex items-center gap-1 font-medium" style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
+                              <span className="text-[11px] px-1.5 py-0.5 flex items-center gap-1 font-medium flex-shrink-0" style={{ background: 'var(--state-warning-surface)', color: 'var(--state-warning)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
                                 <AlertTriangle className="w-3 h-3" /> 需求匹配
                               </span>
                             )}
                           </div>
-                          <p className="text-xs truncate mt-0.5" style={{ color: 'var(--foreground-tertiary)' }}>{proj.description || '无描述'}</p>
-                          {proj.status === 'archived' && proj.go_live_date && (
-                            <p className="text-[11px] mt-1" style={{ color: 'var(--foreground-quaternary)' }}>
-                              上线时间: {formatDateOnly(proj.go_live_date)}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* 中间：状态徽章 v2.8.53: 独立于项目信息显示 */}
-                      <div className="flex items-center flex-shrink-0 mr-3">
-                        <span className={`text-[11px] px-2 py-0.5 font-medium ${statusStyle.bg} ${statusStyle.text}`} style={{ borderRadius: '9999px' }}>
-                          {statusStyle.label}
-                        </span>
-                      </div>
-
-                      {/* 右侧：操作按钮 v2.8.53: 默认半透明 + hover 完全显示 */}
-                      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-[0.6] transition-opacity duration-200 group-hover:opacity-100">
-                        {/* 上传需求文档：直接打开内嵌上传弹窗，不再跳转 */}
-                        <button
-                          onClick={() => { setUploadProjectId(proj.id); setShowUpload(true) }}
-                          className="btn-ghost p-1.5"
-                          title="上传需求文档"
-                        >
-                          <Upload className="w-3.5 h-3.5" />
-                        </button>
-                        {/* 查看测试用例 */}
-                        <button
-                          onClick={() => navigate(`/testcases?project_id=${encodeURIComponent(proj.id)}`)}
-                          className="btn-ghost p-1.5"
-                          title="查看该项目下的测试用例"
-                        >
-                          <TestTube className="w-3.5 h-3.5" />
-                        </button>
-                        {/* 活跃项目操作：归档 + 分隔 + 编辑 + 删除 */}
-                        {proj.status === 'active' && (
-                          <>
-                            <button
-                              onClick={() => setArchiveModal({ id: proj.id, name: proj.name })}
-                              className="btn-ghost p-1.5"
-                              title="归档项目（写入知识库，冻结需求编辑）"
-                            >
-                              <Archive className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          {proj.version ? (
+                            <span className="text-[11px] px-2 py-0.5 font-mono font-medium" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)', borderRadius: 'calc(var(--radius) * 0.25)' }}>
+                              v{proj.version}
+                            </span>
+                          ) : <span className="text-xs" style={{ color: 'var(--foreground-quaternary)' }}>—</span>}
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <span className={`text-[11px] px-2 py-0.5 font-medium ${statusStyle.bg} ${statusStyle.text}`} style={{ borderRadius: '9999px' }}>
+                            {statusStyle.label}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-center text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+                          {proj.go_live_date ? formatDateOnly(proj.go_live_date) : '—'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center justify-end gap-0.5">
+                            <button onClick={(e) => { e.stopPropagation(); setUploadProjectId(proj.id); setShowUpload(true) }} className="btn-ghost p-1.5" title="上传需求文档">
+                              <Upload className="w-3.5 h-3.5" />
                             </button>
-                            <span className="w-px h-4 mx-1" style={{ background: 'var(--border)' }} />
-                            <button onClick={() => setEditModal({ id: proj.id, name: proj.name, description: proj.description, version: proj.version })}
-                              className="btn-ghost p-1.5" title="编辑项目">
-                              <Edit3 className="w-3.5 h-3.5" />
+                            <button onClick={(e) => { e.stopPropagation(); navigate(`/testcases?project_id=${encodeURIComponent(proj.id)}`) }} className="btn-ghost p-1.5" title="查看该项目下的测试用例">
+                              <TestTube className="w-3.5 h-3.5" />
                             </button>
-                            <button onClick={() => handleDelete(proj.id)}
-                              className="btn-ghost p-1.5 hover:bg-red-50" title="删除项目">
-                              <Trash2 className="w-3.5 h-3.5" style={{ color: 'var(--state-error)' }} />
-                            </button>
-                          </>
-                        )}
-                        {/* 归档项目操作：恢复活动 */}
-                        {proj.status === 'archived' && (
-                          <button
-                            onClick={() => handleReactivate(proj.id, proj.name)}
-                            disabled={reactivating === proj.id}
-                            className="btn-ghost p-1.5"
-                            title="恢复活动（从知识库删除，回到活跃状态）"
-                          >
-                            {reactivating === proj.id
-                              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              : <RotateCcw className="w-3.5 h-3.5" style={{ color: 'var(--state-warning)' }} />
-                            }
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                  </div>
-                )
-              })}
+                            {proj.status === 'active' && (
+                              <>
+                                <button onClick={(e) => { e.stopPropagation(); setArchiveModal({ id: proj.id, name: proj.name }) }} className="btn-ghost p-1.5" title="归档项目（写入知识库，冻结需求编辑）">
+                                  <Archive className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
+                                </button>
+                                <button onClick={(e) => { e.stopPropagation(); setEditModal({ id: proj.id, name: proj.name, description: proj.description, version: proj.version }) }} className="btn-ghost p-1.5" title="编辑项目">
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                </button>
+                                <button onClick={(e) => { e.stopPropagation(); handleDelete(proj.id) }} className="btn-ghost p-1.5 hover:bg-red-50" title="删除项目">
+                                  <Trash2 className="w-3.5 h-3.5" style={{ color: 'var(--state-error)' }} />
+                                </button>
+                              </>
+                            )}
+                            {proj.status === 'archived' && (
+                              <button onClick={(e) => { e.stopPropagation(); handleReactivate(proj.id, proj.name) }} disabled={reactivating === proj.id} className="btn-ghost p-1.5" title="恢复活动（从知识库删除，回到活跃状态）">
+                                {reactivating === proj.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" style={{ color: 'var(--state-warning)' }} />}
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
