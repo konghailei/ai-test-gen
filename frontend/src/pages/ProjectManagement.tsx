@@ -1,9 +1,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Plus, Trash2, FolderOpen, Loader2, Edit3, Save, X, Search,
-  TestTube, Archive, RotateCcw,
-  Upload, MessageCircle,
+  Plus, FolderOpen, Loader2, Search,
+  RotateCcw, ChevronRight,
 } from 'lucide-react'
 import { products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
@@ -27,49 +26,6 @@ function formatDateOnly(iso: string | undefined | null): string {
 const PROJECT_STATUS_STYLES: Record<string, { label: string; bg: string; text: string; iconBg: string; iconColor: string }> = {
   active: { label: '活跃', bg: 'bg-emerald-50', text: 'text-emerald-700', iconBg: 'bg-blue-50', iconColor: 'text-blue-500' },
   archived: { label: '已归档', bg: 'bg-slate-100', text: 'text-slate-500', iconBg: 'bg-slate-100', iconColor: 'text-slate-400' },
-}
-
-/** 编辑弹窗 */
-function EditModal({
-  name, description, version, onSave, onClose, saving
-}: {
-  name: string; description: string; version?: string;
-  onSave: (name: string, desc: string, version?: string) => Promise<void>;
-  onClose: () => void; saving: boolean
-}) {
-  const [n, setN] = useState(name)
-  const [d, setD] = useState(description)
-  const [v, setV] = useState(version || '1.0')
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} onClick={() => !saving && onClose()}>
-      <div className="max-w-md w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
-        <div className="flex items-center gap-3 mb-4">
-          <Edit3 className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
-          <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>编辑项目</h2>
-        </div>
-        <div className="space-y-3">
-          <div>
-            <label className="label">名称</label>
-            <input value={n} onChange={e => setN(e.target.value)} className="input-field text-sm" autoFocus />
-          </div>
-          <div>
-            <label className="label">描述</label>
-            <textarea value={d} onChange={e => setD(e.target.value)} className="input-field text-sm resize-none" rows={3} placeholder="可选" />
-          </div>
-          <div>
-            <label className="label">版本号</label>
-            <input value={v} onChange={e => setV(e.target.value)} className="input-field text-sm" placeholder="如 1.0、2.1.0" />
-          </div>
-        </div>
-        <div className="flex justify-end gap-3 mt-5">
-          <button onClick={onClose} className="btn-secondary" disabled={saving}><X className="w-4 h-4" /> 取消</button>
-          <button onClick={() => onSave(n, d, v)} disabled={!n.trim() || saving} className="btn-primary">
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />} 保存
-          </button>
-        </div>
-      </div>
-    </div>
-  )
 }
 
 /** 添加表单 */
@@ -96,99 +52,6 @@ function AddForm({ onAdd, onCancel, adding }: {
   )
 }
 
-/** v2.45 项目归档弹窗 */
-function ArchiveModal({ projId, projName, onClose, onArchived }: {
-  projId: string; projName: string; onClose: () => void; onArchived: () => void
-}) {
-  // v2.45 修复：使用本地日期方法生成默认值，避免 toISOString() 返回 UTC 时间导致 UTC+8 凌晨显示前一天
-  const todayLocal = () => {
-    const d = new Date()
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  }
-  const [goLiveDate, setGoLiveDate] = useState(todayLocal())
-  const [changeSummary, setChangeSummary] = useState('')
-  const [archiving, setArchiving] = useState(false)
-  const [error, setError] = useState('')
-  // v2.45 增强：归档为高影响操作，需输入项目名二次确认防止误操作
-  const [confirmName, setConfirmName] = useState('')
-
-  const handleArchive = async () => {
-    setArchiving(true); setError('')
-    try {
-      const res = await prodApi.archiveProject(projId, goLiveDate, changeSummary)
-      // v2.8.58: 后端改为 Celery 异步派发，归档立即返回，不再阻塞
-      // 异步模式下向量化在后台进行，vectorization_status=pending 由 Celery 回写
-      onArchived()
-    } catch (e: any) {
-      setError(e.message || '归档失败')
-    } finally { setArchiving(false) }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} onClick={() => !archiving && onClose()}>
-      <div className="max-w-md w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
-        <div className="flex items-center gap-3 mb-4">
-          <Archive className="w-5 h-5" style={{ color: 'var(--foreground-tertiary)' }} />
-          <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>归档项目</h2>
-        </div>
-        <p className="text-sm mb-4" style={{ color: 'var(--foreground-secondary)' }}>
-          项目「{projName}」归档后，项目下所有需求将自动归档并写入知识库，供后续需求检索参考。
-        </p>
-        <div className="space-y-3">
-          <div>
-            <label className="label">上线时间 *</label>
-            <input
-              type="date"
-              value={goLiveDate}
-              onChange={e => setGoLiveDate(e.target.value)}
-              className="input-field text-sm"
-              autoFocus
-            />
-            <p className="text-xs mt-1" style={{ color: 'var(--foreground-tertiary)' }}>用于知识库检索时区分最新需求</p>
-          </div>
-          <div>
-            <label className="label">变更说明（可选）</label>
-            <textarea
-              value={changeSummary}
-              onChange={e => setChangeSummary(e.target.value)}
-              className="input-field text-sm resize-none"
-              rows={2}
-              placeholder="本次归档的变更说明，将记录到版本历史"
-            />
-          </div>
-          <div>
-            <label className="label">输入项目名以确认 *</label>
-            <input
-              value={confirmName}
-              onChange={e => setConfirmName(e.target.value)}
-              className="input-field text-sm"
-              placeholder={projName}
-            />
-            <p className="text-xs mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
-              归档会写入知识库并冻结依赖版本快照，请输入项目名「{projName}」确认
-            </p>
-          </div>
-          {error && (
-            <div className="text-sm p-2" style={{ background: 'var(--state-error-surface)', color: 'var(--state-error)', borderRadius: 'calc(var(--radius) * 0.4)' }}>
-              {error}
-            </div>
-          )}
-        </div>
-        <div className="flex justify-end gap-3 mt-5">
-          <button onClick={onClose} className="btn-secondary" disabled={archiving}><X className="w-4 h-4" /> 取消</button>
-          <button
-            onClick={handleArchive}
-            disabled={!goLiveDate || archiving || confirmName.trim() !== projName}
-            className="btn-primary"
-          >
-            {archiving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />} 确认归档
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function ProjectManagementPage() {
   const { products, selectedProductId, selectedProduct } = useProduct()
   const navigate = useNavigate()
@@ -200,11 +63,7 @@ export default function ProjectManagementPage() {
   const [search, setSearch] = useState('')
   const [showAdd, setShowAdd] = useState(false)
   const [adding, setAdding] = useState(false)
-  const [editModal, setEditModal] = useState<{ id: string; name: string; description: string; version?: string } | null>(null)
-  const [saving, setSaving] = useState(false)
   const [activeProductId, setActiveProductId] = useState(selectedProductId)
-  const [archiveModal, setArchiveModal] = useState<{ id: string; name: string } | null>(null)
-  const [reactivating, setReactivating] = useState<string | null>(null)
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'warning'; msg: string } | null>(null)
 
   // v2.8.52: 条件筛选
@@ -219,9 +78,7 @@ export default function ProjectManagementPage() {
 
   useEffect(() => {
     setActiveProductId(selectedProductId)
-    // v2.45 修复：切换产品时关闭所有 Modal/AddForm，避免显示旧数据
-    setEditModal(null)
-    setArchiveModal(null)
+    // v3.2.11: 切换产品时关闭 AddForm
     setShowAdd(false)
     if (selectedProductId) loadData(selectedProductId)
   }, [selectedProductId])
@@ -238,18 +95,12 @@ export default function ProjectManagementPage() {
     }
   }, [searchParams])
 
-  // v2.45 增强：EditModal/ArchiveModal 支持 Esc 关闭
+  // v3.2.11: AddForm 支持 Esc 关闭
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        if (archiveModal) setArchiveModal(null)
-        else if (editModal) setEditModal(null)
-        else if (showAdd) setShowAdd(false)
-      }
-    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowAdd(false) }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [archiveModal, editModal, showAdd])
+  }, [showAdd])
 
   // toast 自动消失
   useEffect(() => {
@@ -286,33 +137,6 @@ export default function ProjectManagementPage() {
     } catch (e: any) { alert('创建失败: ' + e.message) } finally { setAdding(false) }
   }
 
-  const handleDelete = async (id: string) => {
-    if (!confirm('确认删除此项目？此操作不可恢复，关联需求与用例也将被清除。')) return
-    try {
-      await prodApi.deleteProject(id)
-      if (activeProductId) await loadData(activeProductId)
-    } catch (e: any) { alert('删除失败: ' + e.message) }
-  }
-
-  const handleEditSave = async (name: string, desc: string, version?: string) => {
-    if (!editModal) return
-    setSaving(true)
-    try {
-      await prodApi.updateProject(editModal.id, name.trim(), desc.trim(), version?.trim() || '1.0')
-      if (activeProductId) await loadData(activeProductId)
-      setEditModal(null)
-    } catch (e: any) { alert('保存失败: ' + e.message) } finally { setSaving(false) }
-  }
-
-  const handleReactivate = async (id: string, name: string) => {
-    if (!confirm(`确认恢复项目「${name}」为活跃状态？\n\n这将：\n• 从知识库删除该项目的所有需求向量\n• 对应版本的依赖关系标记为未启用\n• 需求和功能点状态回归活跃\n• 新需求影响分析不再考虑该版本\n\n此操作可逆，后续可重新归档。`)) return
-    setReactivating(id)
-    try {
-      await prodApi.reactivateProject(id)
-      if (activeProductId) await loadData(activeProductId)
-      setToast({ type: 'success', msg: '项目已恢复活动状态' })
-    } catch (e: any) { setToast({ type: 'error', msg: '恢复失败: ' + e.message }) } finally { setReactivating(null) }
-  }
 
 
   // v2.46 切换项目展开/收起
@@ -506,31 +330,15 @@ export default function ProjectManagementPage() {
                           {proj.go_live_date ? formatDateOnly(proj.go_live_date) : '—'}
                         </td>
                         <td className="px-4 py-3">
-                          <div className="flex items-center justify-end gap-0.5">
-                            <button onClick={(e) => { e.stopPropagation(); setUploadProjectId(proj.id); setShowUpload(true) }} className="btn-ghost p-1.5" title="上传需求文档">
-                              <Upload className="w-3.5 h-3.5" />
+                          <div className="flex items-center justify-end">
+                            {/* v3.2.11: 操作列精简为单一"详情"入口，项目级操作（归档/恢复/编辑/删除）移至项目详情页 */}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); navigate(`/projects/${encodeURIComponent(proj.id)}`) }}
+                              className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1"
+                              title="查看项目详情"
+                            >
+                              详情 <ChevronRight className="w-3 h-3" />
                             </button>
-                            <button onClick={(e) => { e.stopPropagation(); navigate(`/testcases?project_id=${encodeURIComponent(proj.id)}`) }} className="btn-ghost p-1.5" title="查看该项目下的测试用例">
-                              <TestTube className="w-3.5 h-3.5" />
-                            </button>
-                            {proj.status === 'active' && (
-                              <>
-                                <button onClick={(e) => { e.stopPropagation(); setArchiveModal({ id: proj.id, name: proj.name }) }} className="btn-ghost p-1.5" title="归档项目（写入知识库，冻结需求编辑）">
-                                  <Archive className="w-3.5 h-3.5" style={{ color: 'var(--foreground-tertiary)' }} />
-                                </button>
-                                <button onClick={(e) => { e.stopPropagation(); setEditModal({ id: proj.id, name: proj.name, description: proj.description, version: proj.version }) }} className="btn-ghost p-1.5" title="编辑项目">
-                                  <Edit3 className="w-3.5 h-3.5" />
-                                </button>
-                                <button onClick={(e) => { e.stopPropagation(); handleDelete(proj.id) }} className="btn-ghost p-1.5 hover:bg-red-50" title="删除项目">
-                                  <Trash2 className="w-3.5 h-3.5" style={{ color: 'var(--state-error)' }} />
-                                </button>
-                              </>
-                            )}
-                            {proj.status === 'archived' && (
-                              <button onClick={(e) => { e.stopPropagation(); handleReactivate(proj.id, proj.name) }} disabled={reactivating === proj.id} className="btn-ghost p-1.5" title="恢复活动（从知识库删除，回到活跃状态）">
-                                {reactivating === proj.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" style={{ color: 'var(--state-warning)' }} />}
-                              </button>
-                            )}
                           </div>
                         </td>
                       </tr>
@@ -543,28 +351,7 @@ export default function ProjectManagementPage() {
         </div>
       )}
 
-      {editModal && (
-        <EditModal
-          name={editModal.name}
-          description={editModal.description}
-          version={editModal.version}
-          saving={saving}
-          onSave={handleEditSave}
-          onClose={() => setEditModal(null)}
-        />
-      )}
 
-      {archiveModal && (
-        <ArchiveModal
-          projId={archiveModal.id}
-          projName={archiveModal.name}
-          onClose={() => setArchiveModal(null)}
-          onArchived={() => {
-            setArchiveModal(null)
-            if (activeProductId) loadData(activeProductId)
-          }}
-        />
-      )}
 
       {/* 上传需求弹窗：上传成功后刷新对应项目的需求列表 */}
       <UploadRequirementModal

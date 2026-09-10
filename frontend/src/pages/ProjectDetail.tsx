@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, FileText, TestTube, Loader2, Layers, Calendar, Archive, Upload, Info } from 'lucide-react'
+import { ArrowLeft, FileText, TestTube, Loader2, Layers, Calendar, Archive, Upload, Info, Edit3, Trash2, RotateCcw } from 'lucide-react'
 import { products as prodApi, requirements as reqApi, testCases as caseApi } from '../api/client'
 import type { Project } from '../types'
-import { formatDate, priorityBadge } from '../utils'
+import { formatDate, priorityBadge, STATUS_LABELS } from '../utils'
 import TestCases from './TestCases'
 import UploadRequirementModal from '../components/UploadRequirementModal'
+import { EditModal, ArchiveModal } from '../components/ProjectModals'
 
 /**
  * 项目详情页（v3.2.8）
@@ -29,6 +30,11 @@ export default function ProjectDetail() {
   const [loadingReqs, setLoadingReqs] = useState(false)
   const [showUpload, setShowUpload] = useState(false)
   const [error, setError] = useState('')
+  // v3.2.11: 项目级操作（归档/恢复/编辑/删除）——由列表页迁入详情页
+  const [editModal, setEditModal] = useState(false)
+  const [archiveModal, setArchiveModal] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [reactivating, setReactivating] = useState(false)
 
   // 项目元信息
   useEffect(() => {
@@ -65,6 +71,49 @@ export default function ProjectDetail() {
   }, [projectId])
 
   useEffect(() => { loadReqs(); loadCaseCount() }, [loadReqs, loadCaseCount])
+
+  // v3.2.11: 刷新项目元信息（编辑/归档/恢复后）
+  const refreshProject = useCallback(async () => {
+    if (!projectId) return
+    try {
+      const r: any = await prodApi.getProjectDetail(projectId)
+      setProject(r?.data || r)
+    } catch { /* ignore */ }
+  }, [projectId])
+
+  const handleEditSave = async (name: string, description: string, version?: string) => {
+    setSaving(true)
+    try {
+      await prodApi.updateProject(projectId!, name, description, version || '1.0')
+      setEditModal(false)
+      await refreshProject()
+    } catch (e: any) {
+      alert('保存失败：' + (e?.message || '未知错误'))
+    } finally { setSaving(false) }
+  }
+
+  const handleDelete = async () => {
+    if (!project) return
+    if (!confirm(`确认删除项目「${project.name}」？此操作不可恢复，项目下所有需求与用例也将被清除。`)) return
+    try {
+      await prodApi.deleteProject(projectId!)
+      navigate('/projects')
+    } catch (e: any) {
+      alert('删除失败：' + (e?.message || '未知错误'))
+    }
+  }
+
+  const handleReactivate = async () => {
+    if (!project) return
+    if (!confirm(`确认恢复项目「${project.name}」为活动状态？将从知识库删除该项目条目。`)) return
+    setReactivating(true)
+    try {
+      await prodApi.reactivateProject(projectId!)
+      await refreshProject()
+    } catch (e: any) {
+      alert('恢复失败：' + (e?.message || '未知错误'))
+    } finally { setReactivating(false) }
+  }
 
   const statusInfo = (s?: string) => {
     if (s === 'archived') return { text: '已归档', cls: 'bg-slate-100 text-slate-600' }
@@ -112,8 +161,8 @@ export default function ProjectDetail() {
         <span className={`text-xs px-2 py-0.5 rounded shrink-0 ${st.cls}`}>{st.text}</span>
       </div>
 
-      {/* 三标签栏（样式对齐系统 RequirementDetail：border-b-2 + brand-700） */}
-      <div className="flex items-center gap-1" style={{ borderBottom: '1px solid var(--border)' }}>
+      {/* 三标签栏（弧形分段卡片样式，与系统圆角风格一致） */}
+      <div className="inline-flex items-center gap-1 p-1" style={{ background: 'var(--background-muted)', borderRadius: 'calc(var(--radius) * 0.7)' }}>
         {([
           ['info', '项目信息', Info, null],
           ['reqs', '需求管理', FileText, reqs.length],
@@ -121,17 +170,17 @@ export default function ProjectDetail() {
         ] as const).map(([key, label, Icon, count]) => (
           <button
             key={key}
-            className="flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-all duration-150"
+            className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium transition-all duration-150"
             style={tab === key
-              ? { borderColor: 'var(--brand-500)', color: 'var(--brand-700)' }
-              : { borderColor: 'transparent', color: 'var(--foreground-tertiary)' }}
+              ? { background: 'var(--background)', color: 'var(--brand-700)', borderRadius: 'calc(var(--radius) * 0.5)', boxShadow: 'var(--shadow-apple-sm)' }
+              : { color: 'var(--foreground-tertiary)', borderRadius: 'calc(var(--radius) * 0.5)' }}
             onClick={() => setTab(key)}
           >
             <Icon className="w-4 h-4" />
             {label}
             {count != null && (
               <span className="ml-1 px-1.5 py-0.5 text-[11px] rounded-full font-mono"
-                style={{ background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }}>
+                style={{ background: tab === key ? 'var(--brand-100)' : 'var(--background)', color: tab === key ? 'var(--brand-700)' : 'var(--foreground-tertiary)' }}>
                 {count}
               </span>
             )}
@@ -206,6 +255,31 @@ export default function ProjectDetail() {
               </div>
             </dl>
           </div>
+
+          {/* v3.2.11: 项目管理操作（由列表页迁入，含"恢复活动"） */}
+          <div className="card p-5">
+            <h3 className="text-sm font-semibold mb-3" style={{ color: 'var(--foreground)' }}>项目管理</h3>
+            <div className="flex flex-wrap items-center gap-2">
+              {project.status === 'active' && (
+                <>
+                  <button onClick={() => setEditModal(true)} className="btn-secondary text-sm flex items-center gap-1.5">
+                    <Edit3 className="w-4 h-4" /> 编辑项目
+                  </button>
+                  <button onClick={() => setArchiveModal(true)} className="btn-secondary text-sm flex items-center gap-1.5">
+                    <Archive className="w-4 h-4" /> 归档项目
+                  </button>
+                </>
+              )}
+              {project.status === 'archived' && (
+                <button onClick={handleReactivate} disabled={reactivating} className="btn-secondary text-sm flex items-center gap-1.5">
+                  {reactivating ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} 恢复活动
+                </button>
+              )}
+              <button onClick={handleDelete} className="btn-secondary text-sm flex items-center gap-1.5" style={{ color: 'var(--state-error)' }}>
+                <Trash2 className="w-4 h-4" /> 删除项目
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -221,7 +295,7 @@ export default function ProjectDetail() {
               <Upload className="w-4 h-4" />上传需求
             </button>
           </div>
-          <div className="card overflow-hidden">
+          <div className="overflow-hidden" style={{ border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.6)' }}>
             {loadingReqs ? (
               <div className="flex items-center justify-center py-12">
                 <Loader2 className="w-4 h-4 animate-spin mr-2" style={{ color: 'var(--foreground-tertiary)' }} />
@@ -260,7 +334,9 @@ export default function ProjectDetail() {
                         <span className={`text-xs font-semibold font-mono ${priorityBadge(req.priority)}`}>{req.priority}</span>
                       </td>
                       <td className="px-3 py-3 text-center">
-                        <span className="text-xs" style={{ color: 'var(--foreground-secondary)' }}>{req.status || '-'}</span>
+                        <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>
+                          {STATUS_LABELS[req.status] || req.status || '-'}
+                        </span>
                       </td>
                       <td className="px-5 py-3 text-right text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
                         {formatDate(req.created_at)}
@@ -277,6 +353,26 @@ export default function ProjectDetail() {
       {/* ===== 用例管理（复用完整测试用例页，锁定当前项目） ===== */}
       {tab === 'cases' && (
         <TestCases fixedProjectId={projectId} embedded />
+      )}
+
+      {/* v3.2.11: 项目编辑/归档弹窗 */}
+      {editModal && (
+        <EditModal
+          name={project.name}
+          description={project.description}
+          version={project.version}
+          saving={saving}
+          onSave={handleEditSave}
+          onClose={() => setEditModal(false)}
+        />
+      )}
+      {archiveModal && (
+        <ArchiveModal
+          projId={project.id}
+          projName={project.name}
+          onClose={() => setArchiveModal(false)}
+          onArchived={() => { setArchiveModal(false); refreshProject(); loadReqs() }}
+        />
       )}
 
       {/* 上传需求弹窗 */}
