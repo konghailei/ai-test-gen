@@ -5,7 +5,7 @@ import {
   TestTube, Archive, RotateCcw, ChevronRight, ChevronDown, AlertTriangle,
   Upload, MessageCircle,
 } from 'lucide-react'
-import { products as prodApi, requirements as reqApi } from '../api/client'
+import { products as prodApi, requirements as reqApi, testCases as caseApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { Project, Requirement } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS } from '../utils'
@@ -216,6 +216,10 @@ export default function ProjectManagementPage() {
   // v2.46 折叠面板状态：展开的项目 ID 集合
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   // 每个项目下的需求列表缓存
+  // v3.2.6: 展开面板标签页（需求/用例）+ 用例数据缓存
+  const [expandedTab, setExpandedTab] = useState<Record<string, 'reqs' | 'cases'>>({})
+  const [projectCases, setProjectCases] = useState<Record<string, any[]>>({})
+  const [loadingCases, setLoadingCases] = useState<Set<string>>(new Set())
   const [projectReqs, setProjectReqs] = useState<Record<string, Requirement[]>>({})
   // 正在加载需求的项目 ID 集合
   const [loadingReqs, setLoadingReqs] = useState<Set<string>>(new Set())
@@ -287,6 +291,18 @@ export default function ProjectManagementPage() {
       if (!e?._aborted && !e?._unauthorized) alert('加载项目列表失败：' + (e?.message || '网络错误'))
     } finally { setLoading(false) }
   }
+
+  // v3.2.6: 加载项目下的用例列表（按 project_id 筛选，切到"用例"标签时懒加载）
+  const loadProjectCases = useCallback(async (projectId: string) => {
+    if (projectCases[projectId] || loadingCases.has(projectId)) return
+    setLoadingCases(prev => new Set(prev).add(projectId))
+    try {
+      const r = await caseApi.list(undefined, projectId, undefined, 1, 100)
+      const d = (r as any)?.data || r
+      setProjectCases(prev => ({ ...prev, [projectId]: d.items || [] }))
+    } catch (e) { console.error('加载项目用例失败', e) }
+    setLoadingCases(prev => { const s = new Set(prev); s.delete(projectId); return s })
+  }, [projectCases, loadingCases])
 
   // v2.8.52 加载项目下的需求列表（带搜索 + 状态/优先级过滤）
   const loadProjectReqs = useCallback(async (projectId: string, keyword?: string, reqStatus?: string, reqPriority?: string) => {
@@ -720,7 +736,46 @@ export default function ProjectManagementPage() {
                     {/* v2.8.52 折叠面板内容：项目下的需求列表 — 直接嵌入卡片，border-t 分隔 */}
                     {isExpanded && (
                       <div className="overflow-hidden" style={{ borderTop: '1px solid var(--border)', borderBottomLeftRadius: 'calc(var(--radius) * 0.6)', borderBottomRightRadius: 'calc(var(--radius) * 0.6)' }}>
-                        {isLoadingReqs ? (
+                        {/* v3.2.6: 需求/用例双标签栏 */}
+                        {(() => {
+                          const tab = expandedTab[proj.id] || 'reqs'
+                          return (
+                            <div className="flex items-center gap-0 px-4 pt-2" style={{ borderBottom: '1px solid var(--border)', background: 'var(--background-muted)' }}>
+                              {([['reqs', '需求管理', FileText], ['cases', '用例管理', TestTube]] as const).map(([key, label, Icon]) => (
+                                <button
+                                  key={key}
+                                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors duration-150"
+                                  style={{
+                                    borderBottom: tab === key ? '2px solid var(--brand-500)' : '2px solid transparent',
+                                    color: tab === key ? 'var(--brand-600)' : 'var(--foreground-tertiary)',
+                                  }}
+                                  onClick={() => {
+                                    setExpandedTab(prev => ({ ...prev, [proj.id]: key }))
+                                    if (key === 'cases') loadProjectCases(proj.id)
+                                  }}
+                                >
+                                  <Icon className="w-3.5 h-3.5" />
+                                  {label}
+                                  {key === 'cases' && projectCases[proj.id] && (
+                                    <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded-full font-mono" style={{ background: 'var(--brand-100)', color: 'var(--brand-700)' }}>
+                                      {projectCases[proj.id].length}
+                                    </span>
+                                  )}
+                                </button>
+                              ))}
+                              <div className="flex-1" />
+                              <button
+                                className="text-[11px] py-1 px-2 rounded transition-colors hover:bg-slate-100"
+                                style={{ color: 'var(--foreground-tertiary)' }}
+                                onClick={() => navigate(`/testcases?project_id=${proj.id}`)}
+                              >
+                                在用例管理中打开 →
+                              </button>
+                            </div>
+                          )
+                        })()}
+                        {(expandedTab[proj.id] || 'reqs') === 'reqs' && (
+                        isLoadingReqs ? (
                           <div className="flex items-center justify-center py-6">
                             <Loader2 className="w-4 h-4 animate-spin mr-2" style={{ color: 'var(--foreground-tertiary)' }} />
                             <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>加载需求列表...</span>
@@ -838,11 +893,54 @@ export default function ProjectManagementPage() {
                               ))}
                             </tbody>
                           </table>
+                        ))}
+                        {(expandedTab[proj.id]) === 'cases' && (
+                          loadingCases.has(proj.id) ? (
+                            <div className="flex items-center justify-center py-6">
+                              <Loader2 className="w-4 h-4 animate-spin mr-2" style={{ color: 'var(--foreground-tertiary)' }} />
+                              <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>加载用例列表...</span>
+                            </div>
+                          ) : !projectCases[proj.id]?.length ? (
+                            <div className="text-center py-6 px-4">
+                              <TestTube className="w-6 h-6 mx-auto mb-1.5" style={{ color: 'var(--foreground-quaternary)' }} />
+                              <p className="text-sm m-0" style={{ color: 'var(--foreground-tertiary)' }}>该项目下暂无用例</p>
+                            </div>
+                          ) : (
+                            <table className="w-full">
+                              <thead>
+                                <tr style={{ background: 'var(--background-muted)' }}>
+                                  <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-4 py-2" style={{ color: 'var(--foreground-tertiary)' }}>用例标题</th>
+                                  <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-24" style={{ color: 'var(--foreground-tertiary)' }}>类型</th>
+                                  <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-24" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
+                                  <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-16" style={{ color: 'var(--foreground-tertiary)' }}>置信度</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {projectCases[proj.id].map((tc: any) => (
+                                  <tr key={tc.id} className="transition-colors duration-150 cursor-pointer hover:bg-slate-50" style={{ borderTop: '1px solid var(--border)' }}
+                                    onClick={() => navigate(`/testcases?project_id=${proj.id}`)}>
+                                    <td className="px-4 py-2.5">
+                                      <span className="text-sm truncate block max-w-md" style={{ color: 'var(--foreground-secondary)' }} title={tc.title}>{tc.title || tc.id}</span>
+                                    </td>
+                                    <td className="px-3 py-2.5 text-center">
+                                      <span className="text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>{tc.type}</span>
+                                    </td>
+                                    <td className="px-3 py-2.5 text-center">
+                                      <span className={`text-xs font-semibold ${tc.status === 'approved' ? 'text-green-600' : 'text-amber-500'}`}>{tc.status}</span>
+                                    </td>
+                                    <td className="px-3 py-2.5 text-center text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>
+                                      {tc.confidence != null ? Number(tc.confidence).toFixed(3) : '-'}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          )
                         )}
-                        {/* 底部操作栏 — 仅分隔 */}
+                        {/* 底部操作栏 */}
                         <div className="px-4 py-1.5 border-t" style={{ borderColor: 'var(--border)', background: 'var(--background-muted)' }}>
                           <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
-                            共 {reqs.length} 条需求
+                            {(expandedTab[proj.id] || 'reqs') === 'reqs' ? `共 ${reqs.length} 条需求` : `共 ${projectCases[proj.id]?.length || 0} 条用例`}
                           </span>
                         </div>
                       </div>
