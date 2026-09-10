@@ -15,7 +15,14 @@ import { subscribeCasesChanged } from '../utils/caseSync'
  * - 「打开 XMind」在新标签页打开真实 XMind 网页编辑器 /testcases/xmind-edit
  */
 
-export default function TestCases() {
+export interface TestCasesProps {
+  /** 锁定项目（项目详情页嵌入时传入，隐藏项目筛选器） */
+  fixedProjectId?: string
+  /** 嵌入模式：隐藏页面大标题（父页面已有标题），保留操作按钮 */
+  embedded?: boolean
+}
+
+export default function TestCases({ fixedProjectId, embedded = false }: TestCasesProps = {}) {
   const { selectedProductId } = useProduct()
   const [cases, setCases] = useState<TestCase[]>([])
   const [total, setTotal] = useState(0)
@@ -23,7 +30,7 @@ export default function TestCases() {
   const [truncated, setTruncated] = useState(false)  // P2: 全量加载触及 5000 上限时提示
 
   // 筛选
-  const [filterProject, setFilterProject] = useState('')
+  const [filterProject, setFilterProject] = useState(fixedProjectId || '')
   const [filterReq, setFilterReq] = useState('')
   const [filterSearch, setFilterSearch] = useState('')
   const [reqs, setReqs] = useState<Requirement[]>([])
@@ -47,12 +54,18 @@ export default function TestCases() {
   // 从 URL query 读取 project_id（支持从项目管理页面跳转过来）
   const [searchParams, setSearchParams] = useSearchParams()
   useEffect(() => {
+    if (fixedProjectId) return  // v3.2.8: 项目详情页已锁定项目，不读 URL
     const qProj = searchParams.get('project_id') || ''
     if (qProj) {
       setFilterProject(qProj)
       setSearchParams({}, { replace: true })
     }
   }, [])
+
+  // v3.2.8: 嵌入模式下 fixedProjectId 变化时同步筛选
+  useEffect(() => {
+    if (fixedProjectId) setFilterProject(fixedProjectId)
+  }, [fixedProjectId])
 
   // 加载需求 + 项目（先按产品过滤，无结果回退全部）
   useEffect(() => {
@@ -248,13 +261,15 @@ export default function TestCases() {
   return (
     <div className="space-y-6">
       {/* 标题栏 */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="page-title">测试用例</h1>
-          <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
-            {noProject ? '请先选择一个项目，再查看该项目的测试用例' : `${total} 个用例`}
-          </p>
-        </div>
+      <div className={`flex items-center ${embedded ? 'justify-end' : 'justify-between'}`}>
+        {!embedded && (
+          <div>
+            <h1 className="page-title">测试用例</h1>
+            <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
+              {noProject ? '请先选择一个项目，再查看该项目的测试用例' : `${total} 个用例`}
+            </p>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <button onClick={handleGenerate} className="btn-primary flex items-center gap-2" disabled={noProject}>
             <FileText className="w-4 h-4" />生成用例
@@ -298,7 +313,8 @@ export default function TestCases() {
         <div className="flex items-center gap-3 flex-wrap">
           <Filter className="w-4 h-4 shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />
 
-          {/* 项目 — 可搜索下拉（必须选择） */}
+          {/* v3.2.8: 项目详情页嵌入时已锁定项目，隐藏项目筛选器 */}
+          {!fixedProjectId && (
           <div className="relative" ref={projectDropdownRef}>
             <div className="flex items-center min-w-[180px]" style={{ background: 'var(--background)', border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
               <input value={projectSearch} onChange={e => { setProjectSearch(e.target.value); setShowProjectDropdown(true) }}
@@ -332,6 +348,7 @@ export default function TestCases() {
               </div>
             )}
           </div>
+          )}
 
           {/* 需求 */}
           <div className="flex items-center gap-1.5">

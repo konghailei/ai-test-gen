@@ -1,13 +1,13 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  Plus, Trash2, FolderOpen, Loader2, Edit3, Save, X, Search, FileText,
-  TestTube, Archive, RotateCcw, ChevronRight, ChevronDown, AlertTriangle,
+  Plus, Trash2, FolderOpen, Loader2, Edit3, Save, X, Search,
+  TestTube, Archive, RotateCcw, ChevronRight, AlertTriangle,
   Upload, MessageCircle,
 } from 'lucide-react'
-import { products as prodApi, requirements as reqApi, testCases as caseApi } from '../api/client'
+import { products as prodApi, requirements as reqApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
-import type { Project, Requirement } from '../types'
+import type { Project } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS } from '../utils'
 import UploadRequirementModal from '../components/UploadRequirementModal'
 
@@ -213,21 +213,8 @@ export default function ProjectManagementPage() {
   const [filterReqStatus, setFilterReqStatus] = useState('')     // 需求状态: ''/analyzing/draft/pending_review/confirmed/archived
   const [filterReqPriority, setFilterReqPriority] = useState('') // 需求优先级: ''/P0/P1/P2/P3
 
-  // v2.46 折叠面板状态：展开的项目 ID 集合
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
-  // 每个项目下的需求列表缓存
-  // v3.2.6: 展开面板标签页（需求/用例）+ 用例数据缓存
-  const [expandedTab, setExpandedTab] = useState<Record<string, 'reqs' | 'cases'>>({})
-  const [projectCases, setProjectCases] = useState<Record<string, any[]>>({})
-  const [loadingCases, setLoadingCases] = useState<Set<string>>(new Set())
-  const [projectReqs, setProjectReqs] = useState<Record<string, Requirement[]>>({})
-  // 正在加载需求的项目 ID 集合
-  const [loadingReqs, setLoadingReqs] = useState<Set<string>>(new Set())
   // 搜索模式：匹配需求的项目 ID 集合（用于在搜索时额外显示项目名不匹配但需求匹配的项目）
   const [searchMatchedProjectIds, setSearchMatchedProjectIds] = useState<Set<string> | null>(null)
-  // v2.8.57: analyzing 需求的实时任务进度（req_id → { progress, phase, message }）
-  const [reqTaskProgress, setReqTaskProgress] = useState<Record<string, { progress: number; phase: string; message: string }>>({})
-  const taskProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // 上传需求弹窗状态
   const [showUpload, setShowUpload] = useState(false)
@@ -240,9 +227,7 @@ export default function ProjectManagementPage() {
     setEditModal(null)
     setArchiveModal(null)
     setShowAdd(false)
-    // v2.46 切换产品时清空折叠状态和需求缓存
-    setExpandedIds(new Set())
-    setProjectReqs({})
+    // v3.2.8: 切换产品时清空搜索匹配状态（折叠面板已移除）
     setSearchMatchedProjectIds(null)
     if (selectedProductId) loadData(selectedProductId)
   }, [selectedProductId])
@@ -292,39 +277,7 @@ export default function ProjectManagementPage() {
     } finally { setLoading(false) }
   }
 
-  // v3.2.6: 加载项目下的用例列表（按 project_id 筛选，切到"用例"标签时懒加载）
-  const loadProjectCases = useCallback(async (projectId: string) => {
-    if (projectCases[projectId] || loadingCases.has(projectId)) return
-    setLoadingCases(prev => new Set(prev).add(projectId))
-    try {
-      const r = await caseApi.list(undefined, projectId, undefined, 1, 100)
-      const d = (r as any)?.data || r
-      setProjectCases(prev => ({ ...prev, [projectId]: d.items || [] }))
-    } catch (e) { console.error('加载项目用例失败', e) }
-    setLoadingCases(prev => { const s = new Set(prev); s.delete(projectId); return s })
-  }, [projectCases, loadingCases])
 
-  // v2.8.52 加载项目下的需求列表（带搜索 + 状态/优先级过滤）
-  const loadProjectReqs = useCallback(async (projectId: string, keyword?: string, reqStatus?: string, reqPriority?: string) => {
-    setLoadingReqs(prev => new Set(prev).add(projectId))
-    try {
-      const r = await reqApi.list(1, 50, activeProductId || undefined, projectId, {
-        search: keyword || undefined,
-        status: reqStatus || undefined,
-        priority: reqPriority || undefined,
-      })
-      setProjectReqs(prev => ({ ...prev, [projectId]: r.items || [] }))
-    } catch (e: any) {
-      setProjectReqs(prev => ({ ...prev, [projectId]: [] }))
-      setToast({ type: 'error', msg: `加载项目需求失败：${e?.message || '未知错误'}` })
-    } finally {
-      setLoadingReqs(prev => {
-        const next = new Set(prev)
-        next.delete(projectId)
-        return next
-      })
-    }
-  }, [activeProductId])
 
   // v2.46 统一搜索：搜索关键词变化时，并行查询匹配需求的项目 ID 集合
   useEffect(() => {
@@ -354,58 +307,7 @@ export default function ProjectManagementPage() {
     return () => { cancelled = true; clearTimeout(t) }
   }, [search, activeProductId, filterReqStatus, filterReqPriority])
 
-  // v2.8.52 搜索/筛选变化时，重新加载已展开项目的需求
-  useEffect(() => {
-    if (expandedIds.size === 0) return
-    for (const pid of expandedIds) {
-      loadProjectReqs(pid, search.trim() || undefined, filterReqStatus || undefined, filterReqPriority || undefined)
-    }
-  }, [search, filterReqStatus, filterReqPriority])
 
-  // v2.8.57: 轮询 analyzing 需求的实时任务进度，展示迷你进度条
-  useEffect(() => {
-    if (taskProgressTimerRef.current) {
-      clearInterval(taskProgressTimerRef.current)
-      taskProgressTimerRef.current = null
-    }
-    // 收集所有展开项目中的 analyzing 需求 ID
-    const analyzingReqIds: string[] = []
-    for (const pid of expandedIds) {
-      const reqs = projectReqs[pid] || []
-      for (const r of reqs) {
-        if (r.status === 'analyzing') analyzingReqIds.push(r.id)
-      }
-    }
-    if (analyzingReqIds.length === 0) {
-      setReqTaskProgress({})
-      return
-    }
-    // 立即查询一次
-    const pollOnce = async () => {
-      const updates: Record<string, { progress: number; phase: string; message: string }> = {}
-      await Promise.all(analyzingReqIds.map(async (rid) => {
-        try {
-          const task = await reqApi.getTaskByReq(rid)
-          if (task && (task.status === 'running' || task.status === 'pending')) {
-            updates[rid] = {
-              progress: task.progress || 0,
-              phase: task.phase || '',
-              message: task.message || '',
-            }
-          }
-        } catch { /* 静默失败 */ }
-      }))
-      setReqTaskProgress(updates)
-    }
-    pollOnce()
-    taskProgressTimerRef.current = setInterval(pollOnce, 3000)
-    return () => {
-      if (taskProgressTimerRef.current) {
-        clearInterval(taskProgressTimerRef.current)
-        taskProgressTimerRef.current = null
-      }
-    }
-  }, [expandedIds, projectReqs])
 
   const handleAdd = async (name: string, desc: string, version: string) => {
     if (!activeProductId || !name.trim()) return
@@ -445,18 +347,6 @@ export default function ProjectManagementPage() {
     } catch (e: any) { setToast({ type: 'error', msg: '恢复失败: ' + e.message }) } finally { setReactivating(null) }
   }
 
-  // v2.8.52: 需求删除（在项目管理页面直接操作）
-  const handleDeleteReq = async (reqId: string, reqTitle: string, projectId: string) => {
-    if (!confirm(`确认删除需求「${reqTitle}」？此操作不可恢复，关联的测试用例也将被清除。`)) return
-    try {
-      await reqApi.delete(reqId)
-      // 重新加载该项目的需求列表
-      loadProjectReqs(projectId, search.trim() || undefined, filterReqStatus || undefined, filterReqPriority || undefined)
-      setToast({ type: 'success', msg: '需求已删除' })
-    } catch (e: any) {
-      setToast({ type: 'error', msg: '删除失败：' + (e?.message || '未知错误') })
-    }
-  }
 
   // v2.46 切换项目展开/收起
   // v3.2.7: 点击项目卡片不再原地展开，改为跳转项目详情页（含需求/用例双标签）
@@ -599,10 +489,7 @@ export default function ProjectManagementPage() {
           ) : (
             <div className="space-y-1.5">
               {filtered.map(proj => {
-                const isExpanded = expandedIds.has(proj.id)
                 const statusStyle = PROJECT_STATUS_STYLES[proj.status || 'active'] || PROJECT_STATUS_STYLES.active
-                const reqs = projectReqs[proj.id] || []
-                const isLoadingReqs = loadingReqs.has(proj.id)
                 // v2.46 搜索模式下高亮提示：项目名不匹配但需求匹配的项目
                 const isMatchedByReq = search.trim() !== '' &&
                   searchMatchedProjectIds?.has(proj.id) &&
@@ -614,20 +501,15 @@ export default function ProjectManagementPage() {
                     className="border transition-all"
                     style={{
                       borderRadius: 'calc(var(--radius) * 0.6)',
-                      borderColor: isExpanded ? 'var(--brand-300)' : 'var(--border)',
+                      borderColor: 'var(--border)',
                       background: isMatchedByReq ? 'var(--state-warning-surface)' : 'var(--background)',
                     }}
                   >
-                    {/* 项目头部（可点击展开） v2.8.53: 对齐设计稿布局 */}
+                    {/* 项目头部（点击进入详情页）v3.2.8: 由原地展开改为跳转项目详情页 */}
                     <div className="flex items-center justify-between px-4 py-3.5 group">
-                      {/* 左侧：折叠按钮 + 图标 + 信息 */}
+                      {/* 左侧：图标 + 项目信息 */}
                       <div className="flex items-start gap-2.5 min-w-0 flex-1 cursor-pointer" onClick={() => toggleExpand(proj.id)}>
-                        {/* 展开图标 */}
-                        {isExpanded ? (
-                          <ChevronDown className="w-4 h-4 flex-shrink-0 mt-0.5" style={{ color: 'var(--foreground-tertiary)' }} />
-                        ) : (
-                          <ChevronRight className="w-4 h-4 flex-shrink-0 mt-0.5" style={{ color: 'var(--foreground-tertiary)' }} />
-                        )}
+                        <ChevronRight className="w-4 h-4 flex-shrink-0 mt-0.5" style={{ color: 'var(--foreground-tertiary)' }} />
                         {/* 项目图标 v2.8.53: 对齐设计稿 — 活跃使用蓝色背景，归档使用灰色背景 */}
                         <div
                           className={`w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0 ${statusStyle.iconBg}`}
@@ -722,218 +604,6 @@ export default function ProjectManagementPage() {
                       </div>
                     </div>
 
-                    {/* v2.8.52 折叠面板内容：项目下的需求列表 — 直接嵌入卡片，border-t 分隔 */}
-                    {isExpanded && (
-                      <div className="overflow-hidden" style={{ borderTop: '1px solid var(--border)', borderBottomLeftRadius: 'calc(var(--radius) * 0.6)', borderBottomRightRadius: 'calc(var(--radius) * 0.6)' }}>
-                        {/* v3.2.6: 需求/用例双标签栏 */}
-                        {(() => {
-                          const tab = expandedTab[proj.id] || 'reqs'
-                          return (
-                            <div className="flex items-center gap-0 px-4 pt-2" style={{ borderBottom: '1px solid var(--border)', background: 'var(--background-muted)' }}>
-                              {([['reqs', '需求管理', FileText], ['cases', '用例管理', TestTube]] as const).map(([key, label, Icon]) => (
-                                <button
-                                  key={key}
-                                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors duration-150"
-                                  style={{
-                                    borderBottom: tab === key ? '2px solid var(--brand-500)' : '2px solid transparent',
-                                    color: tab === key ? 'var(--brand-600)' : 'var(--foreground-tertiary)',
-                                  }}
-                                  onClick={() => {
-                                    setExpandedTab(prev => ({ ...prev, [proj.id]: key }))
-                                    if (key === 'cases') loadProjectCases(proj.id)
-                                  }}
-                                >
-                                  <Icon className="w-3.5 h-3.5" />
-                                  {label}
-                                  {key === 'cases' && projectCases[proj.id] && (
-                                    <span className="ml-1 px-1.5 py-0.5 text-[10px] rounded-full font-mono" style={{ background: 'var(--brand-100)', color: 'var(--brand-700)' }}>
-                                      {projectCases[proj.id].length}
-                                    </span>
-                                  )}
-                                </button>
-                              ))}
-                              <div className="flex-1" />
-                              <button
-                                className="text-[11px] py-1 px-2 rounded transition-colors hover:bg-slate-100"
-                                style={{ color: 'var(--foreground-tertiary)' }}
-                                onClick={() => navigate(`/testcases?project_id=${proj.id}`)}
-                              >
-                                在用例管理中打开 →
-                              </button>
-                            </div>
-                          )
-                        })()}
-                        {(expandedTab[proj.id] || 'reqs') === 'reqs' && (
-                        isLoadingReqs ? (
-                          <div className="flex items-center justify-center py-6">
-                            <Loader2 className="w-4 h-4 animate-spin mr-2" style={{ color: 'var(--foreground-tertiary)' }} />
-                            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>加载需求列表...</span>
-                          </div>
-                        ) : reqs.length === 0 ? (
-                          <div className="text-center py-6 px-4">
-                            <FileText className="w-6 h-6 mx-auto mb-1.5" style={{ color: 'var(--foreground-quaternary)' }} />
-                            <p className="text-sm m-0" style={{ color: 'var(--foreground-tertiary)' }}>
-                              {search.trim() || filterReqStatus || filterReqPriority ? '该项目下无匹配需求' : '该项目下暂无需求'}
-                            </p>
-                          </div>
-                        ) : (
-                          <table className="w-full">
-                            <thead>
-                              <tr style={{ background: 'var(--background-muted)' }}>
-                                <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-4 py-2" style={{ color: 'var(--foreground-tertiary)' }}>需求标题</th>
-                                <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-16" style={{ color: 'var(--foreground-tertiary)' }}>优先级</th>
-                                <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-24" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
-                                <th className="text-right text-[11px] font-semibold uppercase tracking-wider px-4 py-2 w-28" style={{ color: 'var(--foreground-tertiary)' }}>创建时间</th>
-                                <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-16" style={{ color: 'var(--foreground-tertiary)' }}>操作</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {reqs.map(req => (
-                                <tr
-                                  key={req.id}
-                                  className="transition-colors duration-150 cursor-pointer group hover:bg-slate-50"
-                                  style={{ borderTop: '1px solid var(--border)' }}
-                                  onClick={() => navigate(`/requirements/${encodeURIComponent(req.id)}`)}
-                                >
-                                  <td className="px-4 py-2.5">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <FileText className="w-3.5 h-3.5 flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />
-                                      <span className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }} title={req.title}>
-                                        {req.title || req.id}
-                                      </span>
-                                    </div>
-                                  </td>
-                                  <td className="px-3 py-2.5 text-center">
-                                    <span className={`text-xs font-semibold font-mono ${priorityBadge(req.priority)}`}>{req.priority}</span>
-                                  </td>
-                                  <td className="px-3 py-2.5 text-center">
-                                    <span
-                                      className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium"
-                                      style={(() => {
-                                        switch (req.status) {
-                                          case 'draft': return { background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }
-                                          case 'active': return { background: 'var(--state-success-surface)', color: 'var(--state-success)' }
-                                          case 'confirmed': return { background: 'var(--state-success-surface)', color: 'var(--state-success)' }
-                                          case 'archived': return { background: 'var(--background-muted)', color: 'var(--foreground-tertiary)' }
-                                          case 'superseded': return { background: 'var(--state-warning-surface)', color: 'var(--state-warning)' }
-                                          case 'deprecated': return { background: 'var(--state-error-surface)', color: 'var(--state-error)' }
-                                          case 'analyzing': return { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }
-                                          case 'pending_review': return { background: 'rgba(88, 86, 214, 0.1)', color: '#5856d6' }
-                                          default: return { background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }
-                                        }
-                                      })()}
-                                    >
-                                      {STATUS_LABELS[req.status] || req.status}
-                                      {req.status === 'draft' && <MessageCircle className="w-3 h-3 ml-0.5 animate-pulse" />}
-                                      {req.status === 'analyzing' && reqTaskProgress[req.id] && (
-                                        <Loader2 className="w-3 h-3 ml-0.5 animate-spin" />
-                                      )}
-                                    </span>
-                                    {/* v2.8.57: analyzing 状态展示迷你进度条 */}
-                                    {req.status === 'analyzing' && reqTaskProgress[req.id] && (() => {
-                                      const tp = reqTaskProgress[req.id]
-                                      const phaseLabels: Record<string, string> = {
-                                        upload: '解析中', parse: '解析中', kb_search: '检索知识库',
-                                        clarify: '澄清中', regenerate: '保存中', recheck: '验证中',
-                                        done: '完成', '': '处理中',
-                                      }
-                                      return (
-                                        <div className="mt-1.5 flex items-center gap-1.5" style={{ minWidth: 120 }}>
-                                          <div
-                                            className="rounded-full overflow-hidden flex-shrink-0"
-                                            style={{ width: 60, height: 3, background: 'var(--background-muted)' }}
-                                          >
-                                            <div
-                                              className="h-full rounded-full transition-all duration-500"
-                                              style={{ width: `${tp.progress}%`, background: 'var(--brand-500)' }}
-                                            />
-                                          </div>
-                                          <span className="text-[10px] whitespace-nowrap" style={{ color: 'var(--foreground-muted)' }}>
-                                            {tp.progress}% · {phaseLabels[tp.phase] || tp.phase}
-                                          </span>
-                                        </div>
-                                      )
-                                    })()}
-                                  </td>
-                                  <td className="px-4 py-2.5 text-right">
-                                    <span className="text-xs tabular-nums" style={{ color: 'var(--foreground-tertiary)' }}>{formatDate(req.created_at)}</span>
-                                  </td>
-                                  <td className="px-3 py-2.5 text-center" onClick={e => e.stopPropagation()}>
-                                    <div className="flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                      <button
-                                        onClick={() => navigate(`/requirements/${encodeURIComponent(req.id)}`)}
-                                        className="btn-ghost p-1"
-                                        title="查看详情"
-                                      >
-                                        <FileText className="w-3 h-3" />
-                                      </button>
-                                      {req.status !== 'archived' && (
-                                        <button
-                                          onClick={(e) => { e.stopPropagation(); handleDeleteReq(req.id, req.title || req.id, proj.id) }}
-                                          className="btn-ghost p-1 hover:bg-red-50"
-                                          title="删除需求"
-                                        >
-                                          <Trash2 className="w-3 h-3" style={{ color: 'var(--state-error)' }} />
-                                        </button>
-                                      )}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        ))}
-                        {(expandedTab[proj.id]) === 'cases' && (
-                          loadingCases.has(proj.id) ? (
-                            <div className="flex items-center justify-center py-6">
-                              <Loader2 className="w-4 h-4 animate-spin mr-2" style={{ color: 'var(--foreground-tertiary)' }} />
-                              <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>加载用例列表...</span>
-                            </div>
-                          ) : !projectCases[proj.id]?.length ? (
-                            <div className="text-center py-6 px-4">
-                              <TestTube className="w-6 h-6 mx-auto mb-1.5" style={{ color: 'var(--foreground-quaternary)' }} />
-                              <p className="text-sm m-0" style={{ color: 'var(--foreground-tertiary)' }}>该项目下暂无用例</p>
-                            </div>
-                          ) : (
-                            <table className="w-full">
-                              <thead>
-                                <tr style={{ background: 'var(--background-muted)' }}>
-                                  <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-4 py-2" style={{ color: 'var(--foreground-tertiary)' }}>用例标题</th>
-                                  <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-24" style={{ color: 'var(--foreground-tertiary)' }}>类型</th>
-                                  <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-24" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
-                                  <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2 w-16" style={{ color: 'var(--foreground-tertiary)' }}>置信度</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {projectCases[proj.id].map((tc: any) => (
-                                  <tr key={tc.id} className="transition-colors duration-150 cursor-pointer hover:bg-slate-50" style={{ borderTop: '1px solid var(--border)' }}
-                                    onClick={() => navigate(`/testcases?project_id=${proj.id}`)}>
-                                    <td className="px-4 py-2.5">
-                                      <span className="text-sm truncate block max-w-md" style={{ color: 'var(--foreground-secondary)' }} title={tc.title}>{tc.title || tc.id}</span>
-                                    </td>
-                                    <td className="px-3 py-2.5 text-center">
-                                      <span className="text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>{tc.type}</span>
-                                    </td>
-                                    <td className="px-3 py-2.5 text-center">
-                                      <span className={`text-xs font-semibold ${tc.status === 'approved' ? 'text-green-600' : 'text-amber-500'}`}>{tc.status}</span>
-                                    </td>
-                                    <td className="px-3 py-2.5 text-center text-xs font-mono" style={{ color: 'var(--foreground-tertiary)' }}>
-                                      {tc.confidence != null ? Number(tc.confidence).toFixed(3) : '-'}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          )
-                        )}
-                        {/* 底部操作栏 */}
-                        <div className="px-4 py-1.5 border-t" style={{ borderColor: 'var(--border)', background: 'var(--background-muted)' }}>
-                          <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
-                            {(expandedTab[proj.id] || 'reqs') === 'reqs' ? `共 ${reqs.length} 条需求` : `共 ${projectCases[proj.id]?.length || 0} 条用例`}
-                          </span>
-                        </div>
-                      </div>
-                    )}
                   </div>
                 )
               })}
@@ -972,11 +642,6 @@ export default function ProjectManagementPage() {
         productId={activeProductId}
         preselectedProjectId={uploadProjectId}
         onUploaded={(reqId) => {
-          // 上传成功：刷新该项目下的需求列表并展开该项目，提示成功
-          if (uploadProjectId) {
-            setExpandedIds(prev => new Set(prev).add(uploadProjectId))
-            loadProjectReqs(uploadProjectId, search.trim() || undefined, filterReqStatus || undefined, filterReqPriority || undefined)
-          }
           setToast({ type: 'success', msg: `需求已上传成功（${reqId}）` })
         }}
       />
