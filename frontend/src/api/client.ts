@@ -877,6 +877,9 @@ export const products = {
     request<{ id: string; name: string; stats: { projects: number; modules: number; requirements: number; test_cases: number; functional_points: number } }>(`/products/${id}/delete-check`),
   listProjects: (pid: string) =>
     request<import('../types').Project[]>(`/products/${pid}/projects`),
+  /** v3.2.7: 项目详情单查（项目详情页双标签用，刷新不丢元信息） */
+  getProjectDetail: (projId: string) =>
+    request<import('../types').Project>(`/products/projects/${projId}/detail`),
   createProject: (pid: string, name: string, desc = '', version = '1.0') =>
     request(`/products/${pid}/projects`, {
       method: 'POST', body: JSON.stringify({ name, description: desc, version }),

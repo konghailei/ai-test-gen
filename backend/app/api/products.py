@@ -337,6 +337,49 @@ async def list_projects(
     return ApiResponse(success=True, message="ok", data=data)
 
 
+@router.get("/projects/{proj_id}/detail", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_project_detail(
+    proj_id: str,
+    session: AsyncSession = Depends(get_session),
+    _user: "CurrentUser" = Depends(get_current_user),
+):
+    """v3.2.7: 项目详情（支撑项目详情页"需求/用例"双标签）。
+
+    项目详情页需要独立获取项目元信息（名称/版本/状态/归档时间），
+    此前仅有按产品列项目的接口，刷新详情页会丢失项目信息，故补充单查接口。
+
+    注意：路径刻意用 /projects/{proj_id}/detail，避免与 /{pid}/projects 列表路由歧义。
+    """
+    from app.core.auth import CurrentUser
+    from app.core.product_access import assert_product_visible
+
+    result = await session.execute(select(Project).where(Project.id == proj_id))
+    proj = result.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
+    # P1-1 产品隔离：父产品不可见则拒绝
+    await assert_product_visible(session, _user, proj.product_id)
+
+    def _iso(dt):
+        try:
+            return dt.isoformat() if dt else ""
+        except Exception:
+            return ""
+
+    return ApiResponse(success=True, message="ok", data={
+        "id": proj.id or "",
+        "product_id": proj.product_id or "",
+        "name": proj.name or "",
+        "description": proj.description or "",
+        "version": proj.version or "1.0",
+        "status": proj.status or "active",
+        "created_at": _iso(proj.created_at),
+        "go_live_date": _iso(proj.go_live_date),
+        "archived_at": _iso(proj.archived_at),
+        "archived_by": proj.archived_by or "",
+    })
+
+
 @router.post("/{pid}/projects", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def create_project(pid: str, body: CreateProjectRequest, session: AsyncSession = Depends(get_session)):
     """创建项目。项目 ID 自动生成（时间戳后缀 + 随机数防冲突）。"""

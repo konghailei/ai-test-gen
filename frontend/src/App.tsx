@@ -13,6 +13,7 @@ import KnowledgeBase from './pages/KnowledgeBase'
 import DependencyGraph from './pages/DependencyGraph'
 import ProjectsModules from './pages/ProjectsModules'
 import ProjectManagement from './pages/ProjectManagement'
+import ProjectDetail from './pages/ProjectDetail'
 import ModuleManagement from './pages/ModuleManagement'
 import KnowledgeQA from './pages/KnowledgeQA'
 import CorrectionReview from './pages/CorrectionReview'
@@ -103,6 +104,7 @@ export default function App() {
           <Route path="/dependency-graph" element={<DependencyGraph />} />
           <Route path="/projects-modules" element={<ProjectsModules />} />
           <Route path="/projects" element={<ProjectManagement />} />
+          <Route path="/projects/:id" element={<ProjectDetail />} />
           <Route path="/modules" element={<ModuleManagement />} />
           <Route path="/manual" element={<UserManual />} />
           <Route path="/tasks" element={<Tasks />} />

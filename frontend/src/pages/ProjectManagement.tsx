@@ -459,20 +459,9 @@ export default function ProjectManagementPage() {
   }
 
   // v2.46 切换项目展开/收起
+  // v3.2.7: 点击项目卡片不再原地展开，改为跳转项目详情页（含需求/用例双标签）
   const toggleExpand = (projectId: string) => {
-    setExpandedIds(prev => {
-      const next = new Set(prev)
-      if (next.has(projectId)) {
-        next.delete(projectId)
-      } else {
-        next.add(projectId)
-        // 首次展开时加载需求
-        if (!projectReqs[projectId]) {
-          loadProjectReqs(projectId, search.trim() || undefined, filterReqStatus || undefined, filterReqPriority || undefined)
-        }
-      }
-      return next
-    })
+    navigate(`/projects/${encodeURIComponent(projectId)}`)
   }
 
   // v2.8.52 统一搜索 + 条件筛选
@@ -523,7 +512,7 @@ export default function ProjectManagementPage() {
             项目管理
           </h1>
           <p className="text-sm mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
-            管理产品下的项目与需求 — 点击项目展开查看需求列表，支持按状态/优先级筛选
+            管理产品下的项目与需求 — 点击项目进入详情页查看需求与用例，支持按状态/优先级筛选
           </p>
         </div>
       </div>
