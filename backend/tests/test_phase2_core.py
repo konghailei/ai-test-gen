@@ -14,7 +14,9 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 # 确保能导入 backend.app
 backend_dir = Path(__file__).parent.parent
@@ -443,6 +445,160 @@ def test_prompts(result: TestResult):
 
 
 # ============================================================================
+# 测试 4: LLM 首响应超时（v3.3 / N4 根治）
+# ============================================================================
+
+def _fr_chunk(content=None, reasoning=None, finish=None):
+    """构造 litellm 风格 chunk。
+
+    刻意用 SimpleNamespace：它没有 `model_extra` 属性，可顺带覆盖
+    `getattr(delta, "model_extra", None)` 的兜底分支不会抛错。
+    """
+    delta = SimpleNamespace(content=content, reasoning_content=reasoning)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=delta, finish_reason=finish)], usage=None
+    )
+
+
+class _FakeStream:
+    """按 (延迟秒, chunk) 脚本产出的假流；延迟用于制造「停顿」。"""
+
+    def __init__(self, steps):
+        self._steps = list(steps)
+        self._i = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._i >= len(self._steps):
+            raise StopAsyncIteration
+        delay, item = self._steps[self._i]
+        self._i += 1
+        if delay:
+            await asyncio.sleep(delay)
+        return item
+
+    async def aclose(self):
+        """对齐真实流对象接口（首响应超时时会被调用）。"""
+
+
+def _fr_provider(tag: str, model: str) -> dict:
+    return {
+        "key": f"{tag}:{model}",
+        "api_key": "fake",
+        "base_url": "http://fake.local",
+        "model": model,
+        "enable_thinking": False,
+        "thinking_params": "",
+        "timeout": 300,
+    }
+
+
+async def test_llm_first_response_timeout(result: TestResult):
+    """验证首响应超时语义（不联网：用假流替换 litellm.acompletion）。
+
+    1. 思考内容（reasoning_content）算「有响应」——思考阶段停顿不会被误判
+    2. 正文 chunk 同样算首响应
+    3. 首响应超时 → 跳过剩余重试**直接切换备用提供商**（不重试 MAX_ATTEMPTS 次）
+    4. 全部提供商超时 → 快速失败，等待时长不随重试放大
+    """
+    from app.config import settings
+    from app.core import llm_client as llm_mod
+    from app.core.llm_client import LLMClient
+
+    saved_timeout = settings.LLM_FIRST_RESPONSE_TIMEOUT
+    saved_acompletion = llm_mod.litellm.acompletion
+    settings.LLM_FIRST_RESPONSE_TIMEOUT = 1  # 缩短预算，避免测试真等 180s
+    calls: dict[str, int] = {}
+
+    def _install(streams: dict, models: list[tuple[str, str]]) -> LLMClient:
+        async def _fake(**kwargs):
+            model = kwargs["model"]
+            calls[model] = calls.get(model, 0) + 1
+            return streams[model]()
+
+        llm_mod.litellm.acompletion = _fake
+        client = LLMClient()
+        providers = [_fr_provider(tag, model) for tag, model in models]
+        client._candidate_providers = lambda model, provider=None: providers  # type: ignore[method-assign]
+        return client
+
+    try:
+        # 1. 思考内容算响应：首响应 0s 到达（thinking），其后停顿 2.5s > 预算 1s
+        calls.clear()
+        client = _install(
+            {"m-think": lambda: _FakeStream([
+                (0.0, _fr_chunk(reasoning="先分析一下……")),
+                (2.5, _fr_chunk(reasoning="继续推理")),
+                (0.0, _fr_chunk(content="思考后的正文", finish="stop")),
+            ])},
+            [("p1", "m-think")],
+        )
+        text = await client.call("hi", temperature=0.3, _skip_log=True)
+        result.assert_eq("思考内容计为响应：答案只取正文（思考不混入）", text, "思考后的正文")
+        result.assert_eq("思考内容计为响应：思考期停顿未被误判（仅 1 次调用）", calls.get("m-think"), 1)
+
+        # 2. 正文 chunk 同样算首响应
+        calls.clear()
+        client = _install(
+            {"m-text": lambda: _FakeStream([
+                (0.0, _fr_chunk(content="A")),
+                (2.5, _fr_chunk(content="B", finish="stop")),
+            ])},
+            [("p1", "m-text")],
+        )
+        text = await client.call("hi", temperature=0.3, _skip_log=True)
+        result.assert_eq("正文首响应：多 chunk 拼接正确", text, "AB")
+        result.assert_eq("正文首响应：无故障转移", calls.get("m-text"), 1)
+
+        # 3. 首响应超时 → 直接切换备用，不重试
+        calls.clear()
+        client = _install(
+            {
+                "m-dead": lambda: _FakeStream([(60.0, _fr_chunk(content="never"))]),
+                "m-alive": lambda: _FakeStream([(0.0, _fr_chunk(content="来自备用", finish="stop"))]),
+            },
+            [("p1", "m-dead"), ("p2", "m-alive")],
+        )
+        _t0 = time.time()
+        text = await client.call("hi", temperature=0.3, _skip_log=True)
+        _elapsed = time.time() - _t0
+        result.assert_eq("首响应超时：最终由备用提供商返回", text, "来自备用")
+        result.assert_eq("首响应超时：异常模型只调用 1 次（未重试 5 次）", calls.get("m-dead"), 1)
+        result.assert_true("首响应超时：切换总耗时 < 5s", _elapsed < 5.0, f"{_elapsed:.2f}s")
+
+        # 4. 全部提供商超时 → 快速失败
+        calls.clear()
+        client = _install(
+            {
+                "m-d1": lambda: _FakeStream([(60.0, _fr_chunk(content="x"))]),
+                "m-d2": lambda: _FakeStream([(60.0, _fr_chunk(content="y"))]),
+            },
+            [("p1", "m-d1"), ("p2", "m-d2")],
+        )
+        _t0 = time.time()
+        _err = None
+        try:
+            await client.call("hi", temperature=0.3, _skip_log=True)
+        except Exception as e:  # noqa: BLE001 - 需捕获任意异常做断言
+            _err = e
+        _elapsed = time.time() - _t0
+        result.assert_true(
+            "全部超时：报「所有 LLM 提供商均不可用」",
+            _err is not None and "均不可用" in str(_err), repr(_err),
+        )
+        result.assert_eq(
+            "全部超时：每个提供商各调用 1 次",
+            [calls.get("m-d1"), calls.get("m-d2")], [1, 1],
+        )
+        result.assert_true("全部超时：总耗时 < 6s（等待不随重试放大）", _elapsed < 6.0, f"{_elapsed:.2f}s")
+    finally:
+        settings.LLM_FIRST_RESPONSE_TIMEOUT = saved_timeout
+        llm_mod.litellm.acompletion = saved_acompletion
+
+
+# ============================================================================
 # 主函数
 # ============================================================================
 
@@ -456,6 +612,7 @@ def main():
     test_channel_selector(result)
     asyncio.run(test_quality_gate(result))
     test_prompts(result)
+    asyncio.run(test_llm_first_response_timeout(result))
 
     success = result.summary()
     sys.exit(0 if success else 1)
