@@ -14,7 +14,7 @@
 
 | # | 位置 | 问题 |
 |---|---|---|
-| 1 | T2 | `blog_v1_clarify.json` 显示**澄清回答 0 条**（`all_answers_total=0`、`rounds_total=0`、`force_passed=True`）→ TR-2.2 来源审计为空集、TR-2.6 rubric 按锚点仅 ≤3 分（低于阈值 4）。TEST_PLAN §20.3 记为"3 轮收敛"，与产物不一致 |
+| 1 | T2 | ~~`blog_v1_clarify.json` 显示**澄清回答 0 条**（`all_answers_total=0`、`rounds_total=0`、`force_passed=True`）→ TR-2.2 来源审计为空集、TR-2.6 rubric 按锚点仅 ≤3 分（低于阈值 4）~~ → ✅ **2026-09-11 已补测通过**（`blog_v1_clarify_audit.json`，7/7 真实作答、0 script_driven、1 轮收敛）；**新发现 N3：TR-2.4 重复率 42.9% ≫ 10% 超标**（同一缺口被 `llm_semantic.*` 与 `prd.*` 两条链路各生成一次，无跨来源去重；原 0.0% 是在 0 条回答上的空洞通过） |
 | 2 | T3 | TR-3.1 要求 FP ≥ 5，**实际仅 4 个**；且 2 个 FP 模块为 `uncategorized` |
 | 3 | T5 | ~~TR-5.7（6 格式导出）/ TR-5.8（feedback CRUD）**无任何产物留证**~~ → ✅ **2026-09-11 已补测通过**（`blog_v1_export_feedback.json`，6/6 格式 + 400/404 + feedback/CRUD 全通） |
 | 4 | T6 | ~~TR-6.4「B 时点 KB 问答」**无独立产物**（无 `qa_v11`）~~ → ✅ **2026-09-11 已补测通过**（`blog_qa_v11.json`，3/3 PASS、无旧值残留、无跨产品越界）；但补测**新暴露一个知识质量问题**：答案依据主要是 AI 生成的测试用例而非需求文档（见 T6 Deviation）。TR-6.5 图谱增量**仍无留证** |
@@ -48,7 +48,7 @@
 - **Notes**: 若 DevBlog 产品已存在，命名为「DevBlog 技术博客创作平台_20260901」并在 blog_state.json 记录 suffix（本次实际 suffix=202609010635，见 `blog_state.json.product_name`）。
 
 ## Task 2: V1.0 上传、解析、澄清（真实验收，非脚本硬编码）
-- **Status**: `completed`（**含 2 项未达成**，见 Deviation）
+- **Status**: `completed`（TR-2.2 / TR-2.6 已于 **2026-09-11 补测通过**；**新发现 TR-2.4 重复率超标**）
 - **Priority**: high
 - **Depends On**: T1
 - **Description**:
@@ -72,12 +72,22 @@
   - TR-2.4 ✅ `TR-2.4_repeat_ratio_pct=0.0`（`TR-2.4_pass=true`）
   - TR-2.5 ✅ `TR-2.5_redundancy_ratio_pct=0.0`（`TR-2.5_pass=true`）
   - SRR/FP 就绪 ✅ `srr_keys_count=22`、`srr_list_item_count=14`、`fp_count=4`（`fp_ge_3=true`，全部 `pending_review`）；`fp_approval_readiness.defect_rate=100%`（4 个 FP 均命中 `weak_acceptance` / `no_preconditions` / `short_description`）
-- **Deviation**（未达成，如实记录）：
-  - ❌ **TR-2.2 未达成**：`TR-2.6_source_audit = {total: 0, system_options_q: 0, written_by_original_ge_1: false, min_10pct_written: false}` —— **澄清回答 0 条**，来源审计为空集，无法证明"无 script_driven"；`all_answers_total=0`、`all_answers_preview=[]`
-  - ❌ **TR-2.6 未达成**：`TR-2.7_convergence_within_3_rounds.note` = `rounds_total=0, force_passed=True, remain=2` —— 脚本从未提交任何一轮答案，流程靠后端**强制放行**进入 `pending_review`，非"1 轮收敛"。按 rubric 锚点应判 **≤3 分**（"2 轮/非脚本驱动"档），低于阈值 4
+- **Deviation**（**2026-09-11 补测：TR-2.2 / TR-2.6 已闭合，另发现 2 个新问题**）：
+  - ✅ **TR-2.2 已补测通过**（产物 `blog_v1_clarify_audit.json`）：真实提交澄清答案 **7/7**，提交 body 为 `{answers: {qid: answer}}` dict、HTTP 200；**逐题来源审计 `script_driven_count = 0`**，`missing_count = 0`
+  - ✅ **TR-2.6 已补测通过**：**1 轮提交即收敛**（第 2 轮待答问题 = 0，`status=passed`，`remaining=0`），按 rubric 锚点落在 **5 分档**（"1 轮直接收敛"），≥ 阈值 4
+  - ⚠️ **TR-2.3（选项充足性）无法验证**：本次 7 题**全部 `options=0`**（均为开放型缺口问题），未覆盖"选项充足 → 选系统选项"分支。原因见下条 N3
+  - ❌ **N3（新发现）TR-2.4 重复率严重超标**：7 个问题里只有 **4 个语义独立**问题，**3 组完全重复**（重复率 **42.9% ≫ 阈值 10%**）——
+    | 重复组 | 问题 A（`llm_semantic.*`） | 问题 B（`prd.*`） |
+    |---|---|---|
+    | 附件 10MB 上限 | `llm_semantic.data_constraints.attachment.size_limit` | `prd.upper_bound_rule.不超过 10MB` |
+    | 48 小时无操作 | `llm_semantic.data_constraints.ticket.timeout_action` | `prd.upper_bound_rule.48 小时` |
+    | 处置角色/入口 | `llm_semantic.user_roles.role_capability` | `prd.role_capability_gap` |
+    根因：**同一缺口被两条检测链路各生成一次**（`llm_semantic.*` 语义检测 与 `prd.*` 规则检测），二者之间**没有跨来源去重**。原 spec 的 `TR-2.4_repeat_ratio_pct = 0.0` 是在**0 条回答**上算的，属**空洞通过**（vacuous pass），真实值应为 42.9%
+  - ℹ️ 补测载体：`REQ-1788922967346-1659`（客户服务文档管理 v1.0，draft，7 个待答问题）。**未用 DevBlog V1.0 需求**——它已 archived 不可再澄清；新建 DevBlog 需求的尝试因解析流程挂起而失败（见 N4）
+  - ℹ️ **额外收获**：本次产物中的 `quality_report` 已带 `coverage{answered:7,covered:7,followup:0}` + `coverage_score:1.0` + `coverage_summary` 明细——**直接验证了 docs/14 一期第 3/4 项的改动在真实链路生效**（改造前这里只会是硬编码 1.0/0.8 且无明细）
   - ⚠️ **与 TEST_PLAN §20.3 口径不一致**：§20.3 记为"澄清收敛（§15.5 方法论）：3 轮收敛→pending_review"，但产物显示 `rounds_total=0`；§20.3 的"3 轮"取自后端 force_pass 提示文案，非脚本实际提交轮次
 - **Notes**: 冗余判定：对照 PRD 原文，若问题内容文档已明确写出则记"冗余"。
-- **Remediation**: 若要真正验证 TR-2.2/TR-2.6，需补一轮脚本：`GET clarify/questions` → 逐条按 PRD 原文作答（标注 `written_by_original`）→ 提交 → 记录 `rounds_used` → 重跑 `blog_v1_clarify.json`。**T3-T8 结论不依赖该缺口**（FP/SRR 已就绪）。
+- **Remediation**: ① **修 N3 重复问题**：在澄清问题生成后加**跨来源语义去重**（`llm_semantic.*` vs `prd.*` 按 field 语义/问题文本 embedding 合并），并把 `TR-2.4` 的口径从"回答数"改为"**问题数**"以免再次空洞通过；② 修订 TEST_PLAN §20.3 澄清措辞；③ 若要补 TR-2.3 的"系统选项"分支，需构造带 options 的题目（当前仅隔离夹具 `REQ-1788771488613-5146` 有 options，为避免污染隔离基线未使用）。
 
 ## Task 3: V1.0 FP 审核 + 模块分配 + 确认需求 + 影响分析 + 图谱查看
 - **Status**: `completed`（**TR-3.1 未达阈值**，见 Deviation）
@@ -297,7 +307,7 @@
 | Task | Status | 核心证据 | 未达成 / 缺口 |
 |---|---|---|---|
 | T1 环境与建产品 | ✅ completed | `blog_state.json` | — |
-| T2 上传解析澄清 | ⚠️ completed（含缺口） | `blog_v1_clarify.json`、`blog_v1_parse.json` | TR-2.2 来源审计（0 条回答）、TR-2.6 rubric（强放行） |
+| T2 上传解析澄清 | ⚠️ completed（含缺口） | `blog_v1_clarify.json`、`blog_v1_parse.json`、`blog_v1_clarify_audit.json` | ✅ TR-2.2/2.6 已补测通过；**新发现 N3：TR-2.4 重复率 42.9% 超标**；TR-2.3 选项分支未覆盖 |
 | T3 FP 审核与确认 | ⚠️ completed（含缺口） | `blog_v1_fp_list/approved.json`、`blog_v1_req_detail.json` | TR-3.1（4 FP < 5）、TR-3.3/3.4/3.5 无留证 |
 | T4 归档与 A 时点问答 | ✅ completed | `blog_v1_archive_qa.json`、`blog_v1_post_gen_archive.json` | TR-4.2 无差值快照 |
 | T5 V1.0 生成与质量核验 | ⚠️ completed（含缺口） | `blog_v1_generate_result.json`（88 条）、`blog_v1_export_feedback.json` | ✅ TR-5.7/5.8 已补测通过；剩 TR-5.1/5.2/5.5 无 SSE 留证 |
@@ -310,9 +320,17 @@
 **最高优先级补测（按性价比）**：
 1. ~~**T6 TR-6.4** —— B 时点 KB 问答（V1.1 最新规则采纳），目前零证据，风险最高~~ → ✅ **2026-09-11 已补测通过**（`blog_qa_v11.json`，3/3 PASS）
 2. ~~**T5 TR-5.7/5.8** —— 导出 6 格式 + feedback CRUD，属对外功能面，零证据~~ → ✅ **2026-09-11 已补测通过**（`blog_v1_export_feedback.json`）
-3. **T2 TR-2.2/2.6** —— 澄清回答来源审计，属 AC-3 质量主张，零证据（**当前最高优先级**）
+3. ~~**T2 TR-2.2/2.6** —— 澄清回答来源审计，属 AC-3 质量主张，零证据（**当前最高优先级**）~~ → ✅ **2026-09-11 已补测通过**（`blog_v1_clarify_audit.json`）；**新发现 N3 重复率超标需修**
 4. **T6 TR-6.5** 图谱增量、**T5 TR-5.1/5.2/5.5** SSE 事件流留证、T8 rubric 评分记录 + AC-11/AC-12 判定
 
 **2026-09-11 补测新增待办（源自 TR-6.4 的观察，不在原 spec 内）**：
 - **知识权威层级问题**：KB 问答对业务规则的依据主要来自 AI 生成的测试用例（而非需求文档），且 top-1 requirement source 恒为旧版本（V1.0）需求。存在"LLM 产出 → 入库 → 被当作依据反哺 LLM"的**循环权威**风险。建议纳入 docs/14 方向 B 治理（沉淀分级 + 可追溯）。
 - **V1.1 需求文档自相矛盾**：`手动版最多保留 50 个`（第 75 行）与 `不设数量上限`（第 83 行验收标准）冲突，导致该业务规则在需求侧无唯一权威值，只能靠用例推断。属文档缺陷，建议回补。
+
+**2026-09-11 补测新增待办（源自 T2 补测）**：
+- **N3 · 澄清问题跨来源重复（Major）**：同一缺口被 `llm_semantic.*`（语义检测）与 `prd.*`（规则检测）**两条链路各生成一次**，二者之间无跨来源去重 → 实测 7 题中 3 组完全重复，**重复率 42.9%**（TR-2.4 阈值 10%）。建议在澄清问题生成后按 field 语义 / 问题文本 embedding 做跨来源合并；同时把 TR-2.4 口径从"回答数"改为"**问题数**"，避免再次出现 0 条回答上的空洞通过。
+- **N4 · 需求解析流程可永久挂起（Major，待复现确认）**：2026-09-11 补测时新建 DevBlog 需求（`REQ-1789111250682-5406`，项目 `PROJ-827-50645-938`），`FpAgent` 于 07:30:03 完成（18 个功能点，耗时 498s）后**再无任何日志与 LLM 调用**，任务 `TASK-1789111250682-5128` 永久停在 `running / kb_search / 41`，需求停在 `analyzing`，**无超时/看门狗**。
+  - 关键判据：`api/requirements.py` 的 `_bg_task_done_callback` 会记录未捕获异常，但**无任何异常日志** → 是「**await 永久挂起**」而非协程死亡。
+  - 旁证：日志中 ReqAgent 报的 `req_id=REQ-1789111298902-5407` 与任务实际 `req_id=REQ-1789111250682-5406` **不一致**，且该 ID 在 DB 中**不存在** → 挂起发生在**持久化之前**。
+  - 无法确认根因（可能为 Milvus 调用阻塞或 LLM 调用无超时）；**与本次 docs/14 改动无关**（改动位于生成/质量分路径，且挂起点在 ClarifyAgent 首条日志之前）。
+  - 建议：为解析任务加**阶段级超时 + 看门狗**，超时后把任务置 `interrupted` 并释放需求，避免永久占用。

@@ -425,7 +425,7 @@ AC-1~AC-8、AC-10 全 PASS；AC-9 的 Q/R/M 主体通过，Q6/M4/R2 经飞轮补
 
 ### 17.8 补测记录（2026-09-11 补记）
 
-§17 首次记录时有 2 项验收标准**零留证**（`blog_*.json` 中检索 `export/gherkin/xmind/pytest/feedback/qa_v11` 全部 0 命中）。2026-09-11 补测闭合：
+§17 首次记录时有 3 项验收标准**零留证**（`blog_*.json` 中检索 `export/gherkin/xmind/pytest/feedback/qa_v11` 全部 0 命中；T2 的 `blog_v1_clarify.json` 显示 `all_answers_total=0`，即从未真正提交过澄清答案）。2026-09-11 分两批补测闭合，并新发现 4 个问题（N1~N4）：
 
 **① TR-5.7 / TR-5.8（导出与反馈）→ 全部 PASS**（产物 `blog_v1_export_feedback.json`）
 
@@ -460,4 +460,41 @@ AC-1~AC-8、AC-10 全 PASS；AC-9 的 Q/R/M 主体通过，Q6/M4/R2 经飞轮补
 | N1 | **知识权威层级倒挂**：三问答案的主要依据是 **AI 生成的测试用例**（`TC-编辑器-*`）而非需求文档。B2 答案自述「需求文档中并未直接说明手动标记版本的上限为 50…是通过测试用例推断得出的」；B3 亦注明「信息来源于知识库中的测试用例文档」。且三问 top-1 requirement source 恒为 **V1.0 需求 `REQ-1788244895551-8397`**（similarity 0.4976），V1.1 需求未进 top sources | `blog_qa_v11.json` 各问 `answer_full` + `source_ids_sample` | **Major（治理项）**：存在"LLM 产出 → 入库 → 被当作依据反哺 LLM"的**循环权威**风险；建议纳入 docs/14 方向 B（沉淀分级 + 可追溯） |
 | N2 | **V1.1 需求文档自相矛盾**：第 75 行「手动版最多保留 **50 个**」，第 83 行验收标准却写「手动标记版本长期保留，**不设数量上限**」 | `backend/tests/博客创作平台-v1.1优化需求文档.md` L75 vs L83 | **文档缺陷**：该业务规则在需求侧无唯一权威值，是 N1 的直接成因（答案只能靠用例推断）。对应 §6.2.1「需求文档结构性缺失信号」，建议回补文档 |
 
-> 剩余未闭合：**T6 TR-6.5**（图谱增量无产物）、**T5 TR-5.1/5.2/5.5**（SSE 事件流未留存）、**T2 TR-2.2/2.6**（澄清回答来源审计，当前最高优先级）、T8 的 9 条 rubric 评分与 AC-11/AC-12 判定。
+**④ T2（澄清回答来源审计）→ TR-2.2 / TR-2.6 PASS，新发现 N3 重复率超标**（产物 `blog_v1_clarify_audit.json`）
+
+补测载体：`REQ-1788922967346-1659`（客户服务文档管理 v1.0，draft，7 个待答问题）。答案由后端已配置 LLM 依需求原文生成（沿用项目既定 `E2E.AnswerGen` 口径，**禁用脚本泛化兜底**）。
+
+| 项 | 结果 |
+|---|---|
+| TR-2.2 提交 | HTTP **200**，body 为 `{answers: {qid: answer}}` dict |
+| TR-2.2 来源审计 | **7/7 真实作答**，`script_driven_count = 0`，`missing_count = 0`（全部 `llm_from_original`） |
+| TR-2.6 收敛 | **1 轮提交即收敛**：第 2 轮待答问题 = 0，`status=passed`，`remaining=0` → rubric 锚点 **5 分档**（≥ 阈值 4） |
+| TR-2.3 选项充足性 | **未覆盖**：本次 7 题全部 `options=0`（开放型缺口问题），"选系统选项"分支未验证 |
+
+**N3 · 澄清问题跨来源重复（Major）**：7 题中只有 **4 个语义独立**问题，**3 组完全重复 → 重复率 42.9%**（TR-2.4 阈值 10%，**FAIL**）：
+
+| 重复组 | 问题 A（`llm_semantic.*`） | 问题 B（`prd.*`） |
+|---|---|---|
+| 附件 10MB 上限 | `llm_semantic.data_constraints.attachment.size_limit` | `prd.upper_bound_rule.不超过 10MB` |
+| 48 小时无操作 | `llm_semantic.data_constraints.ticket.timeout_action` | `prd.upper_bound_rule.48 小时` |
+| 处置角色/入口 | `llm_semantic.user_roles.role_capability` | `prd.role_capability_gap` |
+
+根因：**同一缺口被语义检测与规则检测两条链路各生成一次，二者之间没有跨来源去重**。
+⚠️ 原 spec 记录的 `TR-2.4_repeat_ratio_pct = 0.0` 是在**0 条回答**上算出来的——属**空洞通过（vacuous pass）**，真实值 42.9%。
+建议：① 澄清问题生成后按 field 语义 / 问题文本 embedding 做跨来源合并；② 把 TR-2.4 口径从"回答数"改为"**问题数**"。
+
+**⑤ 附带收获：docs/14 一期第 3/4 项改动获真实链路验证**
+
+本次产物的 `_clarify_state.quality_report` 含 `coverage{answered:7,covered:7,followup:0,skipped:0,evidence:"answered"}`、`coverage_score:1.0`、`coverage_summary:"答案覆盖率 1.00 = 已覆盖 7/已回答 7"` —— 改造前这里只会是硬编码的 `1.0/0.8` 且无任何明细。**说明"覆盖率去硬编码 + 口径分离"已在生产链路生效**。
+
+**N4 · 需求解析流程可永久挂起（Major，待复现确认）**
+
+补测时新建 DevBlog 需求 `REQ-1789111250682-5406`（项目 `PROJ-827-50645-938`，产品 `PROD-63410-827` 空壳），`FpAgent` 于 07:30:03 完成（**18 个功能点**，耗时 **498s**）后**再无任何日志与 LLM 调用**；任务 `TASK-1789111250682-5128` 永久停在 `running / kb_search / 41`，需求停在 `analyzing`，**无超时/看门狗**。
+
+- 关键判据：`api/requirements.py` 的 `_bg_task_done_callback` 会记录未捕获异常，但**无任何异常日志** → 属「**await 永久挂起**」而非协程死亡
+- 旁证：日志中 ReqAgent 报 `req_id=REQ-1789111298902-5407`，与任务实际 `REQ-1789111250682-5406` **不一致**，且前者在 DB 中**不存在** → 挂起发生在**持久化之前**
+- 根因未确认（可能为 Milvus 调用阻塞或 LLM 调用无超时）；**与本次 docs/14 改动无关**（改动位于生成/质量分路径，挂起点在 ClarifyAgent 首条日志之前）
+- 建议：为解析任务加**阶段级超时 + 看门狗**，超时置 `interrupted` 并释放需求
+
+> 剩余未闭合：**T6 TR-6.5**（图谱增量无产物）、**T5 TR-5.1/5.2/5.5**（SSE 事件流未留存）、**T8** 的 9 条 rubric 评分与 AC-11/AC-12 判定。
+> 新增待修：**N1**（知识权威层级倒挂）、**N2**（V1.1 文档自相矛盾）、**N3**（澄清问题跨来源重复）、**N4**（解析流程挂起）。
