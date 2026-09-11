@@ -136,3 +136,16 @@ BUG_REPORT_*.md
 SECURITY-AUDIT-REPORT.md
 KB_MODEL_FIX_OVERVIEW.md
 DEPLOY_OFFLINE_PACK.md
+
+# ===== 根目录一次性验证目录（与 _e2e_v30/ 同类，不入库） =====
+_e2e_tmp/
+_verify_tmp/
+
+# ===== backend/tests 下的一次性探针脚本（不入库） =====
+backend/tests/_probe_*.py
+backend/tests/_e2e_*.py
+
+# ===== 第三方工具本地副本（体积大、可重新下载，不入库） =====
+# marktext 便携版（用于人工核对 xmind/markdown 导出效果）
+tests/marktext-x64-win.zip
+tests/marktext-x64-win/
