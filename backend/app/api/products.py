@@ -1305,6 +1305,204 @@ async def reactivate_project(
 
 
 # ============================================================================
+# v3.2.13: 项目级「修改上线时间」+ 知识库元数据重整合
+# ============================================================================
+
+class ProjectGoLiveUpdateRequest(BaseModel):
+    """项目级上线时间修改请求模型。"""
+    go_live_date: str = Field(..., description="上线时间 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM")
+    reason: str = Field(default="", max_length=512, description="变更原因（可选，写入审计日志）")
+
+
+@router.patch("/projects/{proj_id}/go-live-date", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def update_project_go_live_date(
+    proj_id: str,
+    body: ProjectGoLiveUpdateRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """修改已归档项目的上线时间，并同步重建知识库派生数据（v3.2.13）。
+
+    背景：上线时间在系统中承担三个职责——
+      ① 知识库检索的时间衰减因子（越新排越前）
+      ② 同 req_id 多版本去重时的版本判据（保留最新）
+      ③ 归档时写入向量元数据的锚点
+
+    因此上线时间变更不能只改 PG 字段，必须同步以下三层，否则检索结果
+    与"一项目多时间"的自相矛盾：
+      - Project.go_live_date（项目本体）
+      - Requirement.go_live_date（项目下所有需求）
+      - FPDependencyVersion.go_live_date（版本快照，保持可追溯一致）
+
+    向量库侧（Milvus metadata）：
+      - 批量更新该项目下所有需求向量 + FP 向量的 go_live_date
+      - 失效知识库检索缓存（否则仍返回旧排序）
+      - 不重算 embedding（日期在 metadata，正文未变）
+
+    仅允许 archived 项目（活跃项目无归档上线时间语义）。
+
+    Args:
+        proj_id: 项目 ID
+        body: 含 go_live_date 与可选 reason
+    """
+    # 1. 查询项目
+    project = await session.get(Project, proj_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
+    if project.status != "archived":
+        raise HTTPException(
+            status_code=409,
+            detail=f"仅已归档项目可修改上线时间（当前状态: {project.status}）。活跃项目的上线时间在归档时设置。",
+        )
+
+    # 2. 解析上线时间
+    try:
+        parsed_go_live = datetime.fromisoformat(body.go_live_date)
+    except ValueError:
+        try:
+            parsed_go_live = datetime.fromisoformat(body.go_live_date + "T00:00:00")
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"上线时间格式不正确: {body.go_live_date}，需为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD",
+            )
+    if parsed_go_live.tzinfo is None:
+        parsed_go_live = parsed_go_live.replace(tzinfo=timezone.utc)
+
+    old_go_live = project.go_live_date
+    # 无变化直接返回，避免无意义的向量重建
+    if old_go_live and old_go_live == parsed_go_live:
+        return ApiResponse(
+            success=True,
+            message="上线时间未变化，无需同步",
+            data={
+                "project_id": proj_id,
+                "go_live_date": parsed_go_live.isoformat(),
+                "changed": False,
+                "requirement_count": 0,
+                "milvus_updated": False,
+            },
+        )
+
+    # 3. 事务内同步三层 PG 数据
+    project.go_live_date = parsed_go_live
+
+    req_result = await session.execute(
+        select(Requirement).where(Requirement.project_id == proj_id)
+    )
+    requirements = req_result.scalars().all()
+    for r in requirements:
+        r.go_live_date = parsed_go_live
+
+    ver_result = await session.execute(
+        select(FPDependencyVersion).where(FPDependencyVersion.project_id == proj_id)
+    )
+    versions = ver_result.scalars().all()
+    for v in versions:
+        v.go_live_date = parsed_go_live
+
+    fp_result = await session.execute(
+        select(FunctionalPoint.id).where(
+            FunctionalPoint.requirement_id.in_([r.id for r in requirements])
+        )
+    )
+    fp_ids = [row[0] for row in fp_result.fetchall()]
+
+    await session.commit()
+
+    logger.info(
+        "[UpdateProjectGoLive] 项目上线时间变更: proj_id={}, {} → {}, 需求={}, 版本快照={}, FP={}, user={}, reason={}",
+        proj_id,
+        old_go_live.isoformat() if old_go_live else "(空)",
+        parsed_go_live.isoformat(),
+        len(requirements), len(versions), len(fp_ids),
+        current_user.username, body.reason or "(未填写)",
+    )
+
+    # 4. 知识库侧重整合：更新向量 metadata + 失效缓存
+    milvus_updated = False
+    milvus_error = ""
+    milvus_count = 0
+    cache_invalidated = 0
+    try:
+        from app.db.milvus_store import vector_store
+
+        new_date_iso = parsed_go_live.isoformat()
+        # 4.1 批量更新需求向量元数据（含兜底：单条失败不阻断整批）
+        for r in requirements:
+            try:
+                await asyncio.to_thread(
+                    vector_store.update_requirement_metadata,
+                    r.id,
+                    {"go_live_date": new_date_iso},
+                )
+                milvus_count += 1
+            except Exception as inner_e:
+                logger.warning(
+                    "[UpdateProjectGoLive] 需求向量元数据更新失败(不阻断): req_id={}, error={}",
+                    r.id, str(inner_e)[:100],
+                )
+        # 4.2 批量更新 FP 向量元数据
+        for fp_id in fp_ids:
+            try:
+                await asyncio.to_thread(
+                    vector_store.update_requirement_metadata,
+                    f"FP-{fp_id}",
+                    {"go_live_date": new_date_iso},
+                )
+                milvus_count += 1
+            except Exception as inner_e:
+                logger.warning(
+                    "[UpdateProjectGoLive] FP 向量元数据更新失败(不阻断): fp_id={}, error={}",
+                    fp_id, str(inner_e)[:100],
+                )
+        milvus_updated = True
+
+        # 4.3 失效知识库检索缓存（按产品维度清除，确保新排序立即生效）
+        try:
+            from app.db.kb_cache import kb_cache
+            cache_invalidated = await kb_cache.invalidate_by_product(project.product_id)
+            logger.info(
+                "[UpdateProjectGoLive] KB 缓存已失效: product_id={}, cleared={}",
+                project.product_id, cache_invalidated,
+            )
+        except Exception as cache_e:
+            logger.warning(
+                "[UpdateProjectGoLive] KB 缓存失效失败(不阻断，缓存将在 TTL 后自然过期): error={}",
+                str(cache_e)[:200],
+            )
+    except Exception as e:
+        milvus_error = str(e)[:300]
+        logger.warning(
+            "[UpdateProjectGoLive] Milvus 元数据更新失败（不阻断，PG 已落库）: proj_id={}, error={}",
+            proj_id, milvus_error[:200],
+        )
+
+    return ApiResponse(
+        success=True,
+        message=(
+            f"项目上线时间已更新，同步 {milvus_count} 条知识库向量元数据"
+            + (f"，失效 {cache_invalidated} 条检索缓存" if cache_invalidated else "")
+            if milvus_updated
+            else "项目上线时间已更新，但向量库元数据同步失败（可稍后重试）"
+        ),
+        data={
+            "project_id": proj_id,
+            "go_live_date": parsed_go_live.isoformat(),
+            "changed": True,
+            "old_go_live_date": old_go_live.isoformat() if old_go_live else "",
+            "requirement_count": len(requirements),
+            "version_count": len(versions),
+            "fp_count": len(fp_ids),
+            "milvus_updated": milvus_updated,
+            "milvus_count": milvus_count,
+            "milvus_error": milvus_error if not milvus_updated else "",
+            "cache_invalidated": cache_invalidated,
+        },
+    )
+
+
+# ============================================================================
 # v2.45: 依赖版本查询端点
 # ============================================================================
 

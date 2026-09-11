@@ -51,17 +51,18 @@ function isoToDatetimeLocal(iso?: string): string {
 // ============================================================================
 
 const GoLiveEditModal = memo(function GoLiveEditModal({
-  entry,
+  project,
   onClose,
   onSaved,
   toast,
 }: {
-  entry: KbEntry
+  project: KbProject
   onClose: () => void
-  onSaved: (id: string, newDate: string) => void
+  onSaved: (projectId: string, newDate: string) => void
   toast: (t: { type: 'success' | 'error' | 'warning'; msg: string }) => void
 }) {
-  const [editValue, setEditValue] = useState(isoToDatetimeLocal(entry.go_live_date))
+  const [editValue, setEditValue] = useState(isoToDatetimeLocal(project.go_live_date))
+  const [reason, setReason] = useState('')
   const [saving, setSaving] = useState(false)
 
   // v2.45 增强：Esc 关闭 GoLiveEditModal（保存中禁用避免误关）
@@ -78,14 +79,23 @@ const GoLiveEditModal = memo(function GoLiveEditModal({
     setSaving(true)
     try {
       const isoDate = datetimeLocalToISO(editValue)
-      const r = await reqApi.updateGoLiveDate(entry.id, isoDate)
-      onSaved(entry.id, r.go_live_date)  // 更新父列表
-      toast({
-        type: r.milvus_updated ? 'success' : 'warning',
-        msg: r.milvus_updated
-          ? `「${entry.title}」上线时间已更新，向量库元数据已同步`
-          : `「${entry.title}」上线时间已更新，但向量库元数据同步失败`,
-      })
+      // v3.2.13: 改为项目级接口 —— 一次性同步项目下全部需求/FP 向量元数据并失效缓存
+      const r = await prodApi.updateProjectGoLiveDate(project.id, isoDate, reason.trim())
+      onSaved(project.id, r.go_live_date)
+      if (!r.changed) {
+        toast({ type: 'success', msg: `上线时间未变化，无需同步` })
+      } else if (r.milvus_updated) {
+        const extra = r.cache_invalidated ? `，失效 ${r.cache_invalidated} 条检索缓存` : ''
+        toast({
+          type: 'success',
+          msg: `项目上线时间已更新，同步 ${r.milvus_count ?? r.requirement_count} 条向量元数据${extra}`,
+        })
+      } else {
+        toast({
+          type: 'warning',
+          msg: `上线时间已更新，但向量库同步失败：${r.milvus_error || '请检查 Milvus 状态'}`,
+        })
+      }
       onClose()
     } catch (e: any) {
       const errBody = e?.data?.detail || e?.detail || e?.message || ''
@@ -97,12 +107,14 @@ const GoLiveEditModal = memo(function GoLiveEditModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0, 0, 0, 0.32)', backdropFilter: 'blur(4px)' }} onClick={() => !saving && onClose()}>
-      <div className="max-w-sm w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
+      <div className="max-w-md w-full p-6 animate-slide-up" style={{ background: 'var(--background)', borderRadius: 'calc(var(--radius) * 1.1)', boxShadow: 'var(--shadow-apple-xl)' }} onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
           <Calendar className="w-5 h-5" style={{ color: 'var(--brand-500)' }} />
-          <div>
-            <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>修改上线时间</h2>
-            <p className="text-xs truncate max-w-[240px]" style={{ color: 'var(--foreground-tertiary)' }}>{entry.title}</p>
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold" style={{ color: 'var(--foreground)' }}>修改项目上线时间</h2>
+            <p className="text-xs truncate max-w-[300px]" style={{ color: 'var(--foreground-tertiary)' }}>
+              {project.name || project.id} {project.version ? `· v${project.version}` : ''}
+            </p>
           </div>
         </div>
         <div className="space-y-3">
@@ -118,6 +130,24 @@ const GoLiveEditModal = memo(function GoLiveEditModal({
             <p className="text-xs mt-1" style={{ color: 'var(--foreground-tertiary)' }}>
               用于知识库检索时按上线时间排序，同一功能多个版本时以靠后时间为准
             </p>
+          </div>
+          <div>
+            <label className="label">变更原因（可选）</label>
+            <input
+              type="text"
+              value={reason}
+              onChange={e => setReason(e.target.value)}
+              placeholder="如：上线延期至下个迭代"
+              className="input-field text-sm"
+              maxLength={200}
+            />
+          </div>
+          <div className="p-3 text-xs flex items-start gap-2" style={{ borderRadius: 'calc(var(--radius) * 0.5)', background: 'var(--background-info)', color: 'var(--color-text-info, var(--brand-500))' }}>
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            <span>
+              保存后将同步重建知识库：项目下 {project.requirement_count || 0} 条需求的向量元数据、
+              版本快照统一更新，并失效检索缓存。此操作不重算向量内容，通常几秒内完成。
+            </span>
           </div>
         </div>
         <div className="flex justify-end gap-3 mt-5">
@@ -153,8 +183,8 @@ export default function KnowledgeBase() {
   const [revectorizingIds, setRevectorizingIds] = useState<Set<string>>(new Set())
   const [batchBusy, setBatchBusy] = useState(false)
 
-  // 修改上线时间弹窗 — 只保留 entry 引用（日期/保存状态由 memo 组件内部管理）
-  const [editingEntry, setEditingEntry] = useState<KbEntry | null>(null)
+  // 修改上线时间弹窗 — v3.2.13: 改为项目级（同步重建知识库）
+  const [editingProject, setEditingProject] = useState<KbProject | null>(null)
 
   // 加载已归档项目列表
   const loadProjects = async () => {
@@ -224,8 +254,8 @@ export default function KnowledgeBase() {
   // 切换产品：加载项目列表，清空项目详情
   useEffect(() => {
     setSelectedKbProject(null)
-    // v2.45 修复：切换产品时关闭修改上线时间弹窗，避免对旧产品条目执行保存
-    setEditingEntry(null)
+    // v3.2.13：切换产品时关闭修改上线时间弹窗，避免对旧产品项目执行保存
+    setEditingProject(null)
     setProjectEntries({ requirements: [], test_cases: [] })
     setKbEntryIndex(new Map())
     loadProjects()
@@ -340,27 +370,19 @@ export default function KnowledgeBase() {
     }
   }
 
-  // 修改上线时间：将项目内需求适配为 KbEntry 以复用 GoLiveEditModal
-  const handleEditGoLive = (req: any) => {
-    const entry: KbEntry = {
-      id: req.id,
-      title: req.title || req.id,
-      type: 'requirement',
-      product_id: req.product_id || selectedProductId || '',
-      go_live_date: req.go_live_date,
-      priority: req.priority,
-      summary: req.summary,
-      vectorized: req.vectorized,
-      vectorization_status: req.vectorization_status,
-    }
-    setEditingEntry(entry)
+  // v3.2.13: 修改项目上线时间（项目级，同步重建知识库）
+  const handleEditGoLive = (project: KbProject) => {
+    setEditingProject(project)
   }
 
-  const onSavedGoLive = useCallback((id: string, newDate: string) => {
+  // 保存后同步内存态：项目及其下所有需求的上线时间（后端已统一更新）
+  const onSavedGoLive = useCallback((projectId: string, newDate: string) => {
+    setKbProjects(prev => prev.map(p => p.id === projectId ? { ...p, go_live_date: newDate } : p))
     setProjectEntries(prev => ({
       ...prev,
-      requirements: prev.requirements.map(r => r.id === id ? { ...r, go_live_date: newDate } : r),
+      requirements: prev.requirements.map(r => ({ ...r, go_live_date: newDate })),
     }))
+    setSelectedKbProject(prev => prev && prev.id === projectId ? { ...prev, go_live_date: newDate } : prev)
   }, [])
 
   const productName = selectedProductId
@@ -484,6 +506,22 @@ export default function KnowledgeBase() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
+                    {/* v3.2.13: 修改项目上线时间（项目级，同步重建知识库） */}
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => { e.stopPropagation(); handleEditGoLive(project) }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); handleEditGoLive(project) }
+                      }}
+                      title="修改项目上线时间（同步更新知识库）"
+                      className="p-1.5 rounded-lg transition-colors flex items-center"
+                      style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0, 122, 255, 0.12)'; e.currentTarget.style.color = 'var(--brand-500)' }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'var(--background-muted)'; e.currentTarget.style.color = 'var(--foreground-secondary)' }}
+                    >
+                      <Calendar className="w-3.5 h-3.5" />
+                    </span>
                     <span
                       role="button"
                       tabIndex={0}
@@ -656,14 +694,7 @@ export default function KnowledgeBase() {
                         )}
                       </div>
                       <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-                        <button
-                          onClick={() => handleEditGoLive(entry)}
-                          className="p-1.5 transition-all"
-                          style={{ borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-tertiary)' }}
-                          title="修改上线时间"
-                        >
-                          <Calendar className="w-3.5 h-3.5" />
-                        </button>
+                        {/* v3.2.13: 上线时间修改已上移至项目级（项目卡片），条目级不再提供修改入口 */}
                         <button onClick={() => handleDeleteEntry(entry, 'requirement')}
                           className="p-1.5 transition-all"
                           style={{ borderRadius: 'calc(var(--radius) * 0.5)', color: 'var(--foreground-tertiary)' }}
@@ -722,11 +753,11 @@ export default function KnowledgeBase() {
         </div>
       )}
 
-      {/* 修改上线时间弹窗（React.memo 隔离，避免 onChange 触发列表重渲染） */}
-      {editingEntry && (
+      {/* 修改上线时间弹窗（v3.2.13: 项目级） */}
+      {editingProject && (
         <GoLiveEditModal
-          entry={editingEntry}
-          onClose={() => setEditingEntry(null)}
+          project={editingProject}
+          onClose={() => setEditingProject(null)}
           onSaved={onSavedGoLive}
           toast={t => setToast(t)}
         />

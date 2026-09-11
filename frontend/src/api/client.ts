@@ -928,6 +928,17 @@ export const products = {
       `/products/projects/${projectId}/reactivate`,
       { method: 'POST' }
     ),
+  // v3.2.13 项目级修改上线时间 + 知识库元数据重整合
+  updateProjectGoLiveDate: (projectId: string, goLiveDate: string, reason = '') =>
+    request<{
+      project_id: string; go_live_date: string; changed: boolean;
+      old_go_live_date?: string; requirement_count: number; version_count?: number;
+      fp_count?: number; milvus_updated: boolean; milvus_count?: number;
+      milvus_error?: string; cache_invalidated?: number;
+    }>(
+      `/products/projects/${projectId}/go-live-date`,
+      { method: 'PATCH', body: JSON.stringify({ go_live_date: goLiveDate, reason }) }
+    ),
   // v2.45 依赖版本查询
   listDependencyVersionsByProduct: (productId: string) =>
     request<DependencyVersion[]>(`/products/${productId}/fp/dependency-versions`),
