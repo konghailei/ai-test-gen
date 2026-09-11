@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from app.config import settings
-from app.core.constants import Confidence
+from app.core.constants import Confidence, RetrievalThreshold
 from app.utils.numbers import clamp01
 from app.core.llm_client import llm_client
 from app.core import prompt_manager
@@ -108,83 +108,193 @@ class GenAgent:
         logger.info("[GenAgent] ▶ 开始生成: req_id={}, multi_type={}, has_impact_guidance={}, fp_count={}",
                     req_id, enable_multi_type, bool(impact_guidance), len(functional_points or []))
 
-        # v3.2: 轻量 KB 检索——查同模块下已 approved 的高质量用例 Top-3 作为 Few-shot 参考
+        # ===== 知识注入统一检索（docs/14 一期）=====
+        # 统一原则（docs/14 §3 B2）：过相似度阈值 + 数量上限 + 可追溯。
+        # 相对旧实现（v3.2/v3.4）的三处改进：
+        #   1. Few-shot 由「最近更新 10 条内按模块过滤」改为**向量语义检索**——
+        #      旧口径候选池被锁死在最近 10 条，用例攒多后大概率召回为空。
+        #   2. 检索不再依赖 modules（旧实现 `if modules:` 门控使无模块需求零注入）。
+        #   3. 注入的用例/模式分别累加 execution_count / usage_count（原为零引用死字段）。
+        # 阈值来源见 core/constants.RetrievalThreshold（本项目实测分布，非照搬业界 0.75）。
         few_shot_cases: list = []
         matched_patterns: list = []
         functional_points = functional_points or []
-        if modules:
-            try:
-                from app.db.database import async_session
-                from app.db.models import TestCase
-                from sqlalchemy import select as _select
-                async with async_session() as _s:
-                    cases_in_module = await _s.execute(
-                        _select(TestCase.case_json, TestCase.id, TestCase.modules)
-                        .where(TestCase.product_id == product_id, TestCase.status == "approved")
-                        .order_by(TestCase.updated_at.desc())
-                        .limit(10)
-                    )
-                    for cj, cid, db_modules in cases_in_module.all():
-                        if not isinstance(cj, dict):
-                            continue
-                        # 模块过滤优先使用独立列 modules，其次回退 case_json 内字段
-                        case_modules = list(db_modules or []) if isinstance(db_modules, (list, tuple)) else []
-                        if not case_modules:
-                            case_modules = cj.get("modules") or ([cj.get("module")] if cj.get("module") else [])
-                        if not any(module in modules for module in case_modules):
-                            continue
-                        few_shot_cases.append({
-                            "id": cid,
-                            "title": cj.get("title", ""),
-                            "type": cj.get("type", ""),
-                            "priority": cj.get("priority", ""),
-                            "steps": cj.get("steps", [])[:3],
-                            "assertions": cj.get("assertions", [])[:2],
-                        })
-                    # 去重 + Top-3
-                    seen = set()
-                    uniq = []
-                    for c in few_shot_cases:
-                        title = c.get("title", "")
-                        if title and title not in seen:
-                            seen.add(title)
-                            uniq.append(c)
-                    few_shot_cases = uniq[:3]
-            except Exception as e:
-                logger.debug("[GenAgent] 轻量 KB 检索失败（不阻断）: {}", str(e)[:120])
 
-        # v3.4: 测试模式库检索——按需求语义检索经人工验证的模式骨架（test_patterns），
-        # 注入 prompt 让 LLM 照着骨架生成，提升覆盖率与风格一致性（等价类/边界值/决策表等）。
-        if modules:
+        # 查询文本：模块 + 功能点/需求概述（无模块时退化为概述，保证总能检索）
+        _req_info = srr.get("requirement", {}) or {}
+        _req_text = str(_req_info.get("summary") or _req_info.get("title") or "").strip()
+        _fp_pool = [fp_scope] if fp_scope else functional_points
+        _fp_text = " ".join(
+            str(fp.get("name") or "") for fp in _fp_pool[:5] if isinstance(fp, dict)
+        ).strip()
+        _mod_text = " / ".join(m for m in modules if isinstance(m, str) and m)
+        _query_text = " ".join(x for x in [_mod_text, _fp_text or _req_text] if x).strip()[:300]
+
+        if product_id and _query_text:
+            from sqlalchemy import select as _select
+            from sqlalchemy import update as _update
+
+            from app.db.database import async_session
+            from app.db.models import TestCase, TestPattern
+
+            # ---- 1) Few-shot：向量语义检索 + 阈值 + 模块偏好 + Top-K ----
+            # ⚠️ 不向 Milvus 传 modules：test_cases 的向量 metadata 从未写入 modules
+            # 字段（add_test_case 只写 req_id/product_id/case_type/confidence/gen_batch_id），
+            # 传 modules 会被内存过滤成 0 条。故改为「产品隔离硬过滤 + 模块作排序偏好」。
             try:
-                query_text = (
-                    f"{' / '.join(modules)} "
-                    f"{srr.get('requirement', {}).get('summary', '') or srr.get('requirement', {}).get('title', '')}"
-                ).strip()[:200]
-                # v3.1.3 P2-8: search_patterns 含 Milvus 网络调用，改 to_thread 防止阻塞事件循环
-                hits = await asyncio.to_thread(vector_store.search_patterns, query_text, top_k=3)
-                for h in hits:
-                    meta = h.get("metadata", {}) or {}
-                    doc = h.get("document") or h.get("content") or h.get("text") or ""
-                    name = meta.get("name", "")
-                    cat = meta.get("category", "")
-                    pattern_json = None
-                    try:
-                        pattern_json = json.loads(doc) if doc else None
-                    except Exception:
-                        pattern_json = None
-                    if not pattern_json and isinstance(meta, dict):
-                        pattern_json = meta.get("pattern_json")
-                    if name and (pattern_json or cat):
-                        matched_patterns.append({
-                            "name": name,
-                            "category": cat,
-                            "pattern_json": pattern_json if isinstance(pattern_json, dict) else str(pattern_json),
-                        })
+                _hits = await asyncio.to_thread(
+                    vector_store.search_similar_cases,
+                    _query_text,
+                    RetrievalThreshold.FEW_SHOT_CANDIDATE_K,
+                    None,        # case_type
+                    None,        # req_id
+                    product_id,  # 产品隔离（硬过滤，必须）
+                    None,        # project_id
+                    None,        # modules：见上，对 test_cases 不可用
+                )
+                _scored = [
+                    (h, float(h.get("similarity")))
+                    for h in _hits
+                    if isinstance(h.get("similarity"), (int, float))
+                ]
+                _sims = [s for _, s in _scored]
+                # 过阈值，保持 Milvus 相似度排序并去重
+                _passed: list[tuple[str, float]] = []
+                _seen_ids: set[str] = set()
+                for h, s in _scored:
+                    if s < RetrievalThreshold.FEW_SHOT_MIN_SIMILARITY:
+                        continue
+                    _cid = str(h.get("id") or "")
+                    if _cid and _cid not in _seen_ids:
+                        _seen_ids.add(_cid)
+                        _passed.append((_cid, s))
+
+                # 模块偏好分组结果（在 if 外初始化，保证日志可用）
+                _pref: list[tuple[str, float]] = []
+                _rest: list[tuple[str, float]] = []
+                if _passed:
+                    async with async_session() as _s:
+                        _rows = await _s.execute(
+                            _select(TestCase.id, TestCase.case_json, TestCase.modules).where(
+                                TestCase.id.in_([x for x, _ in _passed]),
+                                TestCase.product_id == product_id,
+                                # 双保险：Milvus 仅存 approved，但防「审批后降级」的向量残留
+                                TestCase.status == "approved",
+                            )
+                        )
+                        _info = {r[0]: (r[1], r[2]) for r in _rows.all()}
+                        _wanted = {m for m in modules if isinstance(m, str) and m}
+                        # 模块作为排序偏好：命中模块的优先，不足再按相似度补足
+                        for _cid, _sim in _passed:
+                            if _cid not in _info:
+                                continue
+                            _stored = {
+                                m.strip() for m in (_info[_cid][1] or [])
+                                if isinstance(m, str) and m.strip()
+                            }
+                            (_pref if (_wanted and _wanted & _stored) else _rest).append((_cid, _sim))
+                        _seen_titles: set[str] = set()
+                        for _cid, _sim in _pref + _rest:
+                            if len(few_shot_cases) >= RetrievalThreshold.FEW_SHOT_TOP_K:
+                                break
+                            _cj = _info[_cid][0]
+                            if not isinstance(_cj, dict):
+                                continue
+                            _title = _cj.get("title", "") or ""
+                            if _title and _title in _seen_titles:
+                                continue
+                            _seen_titles.add(_title)
+                            few_shot_cases.append({
+                                "id": _cid,
+                                "title": _title,
+                                "type": _cj.get("type", ""),
+                                "priority": _cj.get("priority", ""),
+                                "steps": (_cj.get("steps") or [])[:3],
+                                "assertions": (_cj.get("assertions") or [])[:2],
+                            })
+                        # 激活 execution_count：语义为「被检索命中并注入 prompt 的次数」，
+                        # 不等于「实际执行次数」（后者见 docs/14 §6 风险 4）
+                        if few_shot_cases:
+                            await _s.execute(
+                                _update(TestCase)
+                                .where(TestCase.id.in_([c["id"] for c in few_shot_cases]))
+                                .values(execution_count=TestCase.execution_count + 1)
+                            )
+                            await _s.commit()
+                logger.info(
+                    "[GenAgent] Few-shot 语义检索: query={}, 候选={}, 过阈值={}, 命中模块优先={}, 注入={}, 阈值={}, sims={}",
+                    _query_text[:60], len(_scored), len(_passed), len(_pref),
+                    len(few_shot_cases), RetrievalThreshold.FEW_SHOT_MIN_SIMILARITY,
+                    [round(x, 3) for x in _sims[:10]],
+                )
             except Exception as e:
-                logger.debug("[GenAgent] 测试模式库检索失败（不阻断）: {}", str(e)[:120])
-        logger.info("[GenAgent] 轻量 KB 检索: few_shot_cases={}, matched_patterns={}",
-                    len(few_shot_cases), len(matched_patterns))
+                logger.debug("[GenAgent] Few-shot 语义检索失败（不阻断）: {}", str(e)[:150])
+
+            # ---- 2) 测试模式：向量检索 + 阈值 + Top-K ----
+            try:
+                _pat_hits = await asyncio.to_thread(
+                    vector_store.search_patterns,
+                    _query_text,
+                    RetrievalThreshold.PATTERN_CANDIDATE_K,
+                )
+                _pat_ids: list[int] = []
+                for h in _pat_hits:
+                    _sim = h.get("similarity")
+                    if not isinstance(_sim, (int, float)):
+                        continue
+                    if _sim < RetrievalThreshold.PATTERN_MIN_SIMILARITY:
+                        continue
+                    _meta = h.get("metadata", {}) or {}
+                    _doc = h.get("document") or ""
+                    try:
+                        _pjson = json.loads(_doc) if _doc else None
+                    except Exception:
+                        _pjson = None
+                    if not _pjson and isinstance(_meta, dict):
+                        _pjson = _meta.get("pattern_json")
+                    _name = _meta.get("name", "")
+                    if not _name or not (_pjson or _meta.get("category")):
+                        continue
+                    matched_patterns.append({
+                        "name": _name,
+                        "category": _meta.get("category", ""),
+                        "pattern_json": _pjson if isinstance(_pjson, dict) else str(_pjson),
+                    })
+                    # Milvus 主键即 str(TestPattern.id)（见 db/seed.py add_pattern 调用）
+                    try:
+                        _pat_ids.append(int(str(h.get("id"))))
+                    except (TypeError, ValueError):
+                        pass
+                    if len(matched_patterns) >= RetrievalThreshold.PATTERN_TOP_K:
+                        break
+                logger.info(
+                    "[GenAgent] 测试模式检索: 候选={}, 过阈值={}, 阈值={}, sims={}",
+                    len(_pat_hits), len(matched_patterns),
+                    RetrievalThreshold.PATTERN_MIN_SIMILARITY,
+                    [round(float(h.get("similarity") or 0), 3) for h in _pat_hits],
+                )
+                # 激活 usage_count（原为零更新字段）
+                if _pat_ids:
+                    async with async_session() as _s:
+                        await _s.execute(
+                            _update(TestPattern)
+                            .where(TestPattern.id.in_(_pat_ids))
+                            .values(usage_count=TestPattern.usage_count + 1)
+                        )
+                        await _s.commit()
+            except Exception as e:
+                logger.debug("[GenAgent] 测试模式检索失败（不阻断）: {}", str(e)[:150])
+        else:
+            logger.debug("[GenAgent] 跳过知识检索: has_product={}, query_len={}",
+                         bool(product_id), len(_query_text))
+
+        # 可追溯：记录本次实际注入的知识源（docs/14 §3 B2 原则三）
+        logger.info(
+            "[GenAgent] 知识注入完成: few_shot={}, patterns={}, 来源={}",
+            len(few_shot_cases), len(matched_patterns),
+            {"cases": [c["id"] for c in few_shot_cases],
+             "patterns": [p["name"] for p in matched_patterns]},
+        )
 
         # 3. 构建 Prompt（含 FP 定向上下文 + 覆盖缺口引导）
         # 要点级覆盖驱动：动态生成数量下限由要点规模推导，随 prompt 注入硬约束
