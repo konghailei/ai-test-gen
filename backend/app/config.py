@@ -108,6 +108,29 @@ class Settings(BaseSettings):
     """LLM 调用超时（秒），0 表示不限时"""
     LLM_TIMEOUT: int = 0
 
+    # ========== 任务看门狗配置（v3.3 新增） ==========
+    """是否启用分析任务看门狗。
+
+    背景（N4）：LLM 流式调用自 v3.1.3 起「总生成时长不设上限」，仅施加
+    首 chunk 超时（上限 1800s）与 chunk 空闲超时（STREAM_IDLE_TIMEOUT=180s）。
+    因此当上游持续以极慢速率吐字时，单次调用可无限长；叠加任务层无任何
+    超时/看门狗，任务会永久停在 running、需求永久停在 analyzing。
+
+    看门狗不试图杀死协程（无协程注册表），而是把「长时间无状态更新」的任务
+    标记为 interrupted —— 该状态受 requirement_tasks._update_task 的
+    `status != 'interrupted'` 守卫保护，僵尸协程无法再把状态改回 running。
+    """
+    TASK_WATCHDOG_ENABLED: bool = True
+
+    """任务无状态更新超过该分钟数即判定为卡死。
+    取值须大于「两次状态更新之间可能出现的最长单次 LLM 调用」：
+    实测最长合法调用 498s（8.3 分钟），首 chunk 上限 1800s（30 分钟），
+    故默认 60 分钟留足余量，仅用于兜底真正的无限期挂起。"""
+    TASK_STALE_MINUTES: int = 60
+
+    """看门狗巡检间隔（秒）"""
+    TASK_WATCHDOG_INTERVAL: int = 120
+
     # ========== 嵌入模型配置 ==========
     """嵌入模型类型：local（sentence-transformers，默认）| cloud（远程 API 嵌入）。
     注：ChromaDB 已弃用，chroma_default 选项不再可用；模型实际加载由 EMBEDDING_MODEL_NAME 决定。"""

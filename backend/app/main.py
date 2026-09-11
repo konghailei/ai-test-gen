@@ -110,12 +110,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("向量库预热失败（不影响启动）: {}", str(e)[:120])
 
+    # v3.3（N4 兜底）：启动分析任务看门狗。
+    # LLM 流式调用「总生成时长不设上限」，任务层无超时，挂起的任务会永久停在 running。
+    try:
+        from app.core.task_watchdog import start_task_watchdog, stop_task_watchdog
+        start_task_watchdog()
+    except Exception as e:
+        logger.warning("[Watchdog] 启动失败（不影响启动）: {}", str(e)[:150])
+
     logger.info("AI测试用例生成系统 启动完成，监听端口 {}", settings.APP_PORT)
 
     yield
 
     # ===== 关闭阶段 =====
     logger.info("AI测试用例生成系统 正在关闭...")
+    try:
+        from app.core.task_watchdog import stop_task_watchdog
+        await stop_task_watchdog()
+    except Exception as e:
+        logger.warning("[Watchdog] 停止失败: {}", str(e)[:150])
 
 
 # ============================================================================

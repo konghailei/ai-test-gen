@@ -188,7 +188,10 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
             "duration_ms": _d1 + _d2,
             "status": "error" if kb_unavailable else "success",
         })
-        await _report("KB 状态检查完成，正在检测需求类型（优化/新建）...", 41)
+        # v3.3: 原文案「正在检测需求类型（优化/新建）」已失效——v3.1.6 起需求类型
+        # 检测整体移除（见下方 ② 的注释）。该文案误导排查：任务卡在 41% 时看到的是
+        # 一个早已不存在的步骤，而实际下一步是规则检测 + LLM 语义检测（可耗时 8 分钟+）。
+        await _report("KB 状态检查完成，正在进行规则检测与语义分析...", 41)
 
         # ② 规则检测：完整性 + 歧义性
         # v3.1.6: 优化需求专项检测整个移除（用户裁定多余）——不管需求类型直接查 KB，
