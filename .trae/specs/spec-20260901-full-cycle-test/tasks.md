@@ -16,8 +16,8 @@
 |---|---|---|
 | 1 | T2 | `blog_v1_clarify.json` 显示**澄清回答 0 条**（`all_answers_total=0`、`rounds_total=0`、`force_passed=True`）→ TR-2.2 来源审计为空集、TR-2.6 rubric 按锚点仅 ≤3 分（低于阈值 4）。TEST_PLAN §20.3 记为"3 轮收敛"，与产物不一致 |
 | 2 | T3 | TR-3.1 要求 FP ≥ 5，**实际仅 4 个**；且 2 个 FP 模块为 `uncategorized` |
-| 3 | T5 | TR-5.7（6 格式导出）/ TR-5.8（feedback CRUD）**无任何产物留证**：`blog_*.json` 中检索 `export / gherkin / xmind / pytest / feedback` 全部 0 命中 |
-| 4 | T6 | TR-6.4「B 时点 KB 问答」**无独立产物**（无 `qa_v11`）；全库检索 `2GB` **仅命中 `blog_quality_v11.json`**，且该命中来自 **M2 的用例字符串检索、不是 KB 问答答案**。TR-6.5 图谱增量同样无独立产物 |
+| 3 | T5 | ~~TR-5.7（6 格式导出）/ TR-5.8（feedback CRUD）**无任何产物留证**~~ → ✅ **2026-09-11 已补测通过**（`blog_v1_export_feedback.json`，6/6 格式 + 400/404 + feedback/CRUD 全通） |
+| 4 | T6 | ~~TR-6.4「B 时点 KB 问答」**无独立产物**（无 `qa_v11`）~~ → ✅ **2026-09-11 已补测通过**（`blog_qa_v11.json`，3/3 PASS、无旧值残留、无跨产品越界）；但补测**新暴露一个知识质量问题**：答案依据主要是 AI 生成的测试用例而非需求文档（见 T6 Deviation）。TR-6.5 图谱增量**仍无留证** |
 | 5 | T7/T8 | T7：M3 SKIP、**R3 FAIL（Bug B4）**；T8：TR-8.3 的 12 个预设文件名未逐一对应（实际 13 个，命名不同）、TR-8.4 未达成（§20.7 只覆盖 AC-1~AC-10，**AC-11/AC-12 全库未判定**；9 条 rubric 均无分数记录） |
 
 > **命名映射**（spec 预设 → 实际）：`state`→`blog_state.json`；`v1_parse`→`blog_v1_parse.json`；`v1_clarify`→`blog_v1_clarify.json`；`v1_generate`→`blog_v1_generate_result.json`；`v1_archive`+`qa_v1`→`blog_v1_archive_qa.json`；`quality_v11`→`blog_quality_v11.json`；`isolation`→`blog_product_isolation.json`。
@@ -137,7 +137,7 @@
 - **Notes**: V1.0 的 Q3 若 PRD 未提及「50 个手动标记」，其命中只要求回答 V1.0 已定义的「历史版本保留策略（如：自动保存 N 条/可回滚）」，不按 V1.1 新增内容断言。
 
 ## Task 5: V1.0 测试用例生成（阶段 10）与人工质量核验
-- **Status**: `completed`（**TR-5.7 / TR-5.8 无留证**，见 Deviation）
+- **Status**: `completed`（TR-5.7 / TR-5.8 已于 **2026-09-11 补测通过**）
 - **Priority**: high
 - **Depends On**: T4
 - **Description**:
@@ -175,15 +175,16 @@
   - TR-5.13 ✅ R1 PASS：DevBlog Milvus approved 用例向量=0，带 `product_id` 过滤检索返回空、无跨产品泄漏；全局向量库工单系统=285 条（不带过滤会泄漏，印证过滤必要性）
   - TR-5.14 ✅ R4 PASS：阶段 A 后 `PG approved=Milvus 向量=397`，失败 0（`blog_flywheel_bootstrap.json`）
   - TR-5.15 ✅ M1 PASS：`gen_batch_id` 非空率 = **1.0000**（total=397, empty_batch=0）
-- **Deviation**：
-  - ❌ **TR-5.7 未验证**：`blog_*.json` 中检索 `export / gherkin / xmind / pytest` **全部 0 命中** —— 6 格式导出与 400/404 边界无任何留证
-  - ❌ **TR-5.8 未验证**：检索 `feedback` **0 命中** —— 单条/批量 feedback 与 CRUD 无留证
-  - ⚠️ TR-5.1（404/409 三档前置）、TR-5.2（SSE 9 节点顺序 + `channel=FULL`）、TR-5.5（补生成 ≤1 次）**无独立产物**：`blog_v1_generate_result.json` 仅含 `task` + `case_db_stats` 两个键，**无原始 SSE 事件流**
+- **Deviation**（**2026-09-11 已补测闭合**）：
+  - ✅ **TR-5.7 已补测通过**：`blog_v1_export_feedback.json` —— 6 格式导出 **6/6 成功**（json 11476B / markdown 5784B / gherkin 2190B / pytest 4794B / xmind 2484B / xmind8 2876B，MIME 与 `Content-Disposition` 均正确）；无 `case_ids` → **400**（"必须提供至少一个 case_id 进行导出"）；全部不存在 → **404**
+  - ✅ **TR-5.8 已补测通过**：单条 feedback `draft→approved`（200）、再驳回 `approved→rejected`（200）；批量 feedback 2 条 → 全 `approved`；CRUD `PUT` 200 / `DELETE` 200 / 删除后 `GET` 404
+  - ℹ️ 补测**刻意选用 scratch 产品 `PROD-88568-301`**（3 条 draft）执行 feedback/CRUD，避免污染 DevBlog 已记录的 737 approved 基线；导出用 DevBlog 真实用例（只读）
+  - ⚠️ TR-5.1（404/409 三档前置）、TR-5.2（SSE 9 节点顺序 + `channel=FULL`）、TR-5.5（补生成 ≤1 次）**仍无独立产物**：`blog_v1_generate_result.json` 仅含 `task` + `case_db_stats` 两个键，**无原始 SSE 事件流**
   - ℹ️ TR-5.16 无 rubric 逐项评分记录
-- **Remediation**: 补跑 T8/T9（导出 6 格式 + feedback CRUD）与 T1/T2 前置守卫用例即可闭合；**不影响已有 88/397 条用例的数据结论**。
+- **Remediation**: 剩余仅 TR-5.1/5.2/5.5 需补跑（SSE 事件流留存 + 前置守卫用例），**不影响已有 88/397 条用例的数据结论**。
 
 ## Task 6: V1.1 版本迭代（上传解析→澄清→确认→归档→KB再问答→图谱增量）
-- **Status**: `completed`（**TR-6.4 / TR-6.5 无留证**，见 Deviation）
+- **Status**: `completed`（TR-6.4 已于 **2026-09-11 补测通过**；TR-6.5 仍无留证）
 - **Priority**: high
 - **Depends On**: T5
 - **Description**:
@@ -209,10 +210,22 @@
   - TR-6.6 ✅ 跨产品隔离复检通过（`blog_product_isolation.json` C1/C2/C3 全 PASS：按 DevBlog 过滤跨产品命中 **0**（需求 0 + 用例 0）；无过滤时工单系统可被全局召回 → 印证产品过滤必要性）
   - TR-6.7 ✅ 关键阈值已写入 SRR 并驱动生成：V1.1 用例中「2GB」命中 3 条、「手动标记」8 条、「50」79 条（`blog_quality_v11.json` M2 `keyword_counts`），样例标题《个人总量配额边界值测试（1.99GB/2GB/2.01GB）》《手动版本上限边界值测试49个50个51个》
 - **Deviation**：
-  - ❌ **TR-6.4 未验证（B 时点 KB 问答）**：无 `qa_v11` 类产物；全库检索关键字 `2GB` **仅命中 `blog_quality_v11.json`**，且该命中来自 **M2 的用例字符串检索**，**不是 KB 问答答案**；`B 时点` / `qa_v11` 关键字全库 0 命中 → "归档后 KB 问答采纳 V1.1 最新规则"这一核心断言**缺少直接证据**
-  - ❌ **TR-6.5 未验证（图谱增量）**：无 V1.1 图谱产物；`blog_v1_post_gen_archive.json.tr_summary` 的 `TR-postgen-4_graph_nodes_edges = "nodes/groups: 0, edges/deps: 0"` 是 **V1.0 项目维度**查询结果（且为 0），不能作为 V1.1 增量证据；`version_refs` 版本数=2 亦无留证
+  - ✅ **TR-6.4 已于 2026-09-11 补测通过**（产物 `blog_qa_v11.json`）：对现有 KB 直接发 3 问（DevBlog 已归档、数据仍在），**3/3 PASS**
+    | 问 | 期望值 | 命中 | 旧值残留 |
+    |---|---|---|---|
+    | B1 素材库个人总量配额 | `2GB` + `总量配额` | ✅ 答案明确「**个人总量配额为 2GB**」，并给出 1.99/2.0/2.01GB 边界行为 | 无 |
+    | B2 手动标记版本上限 | `50 个` | ✅ 「**最多保留 50 个**」+ 超限阻止标记并提示清理 | 无 |
+    | B3 敏感词禁言 | `3 次` + `24 小时` | ✅ 「连续命中拦截级敏感词 **3 次** → 禁言 **24 小时** + 进入处置队列」 | 无 |
+
+    - 无工单系统旧值残留（`48/72 小时`、`5 次`、`1 分钟锁定` 全 0 命中）→ TR-6.4 的"不含已作废旧值"成立
+    - 每问 sources 8 条，`types={requirement, test_case}`，**跨产品命中 0** → 同时复核了 TR-6.6
+    - 响应耗时 8.3 / 30.4 / 11.7 秒
+  - ⚠️ **补测暴露一个值得关注的知识质量问题（新增发现，非 spec 原项）**：三问的答案**主要依据是 AI 生成的测试用例（`TC-编辑器-*`），而非需求文档**。B2 答案自己写明「需求文档中并未直接说明手动标记版本的上限为 50…是通过测试用例推断得出的」；B3 亦注明「以上信息来源于知识库中的测试用例文档」。同时三问的 top-1 requirement source 恒为 **V1.0 需求 `REQ-1788244895551-8397`**（similarity 0.4976），V1.1 需求本身未进 top sources。
+    → **风险**：AI 生成的用例正在充当业务规则的"权威来源"，形成**循环权威**（LLM 产出 → 入库 → 被当作依据反哺 LLM）。且需求级 KB 条目在版本演进后未占据首位。建议纳入治理（可归入 docs/14 方向 B 的沉淀分级 / 可追溯）。
+  - ⚠️ **根因旁证**：V1.1 优化文档**自相矛盾**——第 75 行「手动版最多保留 50 个」，第 83 行验收标准却写「手动标记版本长期保留，**不设数量上限**」。这解释了为何答案只能靠测试用例推断：**需求文档自身没有给出唯一权威值**。属文档缺陷（对应 TEST_PLAN §6.2.1 的"需求文档结构性缺失信号"）。
+  - ❌ **TR-6.5 仍未验证（图谱增量）**：无 V1.1 图谱产物；`blog_v1_post_gen_archive.json.tr_summary` 的 `TR-postgen-4_graph_nodes_edges = "nodes/groups: 0, edges/deps: 0"` 是 **V1.0 项目维度**查询结果（且为 0），不能作为 V1.1 增量证据；`version_refs` 版本数=2 亦无留证
   - ⚠️ TR-6.2（ref_undef KB 命中补全）无留证
-- **Remediation**: 补两段即可闭合：① V1.1 归档后跑 B 时点 3 问（Q1 素材库 2GB / Q3 手动标记 50 个 / 旧值残留检查），存 `blog_qa_v11.json`；② 查 V1.1 全部 FP 的图谱节点/边数与 V1.0 对比，并查跨版本 FP 的 `version_refs` 长度，存 `blog_v11_graph.json`。
+- **Remediation**: 仅剩 TR-6.5 需补：查 V1.1 全部 FP 的图谱节点/边数与 V1.0 对比，并查跨版本 FP 的 `version_refs` 长度，存 `blog_v11_graph.json`。
 - **Notes**: V1.1 的澄清同样为**强放行**至 `pending_review`（TEST_PLAN §20.3），偏差性质同 T2。
 
 ## Task 7: V1.1 用例生成 + 阶段 11 Q/R/M 全量机制核验 + 跨产品隔离
@@ -287,15 +300,19 @@
 | T2 上传解析澄清 | ⚠️ completed（含缺口） | `blog_v1_clarify.json`、`blog_v1_parse.json` | TR-2.2 来源审计（0 条回答）、TR-2.6 rubric（强放行） |
 | T3 FP 审核与确认 | ⚠️ completed（含缺口） | `blog_v1_fp_list/approved.json`、`blog_v1_req_detail.json` | TR-3.1（4 FP < 5）、TR-3.3/3.4/3.5 无留证 |
 | T4 归档与 A 时点问答 | ✅ completed | `blog_v1_archive_qa.json`、`blog_v1_post_gen_archive.json` | TR-4.2 无差值快照 |
-| T5 V1.0 生成与质量核验 | ⚠️ completed（含缺口） | `blog_v1_generate_result.json`（88 条） | TR-5.7 导出、TR-5.8 feedback、TR-5.1/5.2/5.5 无留证 |
-| T6 V1.1 迭代 | ⚠️ completed（含缺口） | `blog_quality_v11.json`、`blog_product_isolation.json` | **TR-6.4 B 时点 KB 问答**、**TR-6.5 图谱增量**、TR-6.2 无留证 |
+| T5 V1.0 生成与质量核验 | ⚠️ completed（含缺口） | `blog_v1_generate_result.json`（88 条）、`blog_v1_export_feedback.json` | ✅ TR-5.7/5.8 已补测通过；剩 TR-5.1/5.2/5.5 无 SSE 留证 |
+| T6 V1.1 迭代 | ⚠️ completed（含缺口） | `blog_quality_v11.json`、`blog_product_isolation.json`、`blog_qa_v11.json` | ✅ **TR-6.4 已补测通过（3/3）**；剩 **TR-6.5 图谱增量**、TR-6.2 无留证；⚠️ 新发现「答案依据靠 AI 用例」+ V1.1 文档自相矛盾 |
 | T7 V1.1 生成 + Q/R/M | ⚠️ completed（含缺口） | `blog_quality_v11.json`、`blog_flywheel_*.json` | M3 SKIP、**R3 FAIL（Bug B4）**、TR-7.6 无留证 |
 | T8 汇总与文档 | ⚠️ completed（含缺口） | `TEST_PLAN.md` §20 + `TEST_REPORT.md` §17 + 附录 B | TR-8.3 命名不符、**TR-8.4 未达成（AC-11/12 未判定 + 9 条 rubric 无分数）** |
 
 **整体判定**：AC-1~AC-8、AC-10 **PASS**；AC-9 主体 PASS 但 R3 存在轻量 Bug（B4）；**AC-11/AC-12 未判定**。飞轮正循环（avg_conf 0.671→0.965、回归复用 108 条、approved 0→340）成立，与 §19.2 工单基线一致。
 
 **最高优先级补测（按性价比）**：
-1. **T6 TR-6.4** —— B 时点 KB 问答（V1.1 最新规则采纳）是「版本演进正确性」的核心断言，目前**零证据**，风险最高
-2. **T5 TR-5.7/5.8** —— 导出 6 格式 + feedback CRUD，属对外功能面，零证据
-3. **T2 TR-2.2/2.6** —— 澄清回答来源审计，属 AC-3 质量主张，零证据
-4. T6 TR-6.5 图谱增量、T8 rubric 评分记录 + AC-11/AC-12 判定
+1. ~~**T6 TR-6.4** —— B 时点 KB 问答（V1.1 最新规则采纳），目前零证据，风险最高~~ → ✅ **2026-09-11 已补测通过**（`blog_qa_v11.json`，3/3 PASS）
+2. ~~**T5 TR-5.7/5.8** —— 导出 6 格式 + feedback CRUD，属对外功能面，零证据~~ → ✅ **2026-09-11 已补测通过**（`blog_v1_export_feedback.json`）
+3. **T2 TR-2.2/2.6** —— 澄清回答来源审计，属 AC-3 质量主张，零证据（**当前最高优先级**）
+4. **T6 TR-6.5** 图谱增量、**T5 TR-5.1/5.2/5.5** SSE 事件流留证、T8 rubric 评分记录 + AC-11/AC-12 判定
+
+**2026-09-11 补测新增待办（源自 TR-6.4 的观察，不在原 spec 内）**：
+- **知识权威层级问题**：KB 问答对业务规则的依据主要来自 AI 生成的测试用例（而非需求文档），且 top-1 requirement source 恒为旧版本（V1.0）需求。存在"LLM 产出 → 入库 → 被当作依据反哺 LLM"的**循环权威**风险。建议纳入 docs/14 方向 B 治理（沉淀分级 + 可追溯）。
+- **V1.1 需求文档自相矛盾**：`手动版最多保留 50 个`（第 75 行）与 `不设数量上限`（第 83 行验收标准）冲突，导致该业务规则在需求侧无唯一权威值，只能靠用例推断。属文档缺陷，建议回补。
