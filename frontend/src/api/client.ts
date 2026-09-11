@@ -935,6 +935,7 @@ export const products = {
       old_go_live_date?: string; requirement_count: number; version_count?: number;
       fp_count?: number; milvus_updated: boolean; milvus_count?: number;
       milvus_error?: string; cache_invalidated?: number;
+      fp_case_sets_refreshed?: number; fp_case_sets_failed?: string[];
     }>(
       `/products/projects/${projectId}/go-live-date`,
       { method: 'PATCH', body: JSON.stringify({ go_live_date: goLiveDate, reason }) }

@@ -86,9 +86,10 @@ const GoLiveEditModal = memo(function GoLiveEditModal({
         toast({ type: 'success', msg: `上线时间未变化，无需同步` })
       } else if (r.milvus_updated) {
         const extra = r.cache_invalidated ? `，失效 ${r.cache_invalidated} 条检索缓存` : ''
+        const fpExtra = r.fp_case_sets_refreshed ? `，重整合 ${r.fp_case_sets_refreshed} 个功能点用例集` : ''
         toast({
           type: 'success',
-          msg: `项目上线时间已更新，同步 ${r.milvus_count ?? r.requirement_count} 条向量元数据${extra}`,
+          msg: `项目上线时间已更新，同步 ${r.milvus_count ?? r.requirement_count} 条向量元数据${extra}${fpExtra}`,
         })
       } else {
         toast({

@@ -1339,6 +1339,12 @@ async def update_project_go_live_date(
       - 失效知识库检索缓存（否则仍返回旧排序）
       - 不重算 embedding（日期在 metadata，正文未变）
 
+    派生整合产物（v3.2.13b）：
+      - functional_point_cases（功能点最新版用例集）的"最新版"口径为
+        「项目 go_live_date 最大者」，日期变更可能改变归属 → 对受影响 FP 重新聚合
+      - functional_point_crsr（权威完整版 SRR）按 req_version/created_at 排序，
+        不依赖 go_live_date → 无需重算
+
     仅允许 archived 项目（活跃项目无归档上线时间语义）。
 
     Args:
@@ -1402,11 +1408,28 @@ async def update_project_go_live_date(
         v.go_live_date = parsed_go_live
 
     fp_result = await session.execute(
-        select(FunctionalPoint.id).where(
+        select(FunctionalPoint.id, FunctionalPoint.name).where(
             FunctionalPoint.requirement_id.in_([r.id for r in requirements])
         )
     )
-    fp_ids = [row[0] for row in fp_result.fetchall()]
+    fp_rows = fp_result.fetchall()
+    fp_ids = [row[0] for row in fp_rows]
+    # v3.2.13b: 收集受影响的功能点名（用于重整合「最新版用例集」）
+    affected_fp_names: set[str] = {row[1] for row in fp_rows if row[1]}
+
+    # 补充：本项目 approved 用例中声明的 related_fp 名称（覆盖名称与 FP 表不完全一致的边缘情况）
+    if requirements:
+        tc_result = await session.execute(
+            select(TestCase.case_json).where(
+                TestCase.req_id.in_([r.id for r in requirements]),
+                TestCase.status == "approved",
+            )
+        )
+        for (cjson,) in tc_result.fetchall():
+            if isinstance(cjson, dict):
+                name = cjson.get("related_fp") or cjson.get("functional_point") or ""
+                if name:
+                    affected_fp_names.add(name)
 
     await session.commit()
 
@@ -1478,11 +1501,58 @@ async def update_project_go_live_date(
             proj_id, milvus_error[:200],
         )
 
+    # 5. 重整合「功能点最新版用例集」（v3.2.13b）
+    # functional_point_cases 判定「最新版」的口径是「项目 go_live_date 最大者」，
+    # 上线时间变更可能改变归属，必须对受影响 FP 重新聚合，否则回归基线会指向旧版本。
+    # 注：functional_point_crsr（权威完整版 SRR）按 req_version/created_at 排序，
+    #     不依赖 go_live_date，无需重算。
+    fpcase_refreshed = 0
+    fpcase_failed: list[str] = []
+    if affected_fp_names and project.product_id:
+        try:
+            from app.core.fp_cases import consolidate_fp_cases
+            for fp_name in sorted(affected_fp_names):
+                try:
+                    # version_id 传 None：本次是"日期纠正"而非重新归档，不追加 version_refs 追溯链
+                    ok = await consolidate_fp_cases(
+                        session, project.product_id, fp_name, version_id=None,
+                    )
+                    if not ok:
+                        fpcase_failed.append(fp_name)
+                except Exception as inner_e:
+                    fpcase_failed.append(fp_name)
+                    logger.warning(
+                        "[UpdateProjectGoLive] FP 用例集重整合失败(不阻断): fp={}, error={}",
+                        fp_name, str(inner_e)[:150],
+                    )
+            await session.commit()
+
+            # consolidate_fp_cases 对"无同名用例"也返回 True，故按实际落库记录数统计，
+            # 避免把空操作计入"已重整合"而虚高。
+            from app.db.models import FunctionalPointCases
+            actual_rows = (await session.execute(
+                select(func.count()).select_from(FunctionalPointCases).where(
+                    FunctionalPointCases.product_id == project.product_id,
+                    FunctionalPointCases.fp_name.in_(sorted(affected_fp_names)),
+                )
+            )).scalar() or 0
+            fpcase_refreshed = int(actual_rows)
+            logger.info(
+                "[UpdateProjectGoLive] FP 用例集重整合: product={}, 受影响 FP={}, 实际落库={}, 失败={}",
+                project.product_id, len(affected_fp_names), fpcase_refreshed, len(fpcase_failed),
+            )
+        except Exception as fpc_e:
+            await session.rollback()
+            logger.warning(
+                "[UpdateProjectGoLive] FP 用例集重整合异常(不阻断): error={}", str(fpc_e)[:200],
+            )
+
     return ApiResponse(
         success=True,
         message=(
             f"项目上线时间已更新，同步 {milvus_count} 条知识库向量元数据"
             + (f"，失效 {cache_invalidated} 条检索缓存" if cache_invalidated else "")
+            + (f"，重整合 {fpcase_refreshed} 个功能点的最新用例集" if fpcase_refreshed else "")
             if milvus_updated
             else "项目上线时间已更新，但向量库元数据同步失败（可稍后重试）"
         ),
@@ -1498,6 +1568,8 @@ async def update_project_go_live_date(
             "milvus_count": milvus_count,
             "milvus_error": milvus_error if not milvus_updated else "",
             "cache_invalidated": cache_invalidated,
+            "fp_case_sets_refreshed": fpcase_refreshed,
+            "fp_case_sets_failed": fpcase_failed,
         },
     )
 
