@@ -1,7 +1,7 @@
-"""评审报告中心服务（v5.2 P1）。
+"""评审报告中心服务（v3.1.3 P1）。
 
 将流水线产生的两类评审报告构建为 ReviewReportRecord 并持久化：
-- case 报告：ReviewAgent 审核报告（含 v5.2 dimension_scores 维度级置信度）
+- case 报告：ReviewAgent 审核报告（含 v3.1.3 dimension_scores 维度级置信度）
 - srr 报告：QualityGate 质量门禁报告（含 ClarifyAgent 质量分）
 
 设计要点：

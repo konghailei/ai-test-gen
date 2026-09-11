@@ -1,4 +1,4 @@
-"""提示词进化服务（v5.2 评审报告中心 P3）。
+"""提示词进化服务（v3.1.3 评审报告中心 P3）。
 
 将多份评审报告中人工已采纳（adoption_status=accepted）的意见 + 人工补充意见，
 经 LLM 整合为目标生成提示词末尾的"历史评审沉淀规则"区段，写入 PromptManager
@@ -14,7 +14,7 @@
 4. 每次 update 自动产生 prompt_history 记录，回退走既有
    POST /api/admin/prompts/{module}/{name}/restore/{history_id}。
 
-设计依据：v5.2 评审报告中心 P3（多报告意见整合优化提示词，自我进化闭环）。
+设计依据：v3.1.3 评审报告中心 P3（多报告意见整合优化提示词，自我进化闭环）。
 """
 
 from __future__ import annotations

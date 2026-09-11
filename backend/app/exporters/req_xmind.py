@@ -557,7 +557,7 @@ def _filter_impact_entries(impact_list: list) -> list[dict]:
 def _build_impact_node(impact_list: list, detail_map: dict | None = None) -> Element | None:
     """构建影响功能分析节点（XML 版）：一级节点，子节点为各受影响 FP。
 
-    v4.2.5：若传入 detail_map（受影响 FP 的最新内容，由导出端点注入），
+    v3.1.3：若传入 detail_map（受影响 FP 的最新内容，由导出端点注入），
     则每个受影响功能点按与其他功能点一致的方式展示其完整内容
     （摘要/主流程/业务规则/数据约束/非功能），并保留"影响说明"。
     """
@@ -592,7 +592,7 @@ def _build_impact_node(impact_list: list, detail_map: dict | None = None) -> Ele
 def _jbuild_impact_node(impact_list: list, detail_map: dict | None = None) -> dict | None:
     """构建影响功能分析节点（JSON 版）：一级节点，子节点为各受影响 FP。
 
-    v4.2.5：若传入 detail_map（受影响 FP 的最新内容），则每个受影响功能点
+    v3.1.3：若传入 detail_map（受影响 FP 的最新内容），则每个受影响功能点
     按与其他功能点一致的方式展示其完整内容，并保留"影响说明"。
     """
     entries = _filter_impact_entries(impact_list)
@@ -625,7 +625,7 @@ def _jbuild_impact_node(impact_list: list, detail_map: dict | None = None) -> di
 def _build_fp_content_nodes(fp: dict) -> list[Element]:
     """构建单个功能点的"内容子节点"（摘要/主流程/业务规则/数据约束/非功能）。
 
-    v4.2.5 抽取：既被功能点节点使用，也被"影响功能分析"节点复用——
+    v3.1.3 抽取：既被功能点节点使用，也被"影响功能分析"节点复用——
     使受影响功能点按与其他功能点一致的方式展示其内容。
     """
     if not isinstance(fp, dict):
@@ -1002,7 +1002,7 @@ def _jbuild_alt_flows(alt_flows: list) -> dict | None:
 def _jbuild_fp_content_nodes(fp: dict) -> list[dict]:
     """构建单个功能点的"内容子节点"（JSON 版）。
 
-    v4.2.5 抽取：既被功能点节点使用，也被"影响功能分析"节点复用。
+    v3.1.3 抽取：既被功能点节点使用，也被"影响功能分析"节点复用。
     """
     if not isinstance(fp, dict):
         return []

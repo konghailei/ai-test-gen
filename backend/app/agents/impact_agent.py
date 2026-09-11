@@ -420,7 +420,7 @@ class ImpactAnalysisAgent:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "is_auto_generated": True,
             # 默认未确认（None = 候选，区别于 True=确认受影响 / False=确认不受影响）。
-            # v4.2.9 修复 P5：原默认 False 会被展示层误读为「确认不受影响」，
+            # v3.1.3 修复 P5：原默认 False 会被展示层误读为「确认不受影响」，
             # 与 run_impact_analysis 写入的未确认候选语义（is_affected=None）不一致。
             # confirm_impact_analysis 确认后会覆盖为 True/False；confirm_requirement
             # 守卫只认 confirmed_at，不受此值影响。

@@ -10,10 +10,10 @@ import { caseTypeLabel } from '../utils/labels'
 
 const SSE_STAGES = ['parse', 'select_channel', 'clarify', 'gate', 'impact', 'test_design', 'generate', 'review']
 
-// v5.0：细粒度 FP 进度卡片
+// v3.1.3：细粒度 FP 进度卡片
 type FSSubtask = { key?: string; name?: string; status?: string; cases?: number }
 
-// v5.0 续跑状态 → 中文标签
+// v3.1.3 续跑状态 → 中文标签
 const SUBTASK_STATUS_LABELS: Record<string, string> = {
   generating: '生成中',
   done: '已完成',
@@ -64,7 +64,7 @@ export default function Generate() {
   const [error, setError] = useState('')
   // v2.0：导出错误独立状态，避免污染主流程 error
   const [exportError, setExportError] = useState('')
-  // v5.0：细粒度 FP 进度卡片 + 续跑标记
+  // v3.1.3：细粒度 FP 进度卡片 + 续跑标记
   const [subtasks, setSubtasks] = useState<FSSubtask[]>([])
   const [resuming, setResuming] = useState(false)
 
@@ -170,7 +170,7 @@ export default function Generate() {
         if (e.stage) setCurrentStage(e.stage)
         if (e.progress !== undefined) setProgress(e.progress)
         if (e.message) setMessage(e.message)
-        // v5.0：细粒度 FP 进度卡片（generate 阶段的 subtasks 快照）
+        // v3.1.3：细粒度 FP 进度卡片（generate 阶段的 subtasks 快照）
         if (e.stage === 'generate' && Array.isArray(e.subtasks)) {
           setSubtasks(e.subtasks as FSSubtask[])
         }
@@ -452,7 +452,7 @@ export default function Generate() {
           onCancel={generating ? handleCancel : undefined} />
       )}
 
-      {/* v5.0：细粒度功能点生成明细（卡片） */}
+      {/* v3.1.3：细粒度功能点生成明细（卡片） */}
       {(generating && (subtasks.length > 0 || resuming)) && (
         <div className="card space-y-3">
           <div className="flex items-center justify-between">

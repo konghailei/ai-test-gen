@@ -157,7 +157,7 @@ function splitTextIntoBlocks(text: string): Array<
 
 // ============================================================================
 // 可搜索下拉（SearchSelect）：支持输入过滤、多选勾选、点击外部关闭
-// v4.2.2：手动添加受影响功能点使用——模块下拉 + 功能点下拉
+// v3.1.3：手动添加受影响功能点使用——模块下拉 + 功能点下拉
 // ============================================================================
 function SearchSelect({ options, selected, onToggle, placeholder, loading, disabled, display }: {
   options: Array<{ id: string; name: string; desc?: string }>
@@ -343,7 +343,7 @@ export default function RequirementDetail() {
     })
   }
 
-  // ===== 手动补选受影响功能点（v4.2 增强） =====
+  // ===== 手动补选受影响功能点（v3.1.3 增强） =====
   // 依赖图谱 BFS 只覆盖已建依赖边；跨需求/漏建边时可由用户按模块+名称检索补选。
   // 补选 FP 直接并入 confirmedFpIds，复用既有 confirm_impact_analysis 写入 SRR.impact_analysis。
   const [manualOpen, setManualOpen] = useState(false)
@@ -355,7 +355,7 @@ export default function RequirementDetail() {
 
   useEffect(() => {
     if (!manualOpen || !req?.product_id) return
-    // v4.2.2：展开即一次性加载模块与已归档 FP 池，后续本地按模块/关键字过滤，无需逐个点检索。
+    // v3.1.3：展开即一次性加载模块与已归档 FP 池，后续本地按模块/关键字过滤，无需逐个点检索。
     if (manualModules.length === 0) {
       prodApi.listModules(req.product_id).then(m => setManualModules(Array.isArray(m) ? m : [])).catch(() => {})
     }
@@ -380,7 +380,7 @@ export default function RequirementDetail() {
       }))
   }, [manualFpPool, manualModuleId])
 
-  // v4.2.3：手动添加受影响功能点 —— 「选择功能点 → 点添加 → 加入确认列表」。
+  // v3.1.3：手动添加受影响功能点 —— 「选择功能点 → 点添加 → 加入确认列表」。
   // manualSelFpId：功能点下拉当前选中项（暂存，未加入确认）。
   const [manualSelFpId, setManualSelFpId] = useState('')
   // 本次 BFS 候选集：用于区分「图谱分析出的候选」与「手动补选」。
@@ -413,7 +413,7 @@ export default function RequirementDetail() {
     setConfirmedFpIds(prev => { const next = new Set(prev); next.delete(fpId); return next })
   }
 
-  // v4.2.3：受影响功能点"合并列表" = BFS 依赖图谱分析结果 + 手动补选的功能点。
+  // v3.1.3：受影响功能点"合并列表" = BFS 依赖图谱分析结果 + 手动补选的功能点。
   // 手动补选项复用主列表的行渲染（可点行展开查看功能点最新完整 SRR），
   // 并携带 is_manual 标记用于展示"手动添加"与行内移除按钮。
   const allImpactedFps = useMemo(() => {
@@ -704,7 +704,7 @@ export default function RequirementDetail() {
     const candidateIds = impactData?.affected_fps.map(x => x.fp_id).filter(Boolean) as string[]
     const candidateSet = new Set(candidateIds || [])
 
-    // v4.2.1 修复：手动补选的功能点（BFS 候选之外，由用户在"手动添加受影响功能点"中检索勾选）
+    // v3.1.3 修复：手动补选的功能点（BFS 候选之外，由用户在"手动添加受影响功能点"中检索勾选）
     // 之前被 candidateSet.has(x) 过滤掉导致无法提交。现放开：候选集的勾选 → 受影响；
     // 候选集未勾选 → 确认不受影响；候选集之外的勾选（手动补选）→ 也视为受影响一并提交，
     // 由后端 confirm_impact_analysis 的 _write_entry 以 append 方式写入新条目。
@@ -1872,7 +1872,7 @@ export default function RequirementDetail() {
           </div>
         )}
 
-        {/* 手动补选受影响功能点（v4.2：跨需求/漏建边时人工补选，写入 impact_analysis 生成回归用例） */}
+        {/* 手动补选受影响功能点（v3.1.3：跨需求/漏建边时人工补选，写入 impact_analysis 生成回归用例） */}
         <div style={{ border: '1px dashed var(--border)', borderRadius: 'calc(var(--radius) * 0.6)', background: 'var(--background-muted/50)' }}>
           <button
             onClick={() => setManualOpen(o => !o)}
@@ -1889,7 +1889,7 @@ export default function RequirementDetail() {
           </button>
           {manualOpen && (
             <div className="px-4 pb-4 space-y-3">
-              {/* v4.2.2：两个可搜索下拉框 —— 模块筛选 + 受影响功能点 */}
+              {/* v3.1.3：两个可搜索下拉框 —— 模块筛选 + 受影响功能点 */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <div className="text-xs mb-1" style={{ color: 'var(--foreground-tertiary)' }}>按模块筛选（可搜索）</div>

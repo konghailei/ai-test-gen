@@ -29,7 +29,7 @@ async def load_functional_points(req_id: str) -> list[dict]:
     """加载需求下全部功能点（完整形状，FP 统一形状的唯一权威定义）。
 
     返回形状：{id, name, fp_type, srr_json, atomicity_check}
-    （v4.5 前 _gen_node 与 _test_design_node 加载形状不一致，现统一由本函数定义）
+    （v3.1.3 前 _gen_node 与 _test_design_node 加载形状不一致，现统一由本函数定义）
 
     Args:
         req_id: 需求 ID

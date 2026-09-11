@@ -137,7 +137,7 @@ class PipelineState(TypedDict, total=False):
     # ⚠️ 必须在 PipelineState 中显式声明，否则 LangGraph StateGraph 会过滤掉
     # 未定义字段，导致 done 事件中 consistency_check 始终为空
     consistency_check: dict
-    # v4.6：降级标记（由各节点追加，done 事件透传，前端可提示能力降级）
+    # v3.1.3：降级标记（由各节点追加，done 事件透传，前端可提示能力降级）
     # ⚠️ 必须显式声明（同 consistency_check），否则被 StateGraph 过滤
     degraded_flags: list
 
@@ -268,11 +268,11 @@ class Orchestrator:
     def __init__(self) -> None:
         """初始化编排器，构建并编译 LangGraph 状态图。"""
         self.graph = self._build_graph()
-        # v5.0 细粒度生成进度事件队列（run_pipeline 内创建，_gen_node 消费）
+        # v3.1.3 细粒度生成进度事件队列（run_pipeline 内创建，_gen_node 消费）
         self._gen_event_queue: asyncio.Queue | None = None
 
     # ========================================================================
-    # v5.0 断点续跑 checkpoint（断电/断网中断后，续跑跳过已完成功能点）
+    # v3.1.3 断点续跑 checkpoint（断电/断网中断后，续跑跳过已完成功能点）
     # ========================================================================
     async def _save_gen_checkpoint(self, task_id: str, fp_groups: list[dict]) -> None:
         """把各功能点已生成的结果写入 analysis_tasks.result_json，供断点续跑恢复。
@@ -660,7 +660,7 @@ class Orchestrator:
         guidance_len = len(result.get("generation_guidance", "") or "")
 
         logger.info(
-            # v4.6: 修正过时日志——v2.3 起 impact 的下一节点是 test_design 而非 generate
+            # v3.1.3: 修正过时日志——v2.3 起 impact 的下一节点是 test_design 而非 generate
             "[Orchestrator] ◀ 节点 impact 完成 ▶ 下一节点 test_design: "
             "is_optimization={}, guidance_len={}, original_cases={}",
             is_opt,
@@ -694,10 +694,10 @@ class Orchestrator:
         impact_guidance = impact_result.get("generation_guidance", "") or ""
 
         # 从 DB 加载已拆分的功能点，用于 FP 子 SRR 分析
-        # v4.5: FP 统一加载源——本节点是流水线内首个 FP 消费者，加载完整形状
+        # v3.1.3: FP 统一加载源——本节点是流水线内首个 FP 消费者，加载完整形状
         # （含 atomicity_check）写入 state，_gen_node/补生成/覆盖率统计统一读 state，
         # 避免同流水线多次查 DB 且形状不一（首次生成与补生成收到不同数据）
-        # v4.6: ORM 查询收敛到 db/repositories，形状由仓储层唯一定义
+        # v3.1.3: ORM 查询收敛到 db/repositories，形状由仓储层唯一定义
         functional_points: list[dict] = []
         degraded_flags: list[str] = list(state.get("degraded_flags", []) or [])
         if req_id:
@@ -709,7 +709,7 @@ class Orchestrator:
                     "[Orchestrator] 测试设计加载功能点失败（降级仅总SRR分析）: {}",
                     str(e)[:150],
                 )
-                # v4.6: 降级可观测——FP 加载失败标记透传 done 事件，前端可提示
+                # v3.1.3: 降级可观测——FP 加载失败标记透传 done 事件，前端可提示
                 degraded_flags.append("fp_load_failed")
 
         logger.info(
@@ -800,7 +800,7 @@ class Orchestrator:
         from app.db.database import async_session
         from app.core.fp_cases import aggregate_latest_cases
 
-        # v4.6: try 下沉到循环体内——单个 FP 装配失败只跳过该 FP，
+        # v3.1.3: try 下沉到循环体内——单个 FP 装配失败只跳过该 FP，
         # 不再因一个 FP 中断导致其余 FP 的回归装配全部丢失；
         # session 级失败（连接不可用）整体降级为无回归基线（不阻断主流程）
         try:
@@ -876,9 +876,9 @@ class Orchestrator:
         impact_guidance = impact_result.get("generation_guidance", "") or ""
 
         # v1.4：从 DB 加载已拆分的功能点，用于 FP 定向生成
-        # v4.5: 优先读 state（test_design 节点已统一加载完整形状，含 atomicity_check），
+        # v3.1.3: 优先读 state（test_design 节点已统一加载完整形状，含 atomicity_check），
         # 保证首次生成与补生成收到相同数据；state 缺失时回退查 DB（直接调用兜底）
-        # v4.6: ORM 查询收敛到 db/repositories
+        # v3.1.3: ORM 查询收敛到 db/repositories
         functional_points: list[dict] = state.get("functional_points", []) or []
         degraded_flags: list[str] = list(state.get("degraded_flags", []) or [])
         if not functional_points and req_id:
@@ -905,7 +905,7 @@ class Orchestrator:
             len(functional_points),
         )
 
-        # ── v5.0 FP 分片生成 ──
+        # ── v3.1.3 FP 分片生成 ──
         # 不再把全量 SRR 一次性喂给 LLM（避免 116K+ 大 prompt 引起卡死/超时/字数爆炸）。
         # 改造：按功能点分片小 prompt 定向生成 + 跨功能点/集成独立通道；
         # 每个 FP 完成后立即写 checkpoint（断电/断网可续跑），并推进细粒度进度事件。
@@ -1017,7 +1017,7 @@ class Orchestrator:
                 logger.debug("[Orchestrator] checkpoint 写入失败（不阻断）: {}", str(e)[:120])
 
         # v3.1.7 修复：FP 为空时的批量兜底通道。
-        # v5.0 FP 分片改造后，无功能点需求（FP 拆分失败/被跳过/极简需求）会静默
+        # v3.1.3 FP 分片改造后，无功能点需求（FP 拆分失败/被跳过/极简需求）会静默
         # 生成 0 条用例（FP 循环不执行、集成通道无 cross_fp 数据也不执行）。
         # 恢复单次全量 SRR 生成，保证任何需求至少有一轮生成。
         if not fp_list:
@@ -1119,7 +1119,7 @@ class Orchestrator:
 
         # ── v3.2 + v2.0 增强: 一致性检查（vs 上次生成 + 语义相似度 + 类型方差）──
         # 对应 docs/03 §4.2 ConsistencyChecker
-        # v4.6: ① ORM 收敛到 db/repositories；② 分层捕获——DB 失败（warning + 降级标记）
+        # v3.1.3: ① ORM 收敛到 db/repositories；② 分层捕获——DB 失败（warning + 降级标记）
         # 与 embedding 失败（debug，非关键）区分，consistency_check 留 error 标记
         # 使下游能区分"无历史任务"与"查询失败"；③ semantic_sim 用 None 表示计算失败，
         # 与合法值 0.0（完全不相似）区分，消除二义性误判
@@ -1163,7 +1163,7 @@ class Orchestrator:
                     type_jaccard = 1.0
 
                 # v2.0 增强 2: 语义相似度（基于标题 Embedding）
-                # v4.6: None = 计算失败/跳过（不参与判定）；float = 合法相似度（0.0 也是有效值）
+                # v3.1.3: None = 计算失败/跳过（不参与判定）；float = 合法相似度（0.0 也是有效值）
                 semantic_sim: float | None = None
                 if prev_titles and cur_titles:
                     try:
@@ -1231,7 +1231,7 @@ class Orchestrator:
             "test_cases": cases,
             "consistency_check": consistency_check,
             "degraded_flags": degraded_flags,
-            # v5.0 细粒度进度透出
+            # v3.1.3 细粒度进度透出
             "_fp_subtasks": state.get("_fp_subtasks", []) or [],
             "_fp_groups": state.get("_fp_groups", []) or [],
         }
@@ -1312,7 +1312,7 @@ class Orchestrator:
                 srr, merged_cases, functional_points=functional_points
             )
             supplement_iteration = 1
-            # v4.6: 二次 review 后仍建议补生成 → 标记已达上限（补生成最多 1 次），
+            # v3.1.3: 二次 review 后仍建议补生成 → 标记已达上限（补生成最多 1 次），
             # 避免前端把 should_supplement=True 误解为"还会再补"
             if report.get("should_supplement"):
                 report["supplement_exhausted"] = True
@@ -1456,7 +1456,7 @@ class Orchestrator:
             return []
 
         try:
-            # v4.6: ORM 查询收敛到 db/repositories
+            # v3.1.3: ORM 查询收敛到 db/repositories
             from app.db.repositories import load_cases_by_req
 
             return await load_cases_by_req(original_req_id)
@@ -1613,9 +1613,9 @@ class Orchestrator:
         )
 
         try:
-            # v4.5: 追踪最后完成的节点——final_state 为本地 dict（非 LangGraph state 通道），
+            # v3.1.3: 追踪最后完成的节点——final_state 为本地 dict（非 LangGraph state 通道），
             # 写入 _last_node 不会被 StateGraph 过滤；异常写 DLQ 时用于定位失败节点
-            # v5.0 事件队列：把 LangGraph 的节点完成事件与 _gen_node 内部的细粒度
+            # v3.1.3 事件队列：把 LangGraph 的节点完成事件与 _gen_node 内部的细粒度
             # FP 进度事件合并到一个队列流式透给前端（按序 interleave）。
             queue: asyncio.Queue = asyncio.Queue()
             self._gen_event_queue = queue
@@ -1681,7 +1681,7 @@ class Orchestrator:
 
                             await queue.put(event)
                 except Exception as e:
-                    # v5.1 修复：节点异常不能静默吞掉。此前 astream 抛异常时
+                    # v3.1.3 修复：节点异常不能静默吞掉。此前 astream 抛异常时
                     # producer 只在 finally 放 None 哨兵，消费循环误判为正常
                     # 结束并继续走 done 分支——用户看到「流水线完成」但 0 用例，
                     # 无 error 事件、DLQ 也不记录。这里把异常对象传给消费循环，
@@ -1704,7 +1704,7 @@ class Orchestrator:
                 self._gen_event_queue = None
 
             # ── v3.2: FP 覆盖率矩阵 ──
-            # v4.5: 优先读 state（test_design 已统一加载），避免流水线内第 3 次 FP 查询
+            # v3.1.3: 优先读 state（test_design 已统一加载），避免流水线内第 3 次 FP 查询
             fp_coverage = {}
             try:
                 reviewed_cases = final_state.get("reviewed_cases", []) or []
@@ -1713,7 +1713,7 @@ class Orchestrator:
                 if state_fps:
                     fp_list = [(fp.get("id", ""), fp.get("name", "")) for fp in state_fps]
                 elif req_id_final:
-                    # v4.6: ORM 查询收敛到 db/repositories
+                    # v3.1.3: ORM 查询收敛到 db/repositories
                     from app.db.repositories import load_fp_id_names
 
                     fp_list = await load_fp_id_names(req_id_final)
@@ -1766,7 +1766,7 @@ class Orchestrator:
                 fp_coverage=fp_coverage,
                 point_coverage=(final_state.get("review_result", {}) or {}).get("point_coverage", {}),
                 consistency_check=final_state.get("consistency_check", {}),
-                # v4.6: 降级标记透传（fp_load_failed / consistency_db_failed 等），
+                # v3.1.3: 降级标记透传（fp_load_failed / consistency_db_failed 等），
                 # 前端可据此提示"功能点定向生成/一致性对比不可用"
                 degraded_flags=final_state.get("degraded_flags", []) or [],
                 test_design=final_state.get("test_design_blueprint", {}),
@@ -1788,7 +1788,7 @@ class Orchestrator:
 
             logger.debug("[Orchestrator] 异常堆栈:\n{}", traceback.format_exc())
 
-            # v4.6: PipelineState.error 字段写入方（此前为死声明）——
+            # v3.1.3: PipelineState.error 字段写入方（此前为死声明）——
             # final_state 为本地 dict，供 error 事件与 DLQ 统一读取
             final_state["error"] = str(e)[:200]
 

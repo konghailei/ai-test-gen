@@ -306,7 +306,7 @@ UTCF_CASE_SCHEMA = """每个用例的 JSON 结构：
 def _build_coverage_checklist(srr: dict, functional_points: list[dict]) -> str:
     """从 SRR 中显式提取所有必须覆盖的要点，构建覆盖率检查清单。
 
-    v4.0：改为基于 app.utils.coverage.collect_points 统一抽取，
+    v3.1.3：改为基于 app.utils.coverage.collect_points 统一抽取，
     保证清单中的要点 ID 与覆盖映射统计（calc_point_coverage）完全一致。
 
     Args:
@@ -767,7 +767,7 @@ def build_user_prompt(
 - 下列用例已作为回归基线并入本次结果集，请不要重复生成相同/等价用例
 - 可将它们作为风格与覆盖参考，补生成未覆盖的回归场景"""
 
-    # v4.10: 补生成聚焦——存在 coverage_gaps 时，不再注入全量 SRR（否则补生成退化成
+    # v3.1.3: 补生成聚焦——存在 coverage_gaps 时，不再注入全量 SRR（否则补生成退化成
     # "重新全量生成"，既浪费 LLM 调用时长，又导致二次 review 合并集过大、review
     # prompt 爆炸）。改为注入精简的当前需求骨架（标题/概述/模块），把重心放在
     # gap_section 里的缺口罩点清单上，让补生成严格围绕未覆盖要点定向产出。

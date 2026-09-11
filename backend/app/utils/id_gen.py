@@ -59,7 +59,7 @@ def gen_test_case_id(module_prefix: str = "GEN") -> str:
     Note:
         严格符合 doc-04 §1 的正则 ^TC-[A-Z]+-\d{4}-\d{4}$
 
-    v4.4 修复 L2（用例 ID 碰撞）：
+    v3.1.3 修复 L2（用例 ID 碰撞）：
         原实现 batch_num = int(time.time()) % 10000，时间每 10000 秒（≈2.78h）一轮回，
         叠加进程重启后 _case_counter 随机起点，跨批次易与库内历史 ID 撞号，触发
         UniqueViolation 导致用例丢失。现改为“每 100 秒一个时间分桶”的 batch_num，

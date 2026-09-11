@@ -787,7 +787,7 @@ async def archive_project(
         session.add(item)
 
     # 10. 保留依赖边生效（不冻结 is_active），仅关联最新版本快照用于追溯。
-    # v4.2.4 修复：依赖边应跟随功能点状态——功能点随项目归档置 archived 后，
+    # v3.1.3 修复：依赖边应跟随功能点状态——功能点随项目归档置 archived 后，
     #        其依赖关系客观存在，应继续参与影响分析与引用统计（is_active 保持生效）。
     #        原 v2.45 在此把 is_active 置 False「冻结」，导致已归档依赖边对影响分析
     #        BFS 与 fan_in(is_active==True 过滤)完全失效，出现「引用全 0、跨需求影响漏检」

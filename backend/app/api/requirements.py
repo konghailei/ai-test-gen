@@ -2471,7 +2471,7 @@ async def confirm_requirement(
                        f"请先通过影响分析确认功能点后再确认",
             )
 
-    # v4.2.9 增强（跨需求依赖自动生成）:
+    # v3.1.3 增强（跨需求依赖自动生成）:
     # LLM 的 fp_dependencies 提取通常只覆盖本需求内部 FP，跨需求引用实际落在
     # SRR.cross_fp_interactions.cross_fp_flows（如 "权限回收 -> 权限控制（v1.0）"），
     # 此前这些 flows 从未被转换为依赖边，导致"需求内部无法生成跨需求关联关系"。
@@ -3252,7 +3252,7 @@ async def run_impact_analysis(
     #   - 仅本次分析存在受影响 FP（或历史残留未确认条目）时写入
     #   - 已确认条目（confirmed_at 存在）保留原确认结果，不覆盖
     #   - 候选中未确认的 FP 写为未确认条目（无 confirmed_at，is_affected=None）
-    #   - v4.2.7 修复 P6：不在本次候选中的**已确认**旧条目同样保留，
+    #   - v3.1.3 修复 P6：不在本次候选中的**已确认**旧条目同样保留，
     #     避免依赖图谱变化后用户已确认的影响范围被静默撤销（回归覆盖无声缩水）。
     #     只有"从未确认过"的历史残留未确认条目才被清除。
     affected = result.get("affected_fps") or []
@@ -3355,7 +3355,7 @@ async def confirm_impact_analysis(
             ),
             "confirmed_at": now_iso,
         }
-        # v4.2.7 修复 P1：合并保留旧条目的扩展指导字段。
+        # v3.1.3 修复 P1：合并保留旧条目的扩展指导字段。
         # 旧条目由 FP 影响分析（impact-description/编辑）写入 description/test_focus/
         # affected_fps/affected_modules 等，而生成 prompt 依赖这些字段构造回归指导。
         # 原实现整条覆盖会把它们全部抹掉，导致确认后回归用例生成只能靠 FP 名猜测。
@@ -3705,7 +3705,7 @@ async def fp_list_reusable(
     result = await session.execute(stmt)
     rows = result.all()
 
-    # v4.2.2 修复：modules 为 JSON 列，PostgreSQL json 类型不支持 @>（contains）操作符，
+    # v3.1.3 修复：modules 为 JSON 列，PostgreSQL json 类型不支持 @>（contains）操作符，
     # 直接 .contains 会抛 "operator does not exist" → HTTP 500「内部错误」。改为内存筛选，语义等价。
     if module_id:
         rows = [r for r in rows if r[0].module_id == module_id or module_id in (r[0].modules or [])]
@@ -3881,7 +3881,7 @@ async def fp_delete(
         raise HTTPException(status_code=404, detail="功能点不存在")
 
     # ---- C3 修复：级联清理跨需求 SRR.impact_analysis 中的 fp_id 引用 ----
-    # v4.2.9 修复 P4：srr_json 列类型为 json（非 jsonb），原 SQL 直接用 jsonb_set/
+    # v3.1.3 修复 P4：srr_json 列类型为 json（非 jsonb），原 SQL 直接用 jsonb_set/
     # jsonb_array_elements 操作 json 列会导致 "function jsonb_set(json) does not exist"
     # 运行时报错并被旧 catch 吞掉，跨需求清理实际从未生效。现通过 ::jsonb 显式转型。
     try:
@@ -3916,7 +3916,7 @@ async def fp_delete(
         )
 
     # ---- 清理可追溯性矩阵中的 FP 关联 ----
-    # v4.2.9 修复 P3：使用真实字段 Traceability.requirement_field（review_agent 以
+    # v3.1.3 修复 P3：使用真实字段 Traceability.requirement_field（review_agent 以
     # "fp:{fp_id}" 写入），原实现引用不存在的 src_fp_id/dest_fp_id 属性属死代码，
     # 每次执行必抛 AttributeError 被吞，删除 FP 后追溯记录永远残留。
     try:
@@ -4087,7 +4087,7 @@ async def export_requirement_xmind(
             for row in fp_rows
         ]
 
-    # v4.2.5：注入"受影响功能点"的最新内容，供 XMind 导出时按其他功能点的内容展示。
+    # v3.1.3：注入"受影响功能点"的最新内容，供 XMind 导出时按其他功能点的内容展示。
     # 受影响功能点是外部功能点（不在本需求 functional_points 中），需从 DB 查询其 SRR。
     # 查询"最新版本"：以受影响条目记录的 fp_id 精确取该 FP；同名多版本时由 fp_id 天然区分。
     impact_raw = srr.get("impact_analysis") or []

@@ -370,7 +370,7 @@ class ReviewAgent:
         if test_cases:
             avg_conf = sum(c.get("confidence", 0) for c in test_cases) / len(test_cases)
 
-        # v5.2 维度级置信度（评审报告中心 P1）：确定性规则聚合，不调 LLM
+        # v3.1.3 维度级置信度（评审报告中心 P1）：确定性规则聚合，不调 LLM
         dimension_scores = self._calc_dimension_scores(
             test_cases, all_issues, point_coverage
         )
@@ -403,7 +403,7 @@ class ReviewAgent:
         issues: list[dict],
         point_coverage: dict | None = None,
     ) -> dict:
-        """计算 6 维度置信度（v5.2 评审报告中心 P1，纯规则聚合，不调 LLM）。
+        """计算 6 维度置信度（v3.1.3 评审报告中心 P1，纯规则聚合，不调 LLM）。
 
         口径设计（评审通过：确定性数据优先，避免为维度分再调 LLM 的成本与不稳定性）：
         - traceability（追溯性）：1 - 追溯性 blocker 用例占比
@@ -690,7 +690,7 @@ class ReviewAgent:
                 is_blocked = case_id in blocked_case_ids
 
                 try:
-                    # v4.4 修复 L2 根因：回归复用（v3.4：historical_regression 并入结果集）
+                    # v3.1.3 修复 L2 根因：回归复用（v3.4：historical_regression 并入结果集）
                     # 的用例带历史 id，persist 对其重复 insert 触发 UniqueViolation，导致
                     # 批次整段丢失。此处先按 id 查库，已存在则判定为"已入过库"并跳过
                     # （不重复入库、不重复写 traceability/向量），避免误把复用当新生成。
@@ -791,7 +791,7 @@ class ReviewAgent:
                         # 记录 "fp:{fp_id}"，建立 test_case↔functional_point 追溯链
                         related_fp = case.get("related_fp", "")
                         req_field = f"fp:{related_fp}" if related_fp else ""
-                        # v4.3.1 修复 P7：原实现 trace_type="direct" if related_fp else "direct"
+                        # v3.1.3 修复 P7：原实现 trace_type="direct" if related_fp else "direct"
                         # 恒为 direct（恒真三目，死代码），且无 FP 关联的用例也被标记为直接
                         # 验证，语义矛盾。按 docs/02-knowledge-base.md trace_type 取值区分：
                         # 有关联 FP → direct（直接验证该功能点）；无关联 FP → indirect（间接覆盖）。

@@ -146,7 +146,7 @@ async def generate_test_cases(
                    f"请先确认需求分析结果（SRR/功能点/影响分析）后再试。",
         )
 
-    # v4.2.8 修复 P2：confirmed 后重跑影响分析会写入新的未确认候选条目，
+    # v3.1.3 修复 P2：confirmed 后重跑影响分析会写入新的未确认候选条目，
     # 但生成入口此前只校验 status，导致这些新候选被 prompt 端静默排除、
     # 回归覆盖无声缩水且无任何提示。此处与 confirm_requirement 守卫对齐：
     # 存在未确认影响条目时拒绝生成，强制用户先完成影响确认。
@@ -208,7 +208,7 @@ async def generate_test_cases(
                    f"或到任务管理页取消后再发起生成。",
         )
 
-    # v5.0 断点续跑：resume=True 时从最近一次中断/作废任务 checkpoint 继续
+    # v3.1.3 断点续跑：resume=True 时从最近一次中断/作废任务 checkpoint 继续
     _resume_meta: dict | None = None
     if req.resume:
         _resume_meta = await _find_resume_checkpoint(req.resume_from_task, req.resume_from_task) if req.resume_from_task else await _find_resume_checkpoint(req.req_id)
@@ -332,10 +332,10 @@ async def generate_test_cases(
                         title = c.get("title", "")
                         if title:
                             case_titles.append(title)
-                    # v5.1: 显式统计回归复用用例数，供 R2 质量验证直接读取
+                    # v3.1.3: 显式统计回归复用用例数，供 R2 质量验证直接读取
                     reused_count = sum(1 for c in done_cases if c.get("source") == "reused")
                     regression_count = type_dist.get("regression", 0)
-                    # v5.1: 从回归复用摘要中读取编排器装配的复用计数
+                    # v3.1.3: 从回归复用摘要中读取编排器装配的复用计数
                     reuse_summary = event.get("regression_reuse_summary", {}) or {}
                     await _update_gen_task(
                         status="completed", phase="done", progress=100,
@@ -355,7 +355,7 @@ async def generate_test_cases(
                             "duration_ms": event.get("duration_ms", 0),
                             # 要点级覆盖映射（RTM 口径），供任务详情页与一致性检查使用
                             "point_coverage": event.get("point_coverage", {}),
-                            # v5.1: 回归复用计数（显式字段，供 R2 验证）
+                            # v3.1.3: 回归复用计数（显式字段，供 R2 验证）
                             "reused_count": reused_count,
                             "regression_count": regression_count,
                             "regression_reuse_summary": reuse_summary,
@@ -364,7 +364,7 @@ async def generate_test_cases(
                         },
                     )
 
-                    # v5.2 评审报告中心 P1：SRR 门禁报告 + 用例审核报告落库。
+                    # v3.1.3 评审报告中心 P1：SRR 门禁报告 + 用例审核报告落库。
                     # 失败不阻断主流程（报告中心仅作展示/后续采纳消费）。
                     try:
                         from app.core.review_reports import (

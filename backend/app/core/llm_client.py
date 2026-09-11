@@ -199,7 +199,7 @@ class LLMClient:
     MAX_ATTEMPTS = 5
     BASE_DELAY = 1.0
     MAX_DELAY = 60.0
-    # v4.8 流式空闲超时（秒）：两个 chunk 之间超过该时长无数据视为链路死亡。
+    # v3.1.3 流式空闲超时（秒）：两个 chunk 之间超过该时长无数据视为链路死亡。
     # 正常生成时 chunk 间隔通常 < 30s；总生成时长不设上限（大 prompt 可达 10-30 分钟）。
     STREAM_IDLE_TIMEOUT = 180
 
@@ -918,7 +918,7 @@ class LLMClient:
                         thinking_kwargs = self._build_thinking_kwargs(provider["model"])
                         kwargs.update(thinking_kwargs)
 
-                # v4.8 流式优先 + 空闲超时（取代固定总时长超时）：
+                # v3.1.3 流式优先 + 空闲超时（取代固定总时长超时）：
                 # 非流式整体响应要求服务端完整生成全部输出后才返回，大 prompt（116K 字符）
                 # + 32K max_tokens 的总生成时长可达 10-30 分钟，任何固定总时长超时（如 300s）
                 # 都会在生成完成前掐断连接——表现为任务长期 running、API 平台无完成调用记录、
@@ -952,7 +952,7 @@ class LLMClient:
                     _stream_kwargs = dict(kwargs)
                     _stream_kwargs["stream"] = True
                     _stream_kwargs["stream_options"] = {"include_usage": True}
-                    # v4.11 修复：await litellm.acompletion(stream=True) 取得流式对象本身
+                    # v3.1.3 修复：await litellm.acompletion(stream=True) 取得流式对象本身
                     # 会等待服务端 TTFB（首 token 前的 prefill）。大 prompt（如 158K 复核
                     # prompt）prefill 极慢，若提供商短暂停滞，该 await 若无超时保护会永久
                     # 挂起——表现为任务长期 running、无任何 LLM 日志/心跳/进度、重试机制

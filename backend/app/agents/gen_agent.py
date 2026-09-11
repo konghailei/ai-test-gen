@@ -83,11 +83,11 @@ class GenAgent:
                 最新版 approved 用例（functional_point_cases 聚合），直接并入本次生成集。
             coverage_gaps: v3.4 覆盖缺口——无历史用例/覆盖不足的受影响 FP，
                 注入 prompt 让 LLM 定向补生成回归用例。
-            fp_scope: v5.0 FP 分片生成——传入单个 FP（含其 srr_json）时，prompt 仅注入
+            fp_scope: v3.1.3 FP 分片生成——传入单个 FP（含其 srr_json）时，prompt 仅注入
                 该功能点子 SRR + 该 FP 定义，产出该 FP 定向小集合（相关用例强标 related_fp），
                 大幅缩小 prompt（避免全量 SRR 一次生成）。同时传入 global_srr 可附带注入
                 跨功能点共享规则片段，保证该 FP 用例不遗漏跨 FP/共享约束。
-            global_srr: v5.0 全局/跨功能点通道——仅注入总 SRR 的跨功能点/共享规则/顶层
+            global_srr: v3.1.3 全局/跨功能点通道——仅注入总 SRR 的跨功能点/共享规则/顶层
                 数据约束（不起整段全量 SRR），用于"跨功能点/集成"用例的独立生成，
                 避免跨 FP 组合用例因按 FP 拆分而丢失。
 
@@ -189,7 +189,7 @@ class GenAgent:
         # 3. 构建 Prompt（含 FP 定向上下文 + 覆盖缺口引导）
         # 要点级覆盖驱动：动态生成数量下限由要点规模推导，随 prompt 注入硬约束
 
-        # v5.0 FP 分片 / 全局通道：确定本次生成使用的"有效 SRR"与"有效功能点集"。
+        # v3.1.3 FP 分片 / 全局通道：确定本次生成使用的"有效 SRR"与"有效功能点集"。
         # - fp_scope 传入单个 FP 时，prompt 只注入该功能点子 SRR（小而聚焦），
         #   避免全量 SRR 一次生成造成 prompt 过大、易超时/字数爆炸。
         # - global_srr 传入时，只注入跨功能点/共享规则/顶层约束片段，用于
@@ -248,7 +248,7 @@ class GenAgent:
         gen_model = self._get_model_name()
         cases = self._post_process_cases(cases, req_id, module_prefix, batch_id, gen_model, matched_patterns=matched_patterns)
 
-        # v4.9: 要点标注系统兜底——LLM 可能未在 notes/cover_points 输出方括号要点 ID，
+        # v3.1.3: 要点标注系统兜底——LLM 可能未在 notes/cover_points 输出方括号要点 ID，
         # 导致覆盖映射永远失效（回退数量比、补生成无法聚焦缺口）。这里依据用例文本
         # 与要点描述的关键词命中，为未标注用例确定性回填覆盖的要点 ID。
         # 已标注的用例跳过，仅补明显种子，避免污染。
@@ -594,7 +594,7 @@ class GenAgent:
             # 避免同模块重复生成时 UniqueViolationError
             case["id"] = gen_test_case_id(module_prefix)
 
-            # v5.2: 批次 ID 写入用例（评审报告中心关联生成批次用）
+            # v3.1.3: 批次 ID 写入用例（评审报告中心关联生成批次用）
             case.setdefault("gen_batch_id", batch_id)
 
             # 补全关联需求
@@ -660,7 +660,7 @@ class GenAgent:
             else:
                 case["steps"] = []
             # assertions：确保每个断言都有合法 type（required，没有则默认 equals）。
-            # v4.4 修复 L1：原归一化白名单采用旧枚举风格（equal/greater/less/not_contains），
+            # v3.1.3 修复 L1：原归一化白名单采用旧枚举风格（equal/greater/less/not_contains），
             # 与 UTCF schema 的合法枚举（equals/contains/matches/status_code/gt/lt/not_null/custom）
             # 不一致，导致 LLM 输出的合法 "equals" 被误判为非法并默认改写为 "equal"，
             # 使全部用例 UTCF 校验失败、落入 construct 兜底（置信度被强制压到 0.2）。

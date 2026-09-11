@@ -125,7 +125,7 @@ def build_user_prompt(
 【各用例的 GenAgent 自评估置信度（仅参考，不作最终值）】
 {gen_confidences}"""
 
-    # v5.0 审核 prompt 降载：不再注入全量 SRR 与全量用例的完整 JSON（会导致
+    # v3.1.3 审核 prompt 降载：不再注入全量 SRR 与全量用例的完整 JSON（会导致
     # 大规模用例集时 prompt 可达 200K+，LLM 首 token 漫长、易超时/卡死）。
     # 覆盖核算已由 calc_point_coverage 确定性完成，这里仅保留供 6 维语义判断
     # 所需的紧凑需求概要 + 精简用例条目，审核颗粒度不变、prompt 体积骤降。
@@ -180,7 +180,7 @@ def calculate_confidence(
     对应 docs/03 §5.2 的 calculate_confidence 函数。
     本函数为纯计算，不调用 LLM，供 ReviewAgent 直接使用。
 
-    v5.1 权重重构（解决冷启动全部 reviewed 问题）：
+    v3.1.3 权重重构（解决冷启动全部 reviewed 问题）：
     原公式 match_score 权重 0.4 过高，冷启动时 KB 无相似向量
     导致 match_score=0，拉低总分至 0.6 附近，全部落入 reviewed。
     新公式降低 match_score 权重、提高完整性/一致性/gen_self 权重，

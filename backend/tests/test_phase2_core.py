@@ -426,7 +426,7 @@ def test_prompts(result: TestResult):
     ]
     rp = review_agent.build_user_prompt(VALID_SRR_P0, test_cases, [0.8])
     result.assert_true("review_agent.build_user_prompt 返回非空", bool(rp))
-    # v5.0 降载：不再注入全量 SRR JSON，仅注入需求标题与测试点提示
+    # v3.1.3 降载：不再注入全量 SRR JSON，仅注入需求标题与测试点提示
     result.assert_true("review prompt 含需求标题（降载后）", str((VALID_SRR_P0.get("requirement") or {}).get("title", ""))[:20] in rp)
     # 测试置信度计算
     conf = review_agent.calculate_confidence(test_cases[0], [{"similarity": 0.9}])

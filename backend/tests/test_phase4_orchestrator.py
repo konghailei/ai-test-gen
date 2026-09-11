@@ -332,7 +332,7 @@ class AgentMocks:
 
         if self.gen_return is not None:
             async def _gen(*a, **kw):
-                # 捕获 generate 调用参数（累积所有调用——v4.6 审核后补生成会额外
+                # 捕获 generate 调用参数（累积所有调用——v3.1.3 审核后补生成会额外
                 # 调用一次且不带 historical_regression，最后一次 ≠ 主生成调用）
                 self.gen_call_kwargs = kw
                 self.gen_call_kwargs_list.append(kw)
@@ -631,7 +631,7 @@ async def test_pipeline_test_design(result: TestResult):
                      len(td_blueprint.get("coverage_gaps") or []), 1)
 
     # 回归基线/覆盖缺口正确传递到主生成调用（首次 FP 分片调用；
-    # v4.6 审核后补生成的最后一次调用不带回归参数，故不能断言最后一次）
+    # v3.1.3 审核后补生成的最后一次调用不带回归参数，故不能断言最后一次）
     main_gen_calls = [kw for kw in mocks.gen_call_kwargs_list
                       if "historical_regression" in kw]
     result.assert_true("存在主生成调用（含回归参数）", len(main_gen_calls) >= 1)

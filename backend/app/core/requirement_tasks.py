@@ -48,7 +48,7 @@ def _normalize_cross_fp_flow(item: dict) -> dict:
     }
 
 
-# v4.2.9 增强（跨需求依赖）：FP 引用名称归一化。
+# v3.1.3 增强（跨需求依赖）：FP 引用名称归一化。
 # LLM 在 cross_fp_flows / fp_dependencies 中引用历史功能点时常带版本后缀
 # （"权限控制（v1.0）" / "[v1.0]"），而已归档 FP 的 name 是纯名称（"权限控制"），
 # 精确匹配必然落空，导致跨需求依赖边永远无法自动生成。此函数剥离尾部版本标注。
@@ -561,7 +561,7 @@ async def _save_fp_dependencies(
     依赖关系中的 source_fp_name/target_fp_name 需先映射为实际的 FP ID。
     返回成功创建的依赖条数。
 
-    v4.2.9 增强（跨需求依赖）：
+    v3.1.3 增强（跨需求依赖）：
         原实现只在本需求 FP 内解析名称，LLM 提取到跨需求功能点引用时
         （如权限回收 -> 权限控制[v1.0]）解析不到即静默跳过，导致跨需求
         依赖边永远无法自动生成。现扩展两个解析层级：
@@ -583,7 +583,7 @@ async def _save_fp_dependencies(
     )
     name_to_id = {row[1]: row[0] for row in fp_result.fetchall()}
 
-    # v4.2.9：加载同产品下其他需求的已归档 FP（跨需求候选）。
+    # v3.1.3：加载同产品下其他需求的已归档 FP（跨需求候选）。
     # 双索引：
     #   cross_name_to_id —— 精确名称 (name -> {req_id: fp_id})
     #   cross_norm_to_id —— 归一化名称（剥离 [v1.0]/（v1.0）后缀）后索引
