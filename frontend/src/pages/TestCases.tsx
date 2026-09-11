@@ -238,9 +238,13 @@ export default function TestCases({ fixedProjectId, embedded = false }: TestCase
   }
 
   // 生成 → 跳转到测试用例生成页
+  // v3.2.12: 携带 project_id，使生成页默认选中项目且不可修改
   const handleGenerate = () => {
-    if (filterReq) navigate(`/requirements/${encodeURIComponent(filterReq)}/generate`)
-    else navigate('/generate')
+    const params = new URLSearchParams()
+    if (filterProject && filterProject !== 'unassigned') params.set('project_id', filterProject)
+    const qs = params.toString()
+    if (filterReq) navigate(`/requirements/${encodeURIComponent(filterReq)}/generate${qs ? `?${qs}` : ''}`)
+    else navigate(`/generate${qs ? `?${qs}` : ''}`)
   }
 
   // 打开真实 XMind 网页编辑器（新标签页）

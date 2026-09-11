@@ -1,12 +1,18 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, FileText, TestTube, Loader2, Layers, Calendar, Archive, Upload, Info, Edit3, Trash2, RotateCcw } from 'lucide-react'
+import { ArrowLeft, FileText, TestTube, Loader2, Layers, Calendar, Archive, Upload, Info, Edit3, Trash2, RotateCcw, Search, X, Filter } from 'lucide-react'
 import { products as prodApi, requirements as reqApi, testCases as caseApi } from '../api/client'
 import type { Project } from '../types'
 import { formatDate, priorityBadge, STATUS_LABELS } from '../utils'
 import TestCases from './TestCases'
 import UploadRequirementModal from '../components/UploadRequirementModal'
 import { EditModal, ArchiveModal } from '../components/ProjectModals'
+
+/**
+ * 需求状态白名单（v3.2.12）
+ * STATUS_LABELS 为通用状态表（含项目状态），此处仅取需求可用状态，避免下拉出现无关项。
+ */
+const REQ_STATUS_OPTIONS = ['draft', 'analyzing', 'pending_review', 'confirmed', 'archived', 'superseded', 'deprecated']
 
 /**
  * 项目详情页（v3.2.8）
@@ -30,6 +36,10 @@ export default function ProjectDetail() {
   const [loadingReqs, setLoadingReqs] = useState(false)
   const [showUpload, setShowUpload] = useState(false)
   const [error, setError] = useState('')
+  // v3.2.12: 需求筛选（与用例页筛选栏风格对齐）
+  const [reqSearch, setReqSearch] = useState('')
+  const [filterReqStatus, setFilterReqStatus] = useState('')
+  const [filterReqPriority, setFilterReqPriority] = useState('')
   // v3.2.11: 项目级操作（归档/恢复/编辑/删除）——由列表页迁入详情页
   const [editModal, setEditModal] = useState(false)
   const [archiveModal, setArchiveModal] = useState(false)
@@ -114,6 +124,18 @@ export default function ProjectDetail() {
       alert('恢复失败：' + (e?.message || '未知错误'))
     } finally { setReactivating(false) }
   }
+
+  // v3.2.12: 需求筛选（标题搜索 + 状态 + 优先级）
+  const filteredReqs = reqs.filter(r => {
+    if (filterReqStatus && (r.status || '') !== filterReqStatus) return false
+    if (filterReqPriority && (r.priority || '') !== filterReqPriority) return false
+    if (reqSearch.trim()) {
+      const q = reqSearch.toLowerCase()
+      const title = (r.title || r.id || '').toLowerCase()
+      if (!title.includes(q)) return false
+    }
+    return true
+  })
 
   const statusInfo = (s?: string) => {
     if (s === 'archived') return { text: '已归档', cls: 'bg-slate-100 text-slate-600' }
@@ -283,69 +305,122 @@ export default function ProjectDetail() {
         </div>
       )}
 
-      {/* ===== 需求管理 ===== */}
+      {/* ===== 需求管理（v3.2.12: 筛选栏 + 内容卡片，与用例页风格对齐） ===== */}
       {tab === 'reqs' && (
-        <div className="space-y-3">
-          {/* 工具栏：需求统计 + 上传按钮 同行，避免按钮孤立 */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3 text-sm" style={{ color: 'var(--foreground-tertiary)' }}>
-              <span>共 <span className="font-mono font-medium" style={{ color: 'var(--foreground-secondary)' }}>{reqs.length}</span> 条需求</span>
+        <div className="space-y-6">
+          {/* 筛选栏卡片：统计 | 搜索 | 状态 | 优先级 | 重置 | 上传需求(靠右) */}
+          <div className="card py-3 px-5">
+            <div className="flex items-center gap-3 flex-wrap">
+              <Filter className="w-4 h-4 shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />
+
+              {/* 统计 */}
+              <span className="text-sm shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>
+                共 <span className="font-mono font-medium" style={{ color: 'var(--foreground-secondary)' }}>{filteredReqs.length}</span> 条需求
+              </span>
+
+              {/* 标题搜索 */}
+              <div className="flex items-center min-w-[200px] flex-1 max-w-xs" style={{ background: 'var(--background)', border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.5)' }}>
+                <Search className="w-3.5 h-3.5 ml-2.5" style={{ color: 'var(--foreground-tertiary)' }} />
+                <input value={reqSearch} onChange={e => setReqSearch(e.target.value)}
+                  placeholder="搜索需求标题..." className="w-full px-2.5 py-2 text-sm outline-none bg-transparent" />
+                {reqSearch && (
+                  <button onClick={() => setReqSearch('')}
+                    className="px-2 hover:text-[var(--foreground-secondary)]" style={{ color: 'var(--foreground-tertiary)' }}><X className="w-3.5 h-3.5" /></button>
+                )}
+              </div>
+
+              {/* 状态 */}
+              <select value={filterReqStatus} onChange={e => setFilterReqStatus(e.target.value)}
+                className="select-field text-sm w-auto" title="按状态筛选">
+                <option value="">全部状态</option>
+                {REQ_STATUS_OPTIONS.map(s => <option key={s} value={s}>{STATUS_LABELS[s] || s}</option>)}
+              </select>
+
+              {/* 优先级 */}
+              <select value={filterReqPriority} onChange={e => setFilterReqPriority(e.target.value)}
+                className="select-field text-sm w-auto" title="按优先级筛选">
+                <option value="">全部优先级</option>
+                <option value="P0">P0</option>
+                <option value="P1">P1</option>
+                <option value="P2">P2</option>
+                <option value="P3">P3</option>
+              </select>
+
+              {/* 重置 */}
+              <button
+                onClick={() => { setReqSearch(''); setFilterReqStatus(''); setFilterReqPriority('') }}
+                className="btn-secondary text-xs whitespace-nowrap flex items-center gap-1"
+                title="清空搜索与筛选条件"
+              >
+                <RotateCcw className="w-3 h-3" /> 重置
+              </button>
+
+              {/* 上传需求（与用例页操作按钮一致，靠右同行） */}
+              <button className="btn-primary flex items-center gap-2 ml-auto shrink-0" onClick={() => setShowUpload(true)}>
+                <Upload className="w-4 h-4" />上传需求
+              </button>
             </div>
-            <button className="btn-primary flex items-center gap-2" onClick={() => setShowUpload(true)}>
-              <Upload className="w-4 h-4" />上传需求
-            </button>
           </div>
-          <div className="overflow-hidden" style={{ border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.6)' }}>
-            {loadingReqs ? (
-              <div className="flex items-center justify-center py-12">
-                <Loader2 className="w-4 h-4 animate-spin mr-2" style={{ color: 'var(--foreground-tertiary)' }} />
-                <span className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>加载需求列表...</span>
-              </div>
-            ) : reqs.length === 0 ? (
-              <div className="text-center py-12">
-                <FileText className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--foreground-quaternary)' }} />
-                <p className="text-sm m-0 mb-3" style={{ color: 'var(--foreground-tertiary)' }}>该项目下暂无需求</p>
-                <button className="btn-secondary text-sm" onClick={() => setShowUpload(true)}>上传第一个需求</button>
-              </div>
-            ) : (
-              <table className="w-full">
-                <thead>
-                  <tr style={{ background: 'var(--background-muted)' }}>
-                    <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-5 py-2.5" style={{ color: 'var(--foreground-tertiary)' }}>需求标题</th>
-                    <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2.5 w-20" style={{ color: 'var(--foreground-tertiary)' }}>优先级</th>
-                    <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2.5 w-28" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
-                    <th className="text-right text-[11px] font-semibold uppercase tracking-wider px-5 py-2.5 w-36" style={{ color: 'var(--foreground-tertiary)' }}>创建时间</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {reqs.map(req => (
-                    <tr key={req.id} className="transition-colors duration-150 cursor-pointer hover:bg-slate-50"
-                      style={{ borderTop: '1px solid var(--border)' }}
-                      onClick={() => navigate(`/requirements/${encodeURIComponent(req.id)}`)}>
-                      <td className="px-5 py-3">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <FileText className="w-3.5 h-3.5 flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />
-                          <span className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }} title={req.title}>
-                            {req.title || req.id}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-3 py-3 text-center">
-                        <span className={`text-xs font-semibold font-mono ${priorityBadge(req.priority)}`}>{req.priority}</span>
-                      </td>
-                      <td className="px-3 py-3 text-center">
-                        <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>
-                          {STATUS_LABELS[req.status] || req.status || '-'}
-                        </span>
-                      </td>
-                      <td className="px-5 py-3 text-right text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
-                        {formatDate(req.created_at)}
-                      </td>
+
+          {/* 内容卡片：与用例页容器风格一致（card 包裹 + 内嵌圆角表格） */}
+          <div className="card">
+            <div className="overflow-hidden" style={{ border: '1px solid var(--border)', borderRadius: 'calc(var(--radius) * 0.6)' }}>
+              {loadingReqs ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" style={{ color: 'var(--foreground-tertiary)' }} />
+                  <span className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>加载需求列表...</span>
+                </div>
+              ) : reqs.length === 0 ? (
+                <div className="text-center py-12">
+                  <FileText className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--foreground-quaternary)' }} />
+                  <p className="text-sm m-0 mb-3" style={{ color: 'var(--foreground-tertiary)' }}>该项目下暂无需求</p>
+                  <button className="btn-secondary text-sm" onClick={() => setShowUpload(true)}>上传第一个需求</button>
+                </div>
+              ) : filteredReqs.length === 0 ? (
+                <div className="text-center py-12">
+                  <Search className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--foreground-quaternary)' }} />
+                  <p className="text-sm m-0" style={{ color: 'var(--foreground-tertiary)' }}>没有符合筛选条件的需求</p>
+                </div>
+              ) : (
+                <table className="w-full">
+                  <thead>
+                    <tr style={{ background: 'var(--background-muted)' }}>
+                      <th className="text-left text-[11px] font-semibold uppercase tracking-wider px-5 py-2.5" style={{ color: 'var(--foreground-tertiary)' }}>需求标题</th>
+                      <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2.5 w-20" style={{ color: 'var(--foreground-tertiary)' }}>优先级</th>
+                      <th className="text-center text-[11px] font-semibold uppercase tracking-wider px-3 py-2.5 w-28" style={{ color: 'var(--foreground-tertiary)' }}>状态</th>
+                      <th className="text-right text-[11px] font-semibold uppercase tracking-wider px-5 py-2.5 w-36" style={{ color: 'var(--foreground-tertiary)' }}>创建时间</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+                  </thead>
+                  <tbody>
+                    {filteredReqs.map(req => (
+                      <tr key={req.id} className="transition-colors duration-150 cursor-pointer hover:bg-slate-50"
+                        style={{ borderTop: '1px solid var(--border)' }}
+                        onClick={() => navigate(`/requirements/${encodeURIComponent(req.id)}`)}>
+                        <td className="px-5 py-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <FileText className="w-3.5 h-3.5 flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }} />
+                            <span className="text-sm font-medium truncate" style={{ color: 'var(--foreground-secondary)' }} title={req.title}>
+                              {req.title || req.id}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <span className={`text-xs font-semibold font-mono ${priorityBadge(req.priority)}`}>{req.priority}</span>
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: 'var(--background-muted)', color: 'var(--foreground-secondary)' }}>
+                            {STATUS_LABELS[req.status] || req.status || '-'}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3 text-right text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+                          {formatDate(req.created_at)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
         </div>
       )}

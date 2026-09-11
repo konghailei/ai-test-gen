@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle, Folder, ChevronDown, RotateCcw } from 'lucide-react'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
+import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle, Folder, ChevronDown, RotateCcw, Lock } from 'lucide-react'
 import { requirements as reqApi, generateCases, testCases as tcApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { SSEEvent, Requirement, TestCase, Project, ReviewReport, ReviewIssue, KbFlowback } from '../types'
@@ -26,6 +26,9 @@ export default function Generate() {
   const navigate = useNavigate()
   const { selectedProductId, products } = useProduct()
   const selectedProductName = products.find(p => p.id === selectedProductId)?.name || selectedProductId
+  // v3.2.12: 从用例页跳转时通过 ?project_id=xxx 传入锁定项目（默认选中且不可修改）
+  const [searchParams] = useSearchParams()
+  const lockedProjectId = searchParams.get('project_id') || ''
   const [projects, setProjects] = useState<Project[]>([])
   const [selectedProject, setSelectedProject] = useState<string>('')
   const [loadingProjects, setLoadingProjects] = useState(false)
@@ -69,11 +72,13 @@ export default function Generate() {
   useEffect(() => {
     if (!selectedProductId) {
       setProjects([])
-      setSelectedProject('')
+      // v3.2.12: 锁定项目时保留选择（即便产品上下文暂未就绪）
+      if (!lockedProjectId) setSelectedProject('')
       return
     }
     setLoadingProjects(true)
-    setSelectedProject('')  // 切换产品时重置项目选择
+    // v3.2.12: 锁定项目时不重置（保持带入的项目选择）
+    if (!lockedProjectId) setSelectedProject('')
     prodApi.listProjects(selectedProductId)
       .then(list => setProjects(Array.isArray(list) ? list : []))
       .catch(e => {
@@ -82,7 +87,12 @@ export default function Generate() {
         setProjects([])
       })
       .finally(() => setLoadingProjects(false))
-  }, [selectedProductId])
+  }, [selectedProductId, lockedProjectId])
+
+  // v3.2.12: 锁定项目 —— 首次进入即选中传入项目，且不允许修改
+  useEffect(() => {
+    if (lockedProjectId) setSelectedProject(lockedProjectId)
+  }, [lockedProjectId])
 
   // 加载需求列表：按产品 + 项目过滤
   useEffect(() => {
@@ -105,11 +115,12 @@ export default function Generate() {
       setSelectedReq(paramId)
       // 若当前项目筛选下找不到该需求，则清除项目筛选以加载全部需求
       const exists = reqs.some(r => r.id === paramId)
-      if (!exists && selectedProject) {
+      // v3.2.12: 锁定项目时不清除项目筛选（保持不可修改）
+      if (!exists && selectedProject && !lockedProjectId) {
         setSelectedProject('')
       }
     }
-  }, [paramId, reqs, selectedProject])
+  }, [paramId, reqs, selectedProject, lockedProjectId])
 
   // 点击外部关闭需求下拉框
   useEffect(() => {
@@ -265,23 +276,33 @@ export default function Generate() {
               </div>
             </div>
 
-            {/* 项目下拉框 */}
+            {/* 项目下拉框（v3.2.12: 从用例页跳转时锁定项目，不可修改） */}
             <div>
               <label className="block text-xs font-semibold text-slate-600 mb-1">
                 项目 <span className="text-slate-400 font-normal">(级联筛选需求)</span>
+                {lockedProjectId && (
+                  <span className="ml-1 inline-flex items-center gap-0.5 text-[10px] text-slate-400 font-normal">
+                    <Lock className="w-3 h-3" /> 已锁定
+                  </span>
+                )}
               </label>
               <div className="relative">
                 <Folder className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <select
                   value={selectedProject}
                   onChange={e => setSelectedProject(e.target.value)}
-                  className="select-field pl-9"
-                  disabled={loadingProjects || !selectedProductId}
+                  className="select-field pl-9 disabled:opacity-70 disabled:cursor-not-allowed"
+                  disabled={loadingProjects || !selectedProductId || !!lockedProjectId}
+                  title={lockedProjectId ? '项目已锁定，如需更换请返回用例页重新进入' : undefined}
                 >
-                  <option value="">全部项目</option>
+                  {!lockedProjectId && <option value="">全部项目</option>}
                   {projects.map(p => (
                     <option key={p.id} value={p.id}>{p.name} {p.version ? `(v${p.version})` : ''}</option>
                   ))}
+                  {/* 锁定项目不在当前产品列表时兜底显示，避免空值 */}
+                  {lockedProjectId && !projects.some(p => p.id === lockedProjectId) && (
+                    <option value={lockedProjectId}>{lockedProjectId}</option>
+                  )}
                 </select>
               </div>
               {loadingProjects && (
