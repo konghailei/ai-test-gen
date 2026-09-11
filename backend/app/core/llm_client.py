@@ -200,8 +200,16 @@ class LLMClient:
     BASE_DELAY = 1.0
     MAX_DELAY = 60.0
     # v3.1.3 流式空闲超时（秒）：两个 chunk 之间超过该时长无数据视为链路死亡。
-    # 正常生成时 chunk 间隔通常 < 30s；总生成时长不设上限（大 prompt 可达 10-30 分钟）。
+    # 正常生成时 chunk 间隔通常 < 30s；首响应到达后总生成时长不设上限
+    # （大 prompt 可达 10-30 分钟）。
     STREAM_IDLE_TIMEOUT = 180
+
+    # v3.3 首次响应超时（秒）默认值（N4 根治）。实际取值优先读
+    # settings.LLM_FIRST_RESPONSE_TIMEOUT，便于用环境变量调整而无需改代码。
+    # 语义：流式调用下「首个有效 chunk」的等待上限；正文 chunk 或思考
+    # （reasoning_content）chunk 都算「有响应」。超时即判定模型异常，
+    # **跳过剩余重试直接切换备用提供商**，不乘 MAX_ATTEMPTS。
+    DEFAULT_FIRST_RESPONSE_TIMEOUT = 180
 
     # 故障转移配置（docs/03 §6.4）
     PROVIDER_FAILURE_THRESHOLD = 3
@@ -358,6 +366,16 @@ class LLMClient:
                 if return_usage:
                     return content, usage, model_used, provider["key"]
                 return content
+            except _FirstResponseTimeoutError as e:
+                # v3.3（N4 根治）：模型在首响应预算内无任何输出（含思考内容）
+                # → 直接切换备用提供商，不重试同一模型
+                last_error = e
+                self._record_provider_failure(provider)
+                logger.warning(
+                    "提供商 {} 首响应超时，切换备用: {}",
+                    provider["key"],
+                    str(e)[:200],
+                )
             except _RetryableError as e:
                 # 重试耗尽 → 记录失败，尝试下一提供商
                 last_error = e
@@ -885,6 +903,8 @@ class LLMClient:
         Raises:
             _RetryableError: 重试耗尽（可故障转移）
             _NonRetryableError: 不可重试错误（4xx）
+            _FirstResponseTimeoutError: 首响应预算内无任何输出（含思考内容），
+                不重试，直接由调用方切换备用提供商
         """
         last_error: Exception | None = None
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
@@ -918,36 +938,41 @@ class LLMClient:
                         thinking_kwargs = self._build_thinking_kwargs(provider["model"])
                         kwargs.update(thinking_kwargs)
 
-                # v3.1.3 流式优先 + 空闲超时（取代固定总时长超时）：
+                # v3.1.3 流式优先；v3.3 首响应超时固定化（N4 根治）：
                 # 非流式整体响应要求服务端完整生成全部输出后才返回，大 prompt（116K 字符）
                 # + 32K max_tokens 的总生成时长可达 10-30 分钟，任何固定总时长超时（如 300s）
                 # 都会在生成完成前掐断连接——表现为任务长期 running、API 平台无完成调用记录、
-                # 固定 5 分钟间隔反复超时重试。流式模式下 chunk 持续到达，超时语义改为：
-                # - 首 chunk 等待（连接 + prefill）按 prompt 长度动态放宽（上限 1800s）
-                # - 后续 chunk 仅施加空闲超时（STREAM_IDLE_TIMEOUT，无新数据=链路死亡）
-                # - 总生成时长不设上限
+                # 固定 5 分钟间隔反复超时重试。流式模式下超时语义拆成两段：
+                # - 首响应等待（连接 + prefill）: 固定 LLM_FIRST_RESPONSE_TIMEOUT（默认 180s）。
+                #   本项目所有调用均为流式，**180s 内收到任意响应（正文或思考内容）即视为
+                #   模型存活**；超时即判定模型异常 → 跳过剩余重试直接切换备用提供商。
+                #   原实现按 prompt 长度把该预算放宽到 1800s，使 prefill 停滞可挂起 30 分钟。
+                # - 首响应到达后：仅施加空闲超时（STREAM_IDLE_TIMEOUT，无新数据=链路死亡），
+                #   总生成时长不设上限（大 prompt 可达 10-30 分钟，属正常）。
                 import asyncio as _aio_llm
                 _prompt_len = sum(
                     len(m.get("content", "") or "") if isinstance(m, dict) else 0
                     for m in messages
                 )
                 _base_timeout = provider.get("timeout", 300)
-                _first_chunk_timeout = _base_timeout
+                _first_response_timeout = int(
+                    getattr(settings, "LLM_FIRST_RESPONSE_TIMEOUT", 0)
+                    or self.DEFAULT_FIRST_RESPONSE_TIMEOUT
+                )
+                # 非流式回退专用预算：该路径没有中间 chunk 信号，只能按「总时长」兜底，
+                # 故仍按 prompt 长度放宽（上限 1800s），避免长输出被误杀。
+                _fallback_total_timeout = _base_timeout
                 if _prompt_len > 30000:
-                    _first_chunk_timeout = max(
+                    _fallback_total_timeout = max(
                         _base_timeout, min(1800, 300 + _prompt_len // 100)
                     )
-                    if _first_chunk_timeout > _base_timeout:
-                        logger.debug(
-                            "[LLM] 长 prompt 首 chunk 动态超时: prompt_len={}, timeout={}s (base={}s)",
-                            _prompt_len, _first_chunk_timeout, _base_timeout,
-                        )
 
                 content = ""
                 usage: dict = {}
                 _finish_reason = None
                 _stream_done = False
                 _gen = None
+                _got_first_response = False
                 try:
                     _stream_kwargs = dict(kwargs)
                     _stream_kwargs["stream"] = True
@@ -956,22 +981,23 @@ class LLMClient:
                     # 会等待服务端 TTFB（首 token 前的 prefill）。大 prompt（如 158K 复核
                     # prompt）prefill 极慢，若提供商短暂停滞，该 await 若无超时保护会永久
                     # 挂起——表现为任务长期 running、无任何 LLM 日志/心跳/进度、重试机制
-                    # 永不触发（用户的"卡死/死循环"）。此处施加与下方 __anext__ 首 chunk
-                    # 完全一致的动态首 chunk 超时，确保 TTFB 停滞最坏在预算内触发重试。
+                    # 永不触发（用户的"卡死/死循环"）。此处施加与下方 __anext__ 首响应
+                    # 完全一致的超时预算，确保 TTFB 停滞最坏在预算内触发故障转移。
                     _gen = await _aio_llm.wait_for(
                         litellm.acompletion(**_stream_kwargs),
-                        timeout=_first_chunk_timeout,
+                        timeout=_first_response_timeout,
                     )
                     _parts: list[str] = []
                     _t_stream_start = time.time()
+                    _t_first_response: float | None = None
                     _last_progress_log = time.time()
                     while True:
                         try:
                             _chunk = await _aio_llm.wait_for(
                                 _gen.__anext__(),
                                 timeout=(
-                                    _first_chunk_timeout if not _parts
-                                    else self.STREAM_IDLE_TIMEOUT
+                                    self.STREAM_IDLE_TIMEOUT if _got_first_response
+                                    else _first_response_timeout
                                 ),
                             )
                         except StopAsyncIteration:
@@ -979,14 +1005,38 @@ class LLMClient:
                         # include_usage 模式下最后一个 chunk 携带累计用量
                         if getattr(_chunk, "usage", None):
                             usage = self._normalize_usage(_chunk.usage)
+                        _piece = None
+                        _think_piece = None
                         if getattr(_chunk, "choices", None):
                             _delta = getattr(_chunk.choices[0], "delta", None)
-                            _piece = getattr(_delta, "content", None) if _delta is not None else None
+                            if _delta is not None:
+                                _piece = getattr(_delta, "content", None)
+                                # v3.3：思考/推理内容同样算「模型有响应」——推理模型
+                                # 常先吐 reasoning_content 再吐正文。若不计数，一次
+                                # 纯思考流会被误判为「无响应」并在首响应预算到期时
+                                # 被切换掉（也可能反复空等到超时）。
+                                _think_piece = getattr(_delta, "reasoning_content", None) or getattr(
+                                    _delta, "reasoning", None
+                                )
+                                if not _think_piece:
+                                    _extra = getattr(_delta, "model_extra", None)
+                                    if isinstance(_extra, dict):
+                                        _think_piece = _extra.get("reasoning_content")
                             if _piece:
                                 _parts.append(_piece)
                             _fr = getattr(_chunk.choices[0], "finish_reason", None)
                             if _fr:
                                 _finish_reason = _fr
+                        # 首个有效响应（正文或思考）到达 → 转入空闲超时语义
+                        if not _got_first_response and (_piece or _think_piece):
+                            _got_first_response = True
+                            _t_first_response = time.time()
+                            logger.debug(
+                                "[LLM] 首响应到达: provider={}, ttfb={:.1f}s, kind={}",
+                                provider["key"],
+                                _t_first_response - _t_stream_start,
+                                "content" if _piece else "thinking",
+                            )
                         # 心跳日志：证明生成仍在进行，避免"看起来没调 LLM"的误判
                         if time.time() - _last_progress_log > 30:
                             logger.debug(
@@ -998,9 +1048,11 @@ class LLMClient:
                     content = "".join(_parts)
                     _stream_done = True
                     logger.debug(
-                        "LLM 流式调用成功 [provider={}, attempt={}, chars={}, elapsed={:.0f}s]",
+                        "LLM 流式调用成功 [provider={}, attempt={}, chars={}, elapsed={:.0f}s, ttfb={}]",
                         provider["key"], attempt, len(content),
                         time.time() - _t_stream_start,
+                        "-" if _t_first_response is None
+                        else f"{_t_first_response - _t_stream_start:.1f}s",
                     )
                 except Exception as _stream_err:
                     # 清理未消费完的流，避免连接泄漏
@@ -1009,6 +1061,20 @@ class LLMClient:
                             await _gen.aclose()
                     except Exception:
                         pass
+                    # v3.3 首响应超时：预算内没有收到任何响应（含思考内容）→ 判定该模型
+                    # 异常，直接上抛专用异常，**跳过剩余重试**交给上层切换备用提供商。
+                    # 重试同一个"完全不吐字"的模型无意义，只会把挂起时间乘以 MAX_ATTEMPTS。
+                    if (
+                        isinstance(_stream_err, (TimeoutError, asyncio.TimeoutError))
+                        and not _got_first_response
+                    ):
+                        logger.warning(
+                            "[LLM] 首响应超时: provider={}, {}s 内无任何响应（含思考内容），切换备用提供商",
+                            provider["key"], _first_response_timeout,
+                        )
+                        raise _FirstResponseTimeoutError(
+                            f"首响应超时（{_first_response_timeout}s 内无任何响应，含思考内容）"
+                        ) from _stream_err
                     _se = str(_stream_err).lower()
                     _unsupported = "stream" in _se and any(
                         k in _se for k in ("support", "invalid", "unknown", "not found")
@@ -1020,17 +1086,17 @@ class LLMClient:
                         str(_stream_err)[:120],
                     )
                 if not _stream_done:
-                    # 非流式回退：保留 to_thread 卡死防御 + 动态总时长超时（上限 1800s）
+                    # 非流式回退：保留 to_thread 卡死防御 + 按 prompt 长度放宽的总时长预算
                     try:
                         response = await _aio_llm.wait_for(
                             _aio_llm.to_thread(lambda: _aio_llm.run(litellm.acompletion(**kwargs))),
-                            timeout=_first_chunk_timeout,
+                            timeout=_fallback_total_timeout,
                         )
                     except (AttributeError, NotImplementedError, RuntimeError):
                         # 极老 Python / 嵌套 asyncio.run 失败时回退旧逻辑
                         response = await _aio_llm.wait_for(
                             litellm.acompletion(**kwargs),
-                            timeout=_first_chunk_timeout,
+                            timeout=_fallback_total_timeout,
                         )
                     content = response.choices[0].message.content
                     _finish_reason = getattr(response.choices[0], "finish_reason", None)
@@ -1050,6 +1116,10 @@ class LLMClient:
                 return content, usage, provider["model"]
 
             except _NonRetryableError:
+                raise
+            except _FirstResponseTimeoutError:
+                # v3.3：首响应预算内无任何输出（含思考内容）→ 不消耗剩余重试次数，
+                # 直接交给 call() 切换备用提供商
                 raise
             except Exception as e:
                 last_error = e
@@ -1289,6 +1359,16 @@ class _RetryableError(Exception):
 
 class _NonRetryableError(Exception):
     """不可重试错误（4xx 非限流、认证失败等）。"""
+
+
+class _FirstResponseTimeoutError(Exception):
+    """流式调用在首响应预算内未收到任何输出（正文与思考内容都没有）。
+
+    v3.3（N4 根治）：此异常**不参与重试**，直接触发提供商故障转移。
+    依据：本项目所有 LLM 调用均为流式，若一个模型连续
+    `settings.LLM_FIRST_RESPONSE_TIMEOUT`（默认 180s）都吐不出任何 chunk，
+    重试同一模型只会把挂起时间乘以 MAX_ATTEMPTS，无任何收益。
+    """
 
 
 # ============================================================================
