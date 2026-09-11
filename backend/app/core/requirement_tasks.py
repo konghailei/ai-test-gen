@@ -1519,14 +1519,34 @@ async def _run_clarify_reparse(
                     final_data, clarify_history=clarify_history,
                 )
             recheck_questions = recheck_result.get("questions", []) or []
-            recheck_quality_report = recheck_result.get("quality_report", {}) or {}
-            recheck_score = recheck_quality_report.get("overall_score")
-            # 写入最新的 _clarify_state（覆盖旧的）
+            recheck_quality_report = dict(recheck_result.get("quality_report", {}) or {})
+            # v3.3 口径分离（docs/14 一期第 4 项）：
+            # recheck 的 overall_score 是**答案覆盖率**，与需求级**质量分**
+            # （clarify() 的 _calc_quality_score）不是同一个量。此前直接整体覆盖，
+            # 导致落库/前端展示的质量分被覆盖率顶掉（旧实现更是硬编码 1.0/0.8）。
+            # 现改为合并：质量分保留，覆盖率单独记到 coverage_score。
+            recheck_coverage_score = recheck_quality_report.pop("overall_score", None)
+            # 覆盖率自己的说明单独存，避免顶掉质量分的 summary
+            _coverage_summary = recheck_quality_report.pop("summary", None)
+            recheck_score = recheck_coverage_score  # 下方警告阈值仍按覆盖率口径判断
+            _prev_qr = (final_data.get("_clarify_state") or {}).get("quality_report") or {}
+            _merged_qr = {**(_prev_qr if isinstance(_prev_qr, dict) else {}), **recheck_quality_report}
+            if _coverage_summary:
+                _merged_qr["coverage_summary"] = _coverage_summary
+            if recheck_coverage_score is not None:
+                _merged_qr["coverage_score"] = recheck_coverage_score
+            elif "coverage_score" not in _merged_qr:
+                # 无覆盖证据时显式标注，避免前端把缺失当成 0 分
+                _merged_qr["coverage_score"] = None
+            if "overall_score" not in _merged_qr and recheck_coverage_score is not None:
+                # 兜底：理论上不应发生（首次分析必写入质量分），避免前端显示 0
+                _merged_qr["overall_score"] = recheck_coverage_score
+            # 写入最新的 _clarify_state（问题/覆盖率取本次，质量分沿用需求级）
             final_data["_clarify_state"] = {
                 "questions": recheck_questions,
                 "auto_augmentations": recheck_result.get("auto_augmentations", []),
                 "kb_status": recheck_result.get("kb_status", {}),
-                "quality_report": recheck_quality_report,
+                "quality_report": _merged_qr,
                 "field_conflicts": recheck_result.get("field_conflicts", []),
             }
             recheck_kb_logs = recheck_result.get("kb_access_log", [])

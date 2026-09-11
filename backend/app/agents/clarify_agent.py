@@ -264,6 +264,12 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
         # 用户要求：LLM 分析原始文本找问题应先于 KB 查询，让 KB 有机会解决 LLM 发现的问题
         # _generate_questions 基于 _raw_text 检测跨节矛盾/引用未定义/信息缺失/模糊表述
         llm_semantic_questions: list[dict] = []
+        # v3.3（docs/14 一期第 3 项）：LLM 输出里本就有 quality_report（见
+        # _generate_questions 的 schema_hint），但此前**从未被读取**——等于
+        # 自评分支是死代码、规则公式才是实际口径。这里把它捕获下来**仅作观测**
+        # （记入 quality_report.llm_self_score，不参与 overall_score 计分），
+        # 以便为"是否把 LLM 自评接回加权"积累真实数据后再决策。
+        llm_self_report: dict = {}
         try:
             llm_result = await self._generate_questions(
                 srr=srr,
@@ -272,6 +278,13 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
                 similar_reqs=[],
                 augmentations=[],
             )
+            _llm_qr = llm_result.get("quality_report") if isinstance(llm_result, dict) else None
+            if isinstance(_llm_qr, dict) and isinstance(_llm_qr.get("overall_score"), (int, float)):
+                llm_self_report = _llm_qr
+                logger.info(
+                    "[ClarifyAgent] LLM 自评质量分={}（仅观测记录，不参与门禁计分）",
+                    _llm_qr.get("overall_score"),
+                )
             # v2.8.66: LLM 语义问题生成后立即做必要性过滤——猜想型 upper_bound_rule 不进入后续分流和KB检索
             llm_semantic_questions = self._filter_questions_by_necessity(
                 llm_result.get("questions", []) or []
@@ -1225,8 +1238,19 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
         logger.info("[ClarifyAgent] KB已回答: {}, 待人工澄清(LLM精炼): {}",
                     sum(1 for a in kb_answers if a.get("answered")), len(questions))
 
-        # 计算质量评分
-        quality_score = self._calc_quality_score(completeness, ambiguities, {"questions": questions, "quality_report": {}})
+        # 计算质量评分（v3.3：改为返回可解释明细，含前端已声明的
+        # completeness_score / ambiguity_score / summary；overall_score 数值口径不变）
+        quality_report = self.build_quality_report(
+            completeness, ambiguities, {"questions": questions, "quality_report": {}}
+        )
+        quality_score = float(quality_report.get("overall_score", 0.0))
+        if llm_self_report:
+            quality_report["llm_self_score"] = round(
+                float(llm_self_report.get("overall_score")), 3
+            )
+            quality_report["llm_self_note"] = (
+                "LLM 自评分仅作观测记录，未参与 overall_score 计分（待权重决策）"
+            )
 
         # 判定状态：仍有需人工澄清的问题 → needs_clarification；否则 passed
         # 修正 Bug3：状态严格由「是否存在待人工回答的问题」驱动，
@@ -1246,10 +1270,7 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
             # ⭐ v2.6：返回 KB 增强后的 SRR，确保补全字段持久化
             "augmented_srr": augmented_srr,
             # ⚠️ 嵌套结构，与 QualityGate._resolve_pass_score 输入对齐（修复问题1）
-            "quality_report": {
-                "overall_score": round(quality_score, 3),
-                "pass_threshold": threshold,
-            },
+            "quality_report": quality_report,
             # ⚠️ 嵌套结构，与 QualityGate._resolve_pass_score 输入对齐（修复问题1）
             "kb_status": {
                 "kb_empty": kb_empty,

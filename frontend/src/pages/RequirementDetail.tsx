@@ -2665,8 +2665,12 @@ function ClarifyHistoryTab({
                     </span>
                   )}
                   {entry.quality_report && (
-                    <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
-                      质量分: {(entry.quality_report.overall_score * 100).toFixed(0)}%
+                    <span
+                      className="text-xs"
+                      style={{ color: 'var(--foreground-tertiary)' }}
+                      title={entry.quality_report.summary || undefined}
+                    >
+                      质量分: {Math.round((Number(entry.quality_report.overall_score) || 0) * 100)}%
                     </span>
                   )}
                 </div>

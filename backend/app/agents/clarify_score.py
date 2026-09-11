@@ -56,7 +56,17 @@ class ClarifyScoreMixin:
                 "status": "passed",
                 "questions": [],
                 "auto_augmentations": [],
-                "quality_report": {"overall_score": 1.0, "pass_threshold": self.PASS_THRESHOLD},
+                # v3.3: 无待澄清问题 → 视为覆盖充分（1.0 语义成立，非伪造）；
+                # 但显式标注 evidence 以便与"真实评估出的 1.0"区分。
+                "quality_report": {
+                    "overall_score": 1.0,
+                    "pass_threshold": self.PASS_THRESHOLD,
+                    "coverage": {
+                        "answered": 0, "covered": 0, "followup": 0, "skipped": 0,
+                        "evidence": "no_questions",
+                    },
+                    "summary": "无待澄清问题，视为覆盖充分（未经问答评估）",
+                },
                 "kb_status": kb_status,
                 "kb_access_log": [],
                 "field_conflicts": [],
@@ -133,12 +143,51 @@ class ClarifyScoreMixin:
             status = "passed"
         logger.info("[ClarifyAgent] ◀ eval_answer_coverage ▶ req_id={}, status={}, followup={}",
                     req_id, status, len(followup))
+
+        # v3.3 修正硬编码评分（docs/14 一期第 4 项）：
+        # 原实现 `1.0 if not followup else 0.8` 是常量——恒高于任何警告阈值（0.4），
+        # 导致质量警告永不触发、前端 `score >= 0.75` 恒显示「通过」。
+        # 改为真实覆盖率：已回答问题中被判定「已覆盖」的占比。
+        covered_count = max(0, len(answered) - len(followup))
+        coverage_detail: dict = {
+            "answered": len(answered),
+            "covered": covered_count,
+            "followup": len(followup),
+            "skipped": len(unanswered_or_skipped),
+        }
+        coverage_score: float | None
+        if answered:
+            coverage_detail["evidence"] = "answered"
+            coverage_score = round(covered_count / len(answered), 3)
+        elif prev_questions:
+            # 问题全部被跳过 → 没有任何覆盖证据，**不伪造分数**（原实现返回 1.0）
+            coverage_detail["evidence"] = "all_skipped"
+            coverage_score = None
+        else:
+            coverage_detail["evidence"] = "no_questions"
+            coverage_score = None
+
+        report: dict = {
+            "pass_threshold": self.PASS_THRESHOLD,
+            "coverage": coverage_detail,
+        }
+        # 无证据时不写 overall_score（消费方 `overall_score is not None` 判断已兼容）
+        if coverage_score is not None:
+            report["overall_score"] = coverage_score
+            report["summary"] = (
+                f"答案覆盖率 {coverage_score:.2f} = 已覆盖 {covered_count}/已回答 {len(answered)}"
+                f"（追问 {len(followup)}、跳过 {len(unanswered_or_skipped)}）"
+            )
+        else:
+            report["summary"] = (
+                f"无覆盖证据（{coverage_detail['evidence']}）："
+                f"已回答 0、跳过 {len(unanswered_or_skipped)}"
+            )
         return {
             "status": status,
             "questions": followup,
             "auto_augmentations": [],
-            "quality_report": {"overall_score": 1.0 if not followup else 0.8,
-                               "pass_threshold": self.PASS_THRESHOLD},
+            "quality_report": report,
             "kb_status": kb_status,
             "kb_access_log": [],
             "field_conflicts": [],
@@ -178,6 +227,58 @@ class ClarifyScoreMixin:
         ambiguity_score = min(1.0, len(ambiguities) * 0.15)
         score = completeness_score * 0.6 + (1 - ambiguity_score) * 0.4
         return min(max(score, 0.0), 1.0)
+
+    def build_quality_report(
+        self,
+        completeness: dict,
+        ambiguities: list[dict],
+        llm_result: dict,
+    ) -> dict:
+        """构建**可解释**的质量报告（v3.3，docs/14 一期第 3 项）。
+
+        为什么需要它
+        ------------
+        前端 `client.ts` / `RequirementClarify.tsx` 早已声明
+        `quality_report.completeness_score / ambiguity_score / summary`，
+        但后端此前只返回 `overall_score` + `pass_threshold`，导致：
+          ① 前端声明的三个字段永远为空；
+          ② `core/review_reports.py:161` 读 `quality_report["completeness_score"]`
+             恒为 None → `requirement_completeness` 维度只能走 blocker 数兜底，
+             该维度分实际不反映需求完整性。
+
+        本方法在**不改变 overall_score 数值口径**的前提下补齐明细
+        （仍委托 `_calc_quality_score`，故门禁行为零变化），
+        使分数可解释、可复核，并为后续「是否重设公式权重」积累落库数据。
+
+        注意：`_calc_quality_score` 保持返回 float 不变（phase3 测试契约依赖），
+        本方法是其"明细版"包装，不替代它。
+        """
+        completeness_score = float(completeness.get("completeness_score", 0) or 0)
+        ambiguity_score = min(1.0, len(ambiguities or []) * 0.15)
+        llm_report = llm_result.get("quality_report") if isinstance(llm_result, dict) else None
+        llm_used = isinstance(llm_report, dict) and "overall_score" in llm_report
+        overall = self._calc_quality_score(completeness, ambiguities, llm_result)
+
+        if llm_used:
+            summary = (
+                f"质量分 {overall:.2f}（来源：LLM 自评；"
+                f"规则侧完整性 {completeness_score:.2f}、歧义 {len(ambiguities or [])} 条仅供参考）"
+            )
+        else:
+            summary = (
+                f"质量分 {overall:.2f} = 完整性 {completeness_score:.2f}×0.6 "
+                f"+ (1−歧义 {ambiguity_score:.2f})×0.4；歧义项 {len(ambiguities or [])} 条"
+            )
+        return {
+            "overall_score": round(overall, 3),
+            "pass_threshold": self.PASS_THRESHOLD,
+            "completeness_score": round(completeness_score, 3),
+            "ambiguity_score": round(ambiguity_score, 3),
+            "ambiguity_count": len(ambiguities or []),
+            # 可追溯：本分数由哪条路径算出（LLM 自评 / 规则公式）
+            "score_source": "llm_self" if llm_used else "rule",
+            "summary": summary,
+        }
 
     # ========================================================================
     # 工具方法
