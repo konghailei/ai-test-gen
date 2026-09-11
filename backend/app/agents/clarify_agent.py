@@ -1197,6 +1197,10 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
         questions = self._filter_questions_by_necessity(questions)
         questions = self._validate_and_fix_options(questions)
         questions = self._dedup_questions(questions, stage="final")
+        # v3.3: 跨来源语义去重（修 N3）——`_dedup_questions` 只按 field+question 全文去重，
+        # 抓不到「同一缺口被语义检测(llm_semantic.*)与规则检测(prd.*)各生成一次」这类
+        # field 与问句前缀都不同的重复。2026-09-11 实测重复率 42.9%（阈值 10%）。
+        questions = self._dedup_questions_semantic(questions, stage="final")
 
         # v2.8.72: 为引用未定义等规则类问题注入功能点归属，具体到功能点，
         # 防止不同功能点具有相同规则污染答案（仅归属首个相关功能点）。

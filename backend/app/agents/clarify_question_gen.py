@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import difflib
 import json
 import re
 import time
@@ -15,6 +16,94 @@ from app.core import prompt_manager
 from app.agents.requirement_patterns import pattern_matcher
 from app.utils.logger import logger
 from app.agents.clarify_shared import FIELD_PRIORITY, FIELD_QUESTION_TEMPLATES, _build_field_question
+
+
+# ============================================================================
+# 跨来源问题去重辅助（v3.3，修复 N3 澄清问题重复率超标）
+# ============================================================================
+
+# 归一化时剥离的"问题外壳"套话——同一缺口被不同链路生成时，
+# 差异主要就落在这层外壳上（「文档声明」/「请明确」/「达到上限后应如何处理」…）
+_Q_DEDUP_BOILERPLATE: tuple[str, ...] = (
+    "需求文档中声明", "文档中声明", "文档声明",
+    "但未说明达到该上限后系统的具体处理行为",
+    "但未说明达到该上限后系统的处理行为",
+    "未说明达到该上限后系统的具体处理行为",
+    "未说明达到该上限后系统的处理行为",
+    "达到该上限后系统的具体处理行为",
+    "达到该上限后系统的处理行为",
+    "但未说明达到该上限后的处理行为",
+    "请明确：", "请明确:", "请明确",
+    "达到上限后应如何处理", "达到上限后如何处理",
+    "应如何处理", "如何处理",
+    "这些人工操作的执行主体和入口是什么",
+    "执行主体和入口是什么",
+)
+
+# 归一化时剥离的引号/括号（保留括号内文字，因为里面常是具体阈值）
+_Q_DEDUP_QUOTES: tuple[str, ...] = (
+    "「", "」", "《", "》", "【", "】", "『", "』",
+    "“", "”", "‘", "’", "\"", "'", "（", "）", "(", ")",
+)
+
+_Q_DEDUP_PUNCT_RE = re.compile(r"[\s，。、；：？！,.;:?!~—\-/]+")
+
+# 归一化后短句包含判定所需的最小长度（防"必填"这类极短泛化问句吞并他人）
+_Q_DEDUP_MIN_CONTAIN_LEN = 4
+# 相似度判定的最小长度（过短文本的 difflib 比率不可靠）
+_Q_DEDUP_MIN_RATIO_LEN = 12
+# 相似度阈值：实测同一缺口跨来源重复时约 0.96~1.0，无关问题通常 < 0.6
+_Q_DEDUP_RATIO = 0.90
+
+
+def _norm_question_for_dedup(text: str) -> str:
+    """归一化问题文本，用于跨来源语义去重。
+
+    步骤：去引号/括号 → 去公共套话 → 去空白与标点。
+    例：
+      「文档声明「单文件大小不超过 10MB」，但未说明达到该上限后系统的处理行为。
+        请明确：达到上限后应如何处理？」→ `单文件大小不超过10MB`
+      「文档声明「不超过 10MB」，但未说明…请明确：达到上限后应如何处理？」→ `不超过10MB`
+    两者归一化后构成包含关系，即可判定为同一缺口。
+    """
+    t = text or ""
+    for q in _Q_DEDUP_QUOTES:
+        t = t.replace(q, "")
+    for bp in _Q_DEDUP_BOILERPLATE:
+        t = t.replace(bp, "")
+    return _Q_DEDUP_PUNCT_RE.sub("", t)
+
+
+def _is_same_gap(a: str, b: str) -> bool:
+    """判断两个**已归一化**的问题是否指向同一缺口（保守策略，避免误合并）。"""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # 包含关系：短句被长句覆盖（要求短句有最小长度，防极短泛化问句吞并）
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    if len(short) >= _Q_DEDUP_MIN_CONTAIN_LEN and short in long_:
+        return True
+    # 近似文本：difflib 比率（对"处置入口"vs"操作入口"这类 1-2 字差异很敏感）
+    if len(a) >= _Q_DEDUP_MIN_RATIO_LEN and len(b) >= _Q_DEDUP_MIN_RATIO_LEN:
+        if difflib.SequenceMatcher(None, a, b).ratio() >= _Q_DEDUP_RATIO:
+            return True
+    return False
+
+
+def _question_keep_rank(q: dict) -> tuple:
+    """重复问题保留优先级（越大越优先保留）。
+
+    语义层问句（`llm_semantic.*`）通常带更完整的 context/options，
+    比规则层（`prd.*` / `pattern_gap.*`）的短问句更有回答价值，故优先保留。
+    """
+    field = str(q.get("field", "") or "")
+    return (
+        1 if field.startswith("llm_semantic.") else 0,
+        len(q.get("options") or []),
+        len(str(q.get("context", "") or "")),
+    )
+
 
 class ClarifyQuestionGenMixin:
     """澄清问题生成（去重/主题合并/PRD缺口/逻辑矛盾/冷启动）（v3.2.3 从 ClarifyAgent 拆出的 Mixin）。"""
@@ -76,6 +165,80 @@ class ClarifyQuestionGenMixin:
                 stage, len(questions), len(deduped), skipped,
             )
         return deduped
+
+    @staticmethod
+    def _dedup_questions_semantic(questions: list[dict], stage: str = "semantic") -> list[dict]:
+        """跨来源语义去重（v3.3，修复 N3「澄清问题重复率 42.9% 超标」）。
+
+        为什么需要它
+        -----------
+        `_dedup_questions` 的去重键是 `field::question全文`，只能抓**完全一致**的重复。
+        但同一缺口会被两条检测链路各生成一次：
+          - 语义检测：field = `llm_semantic.data_constraints.attachment.size_limit`
+          - 规则检测：field = `prd.upper_bound_rule.不超过 10MB`
+        **field 与问句前缀都不同**（问句只差「单文件大小」几个字），故被漏判。
+        2026-09-11 实测：7 题中 3 组完全重复（重复率 42.9%，阈值 10%）。
+
+        策略（保守，避免误合并）
+        ----------------------
+        对归一化后的问题文本依次判定：
+          ① 完全相同 → 合并
+          ② 包含关系（短句被长句覆盖，且短句 ≥ 4 字）→ 合并
+          ③ difflib 比率 ≥ 0.90（双方 ≥ 12 字）→ 合并
+        冲突时按 `_question_keep_rank` 保留信息量更大的一条（语义层问句优先，
+        因其通常带更完整的 context/options）。
+
+        Args:
+            questions: 待去重的问题列表
+            stage: 日志阶段标识
+
+        Returns:
+            list[dict]: 去重后的问题列表（保持原相对顺序）
+        """
+        if not questions:
+            return questions
+
+        kept: list[dict] = []
+        normed: list[str] = []
+        skipped = 0
+
+        for q in questions:
+            n = _norm_question_for_dedup(str(q.get("question", "") or ""))
+            dup_idx: int | None = None
+            if n:
+                for i, kn in enumerate(normed):
+                    if _is_same_gap(n, kn):
+                        dup_idx = i
+                        break
+            if dup_idx is None:
+                kept.append(q)
+                normed.append(n)
+                continue
+
+            # 命中重复：保留信息量更大的一条
+            skipped += 1
+            if _question_keep_rank(q) > _question_keep_rank(kept[dup_idx]):
+                logger.info(
+                    "[ClarifyAgent] 跨来源语义去重({}) 用更完整的问题替换: "
+                    "丢弃 field={!r} 保留 field={!r}",
+                    stage, kept[dup_idx].get("field"), q.get("field"),
+                )
+                kept[dup_idx] = q
+                normed[dup_idx] = n
+            else:
+                logger.info(
+                    "[ClarifyAgent] 跨来源语义去重({}) 跳过重复问题: "
+                    "保留 field={!r} 丢弃 field={!r} question={!r}",
+                    stage, kept[dup_idx].get("field"), q.get("field"),
+                    str(q.get("question", ""))[:60],
+                )
+
+        if skipped > 0:
+            logger.info(
+                "[ClarifyAgent] 跨来源语义去重({}) 完成: 原始 {} 条 → 去重后 {} 条（跳过 {} 条）",
+                stage, len(questions), len(kept), skipped,
+            )
+        return kept
 
 
     @staticmethod
