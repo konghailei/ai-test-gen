@@ -990,10 +990,14 @@ class Orchestrator:
                     ),
                 )
             except Exception as e:
+                # v3.3（修 N9）：生成通道失败会**静默减少用例数量**——
+                # done 事件只报"流水线完成"，用户不知道少了哪些功能点的用例。
                 logger.warning(
                     "[Orchestrator] 功能点[{}]分片生成失败（不阻断，续跑将重试）: {}",
                     fname, str(e)[:150],
                 )
+                if "fp_generate_failed" not in degraded_flags:
+                    degraded_flags.append("fp_generate_failed")
                 await _emit_gen(
                     f"功能点 [{fname}] 生成失败",
                     {"key": fid, "name": fname, "status": "failed", "cases": 0},
@@ -1041,9 +1045,12 @@ class Orchestrator:
                     "[Orchestrator] FP 为空批量兜底生成: {} 条", len(batch_cases or []),
                 )
             except Exception as e:
+                # v3.3（修 N9）：同"分片生成失败"——静默减少用例数量，需标记
                 logger.warning(
                     "[Orchestrator] 全量批量生成失败（不阻断）: {}", str(e)[:150],
                 )
+                if "batch_generate_failed" not in degraded_flags:
+                    degraded_flags.append("batch_generate_failed")
 
         # 2) 全局/跨功能点通道：独立生成集成/共享规则用例，保证按 FP 拆分后组合用例不丢失
         _global_srr: dict = {}
@@ -1353,11 +1360,24 @@ class Orchestrator:
             kb_result.get("pending_review", 0),
         )
 
+        # v3.3（修 N8）：审核降级标记透传——LLM 审核失败时 ReviewAgent 返回
+        # 「全部通过、0 拦截」的规则预检结果，与"审核真的通过"在数据上无法区分。
+        # 必须标记，否则"审核能力静默缺失"会被当成"质量很好"。
+        _degraded = list(state.get("degraded_flags", []) or [])
+        if report.get("review_degraded") and "review_llm_failed" not in _degraded:
+            _degraded.append("review_llm_failed")
+            logger.error(
+                "[Orchestrator] ⚠️ 本次审核为**降级结果**（LLM 审核失败，仅规则预检）: "
+                "passed={} 不代表真实审核通过。degraded_flags={}",
+                report.get("passed_cases"), _degraded,
+            )
+
         return {
             "review_result": report,
             "reviewed_cases": reviewed_cases,
             "kb_flowback": kb_result,
             "supplement_iteration": supplement_iteration,
+            "degraded_flags": _degraded,
         }
 
     # ========================================================================

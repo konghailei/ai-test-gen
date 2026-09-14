@@ -312,8 +312,14 @@ class ReviewAgent:
             result = await self._llm.call_json(**_review_kwargs)
             return result
         except Exception as e:
-            logger.warning("[ReviewAgent] LLM 审核失败，使用规则降级: {}", str(e)[:200])
-            # 降级：仅返回规则预检结果
+            # v3.3（修 N8）：LLM 审核失败 → 规则降级。
+            #
+            # ⚠️ 降级结果看起来是「**全部通过、0 拦截、不补生成**」——
+            # 与"审核真的通过了"在数据上无法区分。必须显式标记，
+            # 否则"审核能力静默缺失"会被当成"质量很好"（同 N7 的假象模式）。
+            logger.error(
+                "[ReviewAgent] LLM 审核失败 → 本次审核降级为规则预检（N8）: {}", str(e)[:200]
+            )
             return {
                 "total_cases": len(test_cases),
                 "passed_cases": len(test_cases),
@@ -323,6 +329,9 @@ class ReviewAgent:
                 "avg_confidence": 0.0,
                 "should_supplement": False,
                 "supplement_hints": [],
+                # 降级标记：由 orchestrator 透传进 done 事件的 degraded_flags
+                "review_degraded": True,
+                "review_degraded_reason": str(e)[:200],
             }
 
     # ========================================================================
@@ -393,6 +402,11 @@ class ReviewAgent:
             "point_coverage": point_coverage,
             "dimension_scores": dimension_scores,
             "avg_confidence": round(avg_conf, 3),
+            # v3.3（修 N8）：把 `_llm_review` 的降级标记**透传到最终 report**。
+            # ⚠️ 不能只在 `_llm_review` 的返回值里打标——该返回值只是中间结果，
+            # 会被本函数合并掉。实测探针正是靠这一点发现首版补丁无效的。
+            "review_degraded": bool(llm_report.get("review_degraded")),
+            "review_degraded_reason": llm_report.get("review_degraded_reason", ""),
             "should_supplement": should_supplement,
             "supplement_hints": supplement_hints,
         }

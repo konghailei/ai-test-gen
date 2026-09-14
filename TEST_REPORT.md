@@ -934,3 +934,30 @@ N5 三缺陷中 **N5-c（无对账机制）** 是"不一致能潜伏至今"的�
 - 跑一轮 `[KbMaint] 对账一致: completed 且有向量 12 条，无需修复`，无孤儿告警
 - 两个 CLI dry-run 均正常（57 条向量 → 0 孤儿；143→57 与上节删 86 条吻合）
 - 回归 **413/413**
+
+### §17.21 2026-09-14 静默降级系统排查：新登记 N8 / N9
+
+**工具**：`scripts/scan_silent_degradation.py`（AST 级扫描"捕获后只记日志、不上抛、
+也无降级标记"的位置）。**结果：40 处静默捕获，36 处无降级标记**。
+（注：这是**待判定清单**，非缺陷清单——很多命中是合理兜底。）
+
+**N8【Major】ReviewAgent LLM 审核失败 → 静默降级**
+- 现象：LLM 审核失败返回规则预检结果，仅 WARNING、无标记
+- 危害：**LLM 深度审核（完整性/去重/一致性/覆盖率）完全没做**；若规则预检也未命中，
+  结果即「全通过、0 拦截」，与真实审核通过**在数据上无法区分**
+- 修复：`_llm_review` 置 `review_degraded` + ERROR 日志 → **`_merge_review_results`
+  透传到最终 report** → `orchestrator._review_node` 追加 `degraded_flags=["review_llm_failed"]`
+- ⚠️ **第一版补丁无效**：标记只打在 `_llm_review` 返回值（中间结果）上，
+  被 `_merge_review_results` 合并掉；由**确定性探针**抓出
+
+**N9【Minor】Orchestrator 生成通道失败 → 静默减少用例数量**
+- `:992` 分片生成失败、`:1047` 全量批量生成失败 → 仅 WARNING，用例数静默变少
+- 修复：追加 `degraded_flags=["fp_generate_failed"]` / `["batch_generate_failed"]`
+- `:1091` 跨功能点生成失败**已**通过 SSE `status="failed"` 上报前端，无需改
+
+**确定性验证**：注入 `_llm.call_json` 抛异常 → `review_degraded = True` ✅ PASS
+
+**剩余 33 处分级**：类 N5（数据一致性，5 处，**已由维护任务兜住**）/
+类 N7-N8（已修 2 处）/ 待判定 ~12 处 / 合理不阻断 ~14 处。
+
+回归 **413/413**。
