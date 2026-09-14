@@ -75,20 +75,29 @@ async def build_valid_ids() -> dict[str, set[str]]:
 
 
 def classify(vec_id: str, meta: dict, valid: dict[str, set[str]]) -> tuple[str, bool]:
-    """返回 (归类, 是否合法)。无法归类的一律判为合法（保守，不删）。"""
+    """返回 (归类, 是否合法)。
+
+    ⚠️ 判定采用**全局存在性**，而非"按 metadata.type 查对应表"。
+
+    原因（2026-09-14 实测踩到）：`REQ-1788854035042-8100` 的向量 metadata
+    `type="knowledge_qa"`，但**同一 ID 也存在于 `requirements` 表**（archived）。
+    若按 type 只查 knowledge_qa 表 → 判为孤儿 → **会误删一条活需求的向量**。
+
+    因此：只要该 ID 在**任一**候选表（requirements / functional_points /
+    knowledge_qa / test_cases / patterns）中存在，就不算孤儿。
+    功能点向量额外剥离 `FP-` 前缀后再判一次。
+    未知类型仍保守判为合法（不删）。
+    """
     vtype = (meta or {}).get("type", "")
-    if vtype == "functional_point":
-        base = vec_id[len(FP_PREFIX):] if vec_id.startswith(FP_PREFIX) else vec_id
-        return vtype, base in valid.get("functional_point", set())
-    if vtype == "requirement":
-        return vtype, vec_id in valid.get("requirement", set())
-    if vtype == "knowledge_qa":
-        return vtype, vec_id in valid.get("knowledge_qa", set())
-    if vtype in ("test_case", "case"):
-        return vtype, vec_id in valid.get("test_case", set())
-    if vtype in ("pattern", "test_pattern"):
-        return vtype, vec_id in valid.get("pattern", set())
-    return (vtype or "unknown"), True   # 保守：未知类型不动
+    base = vec_id[len(FP_PREFIX):] if vec_id.startswith(FP_PREFIX) else vec_id
+    for name in ("requirement", "functional_point", "knowledge_qa",
+                 "test_case", "pattern"):
+        ids = valid.get(name, set())
+        if vec_id in ids or base in ids:
+            return vtype, True
+    if not vtype or vtype in ("unknown",):
+        return "unknown", True   # 保守：无法归类的一律不动
+    return vtype, False
 
 
 def milvus_records(coll_key: str) -> list[tuple[str, dict]]:
