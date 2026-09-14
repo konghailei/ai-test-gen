@@ -766,3 +766,17 @@ RESULT ALL PASS
 ③ status 过滤排除未归档最新版 → **不改过滤逻辑**，改为让 V1.1 走完归档流程。
 
 **复核**：TR-6.5 图谱结论不变（`15 = 4 + 11`，PASS）；回归 **413/413**。
+
+#### §17.13 补充 2：N5-a 处置（2026-09-14）
+
+3 条卡在 `pending` 的需求经对账工具判定为 **`pending_but_present`**——
+**向量其实都已存在，只是状态未回写**（不是向量缺失）。故修复**仅改状态、不重写向量**。
+
+扩展后的 `kb_vector_reconcile.py` 区分三类：`completed_but_missing`（补写向量）、
+`pending_and_missing`（补写向量）、`pending_but_present`（**仅改状态**）。
+
+**处置后复核收敛**：`completed 且有向量 12`（原 9）/ `无向量 0` / `卡住 0`
+→ **PG 与 Milvus 完全一致**。
+
+> 机制缺陷仍在（未改代码）：Celery「向量写入成功但状态回写失败」无补偿，
+> `_update_vs_sync` 只打 warning 不重试。建议把对账工具接入定时任务兜底。

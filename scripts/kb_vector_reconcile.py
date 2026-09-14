@@ -91,10 +91,19 @@ async def main() -> None:
         rid, status, prod, proj, prio, mods, srr, vs, title = r
         present = rid in vec_ids
         if vs == "completed" and not present:
+            # 标完成但向量不在 → 需补写
             missing.append({"id": rid, "status": status, "title": title,
-                            "product_id": prod, "project_id": proj})
-        elif vs == "pending":
-            stuck_pending.append({"id": rid, "status": status, "title": title})
+                            "product_id": prod, "project_id": proj, "reason": "completed_but_missing"})
+        elif vs in ("pending", "processing") and not present:
+            # N5-a：派发后长期停留 pending/processing 且向量确实不在 → 同样需补写
+            # （向量已在的 pending 只属状态未回写，单独归一类，避免重复写向量）
+            stuck_pending.append({"id": rid, "status": status, "title": title,
+                                  "product_id": prod, "project_id": proj,
+                                  "reason": f"{vs}_and_missing"})
+        elif vs in ("pending", "processing") and present:
+            stuck_pending.append({"id": rid, "status": status, "title": title,
+                                  "product_id": prod, "project_id": proj,
+                                  "reason": f"{vs}_but_present"})
         elif vs == "completed" and present:
             ok.append(rid)
 
@@ -103,14 +112,40 @@ async def main() -> None:
     print(f"  ❌ 标 completed 但无向量（需补写）: {len(missing)}")
     for m in missing:
         print(f"       {m['id']}  status={m['status']}  {str(m['title'])[:30]}")
-    print(f"  ⚠️ 长期 pending（N5-a，任务无终态）: {len(stuck_pending)}")
+    print(f"  ⚠️ 卡在中间态（N5-a）: {len(stuck_pending)}")
     for m in stuck_pending:
-        print(f"       {m['id']}  status={m['status']}  {str(m['title'])[:30]}")
+        print(f"       {m['id']}  status={m['status']}  reason={m['reason']}  "
+              f"{str(m['title'])[:26]}")
+
+    # 需要补写向量的 = completed 缺失 + pending/processing 且向量确实缺失
+    to_repair = list(missing) + [m for m in stuck_pending
+                                 if m["reason"].endswith("_and_missing")]
+    # 仅需修正状态（向量已存在，只是 Celery 未回写终态）——**不重写向量**
+    status_only = [m for m in stuck_pending if m["reason"].endswith("_but_present")]
+
+    if status_only:
+        fixed_status = 0
+        if args.repair:
+            for m in status_only:
+                try:
+                    async with async_session() as s:
+                        await s.execute(text(
+                            "UPDATE requirements SET vectorization_status='completed', "
+                            "vectorization_error=NULL WHERE id=:i"
+                        ), {"i": m["id"]})
+                        await s.commit()
+                    fixed_status += 1
+                    print(f"  ✅ 修正状态 pending→completed（向量本已存在）: {m['id']}")
+                except Exception as e:  # noqa: BLE001
+                    print(f"  ❌ 状态修正失败 {m['id']}: {str(e)[:100]}")
+        report_status_fixed = fixed_status
+    else:
+        report_status_fixed = 0
 
     repaired, failed = 0, []
-    if args.repair and missing:
+    if args.repair and to_repair:
         by_id = {r[0]: r for r in reqs}
-        for m in missing:
+        for m in to_repair:
             rid = m["id"]
             row = by_id[rid]
             srr_json = row[6] or {}
@@ -151,8 +186,10 @@ async def main() -> None:
         "pg_requirement_count": len(reqs),
         "completed_with_vector": len(ok),
         "completed_without_vector": missing,
-        "stuck_pending": stuck_pending,
+        "stuck_intermediate": stuck_pending,
+        "to_repair": [m["id"] for m in to_repair],
         "repaired": repaired,
+        "status_only_fixed": report_status_fixed,
         "repair_failed": failed,
     }
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
