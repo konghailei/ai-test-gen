@@ -255,6 +255,8 @@ async def _enrich_sources(
     # 收集所有需要查询的 ID
     req_ids = [s["id"] for s in kb_sources if s.get("type") == "requirement"]
     case_ids = [s["id"] for s in kb_sources if s.get("type") == "test_case"]
+    # v3.3（修 N6）：功能点单独查询——向量主键为 "FP-"+functional_points.id
+    fp_ids = [s["id"] for s in kb_sources if s.get("type") == "functional_point"]
 
     # 查询需求详情（获取 title + product_id + 版本日期链）
     # v3.3（N1 / B6-3）：额外取 go_live_date / archived_at / updated_at / created_at，
@@ -273,6 +275,17 @@ async def _enrich_sources(
                 "title": row[1], "product_id": row[2],
                 "effective_date": _effective_date(row[3], row[4], row[5], row[6]),
             }
+
+    # 查询功能点详情（v3.3 / 修 N6）：向量主键带 "FP-" 前缀，PG 主键不带，需剥离
+    fp_map: dict[str, dict] = {}
+    if fp_ids:
+        base_ids = [i[len("FP-"):] if i.startswith("FP-") else i for i in fp_ids]
+        stmt = select(
+            FunctionalPoint.id, FunctionalPoint.name, FunctionalPoint.requirement_id,
+        ).where(FunctionalPoint.id.in_(base_ids))
+        result = await session.execute(stmt)
+        for row in result.all():
+            fp_map[row[0]] = {"name": row[1], "requirement_id": row[2]}
 
     # 查询测试用例详情（v3.3：额外取 source，用于区分 L2 人工核准 / L3 AI 生成）
     case_map: dict[str, dict] = {}
@@ -316,6 +329,21 @@ async def _enrich_sources(
                 product_name = pname
             found = True
 
+        elif src_type == "functional_point":
+            base_id = src_id[len("FP-"):] if src_id.startswith("FP-") else src_id
+            if base_id in fp_map:
+                info = fp_map[base_id]
+                title = info["name"] or ""
+                # 功能点所属需求的产品名，便于前端展示「产品 · 功能点」
+                req_info = req_map.get(info.get("requirement_id") or "")
+                if req_info:
+                    pname = product_names.get(req_info.get("product_id", ""), "")
+                    if pname:
+                        product_name = pname
+                    # 复用需求侧的兜底日期，供版本先后比较（B6-3）
+                    effective_date = req_info.get("effective_date") or ""
+                found = True
+
         elif src_type == "test_case" and src_id in case_map:
             title = case_map[src_id]["title"]
             # B6-1：人工核准/复用 = L2（可作行为佐证），AI 生成 = L3（不得作规则依据）
@@ -324,7 +352,10 @@ async def _enrich_sources(
             found = True
 
         # 跳过未在 PG 中找到的孤儿向量记录
-        if not found and src_type == "requirement":
+        # v3.3（修 N6）：functional_point 一并纳入——之前只校验 requirement，
+        # 而功能点被误标为 requirement，导致**合法 FP 被当孤儿丢弃**；
+        # 现在类型已正确，这里的判定对 FP 是真孤儿过滤（保留卫生作用）。
+        if not found and src_type in ("requirement", "functional_point"):
             logger.warning("[API/knowledge-qa] 跳过孤儿向量: id={}, type={}", src_id, src_type)
             continue
 
@@ -490,7 +521,14 @@ async def kqa_ask(
             status="archived", session=session,
         )
         for r in req_results:
-            r["type"] = "requirement"
+            # v3.3（修 N6）：按 Milvus metadata.type **保留真实类型**。
+            # 原实现无条件 `r["type"] = "requirement"`，而 search_requirements 会
+            # 同时返回 requirement 与 functional_point 两类记录 → 功能点被误标为需求后，
+            # `_enrich_sources` 拿它去 `requirements` 表校验存在性，必然查不到
+            # （功能点向量主键是 "FP-"+fp.id）→ 被当孤儿 `continue` 丢弃，
+            # **整个 L1 权威层在 KB 问答中静默失效**。
+            _md_type = (r.get("metadata") or {}).get("type") or ""
+            r["type"] = "functional_point" if _md_type == "functional_point" else "requirement"
             kb_sources.append(r)
     except Exception as e:
         err_msg = str(e)[:200]
