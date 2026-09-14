@@ -118,6 +118,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("[Watchdog] 启动失败（不影响启动）: {}", str(e)[:150])
 
+    # v3.3（N5-c 根治）：启动知识库维护周期任务。
+    # 对账自愈 PG 向量化状态 ↔ Milvus 实际向量（只新增不删除），并报告孤儿向量。
+    try:
+        from app.core.kb_maintenance import start_kb_maintenance, stop_kb_maintenance
+        start_kb_maintenance()
+    except Exception as e:
+        logger.warning("[KbMaint] 启动失败（不影响启动）: {}", str(e)[:150])
+
     logger.info("AI测试用例生成系统 启动完成，监听端口 {}", settings.APP_PORT)
 
     yield
@@ -129,6 +137,11 @@ async def lifespan(app: FastAPI):
         await stop_task_watchdog()
     except Exception as e:
         logger.warning("[Watchdog] 停止失败: {}", str(e)[:150])
+    try:
+        from app.core.kb_maintenance import stop_kb_maintenance
+        await stop_kb_maintenance()
+    except Exception as e:
+        logger.warning("[KbMaint] 停止失败: {}", str(e)[:150])
 
 
 # ============================================================================

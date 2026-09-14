@@ -167,6 +167,19 @@ class Settings(BaseSettings):
     否则 top-5 被未固化用例占满会导致过滤后所剩无几。"""
     KB_CASES_FETCH_K: int = 15
 
+    # ========== 知识库维护任务（v3.3 / N5-c 根治） ==========
+    """是否启用知识库维护周期任务。
+
+    背景：N5 追查发现「无 PG 状态 ↔ Milvus 实际的对账机制」（N5-c），
+    导致向量缺失 / 状态未回写这类不一致**无法被自动发现**。
+    开启后周期执行：① 对账自愈（补写缺失向量、修正卡住的状态，**只新增不删除**）
+    ② 孤儿向量扫描（**只报告，不自动删除**——删除不可逆，需人工确认）。
+    """
+    KB_MAINTENANCE_ENABLED: bool = True
+
+    """知识库维护周期（秒）。默认 1 小时——对账本身轻量，但会遍历 Milvus 全量 ID。"""
+    KB_MAINTENANCE_INTERVAL: int = 3600
+
     # ========== 嵌入模型配置 ==========
     """嵌入模型类型：local（sentence-transformers，默认）| cloud（远程 API 嵌入）。
     注：ChromaDB 已弃用，chroma_default 选项不再可用；模型实际加载由 EMBEDDING_MODEL_NAME 决定。"""

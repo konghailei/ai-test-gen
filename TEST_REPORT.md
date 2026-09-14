@@ -915,3 +915,22 @@ spec 列举的 12 个文件名属**举例**，五个名称不存在（`v1_confir
 
 **验证**：`npx tsc --noEmit` **0 错误**；前端容器重建，`ai-test-gen-web` **healthy**，
 新产物 `index-Gorkx7Kh.js`。
+
+### §17.20 2026-09-14 N5-c 根治：知识库维护周期任务
+
+N5 三缺陷中 **N5-c（无对账机制）** 是"不一致能潜伏至今"的根本原因。本次把
+`kb_vector_reconcile` 从**手动脚本**变成**周期任务**，使系统自愈。
+
+**实现**：核心逻辑抽到 `app/core/kb_vector_reconcile.py`（`reconcile_requirements` +
+`scan_orphan_vectors`）；`app/core/kb_maintenance.py` 提供周期循环；`main.py` lifespan 启停；
+`config.py` 新增 `KB_MAINTENANCE_ENABLED=True` / `KB_MAINTENANCE_INTERVAL=3600`；
+两个 CLI 脚本改为**薄封装**共用同一套逻辑（避免"判错就误删"的孤儿判定出现两份实现）。
+
+**安全边界**：自动修复**只新增/改状态、不删数据**；孤儿**只报告不自动删除**
+（不可逆，仍需人工确认后 `--apply`）。
+
+**验证**：
+- 启动日志 `[KbMaint] 知识库维护任务已启动: interval=3600s`
+- 跑一轮 `[KbMaint] 对账一致: completed 且有向量 12 条，无需修复`，无孤儿告警
+- 两个 CLI dry-run 均正常（57 条向量 → 0 孤儿；143→57 与上节删 86 条吻合）
+- 回归 **413/413**
