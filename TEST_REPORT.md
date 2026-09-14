@@ -899,3 +899,19 @@ spec 列举的 12 个文件名属**举例**，五个名称不存在（`v1_confir
 `qa_v11`/`quality_v1`）**不影响达标**——内容分别并入 `blog_v1_req_detail.json` /
 `blog_v1_archive_qa.json` / `blog_qa_v11.json`。
 > 原「未达成」是把「举例名未逐一对应」当成了失败条件，而 rule 的真实阈值是**数量** ≥10。
+
+### §17.19 2026-09-14 B6-5 前端权威层级可视化落地
+
+**改动**：`types/index.ts` 的 `KbQAReference` 增 `authority_level`/`effective_date`；
+`KnowledgeQA.tsx` 新增 `authorityMeta()`（层级→图标/颜色/徽标/悬停说明，缺失时按 `type` 兜底）
++ 来源行徽标 + 层级图例 + **回答级警示**。
+
+**回答级警示（核心价值）**：来源中**有 L3 但无 L0** 时提示
+「本次来源未包含 L0 需求文档，规则可能推断自 L3（AI 生成用例）…」——
+正对应 N1 循环权威场景；**修复前这种情况在 UI 上完全看不出来**。
+
+**附带修正**：`test_case` 图标由恒为 `TestTube` 改为按层级取，并新增 `functional_point`（L1）
+分支——此前该类型会被误显示为用例图标。
+
+**验证**：`npx tsc --noEmit` **0 错误**；前端容器重建，`ai-test-gen-web` **healthy**，
+新产物 `index-Gorkx7Kh.js`。

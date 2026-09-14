@@ -563,6 +563,12 @@ export interface KbQAReference {
   type: string
   similarity: number
   summary: string
+  /** v3.3（N1 治理 B6-5）：知识权威层级
+   *  L0 需求文档 > L1 功能点 > L2 人工核准用例/历史问答 > L3 AI 生成用例。
+   *  后端 `_enrich_sources` 计算；旧数据可能缺省。 */
+  authority_level?: string
+  /** v3.3（B6-3）：可比较日期（go_live_date → archived_at → updated_at → created_at 兜底） */
+  effective_date?: string
 }
 
 export interface KbQARecord {

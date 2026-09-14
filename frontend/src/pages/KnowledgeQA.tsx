@@ -5,6 +5,34 @@ import {
   X, Loader2, BookOpen, FileText, TestTube, AlertCircle, History,
   PenSquare, Save, CornerDownRight, Layers, ClipboardCheck,
 } from 'lucide-react'
+
+/**
+ * v3.3（N1 治理 B6-5）：知识权威层级 → 展示元数据。
+ *
+ * 层级定义（与后端 `knowledge_qa.AUTHORITY_BY_TYPE` 对齐）：
+ *   L0 需求文档 > L1 功能点说明 > L2 人工核准用例/历史问答 > L3 AI 生成用例
+ *
+ * 目的：让"这条答案的规则依据够不够硬"一眼可见——尤其是当结论实际
+ * 推断自 L3（AI 生成的测试用例）而非需求文档时，用户必须能看出来。
+ */
+function authorityMeta(s: { type?: string; authority_level?: string }) {
+  const level = s.authority_level || (
+    s.type === 'requirement' ? 'L0'
+      : s.type === 'functional_point' ? 'L1'
+        : s.type === 'knowledge_qa' ? 'L2'
+          : 'L3'
+  )
+  switch (level) {
+    case 'L0':
+      return { icon: FileText, color: 'var(--brand-500)', label: 'L0 需求文档', hint: '业务规则的唯一权威来源' }
+    case 'L1':
+      return { icon: Layers, color: 'var(--state-success)', label: 'L1 功能点', hint: '需求的结构化分解，次权威' }
+    case 'L2':
+      return { icon: ClipboardCheck, color: 'var(--brand-400)', label: 'L2 人工核准', hint: '可作行为佐证，不作规则依据' }
+    default:
+      return { icon: TestTube, color: 'var(--state-warning)', label: 'L3 AI 用例', hint: '仅作参考，不得作为业务规则依据' }
+  }
+}
 import { knowledgeQA, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { KbQAReference, Module } from '../types'
@@ -402,18 +430,51 @@ export default function KnowledgeQA() {
                       <div className="mt-4 pt-3 border-t" style={{ borderColor: 'var(--border)' }}>
                         <p className="text-xs font-medium mb-2 flex items-center gap-1" style={{ color: 'var(--foreground-tertiary)' }}>
                           <BookOpen className="w-3 h-3" /> 参考来源
+                          {/* v3.3（B6-5）：权威层级图例 */}
+                          <span className="ml-1 font-normal" style={{ color: 'var(--foreground-quaternary)' }}>
+                            （按权威层级：L0 需求 &gt; L1 功能点 &gt; L2 人工核准 &gt; L3 AI 用例）
+                          </span>
                         </p>
                         <div className="space-y-1">
-                          {msg.sources.map((s, i) => (
-                            <div key={i} className="flex items-center gap-2 text-xs py-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
-                              {s.type === 'requirement'
-                                ? <FileText className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--brand-400)' }} />
-                                : <TestTube className="w-3 h-3 flex-shrink-0" style={{ color: 'var(--state-warning)' }} />}
-                              <span className="truncate">{s.title}</span>
-                              <span className="flex-shrink-0" style={{ color: 'var(--foreground-quaternary)' }}>{(s.similarity * 100).toFixed(0)}%</span>
-                            </div>
-                          ))}
+                          {msg.sources.map((s, i) => {
+                            const a = authorityMeta(s)
+                            const Icon = a.icon
+                            return (
+                              <div key={i} className="flex items-center gap-2 text-xs py-0.5" style={{ color: 'var(--foreground-tertiary)' }}>
+                                <Icon className="w-3 h-3 flex-shrink-0" style={{ color: a.color }} />
+                                {/* 权威层级徽标：悬停显示该层级的采信规则 */}
+                                <span
+                                  className="flex-shrink-0 px-1 py-px rounded text-[10px] leading-4 font-medium"
+                                  title={a.hint}
+                                  style={{ color: a.color, border: `1px solid ${a.color}`, opacity: 0.9 }}
+                                >
+                                  {a.label}
+                                </span>
+                                <span className="truncate">{s.title}</span>
+                                <span className="flex-shrink-0" style={{ color: 'var(--foreground-quaternary)' }}>{(s.similarity * 100).toFixed(0)}%</span>
+                              </div>
+                            )
+                          })}
                         </div>
+                        {/* v3.3（B6-5）：回答级提示——有 L3 且无 L0 时，
+                            说明规则并非来自需求文档，而是推断自 AI 生成用例（N1 的循环权威场景）。
+                            这是"光看答案看不出来"的关键风险，必须显式提示。 */}
+                        {(() => {
+                          const levels = msg.sources.map((s) => authorityMeta(s).label.slice(0, 2))
+                          const hasL3 = levels.includes('L3')
+                          const hasL0 = levels.includes('L0')
+                          if (!hasL3 || hasL0) return null
+                          return (
+                            <div className="mt-2 flex items-start gap-2 text-xs rounded-md px-3 py-2"
+                              style={{ color: 'var(--state-warning)', background: 'var(--state-warning-surface)' }}>
+                              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                              <span>
+                                本次来源<strong>未包含 L0 需求文档</strong>，规则可能推断自 L3（AI 生成用例）。
+                                引用前请核对需求原文，避免把用例中的推断当作既定规则。
+                              </span>
+                            </div>
+                          )
+                        })()}
                       </div>
                     )}
 
