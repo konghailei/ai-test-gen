@@ -334,9 +334,18 @@
   - TR-8.5 达标（文档结构完整、ID/数值与 artifacts 可对账）
 - **Deviation**：
   - ⚠️ **TR-8.3 命名不符**：`v1_confirm` / `v1_impact` / `v1_archive` / `qa_v11` / `quality_v1` 五个预设文件名**不存在**（内容并入 `blog_v1_req_detail.json` / `blog_v1_archive_qa.json`，或缺失）
-  - ❌ **TR-8.4 未达成**：§20.7 只覆盖 **AC-1~AC-10**，`AC-11` / `AC-12` 在 `TEST_PLAN.md` 与 `TEST_REPORT.md` 中**全库 0 提及**（仅在 `spec.md` 第 177/193 行有定义）；且 9 条 rubric（TR-1.5 / TR-2.5 / TR-2.6 / TR-3.6 / TR-4.5 / TR-5.16 / TR-6.7 / TR-7.8 / TR-8.5）**均无分数与理由记录**
+  - ✅ **TR-8.4 已于 2026-09-14 达成**（`TEST_REPORT.md` §17.11）：
+    - **9 条 rubric 全部给出分数与理由**：TR-1.5=5 / TR-2.5=2 / TR-2.6=5 / TR-3.6=4 / TR-4.5=4 /
+      TR-5.16=4 / TR-6.7=4 / TR-7.8=4 / TR-8.5=4 —— **8 条 ≥ 阈值 4**，仅 **TR-2.5=2**
+      （澄清问题 3 条跨来源冗余，根因 N3，**已修复待重测**；该分反映测试当次运行）
+    - **AC-11 判定「通过（附修订）」**：8 小节齐备（§20.1–20.7 + 附录 B 含 DevBlog 条目）；
+      并修订 §20.3「3 轮收敛」不实措辞 → 实为 **0 条回答强放行**（`force_passed=True`），
+      2026-09-11 补测为 7/7 真实作答、1 轮收敛
+    - **AC-12 判定 4 分（≥4 通过）**：证据链与 Bug 根因登记完整，但 AC 判定矩阵此前仅到 AC-10、
+      部分早期 Bug（R3 / Bug B4）缺独立复现脚本，故未达锚 5
   - ⚠️ §20.3 关于 V1.0 澄清"3 轮收敛"的表述与 `blog_v1_clarify.json` 的 `rounds_total=0` 不一致（见 T2 Deviation）
-- **Remediation**: ① 修订 §20.3 澄清措辞；② 补 AC-11/AC-12 判定；③ 补 9 条 rubric 评分记录。
+- **Remediation**: ~~① 修订 §20.3 澄清措辞~~ ✅；~~② 补 AC-11/AC-12 判定~~ ✅；
+  ~~③ 补 9 条 rubric 评分记录~~ ✅ —— 三项均于 **2026-09-14** 完成（见上、见 `TEST_REPORT.md` §17.11）。
 
 ---
 
@@ -351,7 +360,7 @@
 | T5 V1.0 生成与质量核验 | ⚠️ completed（含缺口） | `blog_v1_generate_result.json`（88 条）、`blog_v1_export_feedback.json` | ✅ TR-5.7/5.8 已补测通过；剩 TR-5.1/5.2/5.5 无 SSE 留证 |
 | T6 V1.1 迭代 | ⚠️ completed（含缺口） | `blog_quality_v11.json`、`blog_product_isolation.json`、`blog_qa_v11.json` | ✅ **TR-6.4 已补测通过（3/3）**；剩 **TR-6.5 图谱增量**、TR-6.2 无留证；⚠️ 新发现「答案依据靠 AI 用例」+ V1.1 文档自相矛盾 |
 | T7 V1.1 生成 + Q/R/M | ⚠️ completed（含缺口） | `blog_quality_v11.json`、`blog_flywheel_*.json` | M3 SKIP、**R3 FAIL（Bug B4）**、TR-7.6 无留证 |
-| T8 汇总与文档 | ⚠️ completed（含缺口） | `TEST_PLAN.md` §20 + `TEST_REPORT.md` §17 + 附录 B | TR-8.3 命名不符、**TR-8.4 未达成（AC-11/12 未判定 + 9 条 rubric 无分数）** |
+| T8 汇总与文档 | ✅ completed | `TEST_PLAN.md` §20 + `TEST_REPORT.md` §17（含 §17.11）+ 附录 B | ~~TR-8.4 未达成~~ ✅ 2026-09-14 达成（9 条 rubric 8 条 ≥4、AC-11 通过附修订、AC-12=4）。剩余：TR-8.3 预设文件名命名不符（实际 13 个） |
 
 **整体判定**：AC-1~AC-8、AC-10 **PASS**；AC-9 主体 PASS 但 R3 存在轻量 Bug（B4）；**AC-11/AC-12 未判定**。飞轮正循环（avg_conf 0.671→0.965、回归复用 108 条、approved 0→340）成立，与 §19.2 工单基线一致。
 

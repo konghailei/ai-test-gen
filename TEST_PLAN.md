@@ -1209,7 +1209,7 @@ parse → select_channel → clarify → gate → impact → test_design → gen
 
 | 通用清单维度               | V1.0（4 FP，88 用例）                              | V1.1（11 FP，397 用例→飞轮重跑 340）                  |
 | -------------------- | --------------------------------------------- | -------------------------------------------- |
-| 澄清收敛（§15.5 方法论）      | 3 轮收敛→pending\_review（`blog_v1_clarify.json`） | 强放行至 pending\_review                         |
+| 澄清收敛（§15.5 方法论）      | **0 条回答强放行**（`force_passed=True`、`all_answers_total=0`）→ pending\_review；2026-09-11 补测为 **7/7 真实作答、1 轮收敛**（`blog_v1_clarify_audit.json`） | 强放行至 pending\_review（补测见 `blog_qa_v11.json`） |
 | FP 拆分与审批             | 4/4 approved（`blog_v1_fp_approved.json`）      | 11/11 covered                                |
 | SRR/FP 追溯            | 用例带 related\_fp，traceability 逐条               | 11 FP，case\_json.related\_fp 覆盖 11/11=1.0    |
 | source\_pattern 非空率  | 已固化（LLM 未填由 `",".join(matched_patterns)` 兜底）  | **397/397=100%**（`blog_quality_v11.json` Q4） |
