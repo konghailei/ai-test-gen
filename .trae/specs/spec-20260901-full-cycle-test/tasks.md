@@ -189,9 +189,28 @@
   - ✅ **TR-5.7 已补测通过**：`blog_v1_export_feedback.json` —— 6 格式导出 **6/6 成功**（json 11476B / markdown 5784B / gherkin 2190B / pytest 4794B / xmind 2484B / xmind8 2876B，MIME 与 `Content-Disposition` 均正确）；无 `case_ids` → **400**（"必须提供至少一个 case_id 进行导出"）；全部不存在 → **404**
   - ✅ **TR-5.8 已补测通过**：单条 feedback `draft→approved`（200）、再驳回 `approved→rejected`（200）；批量 feedback 2 条 → 全 `approved`；CRUD `PUT` 200 / `DELETE` 200 / 删除后 `GET` 404
   - ℹ️ 补测**刻意选用 scratch 产品 `PROD-88568-301`**（3 条 draft）执行 feedback/CRUD，避免污染 DevBlog 已记录的 737 approved 基线；导出用 DevBlog 真实用例（只读）
-  - ⚠️ TR-5.1（404/409 三档前置）、TR-5.2（SSE 9 节点顺序 + `channel=FULL`）、TR-5.5（补生成 ≤1 次）**仍无独立产物**：`blog_v1_generate_result.json` 仅含 `task` + `case_db_stats` 两个键，**无原始 SSE 事件流**
+  - ✅ **TR-5.1 已于 2026-09-14 补测闭合**（工具 `scripts/verify_generate_guards_tr51.py`，
+    产物 `blog_v11_generate_guards.json`，**5/5 PASS**）：
+
+    | 用例 | 期望 | 实测 |
+    |---|---|---|
+    | ① 不存在的 `req_id` | 404 | ✅ `404 需求 REQ-TR51-NOT-EXIST-0000 不存在` |
+    | ② 非 confirmed 需求 | 409 | ✅ `409 需求状态为 draft，仅 confirmed 状态可生成…` |
+    | ③ 影响分析条目未确认 | 409 | ✅ `409 存在 2 个未确认的影响分析条目…` |
+    | ④ 正例夹具守卫谓词 | 全部满足 | ✅ 需求存在／`status==confirmed`／影响条目全部已确认／`srr_json.requirement` 存在 |
+    | ④b 历史证据：confirmed 可生成 | 实际生成过 | ✅ `REQ-1788322894962-6696` status=`confirmed`，已生成用例 **737 条** |
+
+    夹具建在 scratch 产品 `PROD-88568-301`，**跑完即删**（含其 `analysis_tasks`），不污染基线。
+
+    > ⚠️ **正例刻意不真实触发生成**：实测调用 `/generate` 后任务会长时间持行锁
+    > （连 `UPDATE analysis_tasks` 都撞 60s `statement_timeout`），且烧 LLM 配额。
+    > 故改为「守卫谓词满足 + 历史生成证据」双重验证，零副作用。
+
+  - ⚠️ TR-5.2（SSE 9 节点顺序 + `channel=FULL`）、TR-5.5（补生成 ≤1 次）**仍无独立产物**：
+    `blog_v1_generate_result.json` 仅含 `task` + `case_db_stats` 两个键，**无原始 SSE 事件流**
   - ℹ️ TR-5.16 无 rubric 逐项评分记录
-- **Remediation**: 剩余仅 TR-5.1/5.2/5.5 需补跑（SSE 事件流留存 + 前置守卫用例），**不影响已有 88/397 条用例的数据结论**。
+- **Remediation**: 剩余仅 TR-5.2/5.5 需补跑（**需真实重跑 SSE 生成**，烧免费额度、单次 10-30 分钟）；
+  ~~TR-5.1~~ 已于 2026-09-14 闭合。**不影响已有 737 条用例的数据结论**。
 
 ## Task 6: V1.1 版本迭代（上传解析→澄清→确认→归档→KB再问答→图谱增量）
 - **Status**: `completed`（TR-6.4 已于 **2026-09-11 补测通过**；**TR-6.5 已于 2026-09-14 严格复核**：断言①PASS，断言②判定为 **N/A** —— 详见 Deviation）
