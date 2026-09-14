@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.auth import require_admin, require_write, get_current_user
 from pydantic import BaseModel, Field
-from sqlalchemy import select, delete, exc as sa_exc, func
+from sqlalchemy import select, delete, update, exc as sa_exc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
@@ -820,6 +820,33 @@ async def archive_project(
         r.go_live_date = parsed_go_live
         r.archived_at = now
 
+    # 11b. v3.3（N1 治理 · 用例库与需求库口径对齐）：随项目归档**固化用例**。
+    #
+    # 背景：KB 问答的需求检索只取 `status="archived"` 的需求（"只信已归档"），
+    # 但用例检索**没有任何归档过滤**，导致尚未定稿/仍在审核的用例也会被当作依据
+    # （N1「答案依据 AI 生成用例」的直接原因之一）。
+    #
+    # 用例侧的落点：`test_cases.archived_at` 列**早已存在但从未写入过**
+    # （实测 1704 条全为 NULL）。此处按与需求侧相同的口径固化：
+    # 归档时把本项目下**已审核通过**的用例标记 archived_at，
+    # 与第 1423 行「用 status=='approved' 的用例构建 functional_point_cases
+    # 固化集」的口径一致。
+    req_ids_for_cases = [r.id for r in requirements]
+    if req_ids_for_cases:
+        case_res = await session.execute(
+            update(TestCase)
+            .where(
+                TestCase.req_id.in_(req_ids_for_cases),
+                TestCase.status == "approved",
+                TestCase.archived_at.is_(None),   # 幂等：重复归档不覆盖首次固化时间
+            )
+            .values(archived_at=now)
+        )
+        logger.info(
+            "[ArchiveProject] 固化用例: 项目={}, 标记 archived_at 的 approved 用例 {} 条",
+            proj_id, case_res.rowcount or 0,
+        )
+
     try:
         await session.commit()
     except sa_exc.IntegrityError as e:
@@ -1221,6 +1248,17 @@ async def reactivate_project(
         r.status = "active"
         r.go_live_date = None
         r.archived_at = None
+
+    # 4b. v3.3（与 11b 对称）：取消归档时**同步解除用例固化**。
+    # 否则用例会一直停留在"已归档"状态，而所属需求已回到 active——
+    # 出现"权威用例挂在不存在的版本上"的不一致。
+    _req_ids_unarch = [r.id for r in requirements]
+    if _req_ids_unarch:
+        await session.execute(
+            update(TestCase)
+            .where(TestCase.req_id.in_(_req_ids_unarch))
+            .values(archived_at=None)
+        )
 
     for f in all_fps:
         # v2.45: 恢复为 pending_review（需重新审核），而非直接 approved（避免跳过审核流程）

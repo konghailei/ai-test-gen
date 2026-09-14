@@ -151,6 +151,22 @@ class Settings(BaseSettings):
     """看门狗巡检间隔（秒）"""
     TASK_WATCHDOG_INTERVAL: int = 120
 
+    # ========== 知识库检索口径（v3.3 / N1 治理） ==========
+    """KB 问答的用例检索是否**只取已固化（归档）用例**。
+
+    口径与需求侧对齐：需求检索只取 `status="archived"` 的需求（"只信已归档"），
+    而用例侧原本**没有任何归档过滤**，尚未定稿/仍在审核的用例也会被当作依据——
+    这是 N1「答案依据 AI 生成用例」的直接原因之一。
+
+    用例的"已归档"= 随所属项目归档时写入 `test_cases.archived_at`
+    （见 `api/products.py` 归档流程第 11b 步）。置 False 可回退到旧行为。
+    """
+    KB_CASES_ARCHIVED_ONLY: bool = True
+
+    """用例检索的召回条数（过滤前）。只取已固化用例时，需要多召回一些再筛，
+    否则 top-5 被未固化用例占满会导致过滤后所剩无几。"""
+    KB_CASES_FETCH_K: int = 15
+
     # ========== 嵌入模型配置 ==========
     """嵌入模型类型：local（sentence-transformers，默认）| cloud（远程 API 嵌入）。
     注：ChromaDB 已弃用，chroma_default 选项不再可用；模型实际加载由 EMBEDDING_MODEL_NAME 决定。"""

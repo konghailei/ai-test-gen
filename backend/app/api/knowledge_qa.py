@@ -72,6 +72,11 @@ def _xml_escape(text: str) -> str:
 # 但不再像旧版那样硬截前 800 字符（那是"命中 source 却说未找到具体规则"的根因之一）。
 _QA_DOC_MAX_CHARS = 8000
 
+# v3.3：进入 prompt 的**用例**文档数上限（需求/功能点文档不限）。
+# 原因：只取已固化用例后召回条数放大，若不加限制，固化用例较多时
+# prompt 会因「每篇最多 _QA_DOC_MAX_CHARS」而成倍膨胀。
+_QA_MAX_CASE_DOCS = 5
+
 
 def _doc_text_for_qa(r: dict) -> str:
     """从检索结果中提取尽可能完整的文档文本用于回答上下文（N10 修复）。
@@ -115,6 +120,15 @@ AUTHORITY_BY_TYPE = {
 }
 
 
+def _cases_archived_only() -> bool:
+    """用例检索是否只取已固化（归档）用例（v3.3 / N1 治理，可配置回退）。"""
+    try:
+        from app.config import settings
+        return bool(getattr(settings, "KB_CASES_ARCHIVED_ONLY", True))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _effective_date(*candidates) -> str:
     """取第一个非空日期作为"可比较日期"（B6-3）。
 
@@ -154,6 +168,17 @@ def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: li
     id_to_authority = {s["id"]: s.get("authority_level", "") for s in enriched_sources}
     id_to_effdate = {s["id"]: s.get("effective_date", "") for s in enriched_sources}
     valid_results = [r for r in kb_results if r.get("id") in valid_ids]
+
+    # v3.3：只取已固化用例后，召回条数放大（KB_CASES_FETCH_K），需在此限制用例文档数，
+    # 避免固化用例较多时把 prompt 撑爆（每篇上限 _QA_DOC_MAX_CHARS）。
+    _kept, _case_kept = [], 0
+    for r in valid_results:
+        if r.get("type") == "test_case":
+            if _case_kept >= _QA_MAX_CASE_DOCS:
+                continue
+            _case_kept += 1
+        _kept.append(r)
+    valid_results = _kept
 
     doc_parts = []
     if valid_results:
@@ -287,15 +312,19 @@ async def _enrich_sources(
         for row in result.all():
             fp_map[row[0]] = {"name": row[1], "requirement_id": row[2]}
 
-    # 查询测试用例详情（v3.3：额外取 source，用于区分 L2 人工核准 / L3 AI 生成）
+    # 查询测试用例详情（v3.3：额外取 source 区分 L2/L3；额外取 archived_at 做归档过滤）
     case_map: dict[str, dict] = {}
     if case_ids:
-        stmt = select(TestCase.id, TestCase.title, TestCase.source).where(
-            TestCase.id.in_(case_ids)
-        )
+        stmt = select(
+            TestCase.id, TestCase.title, TestCase.source, TestCase.archived_at,
+        ).where(TestCase.id.in_(case_ids))
         result = await session.execute(stmt)
         for row in result.all():
-            case_map[row[0]] = {"title": row[1], "source": row[2] or "ai_generated"}
+            case_map[row[0]] = {
+                "title": row[1],
+                "source": row[2] or "ai_generated",
+                "archived_at": row[3],
+            }
 
     # 查询产品名称
     product_ids = set()
@@ -345,11 +374,21 @@ async def _enrich_sources(
                 found = True
 
         elif src_type == "test_case" and src_id in case_map:
-            title = case_map[src_id]["title"]
-            # B6-1：人工核准/复用 = L2（可作行为佐证），AI 生成 = L3（不得作规则依据）
-            src_val = (case_map[src_id].get("source") or "ai_generated").lower()
-            authority = "L2" if src_val in ("human_approved", "reused", "manual") else "L3"
-            found = True
+            info = case_map[src_id]
+            # v3.3（N1 治理 · 与需求侧口径对齐）：只取**已固化（归档）**的用例。
+            # 未固化的用例可能还要修改/尚未审核完，不能作为业务规则依据。
+            # 口径 = 随所属项目归档时写入的 test_cases.archived_at（products.py 归档第 11b 步）。
+            if _cases_archived_only() and not info.get("archived_at"):
+                logger.debug(
+                    "[API/knowledge-qa] 跳过未固化用例: id={}（archived_at 为空）", src_id
+                )
+                found = False
+            else:
+                title = info["title"]
+                # B6-1：人工核准/复用 = L2（可作行为佐证），AI 生成 = L3（不得作规则依据）
+                src_val = (info.get("source") or "ai_generated").lower()
+                authority = "L2" if src_val in ("human_approved", "reused", "manual") else "L3"
+                found = True
 
         # 跳过未在 PG 中找到的孤儿向量记录
         # v3.3（修 N6）：functional_point 一并纳入——之前只校验 requirement，
@@ -357,6 +396,9 @@ async def _enrich_sources(
         # 现在类型已正确，这里的判定对 FP 是真孤儿过滤（保留卫生作用）。
         if not found and src_type in ("requirement", "functional_point"):
             logger.warning("[API/knowledge-qa] 跳过孤儿向量: id={}, type={}", src_id, src_type)
+            continue
+        # v3.3：未固化用例在上面的 test_case 分支里已置 found=False，这里统一丢弃
+        if not found and src_type == "test_case":
             continue
 
         display_title = title or src.get("title") or src.get("name") or "(已删除)"
@@ -536,9 +578,16 @@ async def kqa_ask(
         logger.warning("[API/knowledge-qa] 检索需求失败: {}", err_msg[:100])
 
     try:
+        # v3.3：只取已固化用例时会过滤掉未固化项，故放大召回条数
+        # （KB_CASES_FETCH_K），再在 _enrich_sources / _build_qa_prompt 收窄。
+        try:
+            from app.config import settings as _st
+            _case_k = int(getattr(_st, "KB_CASES_FETCH_K", 15))
+        except Exception:  # noqa: BLE001
+            _case_k = 15
         case_results = await asyncio.to_thread(
             vector_store.search_similar_cases,
-            question, top_k=5, product_id=product_id, modules=modules,
+            question, top_k=_case_k, product_id=product_id, modules=modules,
         )
         for r in case_results:
             r["type"] = "test_case"
