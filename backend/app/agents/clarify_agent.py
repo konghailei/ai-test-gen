@@ -273,6 +273,8 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
         # （记入 quality_report.llm_self_score，不参与 overall_score 计分），
         # 以便为"是否把 LLM 自评接回加权"积累真实数据后再决策。
         llm_self_report: dict = {}
+        # v3.3（N7）：语义检测层是否降级（LLM 输出非 JSON 且重试后仍为空）
+        semantic_degraded = False
         try:
             llm_result = await self._generate_questions(
                 srr=srr,
@@ -288,6 +290,10 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
                     "[ClarifyAgent] LLM 自评质量分={}（仅观测记录，不参与门禁计分）",
                     _llm_qr.get("overall_score"),
                 )
+            # v3.3（N7）：语义层降级标记——LLM 输出非 JSON 且重试后仍为空时置位。
+            # 必须向上传递，否则"语义层静默归零 + 质量分仍 0.91"的假象无法被发现。
+            if isinstance(llm_result, dict) and llm_result.get("semantic_degraded"):
+                semantic_degraded = True
             # v2.8.66: LLM 语义问题生成后立即做必要性过滤——猜想型 upper_bound_rule 不进入后续分流和KB检索
             llm_semantic_questions = self._filter_questions_by_necessity(
                 llm_result.get("questions", []) or []
@@ -326,9 +332,17 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
                         q["id"] = f"llm_{q['id']}"
             await _report(f"LLM 语义检测完成（发现 {len(llm_semantic_questions)} 个问题），正在生成知识库查询...", 46)
         except Exception as e:
-            # LLM 语义检测失败不阻断流水线——规则层和 KB 仍可用
-            logger.warning(
-                "[ClarifyAgent] LLM 语义检测失败（不阻断，仅跳过）: {}",
+            # LLM 语义检测失败不阻断流水线——规则层和 KB 仍可用。
+            #
+            # v3.3（修 N7）：但**必须显式标记降级**。实测有两种失败模式，
+            # 原先两种都只留日志、对外不可见：
+            #   模式 A：LLM 返回散文 → 容错路径返回缺 questions 的结果（不抛异常）
+            #   模式 B：LLM 返回**格式非法的 JSON**（如第 25 行多余逗号）→ 抛异常走到这里
+            # 两者都让语义层归零，而 overall_score 仍可能高达 0.91，
+            # 用户与质量分都察觉不到「跨节矛盾/引用未定义/信息缺失/模糊表述」已完全未检测。
+            semantic_degraded = True
+            logger.error(
+                "[ClarifyAgent] LLM 语义检测失败 → 本次澄清降级为纯规则层（N7，模式B）: {}",
                 str(e)[:200],
             )
             await _report("LLM 语义检测失败，继续生成知识库查询...", 46)
@@ -1301,11 +1315,22 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
                 # 此处残留引用会在含 KB 未答问题的轮次直接 NameError——保留 key 兼容前端，恒为 0
                 "llm_question_refine_ms": 0,
             },
+            # v3.3（N7）：降级标记——语义检测层失效时显式暴露，
+            # 避免"质量分很高但语义层什么都没检测"的假象无法被发现。
+            "degraded_flags": (["semantic_layer_failed"] if semantic_degraded else []),
+            "semantic_degraded": semantic_degraded,
         }
 
+        if semantic_degraded:
+            logger.error(
+                "[ClarifyAgent] ⚠️ 本次澄清为**降级结果**：语义检测层未产出任何问题，"
+                "仅依赖规则层。overall_score={:.3f} 不代表语义层有效。degraded_flags=['semantic_layer_failed']",
+                quality_score,
+            )
+
         logger.info("[ClarifyAgent] ◀ 澄清完成 ▶ 下一节点 QualityGate: status={}, "
-                    "overall_score={:.3f}, pass_threshold={}, questions={}, cold_start={}",
-                    status, quality_score, threshold, len(questions), cold_start)
+                    "overall_score={:.3f}, pass_threshold={}, questions={}, cold_start={}, degraded={}",
+                    status, quality_score, threshold, len(questions), cold_start, semantic_degraded)
         return result
 
     # ========================================================================

@@ -1303,8 +1303,15 @@ class LLMClient:
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as e1:
-            logger.debug("[LLM/parse] 直接解析失败: {}, text_len={}, first80={!r}, last80={!r}",
-                         str(e1)[:100], len(cleaned), cleaned[:80], cleaned[-80:] if len(cleaned) > 80 else "")
+            # v3.3：除首尾片段外，额外打印**出错位置附近**的窗口——
+            # 仅凭 line/column 与首尾 80 字符无法定位语法错误（如第 25 行的
+            # 多余逗号 / 缺逗号），导致「为什么修复函数也没救回来」无法排查。
+            _pos = getattr(e1, "pos", 0) or 0
+            _win = cleaned[max(0, _pos - 120): _pos + 120]
+            logger.debug("[LLM/parse] 直接解析失败: {}, text_len={}, first80={!r}, last80={!r}, "
+                         "err_pos={}, 附近片段={!r}",
+                         str(e1)[:100], len(cleaned), cleaned[:80],
+                         cleaned[-80:] if len(cleaned) > 80 else "", _pos, _win)
             # 容忍：提取首个 {...} 或 [...] 块
             data = _extract_json_block(cleaned)
             if data is None:

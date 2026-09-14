@@ -1163,6 +1163,10 @@ async def _run_requirement_analysis(
                 "kb_status": clarify_result.get("kb_status", {}),
                 "quality_report": clarify_result.get("quality_report", {}),
                 "field_conflicts": clarify_result.get("field_conflicts", []),
+                # v3.3（N7）：语义检测层降级标记落库——否则"质量分很高但语义层
+                # 什么都没检测"这一事实只存在于日志里，前端与后续流程都看不到。
+                "degraded_flags": clarify_result.get("degraded_flags", []),
+                "semantic_degraded": clarify_result.get("semantic_degraded", False),
             }
             kb_logs = clarify_result.get("kb_access_log", [])
             if kb_logs:
@@ -1548,6 +1552,9 @@ async def _run_clarify_reparse(
                 "kb_status": recheck_result.get("kb_status", {}),
                 "quality_report": _merged_qr,
                 "field_conflicts": recheck_result.get("field_conflicts", []),
+                # v3.3（N7）：同 1160 处，降级标记随本次重解析结果一并落库
+                "degraded_flags": recheck_result.get("degraded_flags", []),
+                "semantic_degraded": recheck_result.get("semantic_degraded", False),
             }
             recheck_kb_logs = recheck_result.get("kb_access_log", [])
             if recheck_kb_logs:

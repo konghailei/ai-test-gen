@@ -570,13 +570,49 @@ class ClarifyQuestionGenMixin:
         )
 
         try:
+            _sys_prompt = prompt_manager.get("clarify_agent", "SYSTEM_PROMPT")
             result = await self._llm.call_json(
                 prompt=user_prompt,
-                system_prompt=prompt_manager.get("clarify_agent", "SYSTEM_PROMPT"),
+                system_prompt=_sys_prompt,
                 schema_hint={"questions": list, "quality_report": dict},
                 temperature=0.2,
                 agent_name="ClarifyAgent",
             )
+
+            # v3.3（修 N7）：语义层"空结果"检测 + 重试一次。
+            #
+            # 背景：实测（REQ-1788922967346-1659，连续两次复现）LLM 会返回
+            # **散文而非 JSON**（12.9–14.8 万字符，如 "Looking at this requirement…"），
+            # `call_json` 的容错路径会返回一个缺 `questions`/`issues_detected` 的结果，
+            # 而 `_generate_questions` 不会抛异常 → **语义检测层静默归零**，
+            # 澄清降级为纯规则层，但 overall_score 仍高达 0.910，
+            # 用户与质量分都察觉不到。语义层本应覆盖的
+            # 「跨节矛盾 / 引用未定义 / 信息缺失 / 模糊表述」就此完全失效。
+            if not result.get("questions") and not result.get("issues_detected"):
+                logger.error(
+                    "[ClarifyAgent] 语义检测层返回空结果（questions 与 issues_detected 均缺失），"
+                    "重试一次并强制 JSON 输出"
+                )
+                result = await self._llm.call_json(
+                    prompt=(
+                        user_prompt
+                        + "\n\n【输出格式要求（上次输出不是合法 JSON，请务必遵守）】\n"
+                        "只返回一个 JSON 对象，不要任何解释性文字、不要 Markdown 代码块围栏、"
+                        "不要在 JSON 前后添加说明。必须以 { 开头、以 } 结尾。"
+                    ),
+                    system_prompt=_sys_prompt,
+                    schema_hint={"questions": list, "quality_report": dict},
+                    temperature=0.0,
+                    agent_name="ClarifyAgent",
+                )
+
+            if not result.get("questions") and not result.get("issues_detected"):
+                # 重试后仍为空 → 显式标记降级，避免"高分布 + 空语义层"的假象
+                logger.error(
+                    "[ClarifyAgent] 语义检测层重试后仍为空 → 本次澄清降级为纯规则层（N7）"
+                )
+                result["semantic_degraded"] = True
+
             # 后处理：仅过滤掉 optional 问题（保留全部 critical/important，不截断）
             questions = result.get("questions", [])
             questions = [q for q in questions if q.get("priority") != "optional"]
