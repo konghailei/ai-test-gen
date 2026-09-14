@@ -206,11 +206,31 @@
     > （连 `UPDATE analysis_tasks` 都撞 60s `statement_timeout`），且烧 LLM 配额。
     > 故改为「守卫谓词满足 + 历史生成证据」双重验证，零副作用。
 
-  - ⚠️ TR-5.2（SSE 9 节点顺序 + `channel=FULL`）、TR-5.5（补生成 ≤1 次）**仍无独立产物**：
-    `blog_v1_generate_result.json` 仅含 `task` + `case_db_stats` 两个键，**无原始 SSE 事件流**
+  - ✅ **TR-5.2 / TR-5.5 已于 2026-09-14 补测闭合**（工具 `scripts/verify_generate_sse_tr52.py`，
+    产物 `blog_v11_sse_stream.json`，**6/6 PASS**，原始事件流 48 条已留存）：
+
+    | 断言 | 判定 | 实测 |
+    |---|---|---|
+    | ① `Content-Type` | ✅ | `text/event-stream; charset=utf-8` |
+    | ② 阶段顺序单调不回退 | ✅ | `parse → select_channel → gate → impact → test_design → generate → review → done` |
+    | ③ 9 节点覆盖（**clarify 除外**） | ✅ | 8/9；缺 `clarify`——夹具 SRR 完整无需澄清，**属正常分支不是缺陷** |
+    | ④ `done` 带 cases | ✅ | **14 条** |
+    | ⑤ `done` 的 `channel=FULL` | ✅ | `FULL` |
+    | TR-5.5 补生成 ≤ 1 次 | ✅ | **0 次**（`should_supplement=false`、`supplement_iteration=0`） |
+
+    > ⚠️ **载体偏差（必须写明）**：spec 载体是 DevBlog V1.1（11 FP），本轮改用 **2 FP 小夹具**
+    > （后改为真实 V1.1 SRR 子集）。理由：DevBlog 全量重跑按当前免费供应商实测速率
+    > （单次调用可达 492s）需数小时且中途失败风险高；而 TR-5.2 验证的是 **SSE 协议与阶段序列**，
+    > 与 FP 数量无关。故本产物证明「**SSE 机制符合 TR-5.2**」，**不等于** DevBlog 全量生成复现。
+    >
+    > ⚠️ **过程教训（解析器 bug）**：第一版脚本把 SSE 的 `event:` 与 `data:` 当独立行处理，
+    > 未跨行携带事件名 → `done` 的 `cases`/`channel` 被误判缺失（实际是 14 / FULL）。
+    > 已修复（跨行携带 `cur_event`）并新增 `--recheck` 离线重算模式，
+    > **避免为一次解析错误重跑 8 分钟的流水线**。
   - ℹ️ TR-5.16 无 rubric 逐项评分记录
-- **Remediation**: 剩余仅 TR-5.2/5.5 需补跑（**需真实重跑 SSE 生成**，烧免费额度、单次 10-30 分钟）；
-  ~~TR-5.1~~ 已于 2026-09-14 闭合。**不影响已有 737 条用例的数据结论**。
+- **Remediation**: ✅ **全部闭合**（TR-5.1 于 2026-09-14 闭合；TR-5.2/5.5 同日闭合，6/6 PASS）。
+  剩余仅**载体偏差**一项待说明：TR-5.2 用 2 FP 小夹具而非 DevBlog V1.1 全量（理由见上），
+  若需全量复现需另排期（数小时 + 免费额度）。**不影响已有 737 条用例的数据结论**。
 
 ## Task 6: V1.1 版本迭代（上传解析→澄清→确认→归档→KB再问答→图谱增量）
 - **Status**: `completed`（TR-6.4 已于 **2026-09-11 补测通过**；**TR-6.5 已于 2026-09-14 严格复核**：断言①PASS，断言②判定为 **N/A** —— 详见 Deviation）

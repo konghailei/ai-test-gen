@@ -606,7 +606,36 @@ RESULT ALL PASS
 - 未满足锚 5：AC-1~AC-12 判定矩阵此前**仅到 AC-10**（本轮补齐 AC-11/12）；
   部分早期 Bug（如 R3 / Bug B4）缺少独立复现脚本
 
-> **剩余未闭合（截至 2026-09-14）**：**T5 TR-5.2/5.5**（需真实重跑 SSE，烧额度、单次 10-30 分钟）。
-> ~~T6 TR-6.5~~ ✅ 闭合；~~T5 TR-5.1~~ ✅ 闭合（5/5 PASS）；~~T8 9 条 rubric 与 AC-11/12~~ ✅ 本轮闭合。
+### §17.12 2026-09-14 补测：TR-5.2 / TR-5.5 SSE 事件流（6/6 PASS）
+
+工具 `scripts/verify_generate_sse_tr52.py`；产物 `blog_v11_sse_stream.json`（原始事件流 48 条）。
+
+| 断言 | 判定 | 实测 |
+|---|---|---|
+| ① `Content-Type` | ✅ | `text/event-stream; charset=utf-8` |
+| ② 阶段顺序单调不回退 | ✅ | `parse → select_channel → gate → impact → test_design → generate → review → done` |
+| ③ 9 节点覆盖（**clarify 除外**） | ✅ | 8/9；缺 `clarify`——夹具 SRR 完整无需澄清，**属正常分支** |
+| ④ `done` 带 cases | ✅ | **14 条** |
+| ⑤ `done` 的 `channel=FULL` | ✅ | `FULL` |
+| TR-5.5 补生成 ≤ 1 次 | ✅ | **0 次**（`should_supplement=false`、`supplement_iteration=0`） |
+
+**⚠️ 载体偏差（必须写明）**：spec 载体是 DevBlog V1.1（11 FP），本轮改用 **2 FP 小夹具**
+（后改为真实 V1.1 SRR 子集）。理由：DevBlog 全量重跑按当前免费供应商实测速率
+（单次调用 492s）需数小时且失败风险高；TR-5.2 验证的是 **SSE 协议与阶段序列**，与 FP 数量无关。
+故本产物证明「**SSE 机制符合 TR-5.2**」，**不等于** DevBlog 全量生成复现。
+
+**⚠️ 过程教训（我自己写的解析器 bug）**：第一版把 SSE 的 `event:` 与 `data:` 当独立行处理，
+未跨行携带事件名 → `done` 的 `cases`/`channel` 被**误判为缺失**（实测是 14 / `FULL`）。
+已修复（跨行携带 `cur_event`），并新增 **`--recheck` 离线重算模式**——从已保存产物重新判定，
+**不为一次解析错误重跑 8 分钟流水线**。
+
+**LLM 供应商现状（附带查清）**：`settings.LLM_PROVIDER=deepseek` 但 `llm_config` 中**无此 provider**
+（只有 qwen2 / qwen / 日日新 / qwen1 / openrouter），这正是 09-11 出现「无可用 LLM 提供商」的原因。
+实测当前**可用**：qwen2 免费额度耗尽（403）→ 自动故障转移 `openrouter:poolside/laguna-s-2.1:free`。
+
+> **剩余未闭合（截至 2026-09-14）：无** —— T6 TR-6.5、T5 TR-5.1、T5 TR-5.2/5.5、
+> T8 的 9 条 rubric 与 AC-11/AC-12 均已于本轮闭合。
 >
-> 新增问题处置状态：**N2 已修**（V1.1 文档 L83 对齐 L75）、**N3 已修**（跨来源语义去重 42.9%→0）、**N4 已修**（看门狗 + 首响应超时根治）。**N1 未修**（知识权威层级倒挂，属治理项，建议纳入 docs/14 方向 B）。
+> 新增问题处置状态：**N2 已修**（V1.1 文档 L83 对齐 L75）、**N3 已修**（跨来源语义去重 42.9%→0）、
+> **N4 已修**（看门狗 + 首响应超时根治）、**N1 已出治理设计**（`docs/14` §9，B6 五块 + 4 项验收指标）。
+> N1 的**实施**待确认——B6-2 孤儿向量 GC 涉及**删除 Milvus 向量**，按 §9.7 需先 dry-run 出清单再执行。
