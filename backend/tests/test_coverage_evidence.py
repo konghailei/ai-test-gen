@@ -232,3 +232,28 @@ def test_invalid_existing_labels_are_preserved_not_replaced_by_heuristics():
     result = calc_point_coverage(_srr(1), [], [case])
     assert result["coverage_status"] == "unknown"
     assert result["invalid_point_ids"] == ["happy_path.99"]
+
+
+def test_precondition_annotation_is_legal_but_not_counted():
+    """前置条件是合法要点类型：不得判为"引用不存在"，也不进覆盖分母。
+
+    端到端实测发现的假阻断：用例标注 precondition.1 → invalid_point_references
+    → 发布决策被阻断（而它其实是合法标注）。
+    """
+    srr = _srr(1)
+    srr["preconditions"] = ["用户已登录"]
+    case = {"notes": "[precondition.1] [happy_path.1]"}
+    result = calc_point_coverage(srr, [], [case])
+    assert result["invalid_point_ids"] == []
+    assert result["total_points"] == 1  # 分母仍不含前置条件
+    assert result["covered_points"] == 1
+    assert result["covered_point_ids"] == ["happy_path.1"]
+    assert result["coverage_status"] == "mapped"
+
+
+def test_unknown_precondition_still_reported_invalid():
+    srr = _srr(1)
+    srr["preconditions"] = ["用户已登录"]
+    result = calc_point_coverage(srr, [], [{"notes": "[precondition.9]"}])
+    assert result["invalid_point_ids"] == ["precondition.9"]
+    assert result["covered_points"] == 0

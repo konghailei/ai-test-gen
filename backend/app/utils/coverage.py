@@ -368,6 +368,15 @@ def calc_point_coverage(srr: dict, functional_points: list[dict], cases: list[di
     points = collect_points(srr, functional_points or [])
     total = len(points)
     point_map = {p["id"]: p for p in points}
+    # v3.4 修复（端到端实测发现）：`precondition.N` 是**合法要点类型**，但默认不参与
+    # 覆盖分母（collect_points 会过滤掉）。若拿 point_map 当"合法 ID 全集"，
+    # 用例标注 precondition 会被判成"引用了不存在的要点"→ invalid_point_references
+    # → 直接阻断自动发布。这是**口径错位造成的假阻断**：分母可以排除前置条件，
+    # 但合法性判定必须认它。
+    known_ids = set(point_map.keys()) | {
+        p["id"] for p in collect_points(srr, functional_points or [], include_preconditions=True)
+        if p["ptype"] == "precondition"
+    }
     case_list = [c for c in (cases or []) if isinstance(c, dict)]
     case_count = len(case_list)
 
@@ -380,8 +389,10 @@ def calc_point_coverage(srr: dict, functional_points: list[dict], cases: list[di
         ids = extract_point_ids(c)
         if not ids:
             continue
-        valid = ids & point_map.keys()
-        invalid_ids.extend(sorted(ids - point_map.keys()))
+        unknown = ids - known_ids
+        invalid_ids.extend(sorted(unknown))
+        # 只有"既能算覆盖、又真实存在"的 ID 才进入覆盖分子（前置条件不进分母）
+        valid = (ids - unknown) & point_map.keys()
         if is_heuristic_mapping(c):
             # 回填线索：只登记，不计入任何覆盖分子/分母
             heuristic_ids |= valid
