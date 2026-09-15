@@ -142,6 +142,8 @@ class PipelineState(TypedDict, total=False):
     degraded_flags: list
     # v3.4：用例合同校验问题（只记录不上抛，随 state 透传到发布策略）
     content_errors: list
+    # v3.4：批内近重复去掉的记录（可审计：谁因为和谁重复被去掉）
+    dedup_removed: list
     publication: dict
     completion_status: str
     failed_subtasks: list
@@ -1125,6 +1127,20 @@ class Orchestrator:
                 _dedup_keys.add(k)
             _uniq.append(c)
         cases = _uniq
+        # v3.4：**跨生成通道**的近重复去重（逐 FP / 全量兜底 / 跨 FP 集成 / 审核后补生成
+        # 各自去重，跨通道只有完全同名能被拦住）。实测一次 56 条里有 22 条落在重复簇里，
+        # 直接推高用例库冗余。阈值偏保守（宁可漏报不误删），命中记录写进日志与 done 事件。
+        from app.utils.case_dedup import dedup_near_duplicates
+        cases, dedup_removed = dedup_near_duplicates(cases)
+        if dedup_removed:
+            logger.info(
+                "[Orchestrator] 批内近重复去重: 去掉 {} 条（保留 {} 条）。示例: {}",
+                len(dedup_removed), len(cases),
+                "; ".join(
+                    f"{r['removed_title'][:24]} ≈ {r['kept_title'][:24]}（{r['reason']}）"
+                    for r in dedup_removed[:3]
+                ),
+            )
         # v3.4（docs/15 §4.1 / P0-2）：合同校验**只标记不中断**。
         # 空集/畸形用例必须走完 review → done，由发布策略判 blocked / awaiting_human_review；
         # 在此抛异常会让前端连 done 事件都拿不到（"0 用例不得 completed"是**终态**要求，
@@ -1262,6 +1278,7 @@ class Orchestrator:
             "consistency_check": consistency_check,
             "degraded_flags": degraded_flags,
             "content_errors": content_errors,
+            "dedup_removed": dedup_removed,
             # v3.1.3 细粒度进度透出
             "_fp_subtasks": state.get("_fp_subtasks", []) or [],
             "_fp_groups": state.get("_fp_groups", []) or [],
@@ -1881,6 +1898,7 @@ class Orchestrator:
                 duration_ms=int(duration * 1000),
                 publication=final_state.get("publication", {}),
                 failed_subtasks=final_state.get("failed_subtasks", []),
+                dedup_removed=final_state.get("dedup_removed", []),
             )
             from app.core.publication_policy import quality_outcome
             done_event.update(quality_outcome(done_event))
