@@ -973,6 +973,117 @@ async def get_requirement_revision(
 # 4. 获取澄清问题
 # ============================================================================
 
+@router.get("/{req_id}/quality-report", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_requirement_quality_report(
+    req_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """需求质量报表（docs/14 二期 A5）。
+
+    让"需求写得好不好"对用户可见——**没有度量就没有改进动力**。
+
+    包含三部分：
+    1. **结构完整度**：分数 + 缺口清单（`missing` 含权重与取数位置，供前端指引补充）
+    2. **质量分拆解**：`quality_report` 的构成（完整性/歧义/来源/摘要）
+    3. **澄清轮次与收敛原因**：多轮澄清的历史与最终为何通过
+
+    ⚠️ **结构分按需实时计算**，而不是只读 `_clarify_state.structure_score`：
+    - 纯字典检查、**无 LLM 调用**，成本极低
+    - 存量需求（在本功能上线前解析的）没有落库值，按需计算使它们**立刻可用**，
+      不必等重新解析
+    - 若落库值存在且实时计算失败，回退到落库值
+    """
+    record = await session.get(Requirement, req_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
+
+    srr = record.srr_json or {}
+    clarify_state = srr.get("_clarify_state", {}) or {}
+
+    # ---- 1. 结构完整度 ----
+    structure: dict = {}
+    structure_source = "none"
+    try:
+        from app.db.models import FunctionalPoint
+        from app.utils.requirement_quality import (
+            calc_structure_score,
+            summarize_structure,
+        )
+
+        fp_rows = (await session.execute(
+            select(FunctionalPoint.srr_json).where(
+                FunctionalPoint.requirement_id == req_id
+            )
+        )).scalars().all()
+        fp_srrs = [f for f in fp_rows if isinstance(f, dict) and f]
+        structure = calc_structure_score(srr, fp_srrs)
+        structure["summary"] = summarize_structure(structure)
+        structure["fp_count"] = len(fp_srrs)
+        structure_source = "computed"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[API/requirements] 结构完整度实时计算失败，回退落库值: {}", str(e)[:150])
+        stored = clarify_state.get("structure_score") or {}
+        if stored:
+            structure = stored
+            structure_source = "stored"
+
+    # ---- 2. 质量分拆解 ----
+    quality_raw = clarify_state.get("quality_report", {}) or {}
+    quality = {
+        "overall_score": quality_raw.get("overall_score"),
+        "completeness_score": quality_raw.get("completeness_score"),
+        "ambiguity_score": quality_raw.get("ambiguity_score"),
+        "ambiguity_count": quality_raw.get("ambiguity_count"),
+        # score_source 说明分数来自"规则公式"还是"LLM 自评"，是分数可信度的关键
+        "score_source": quality_raw.get("score_source"),
+        "summary": quality_raw.get("summary"),
+    }
+    # 拆解字段（completeness/ambiguity/score_source/summary）由
+    # `clarify_score.build_quality_report()` 产出，**仅对在其上线后解析的需求存在**。
+    # 存量需求只有 overall_score —— 前端必须据此区分"没有拆解数据"与"拆解值为 0"，
+    # 否则会把 None 渲染成 0 造成误读。
+    quality["breakdown_available"] = any(
+        quality.get(k) is not None
+        for k in ("completeness_score", "ambiguity_score", "score_source", "summary")
+    )
+
+    # ---- 3. 澄清轮次与收敛原因 ----
+    history = srr.get("_clarify_history") or []
+    rounds = [
+        {
+            "round": i + 1,
+            "questions_count": len(h.get("questions") or []),
+            "answers_count": len({k: v for k, v in (h.get("answers") or {}).items() if v}),
+            "created_at": h.get("created_at"),
+            "note": h.get("note"),
+        }
+        for i, h in enumerate(history)
+    ]
+    convergence = {
+        "rounds": rounds,
+        "total_rounds": len(rounds),
+        "force_passed": bool(srr.get("_clarify_force_passed")),
+        "force_passed_reason": srr.get("_clarify_force_passed_reason") or "",
+        "current_status": clarify_state.get("status") or record.status,
+    }
+
+    return ApiResponse(
+        success=True,
+        message="OK",
+        data={
+            "req_id": req_id,
+            "title": record.title,
+            "status": record.status,
+            "structure": structure,
+            "structure_source": structure_source,
+            "quality": quality,
+            "quality_raw": quality_raw,
+            "clarify": convergence,
+        },
+    )
+
+
 @router.get("/{req_id}/clarify/questions", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def get_clarify_questions(
     req_id: str,

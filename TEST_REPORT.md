@@ -1006,3 +1006,21 @@ min-max 是线性拉伸，拉伸倍数=1/极差；**同质候选集极差可能�
 `recompute_all_weights()` **已执行**（1704 条）。
 
 回归 **413/413**。
+
+### §17.24 2026-09-15 A5 需求质量报表落地
+
+**后端**：新增 `GET /requirements/{req_id}/quality-report`，返回 structure / quality / clarify 三块。
+**关键决策：结构分按需实时计算**（纯字典检查、无 LLM），使 **21 条存量需求立刻可用**，
+不必等重新解析；落库值存在且实时计算失败时回退（`structure_source` 标明来源）。
+实测 V1.1 = **0.96**（缺 1 项）/ V1.0 = **0.64**（缺 6 项）。
+
+**显式标注 `breakdown_available`**：质量分拆解字段仅对 `build_quality_report()` 上线后
+解析的需求存在；若不标注，前端会把 `null` 渲染成 **0**，造成"得 0 分"的误读。
+
+**前端**：新增独立组件 `RequirementQualityReport.tsx`，挂在 SRR Tab 内容之前。
+两个刻意选择：① 文案"建议补充"而非"不合格"，并写明**不阻断**流转
+（与后端只 Warning 口径一致）；② `breakdown_available=false` 时显示
+"需重新解析后可用"而不是 0。
+
+**验证**：`tsc --noEmit` 0 错误；前端重建 healthy（`index-lIC6gdBt.js`）；
+接口实测 HTTP 200 且字段齐全；回归 **413/413**。

@@ -239,6 +239,46 @@ export const requirements = {
       field_conflicts: FieldConflict[]
     }>(`/requirements/${id}/clarify/questions`)
   },
+  /**
+   * v3.3（docs/14 二期 A5）：需求质量报表。
+   *
+   * 结构分由后端**按需实时计算**（纯字典检查、无 LLM），
+   * 因此存量需求也能立即拿到报表，无需等重新解析。
+   */
+  getQualityReport: (id: string) =>
+    request<{
+      req_id: string
+      title: string
+      status: string
+      structure_source: 'computed' | 'stored' | 'none'
+      structure: {
+        score: number
+        summary?: string
+        fp_count?: number
+        filled_weight?: number
+        applicable_weight?: number
+        filled: { key: string; label: string; weight: number }[]
+        missing: { key: string; label: string; weight: number; hint?: string }[]
+        not_applicable: { key: string; label: string; weight: number; reason: string }[]
+        report_only: { key: string; label: string; hit: boolean }[]
+      }
+      quality: {
+        overall_score: number | null
+        completeness_score: number | null
+        ambiguity_score: number | null
+        ambiguity_count: number | null
+        score_source: string | null
+        summary: string | null
+        breakdown_available: boolean
+      }
+      clarify: {
+        total_rounds: number
+        force_passed: boolean
+        force_passed_reason: string
+        current_status: string
+        rounds: { round: number; questions_count: number; answers_count: number; created_at?: string; note?: string }[]
+      }
+    }>(`/requirements/${id}/quality-report`),
   submitClarify: (id: string, answers: Record<string, string>, extraNotes = '') =>
     request<{ task_id: string; req_id: string; status: string; answers_count: number }>(`/requirements/${id}/clarify`, {
       method: 'POST',

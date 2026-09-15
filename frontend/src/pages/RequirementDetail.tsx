@@ -12,6 +12,7 @@ import FPSRRViewer from '../components/FPSRRViewer'
 import FieldEditor from '../components/FieldEditor'
 import VersionHistoryPanel from '../components/VersionHistoryPanel'
 import FpCrsrPanel from '../components/FpCrsrPanel'
+import RequirementQualityReport from '../components/RequirementQualityReport'
 
 // ============================================================================
 // Markdown 自定义渲染组件
@@ -2431,7 +2432,15 @@ export default function RequirementDetail() {
               <p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>💡 直接修改 JSON 中的任意字段，保存后立即生效。不符合 Schema 的字段会在生成时被校验。</p>
             </div>
           ) : activeTab === 'srr' ? (
-            renderSrrContent()
+            <>
+              {/* v3.3（docs/14 二期 A5）：需求质量报表。
+                  放在 SRR 内容**之前**——用户先看到"这份需求写得全不全"，
+                  再往下看具体字段，符合"先总后分"的阅读顺序。 */}
+              <div className="mb-4">
+                <RequirementQualityReport reqId={id!} />
+              </div>
+              {renderSrrContent()}
+            </>
           ) : activeTab === 'raw' ? (
             renderRawText()
           ) : activeTab === 'kb' ? (
