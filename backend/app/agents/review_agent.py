@@ -57,6 +57,29 @@ class ReviewAgent:
         """初始化 ReviewAgent。"""
         self._llm = llm_client
 
+    @staticmethod
+    def _resolve_case_source(case: dict) -> str:
+        """解析用例来源，落到 DB 列 `TestCase.source`（v3.3 修 B1）。
+
+        ## 修的是什么（docs/14 §8.2 缺陷 3）
+
+        此前三处落库**硬编码** `source="ai_generated"`，导致：
+        - 回归复用用例由 `orchestrator._build_historical_regression` 打上的
+          `case_json["source"]="reused"` **只存在于 JSON**，未落到 DB 列
+        - 而 B1 的检索权重分级（`human_approved`/`ai_approved`/`reused`/`imported`）
+          依赖 **DB 列**，读不到 → 分级失效
+        - 实测：1704 条用例中 `source` 只有 `ai_generated`(1540) 与 `manual`(1)，
+          **`reused` 一条都没有**，印证缺陷
+
+        ## 白名单
+
+        只接受已知来源值，其余一律回退 `ai_generated`——
+        避免把 LLM 自由填写的任意字符串写进 DB 列（该列有语义含义，会被下游用于分级）。
+        """
+        src = str((case or {}).get("source") or "").strip()
+        return src if src in ("reused", "manual", "imported", "human_approved",
+                              "ai_approved") else "ai_generated"
+
     async def review(
         self,
         srr: dict,
@@ -738,7 +761,7 @@ class ReviewAgent:
                                 priority=case.get("priority", "P1"),
                                 status="approved",
                                 case_json=case,
-                                source="ai_generated",
+                                source=self._resolve_case_source(case),
                                 confidence=confidence,
                                 gen_batch_id=batch_id,
                             )
@@ -759,7 +782,7 @@ class ReviewAgent:
                                 priority=case.get("priority", "P1"),
                                 status="reviewed",
                                 case_json=case,
-                                source="ai_generated",
+                                source=self._resolve_case_source(case),
                                 confidence=confidence,
                                 gen_batch_id=batch_id,
                             )
@@ -779,7 +802,7 @@ class ReviewAgent:
                                 priority=case.get("priority", "P1"),
                                 status="draft",
                                 case_json=case,
-                                source="ai_generated",
+                                source=self._resolve_case_source(case),
                                 confidence=confidence,
                                 gen_batch_id=batch_id,
                             )
