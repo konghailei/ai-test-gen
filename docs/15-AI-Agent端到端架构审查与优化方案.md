@@ -434,7 +434,8 @@ flowchart LR
 > | §4.1 前端 HITL（降级审批可见可操作） | ⚠️ 部分 | `PublicationPanel.tsx` + Generate 页展示决策/原因/降级/失败子任务、KB 跳过态；逐条 approve/reject 走既有反馈端点，尚未做批量审批入口 |
 > | P1-4.3 并发互斥与 SSE 隔离 | ✅ 已做 | `core/task_guard.py`（事务内 advisory lock + 僵尸兜底 + 原子占用）、`database.py` Step 3b partial unique index、`generate.py` 改为原子占用且 **resume 不再绕过**；SSE 隔离由 ContextVar 承载并实测（探针 11/11） |
 > | P1-4.4 PG→Milvus 事务性出箱 | ✅ 已做 | `vector_outbox` 表 + `core/vector_outbox.py`（enqueue 与业务行同事务、relay 至少一次幂等投递、指数退避、FOR UPDATE SKIP LOCKED）、`reconcile_cases()` 双向对账（补缺失自动、删孤儿需显式开关）、feedback 端点同事务入箱；探针 13/13 |
-> | P1（4.2 durable execution / 4.8~4.11） | ❌ 未做 | — |
+> | P1-4.2 durable execution | ⚠️ 部分 | `PipelineState` 补声明（resume/resume_checkpoint 此前被过滤，**断点续跑从未生效**）+ `core/pipeline_fingerprint.py`（checkpoint 指纹：SRR/FP 集合/修订/prompt/模型/合同版本）+ 续跑校验 409 + `fallback_to_restart`；探针 8/8。**剩余**：LangGraph PostgresSaver 与任务迁出 API 进程（互为前提） |
+> | P1（4.8~4.11） | ❌ 未做 | — |
 > | P2 / P3 其余 | ❌ 未做 | — |
 >
 > **已知行为后果**：覆盖标注率 < 30% 时 `coverage_status=unknown` → 永不自动核准（转人工）；
