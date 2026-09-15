@@ -467,7 +467,7 @@ class GenAgent:
                 srr, functional_points, cases, type_dist
             )
 
-            mode = "映射" if point_cov["mapping_based"] else "回退(数量比)"
+            mode = "映射" if point_cov["mapping_based"] else "未知(仅下界)"
             logger.info(
                 "[GenAgent/coverage] 要点级覆盖[{}]: 要点总数={}, 已覆盖={}, 覆盖率={:.1%}, "
                 "P0/P1 要点={}/{}, 高优覆盖={:.1%} | 用例数={}, 类型分布={}, FP分布={}, 要点构成={}",
@@ -499,9 +499,10 @@ class GenAgent:
                     )
             elif point_cov["total_points"] > 0 and point_cov["coverage_rate"] < 0.5:
                 logger.warning(
-                    "[GenAgent/coverage] ⚠️ 覆盖比偏低（回退口径）: SRR 有 {} 个要点，仅 {} 个用例（{:.2f}），"
-                    "且用例未标注任何要点 ID，请检查 notes 覆盖标注",
-                    point_cov["total_points"], case_count, point_cov["coverage_rate"],
+                    "[GenAgent/coverage] ⚠️ 覆盖未知（仅已观测下界）: SRR 有 {} 个要点，已证实覆盖 {} 个（{:.2f}）；"
+                    "用例数为 {}——用例多不等于覆盖对，请检查 notes 的要点标注",
+                    point_cov["total_points"], point_cov["covered_points"],
+                    point_cov["coverage_rate"], case_count,
                 )
 
             # v3.4：测试设计技术覆盖缺口告警

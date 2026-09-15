@@ -19,10 +19,25 @@ _POINT_ID_RE = re.compile(
 )
 # 无方括号的兜底识别（如 notes 中写成 "fp_x.rule.2"）
 _BARE_POINT_ID_RE = re.compile(
-    r"(?<![\w\-\[])((?:[\w\-]+\.)?(?:happy_path|alt_flow|alternate_flow|rule|data)\.\d+)(?![\w\-\]])"
+    r"(?<![\w\-\[.])((?:[\w\-]+\.)?(?:happy_path|alt_flow|alternate_flow|rule|data|precondition|shared_rule)\.\d+)(?![\w\-\].])"
 )
 
 _TOP_LEVEL_TYPES = ("happy_path", "alternate_flow", "precondition", "shared_rule")
+
+# 显式标注率下限：低于此值不认为"映射口径"成立（此时只报已观测下界）
+ANNOTATION_RATE_THRESHOLD = 0.30
+
+# 启发式回填标记：回填 ID 只作线索展示，绝不充当已观测覆盖证据
+HEURISTIC_MARKER = "heuristic"
+
+
+def is_heuristic_mapping(case: dict) -> bool:
+    """用例是否带启发式回填标记（case 级或 gen_metadata 级任一即可）。"""
+    if not isinstance(case, dict):
+        return False
+    gm = case.get("gen_metadata")
+    gm = gm if isinstance(gm, dict) else {}
+    return case.get("mapping_source") == HEURISTIC_MARKER or gm.get("mapping_source") == HEURISTIC_MARKER
 
 
 def _top_priority(srr: dict) -> str:
@@ -123,10 +138,10 @@ def collect_points(
 def extract_point_ids(case: dict) -> set[str]:
     """从单条用例的文本字段中提取其声称覆盖的要点 ID 集合。
 
-    兼容三种标注来源（按权威度降序）：
-    1. 结构化字段：cover_points / covered_points（字符串数组或逗号分隔字符串）
-    2. notes 字段中的方括号格式 [happy_path.1]
-    3. 标题/描述/步骤文本中的裸要点 ID
+    兼容结构化 cover_points / covered_points / covers_points / covered_point_ids、
+    notes 方括号标注和标题/描述/步骤中的裸 ID，也读取 gen_metadata 中的标注。
+    结构化字段中的未知 ID 原样保留，交由覆盖计算与需求清单校验。
+    本函数只提取声明，不判断来源可信度，也不证明业务正确性。
     """
     ids: set[str] = set()
 
@@ -137,20 +152,21 @@ def extract_point_ids(case: dict) -> set[str]:
             for it in v:
                 _collect_str(it)
             return
-        s = str(v)
-        ids |= {m.group(1) for m in _POINT_ID_RE.finditer(s)}
-        ids |= {m.group(1) for m in _BARE_POINT_ID_RE.finditer(s)}
+        if isinstance(v, str):
+            # 用 update 而非闭包内的 |=，避免把 ids 当作未初始化的局部变量。
+            ids.update(token.strip("[]") for token in re.split(r"[,，;；\s]+", v) if token.strip("[]"))
 
-    # 结构化字段优先（UTCF schema 建议字段）
-    for k in ("cover_points", "covered_points", "covers_points"):
-        _collect_str(case.get(k))
+    metadata = case.get("gen_metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    for source in (case, metadata):
+        for k in ("cover_points", "covered_points", "covers_points", "covered_point_ids"):
+            _collect_str(source.get(k))
 
     texts: list[str] = [
         case.get("title", ""),
         case.get("description", ""),
         case.get("notes", ""),
-        (case.get("gen_metadata", {}) or {}).get("notes", ""),
-        (case.get("gen_metadata", {}) or {}).get("cover_points", ""),
+        metadata.get("notes", ""),
     ]
     for s in case.get("steps", []) or []:
         if isinstance(s, dict):
@@ -170,9 +186,9 @@ def backfill_cases_point_ids(
 ) -> int:
     """系统兜底：为无要点标注的用例回填最可能覆盖的要点 ID。
 
-    当 LLM 未在 notes/cover_points 输出要点标注（导致覆盖映射失效、回退数量比、
-    补生成无法聚焦缺口）时，依据用例文本（标题+描述+步骤）与要点描述的关键词
-    命中率，将用例确定性映射到覆盖的要点，并把编号写回 notes 的 “覆盖: [...]” 段。
+    当 LLM 未输出要点标注时，依据用例文本与要点描述的关键词命中率，
+    将候选编号写回 notes 的 “覆盖: [...]” 段，仅供显示和人工核查。
+    回填标记 mapping_source='heuristic'，不作为已观测覆盖证据；已有显式标注优先保留。
 
     仅回填明显种子（同 related_fp / 总需求要点 + 文本有实质命中），避免误配。
 
@@ -180,10 +196,10 @@ def backfill_cases_point_ids(
         cases: 用例列表（就地补充 notes 标注）
         srr: 总 SRR
         functional_points: 功能点列表
-        min_ratio: 标题与要点描述命中 4 字关键词的最低比例阈值
+        min_ratio: 用例文本与要点描述命中 3 字及 2 字关键词的最低比例阈值
 
     Returns:
-        list[str]: 回填标号（4 字关键词）数量（用于统计）。
+        int: 回填的用例数量（用于统计）。
 
     TODO(说明): 若未来引入语义向量化，可用 Embedding 相似度替换关键词命中，
         提高映射精度。当前保持确定性关键词匹配，稳定且无需额外模型调用。
@@ -293,6 +309,9 @@ def backfill_cases_point_ids(
             case["gen_metadata"] = gm
         existing = gm.get("notes", "")
         gm["notes"] = (str(existing) + (" " if existing else "") + cover_tag).strip()
+        # 打标：回填 ID 是"线索"不是"证据"（calc_point_coverage 据此排除）
+        case["mapping_source"] = HEURISTIC_MARKER
+        gm["mapping_source"] = HEURISTIC_MARKER
         backfilled += 1
     return backfilled
 
@@ -331,45 +350,60 @@ def calc_min_cases(srr: dict, functional_points: list[dict]) -> tuple[int, int]:
 
 
 def calc_point_coverage(srr: dict, functional_points: list[dict], cases: list[dict]) -> dict:
-    """计算要点级覆盖映射。
+    """计算要点级覆盖映射——**只认已观测证据，不再用数量比冒充覆盖率**。
 
-    映射模式：按用例文本中的要点 ID 与清单精确匹配（RTM 实践）。
-    回退模式：LLM 未标注任何要点 ID 时，退回数量比 min(case, points)/points，
-    并以 mapping_based=False 标记，供调用方区分口径。
+    两种口径（docs/15 §4.7）：
+
+    - ``mapping_based=True``（``coverage_status='mapped'``）：显式标注率
+      ≥ :data:`ANNOTATION_RATE_THRESHOLD` 时按 ID 精确映射（RTM 实践），
+      ``coverage_rate`` 即实测映射率。
+    - ``mapping_based=False``（``coverage_status='unknown'``）：只报**已观测下界**
+      ``observed_coverage_rate`` = 已证实覆盖数 / 要点总数。旧的
+      ``min(用例数, 要点数)/要点数`` 会被读成"覆盖良好"（用例多≠覆盖对），
+      这正是"伪 100%"的来源，已移除。``estimated_coverage_rate`` 恒为 None。
+
+    启发式回填（``mapping_source='heuristic'``）的 ID 单独登记在
+    ``heuristic_point_ids``：既不进分子也不进分母，仅作人工核查线索。
     """
     points = collect_points(srr, functional_points or [])
     total = len(points)
     point_map = {p["id"]: p for p in points}
-    case_count = len(cases or [])
+    case_list = [c for c in (cases or []) if isinstance(c, dict)]
+    case_count = len(case_list)
 
     covered_ids: set[str] = set()
-    cases_with_ids = 0
-    for c in cases or []:
-        ids = extract_point_ids(c)
-        if ids:
-            cases_with_ids += 1
-        covered_ids |= ids & point_map.keys()
+    heuristic_ids: set[str] = set()
+    invalid_ids: list[str] = []
+    cases_with_valid_ids = 0
 
-    # 映射口径启用条件：至少 1 条标注 且 标注率 ≥ 30%
-    # 防御：仅 1 条用例标注 1 个 ID 时（如 50 条中 1 条标注），映射率会被压到极低
-    # 误判大面积未覆盖触发无意义补生成——标注不完整时回退数量比口径更稳妥
-    annotate_rate = cases_with_ids / case_count if case_count else 0.0
-    mapping_based = total > 0 and cases_with_ids > 0 and annotate_rate >= 0.3
-    if total == 0:
-        rate = 1.0
-    elif mapping_based:
-        rate = round(len(covered_ids) / total, 3)
-    else:
-        rate = round(min(case_count, total) / total, 3)
+    for c in case_list:
+        ids = extract_point_ids(c)
+        if not ids:
+            continue
+        valid = ids & point_map.keys()
+        invalid_ids.extend(sorted(ids - point_map.keys()))
+        if is_heuristic_mapping(c):
+            # 回填线索：只登记，不计入任何覆盖分子/分母
+            heuristic_ids |= valid
+            continue
+        if valid:
+            cases_with_valid_ids += 1
+            covered_ids |= valid
+
+    annotation_rate = round(cases_with_valid_ids / case_count, 3) if case_count else 0.0
+    mapping_based = (
+        total > 0 and cases_with_valid_ids > 0
+        and annotation_rate >= ANNOTATION_RATE_THRESHOLD
+    )
+    observed_rate = round(len(covered_ids) / total, 3) if total else 0.0
 
     hp_points = [p for p in points if p.get("priority") in ("P0", "P1")]
-    if mapping_based:
-        hp_covered = sum(1 for p in hp_points if p["id"] in covered_ids)
-        uncovered = [p for p in points if p["id"] not in covered_ids]
-    else:
-        hp_covered = min(len(hp_points), case_count)
-        uncovered = []
-    hp_rate = round(hp_covered / len(hp_points), 3) if hp_points else 1.0
+    hp_covered = sum(1 for p in hp_points if p["id"] in covered_ids)
+    hp_rate = round(hp_covered / len(hp_points), 3) if hp_points else 0.0
+
+    uncovered = [p for p in points if p["id"] not in covered_ids]
+    prio_rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+    uncovered.sort(key=lambda p: prio_rank.get(p.get("priority", ""), 9))
 
     stats = {"happy_path": 0, "alt_flow": 0, "rule": 0, "data": 0, "shared_rule": 0}
     for p in points:
@@ -377,22 +411,29 @@ def calc_point_coverage(srr: dict, functional_points: list[dict], cases: list[di
         if key in stats:
             stats[key] += 1
 
-    prio_rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
-    uncovered.sort(key=lambda p: prio_rank.get(p.get("priority", ""), 9))
-
     return {
         "total_points": total,
-        "covered_points": len(covered_ids) if mapping_based else min(case_count, total),
-        "coverage_rate": rate,
+        "covered_points": len(covered_ids),
+        "coverage_rate": observed_rate,
+        "coverage_status": "mapped" if mapping_based else "unknown",
+        "coverage_basis": "observed" if mapping_based else "observed_lower_bound",
+        "observed_coverage_rate": observed_rate,
+        "estimated_coverage_rate": None,
+        "mapping_based": mapping_based,
+        "annotation_rate": annotation_rate,
+        "cases_with_valid_ids": cases_with_valid_ids,
+        "invalid_point_ids": list(dict.fromkeys(invalid_ids)),
+        "covered_point_ids": sorted(covered_ids),
+        "heuristic_point_ids": sorted(heuristic_ids),
         "high_priority_total": len(hp_points),
         "high_priority_covered": hp_covered,
         "high_priority_rate": hp_rate,
+        # 全量返回（不截断）：截断会让"未覆盖清单"看起来比真实情况小
         "uncovered": [
             {"id": p["id"], "type": p["ptype"], "priority": p["priority"],
              "desc": p["desc"], "fp_id": p["fp_id"]}
-            for p in uncovered[:50]
+            for p in uncovered
         ],
-        "mapping_based": mapping_based,
         "case_count": case_count,
         "point_stats": stats,
     }

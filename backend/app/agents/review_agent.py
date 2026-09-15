@@ -36,6 +36,25 @@ from app.models.utcf import ReviewReport
 from app.prompts import review_agent as prompts
 from app.core import prompt_manager
 from app.utils.coverage import calc_point_coverage
+from app.core.publication_policy import decide_publication
+from app.utils.case_validation import validation_issues
+from app.models.utcf import ReviewIssue
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+
+class LLMReviewPayload(BaseModel):
+    """Only a validated LLM review can authorize automatic publication."""
+    model_config = ConfigDict(extra="allow")
+    issues: list[ReviewIssue]
+    avg_confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+
+def _validated_review_payload(result: Any, cases: list[dict]) -> dict:
+    payload = LLMReviewPayload.model_validate(result)
+    known_ids = {c.get("id") for c in cases}
+    if any(i.case_id and i.case_id not in known_ids for i in payload.issues):
+        raise ValueError("审核引用了本批次以外的用例")
+    return payload.model_dump()
 from app.utils.id_gen import gen_batch_id, gen_error_id, gen_test_case_id
 from app.utils.logger import logger
 
@@ -118,6 +137,33 @@ class ReviewAgent:
             - 覆盖率低于阈值触发补充生成
         """
         req_id = srr.get("requirement", {}).get("id", "")
+        # v3.4（docs/15 §4.1 / P0-2）：合同校验**只记录不中断**。
+        # 畸形/空用例的处置权属于发布策略（blocked / awaiting_human_review），
+        # 在这里抛异常会让 review → done 整段消失，前端连"为什么失败"都拿不到。
+        content_errors = validation_issues(test_cases)
+        if content_errors:
+            logger.error(
+                "[ReviewAgent] ⚠️ 用例不满足可执行合同（{} 项，转发布策略判定）: {}",
+                len(content_errors), content_errors[:3],
+            )
+        if not test_cases:
+            # 空用例集不调 LLM（prompt 里没有任何用例可审），直接给出可判定的报告。
+            logger.error("[ReviewAgent] ⚠️ 空用例集：跳过 LLM 审核与回流，发布决策将判 blocked")
+            return {
+                "total_cases": 0,
+                "passed_cases": 0,
+                "blocked_cases": 0,
+                "issues": [],
+                "coverage_summary": {},
+                "avg_confidence": 0.0,
+                "should_supplement": False,
+                "supplement_hints": [],
+                "review_status": "unverified",
+                "rule_passed_cases": 0,
+                "review_degraded": False,
+                "review_degraded_reason": "empty_case_set",
+                "content_errors": content_errors,
+            }, []
         logger.info("[ReviewAgent] ▶ 开始审核: req_id={}, cases={}", req_id, len(test_cases))
 
         # 1. 计算 final_confidence（多因子加权，非 LLM）
@@ -150,7 +196,7 @@ class ReviewAgent:
         point_coverage = calc_point_coverage(srr, functional_points or [], reviewed_cases)
         logger.info(
             "[ReviewAgent] 要点级覆盖[{}]: 要点总数={}, 已覆盖={}, 覆盖率={:.1%}, P0/P1={}/{}, 未覆盖={}",
-            "映射" if point_coverage["mapping_based"] else "回退(数量比)",
+            "映射" if point_coverage["mapping_based"] else "未知(仅下界)",
             point_coverage["total_points"], point_coverage["covered_points"],
             point_coverage["coverage_rate"],
             point_coverage["high_priority_covered"], point_coverage["high_priority_total"],
@@ -325,7 +371,7 @@ class ReviewAgent:
             try:
                 result = await self._llm.call_json(**_review_kwargs, provider=judge_provider)
                 logger.info("[ReviewAgent] 评审走异构供应商: {}", judge_provider)
-                return result
+                return _validated_review_payload(result, test_cases)
             except Exception as e:
                 logger.warning(
                     "[ReviewAgent] 评审供应商 {} 失败，回退主力池: {}",
@@ -333,7 +379,7 @@ class ReviewAgent:
                 )
         try:
             result = await self._llm.call_json(**_review_kwargs)
-            return result
+            return _validated_review_payload(result, test_cases)
         except Exception as e:
             # v3.3（修 N8）：LLM 审核失败 → 规则降级。
             #
@@ -345,7 +391,7 @@ class ReviewAgent:
             )
             return {
                 "total_cases": len(test_cases),
-                "passed_cases": len(test_cases),
+                "passed_cases": 0,
                 "blocked_cases": 0,
                 "issues": [],
                 "coverage_summary": {},
@@ -408,7 +454,13 @@ class ReviewAgent:
         )
 
         # 判断是否需要补充生成
-        should_supplement = self._should_supplement(all_issues, coverage, srr, test_cases, point_coverage=point_coverage)
+        # A failed judge cannot provide trustworthy optimization feedback.
+        should_supplement = (not llm_report.get("review_degraded") and
+            self._should_supplement(all_issues, coverage, srr, test_cases, point_coverage=point_coverage))
+        if llm_report.get("review_degraded"):
+            for dim in ("consistency", "deduplication"):
+                dimension_scores[dim]["score"] = None
+                dimension_scores[dim]["status"] = "unknown"
 
         # 补充提示
         supplement_hints = (
@@ -416,9 +468,13 @@ class ReviewAgent:
             if should_supplement else []
         )
 
+        # v3.4：合同问题随最终报告上抛，供发布策略判 blocked
+        # （只记录不中断——畸形用例不能让 review → done 整段消失）
+        content_errors = validation_issues(test_cases)
+
         return {
             "total_cases": total,
-            "passed_cases": passed,
+            "passed_cases": 0 if llm_report.get("review_degraded") else passed,
             "blocked_cases": blocked,
             "issues": all_issues,
             "coverage_summary": coverage,
@@ -428,6 +484,10 @@ class ReviewAgent:
             # v3.3（修 N8）：把 `_llm_review` 的降级标记**透传到最终 report**。
             # ⚠️ 不能只在 `_llm_review` 的返回值里打标——该返回值只是中间结果，
             # 会被本函数合并掉。实测探针正是靠这一点发现首版补丁无效的。
+            "review_status": "degraded" if llm_report.get("review_degraded") else "complete",
+            "rule_passed_cases": passed,
+            # v3.4：合同问题随报告上抛，供发布策略判 blocked（不在此处中断流水线）
+            "content_errors": content_errors,
             "review_degraded": bool(llm_report.get("review_degraded")),
             "review_degraded_reason": llm_report.get("review_degraded_reason", ""),
             "should_supplement": should_supplement,
@@ -492,13 +552,16 @@ class ReviewAgent:
             completeness_score = 1.0
             coverage_score = 1.0
 
+        # Missing evidence is unknown; do not manufacture full marks.
+        coverage_unknown = not point_coverage or point_coverage.get("coverage_status") != "mapped"
         # 覆盖维度若有 issue（如 test_points_hint 类别未覆盖）则拉低 coverage
         if issue_counts["coverage"] > 0:
             coverage_score = min(coverage_score, 1.0 - min(1.0, issue_counts["coverage"] / total))
 
         return {
             "completeness": {
-                "score": _clamp(completeness_score),
+                "score": None if coverage_unknown else _clamp(completeness_score),
+                "status": "unknown" if coverage_unknown else "measured",
                 "issue_count": issue_counts["completeness"],
             },
             "deduplication": {
@@ -518,7 +581,8 @@ class ReviewAgent:
                 "issue_count": issue_counts["traceability"],
             },
             "coverage": {
-                "score": _clamp(coverage_score),
+                "score": None if coverage_unknown else _clamp(coverage_score),
+                "status": "unknown" if coverage_unknown else "measured",
                 "issue_count": issue_counts["coverage"],
             },
         }
@@ -572,8 +636,10 @@ class ReviewAgent:
                 if point_coverage.get("high_priority_total", 0) > 0 and \
                         point_coverage.get("high_priority_covered", 0) < point_coverage["high_priority_total"]:
                     return True
-            elif point_coverage.get("coverage_rate", 1.0) < 0.5:
-                # 回退口径沿用数量比阈值
+            else:
+                # v3.4（docs/15 §4.7）：覆盖"未知"（标注率 < 30%）时不再用数量比
+                # 冒充覆盖率，而是请求**一次定向补生成**去补齐证据 ——
+                # 宁可多花一轮，也不能把"没标注"读成"覆盖良好"。
                 return True
 
         # 覆盖率检查：test_points_hint 中的类别是否都有用例覆盖（旧机制兜底）
@@ -641,6 +707,8 @@ class ReviewAgent:
         srr: dict,
         reviewed_cases: list[dict],
         report: dict,
+        *,
+        publication_context: dict | None = None,
     ) -> dict:
         """将审核通过的用例回流到知识库（PG + Vector DB 双写）。
 
@@ -676,6 +744,33 @@ class ReviewAgent:
             "errors": 0,
             "vector_write_failed": 0,  # v3.1.3 P1-4: Milvus 写入失败计数，上抛可见
         }
+
+        # Re-evaluate at the side-effect boundary; a caller-supplied 'approved'
+        # string cannot bypass missing evidence or a degraded review.
+        context = publication_context or {}
+        decision = decide_publication(
+            report, reviewed_cases,
+            gate_result=context.get("gate_result"),
+            forced_pass=bool(context.get("forced_pass")),
+            degraded_flags=context.get("degraded_flags"),
+            failed_subtasks=context.get("failed_subtasks"),
+            content_errors=validation_issues(reviewed_cases),
+        )
+        stats["publication"] = decision
+        report["publication"] = decision
+        if decision["decision"] == "blocked":
+            # v3.4（docs/15 §4.1）：副作用边界的二次防线 —— 必须"静默不写"，
+            # 不能抛异常。调用方（编排层）已据同一决策跳过回流；此处再兜一层，
+            # 保证即使被直接调用也不会把畸形/降级产物写进权威知识库。
+            stats["skipped"] = True
+            stats["skip_reason"] = "publication_blocked"
+            stats["blocked_reasons"] = decision.get("reasons", [])
+            logger.error(
+                "[ReviewAgent] ⛔ 发布决策=blocked，拒绝写入知识库（PG 与 Milvus 均未写入）: {}",
+                decision.get("reasons"),
+            )
+            return stats
+        auto_allowed = decision["decision"] == "auto_approve"
 
         # 获取 blocker 用例 ID 集合
         blocked_case_ids = set()
@@ -726,6 +821,9 @@ class ReviewAgent:
                 title = case.get("title", "")
                 is_blocked = case_id in blocked_case_ids
 
+                # Persist the server decision on the artifact too, so a later
+                # page load/export cannot mistake a draft for approved content.
+                case = {**case, "publication": decision}
                 try:
                     # v3.1.3 修复 L2 根因：回归复用（v3.4：historical_regression 并入结果集）
                     # 的用例带历史 id，persist 对其重复 insert 触发 UniqueViolation，导致
@@ -744,7 +842,7 @@ class ReviewAgent:
                     # 单个用例 flush 失败时只回滚 savepoint，
                     # 不会让 session 进入 inactive 状态影响后续用例与最终 commit
                     async with session.begin_nested():
-                        if confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
+                        if auto_allowed and confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
                             # 高置信度：自动入库，标记 approved
                             # v3.5: 阈值 0.85→0.70。原 0.85 在冷启动（KB 无相似向量
                             # match_score=0、无模式命中 pattern_bonus=0）时不可达
@@ -767,7 +865,7 @@ class ReviewAgent:
                             )
                             session.add(record)
 
-                        elif Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
+                        elif not auto_allowed or Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
                             confidence >= 0.70 and is_blocked
                         ):
                             # 中置信度：标记 reviewed，等待人工确认
@@ -843,7 +941,7 @@ class ReviewAgent:
                         # begin_nested 退出时自动 flush，失败则回滚到 savepoint
 
                     # savepoint 成功提交后，执行向量库写入与统计（不阻断 DB 事务）
-                    if confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
+                    if auto_allowed and confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
                         try:
                             await asyncio.to_thread(
                                 vector_store.add_test_case,
@@ -865,7 +963,7 @@ class ReviewAgent:
                             )
                         stats["auto_approved"] += 1
 
-                    elif Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
+                    elif not auto_allowed or Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
                         confidence >= 0.70 and is_blocked
                     ):
                         stats["pending_review"] += 1

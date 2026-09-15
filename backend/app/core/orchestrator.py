@@ -140,6 +140,14 @@ class PipelineState(TypedDict, total=False):
     # v3.1.3：降级标记（由各节点追加，done 事件透传，前端可提示能力降级）
     # ⚠️ 必须显式声明（同 consistency_check），否则被 StateGraph 过滤
     degraded_flags: list
+    # v3.4：用例合同校验问题（只记录不上抛，随 state 透传到发布策略）
+    content_errors: list
+    publication: dict
+    completion_status: str
+    failed_subtasks: list
+    task_id: str
+    _fp_subtasks: list
+    _fp_groups: list
 
     # 控制流
     clarify_iteration: int
@@ -269,7 +277,8 @@ class Orchestrator:
         """初始化编排器，构建并编译 LangGraph 状态图。"""
         self.graph = self._build_graph()
         # v3.1.3 细粒度生成进度事件队列（run_pipeline 内创建，_gen_node 消费）
-        self._gen_event_queue: asyncio.Queue | None = None
+        from contextvars import ContextVar
+        self._gen_event_queue: ContextVar = ContextVar("gen_event_queue", default=None)
 
     # ========================================================================
     # v3.1.3 断点续跑 checkpoint（断电/断网中断后，续跑跳过已完成功能点）
@@ -915,7 +924,7 @@ class Orchestrator:
         completed_fps: set[str] = set()   # 断点恢复时已完成的 FP
         checkpoint_groups: list[dict] = []  # 含用例，用于断点持久化
         fp_subtasks: list[dict] = []        # 细粒度进度卡片
-        _gen_queue = getattr(self, "_gen_event_queue", None)
+        _gen_queue = self._gen_event_queue.get()
 
         async def _emit_gen(msg: str, subtask: dict | None = None) -> None:
             """推送细粒度 FP 进度事件（经事件队列按序透出）。"""
@@ -1052,18 +1061,19 @@ class Orchestrator:
                 if "batch_generate_failed" not in degraded_flags:
                     degraded_flags.append("batch_generate_failed")
 
-        # 2) 全局/跨功能点通道：独立生成集成/共享规则用例，保证按 FP 拆分后组合用例不丢失
+        # 2) Cross-FP content lives under cross_fp_interactions since v2.40.
         _global_srr: dict = {}
         try:
-            _cross = srr.get("cross_fp_flows", []) or []
-            _shared = srr.get("shared_business_rules", []) or []
-            _data = srr.get("data_constraints") or {}
+            interactions = srr.get("cross_fp_interactions") or {}
+            _cross = interactions.get("cross_fp_flows") or srr.get("cross_fp_flows", []) or []
+            _shared = interactions.get("shared_business_rules") or srr.get("shared_business_rules", []) or []
+            _data = interactions.get("global_constraints") or srr.get("data_constraints") or {}
             if _cross or _shared or (isinstance(_data, dict) and _data):
                 _global_srr = {
                     "requirement": srr.get("requirement", {}),
                     "cross_fp_flows": _cross,
                     "shared_business_rules": _shared,
-                    "global_constraints": srr.get("global_constraints", ""),
+                    "global_constraints": interactions.get("global_constraints") or srr.get("global_constraints", ""),
                     "flows": srr.get("flows", {}),
                 }
         except Exception:
@@ -1096,6 +1106,7 @@ class Orchestrator:
                     {"key": "__integration__", "name": "跨功能点/集成", "status": "done", "cases": len(intg_cases)},
                 )
             except Exception as e:
+                degraded_flags.append("integration_generate_failed")
                 logger.warning("[Orchestrator] 跨功能点用例生成失败（不阻断）: {}", str(e)[:150])
                 await _emit_gen(
                     "跨功能点/集成用例生成失败",
@@ -1114,6 +1125,18 @@ class Orchestrator:
                 _dedup_keys.add(k)
             _uniq.append(c)
         cases = _uniq
+        # v3.4（docs/15 §4.1 / P0-2）：合同校验**只标记不中断**。
+        # 空集/畸形用例必须走完 review → done，由发布策略判 blocked / awaiting_human_review；
+        # 在此抛异常会让前端连 done 事件都拿不到（"0 用例不得 completed"是**终态**要求，
+        # 不是"让流水线崩掉"）。每通道内的校验同理已移除——否则内容问题会被误记成
+        # "生成通道失败"，既丢用例又给出错误的降级原因。
+        from app.utils.case_validation import validation_issues
+        content_errors = validation_issues(cases)
+        if content_errors:
+            logger.error(
+                "[Orchestrator] ⚠️ 生成用例不满足可执行合同（{} 项，转发布策略判定）: {}",
+                len(content_errors), content_errors[:3],
+            )
 
         logger.info(
             "[Orchestrator] ◀ 节点 generate（FP分片）完成 ▶ 下一节点 review: cases={}, fp_tagged={}, fp_groups={}",
@@ -1238,9 +1261,11 @@ class Orchestrator:
             "test_cases": cases,
             "consistency_check": consistency_check,
             "degraded_flags": degraded_flags,
+            "content_errors": content_errors,
             # v3.1.3 细粒度进度透出
             "_fp_subtasks": state.get("_fp_subtasks", []) or [],
             "_fp_groups": state.get("_fp_groups", []) or [],
+            "failed_subtasks": [s for s in fp_subtasks if s.get("status") == "failed"],
         }
 
     async def _review_node(self, state: PipelineState) -> dict:
@@ -1262,13 +1287,33 @@ class Orchestrator:
             len(test_cases),
         )
 
+        from app.utils.case_validation import validation_issues
+        from app.core.publication_policy import decide_publication
         functional_points = state.get("functional_points", []) or []
+        _degraded = list(state.get("degraded_flags", []) or [])
+        _degraded.extend((state.get("clarify_result") or {}).get("degraded_flags") or [])
+        # v3.4（docs/15 §4.1 / P0-2）：合同问题只记录、不中断——处置权在发布策略。
+        content_errors = list(dict.fromkeys([
+            *(state.get("content_errors") or []),
+            *validation_issues(test_cases),
+        ]))
+        if content_errors:
+            logger.error(
+                "[Orchestrator] ⚠️ 用例不满足可执行合同（{} 项，禁止自动发布）: {}",
+                len(content_errors), content_errors[:3],
+            )
         report, reviewed_cases = await review_agent.review(
             srr, test_cases, functional_points=functional_points
         )
+        # 编排层观测到的合同问题并进报告：证据要能随 report 落库/展示，
+        # 不能只存在于 decision 的 reasons 里（ReviewAgent 真实调用时已自带）。
+        if content_errors and not report.get("content_errors"):
+            report["content_errors"] = content_errors
 
         supplement_iteration = state.get("supplement_iteration", 0)
-        if report.get("should_supplement") and supplement_iteration < 1:
+        if report.get("review_degraded"):
+            _degraded.append("review_llm_failed")
+        if report.get("should_supplement") and not report.get("review_degraded") and supplement_iteration < 1:
             hints = report.get("supplement_hints", []) or []
             logger.info(
                 "[Orchestrator] Review 建议补生成，执行第{}次补生成: hints={}",
@@ -1324,11 +1369,43 @@ class Orchestrator:
             if report.get("should_supplement"):
                 report["supplement_exhausted"] = True
 
-        # 知识库回流闭环（docs/02 §4.1 + docs/00 §3 阶段⑧）
+        # Decide BEFORE any write, then re-evaluate inside persist_to_kb.
+        if report.get("review_degraded"):
+            _degraded.append("review_llm_failed")
+        _degraded = list(dict.fromkeys(_degraded))
+        publication_context = {
+            "gate_result": state.get("gate_result"),
+            "forced_pass": bool(state.get("forced_pass")),
+            "degraded_flags": _degraded,
+            "failed_subtasks": state.get("failed_subtasks") or [],
+        }
+        publication = decide_publication(
+            report, reviewed_cases, **publication_context,
+            content_errors=content_errors,
+        )
+        report["publication"] = publication
         kb_result = {}
-        if reviewed_cases:
+        if publication["decision"] == "blocked":
+            # v3.4（docs/15 §4.1）：fail-closed 的正确形态是"不写 + 终态可见"，
+            # 不是抛异常。抛异常会让 review → done 消失，failed_subtasks/
+            # completion_status 全部无法上报（前端只看到"流水线异常"）。
+            logger.error(
+                "[Orchestrator] ⛔ 发布决策=blocked，跳过知识库回流"
+                "（PG 与 Milvus 均不写入）: {}",
+                publication.get("reasons"),
+            )
+            if "publication_blocked" not in _degraded:
+                _degraded.append("publication_blocked")
+            kb_result = {
+                "skipped": True,
+                "skip_reason": "publication_blocked",
+                "reasons": publication.get("reasons", []),
+            }
+        elif reviewed_cases:
             try:
-                kb_result = await review_agent.persist_to_kb(srr, reviewed_cases, report)
+                kb_result = await review_agent.persist_to_kb(
+                    srr, reviewed_cases, report, publication_context=publication_context,
+                )
                 logger.info(
                     "[Orchestrator] KB 回流完成: auto_approved={}, pending={}, rejected={}, vector_write_failed={}",
                     kb_result.get("auto_approved", 0),
@@ -1363,7 +1440,6 @@ class Orchestrator:
         # v3.3（修 N8）：审核降级标记透传——LLM 审核失败时 ReviewAgent 返回
         # 「全部通过、0 拦截」的规则预检结果，与"审核真的通过"在数据上无法区分。
         # 必须标记，否则"审核能力静默缺失"会被当成"质量很好"。
-        _degraded = list(state.get("degraded_flags", []) or [])
         if report.get("review_degraded") and "review_llm_failed" not in _degraded:
             _degraded.append("review_llm_failed")
             logger.error(
@@ -1378,6 +1454,8 @@ class Orchestrator:
             "kb_flowback": kb_result,
             "supplement_iteration": supplement_iteration,
             "degraded_flags": _degraded,
+            "publication": publication,
+            "failed_subtasks": state.get("failed_subtasks") or [],
         }
 
     # ========================================================================
@@ -1638,7 +1716,7 @@ class Orchestrator:
             # v3.1.3 事件队列：把 LangGraph 的节点完成事件与 _gen_node 内部的细粒度
             # FP 进度事件合并到一个队列流式透给前端（按序 interleave）。
             queue: asyncio.Queue = asyncio.Queue()
-            self._gen_event_queue = queue
+            queue_token = self._gen_event_queue.set(queue)
 
             async def _producer() -> None:
                 try:
@@ -1721,7 +1799,12 @@ class Orchestrator:
                     yield event
             finally:
                 producer.cancel()
-                self._gen_event_queue = None
+                try:
+                    await producer
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    self._gen_event_queue.reset(queue_token)
 
             # ── v3.2: FP 覆盖率矩阵 ──
             # v3.1.3: 优先读 state（test_design 已统一加载），避免流水线内第 3 次 FP 查询
@@ -1750,7 +1833,9 @@ class Orchestrator:
                         rf = c.get("related_fp", "")
                         if not rf:
                             continue
-                        covered_ids.add(name_to_id.get(rf, rf))
+                        resolved_id = name_to_id.get(rf, rf)
+                        if resolved_id in {fid for fid, _ in fp_list}:
+                            covered_ids.add(resolved_id)
                     uncovered = [
                         {"id": fid, "name": fname}
                         for fid, fname in fp_list if fid not in covered_ids
@@ -1794,7 +1879,13 @@ class Orchestrator:
                 manual_action_required=manual_action_required,
                 supplement_iteration=final_state.get("supplement_iteration", 0),
                 duration_ms=int(duration * 1000),
+                publication=final_state.get("publication", {}),
+                failed_subtasks=final_state.get("failed_subtasks", []),
             )
+            from app.core.publication_policy import quality_outcome
+            done_event.update(quality_outcome(done_event))
+            if done_event["manual_action_required"]:
+                done_event["message"] = "生成结果待人工审核，未获自动核准"
             logger.info(
                 "[Orchestrator] ╚══ 流水线完成: req_id={}, duration={:.2f}s ══╝",
                 final_state.get("req_id", ""),

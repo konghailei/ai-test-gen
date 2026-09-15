@@ -251,12 +251,17 @@ async def generate_test_cases(
         try:
             from sqlalchemy import update as sa_update
             async with async_session() as s:
-                stmt = sa_update(AnalysisTask).where(AnalysisTask.id == task_id).values(**fields)
+                stmt = sa_update(AnalysisTask).where(
+                    AnalysisTask.id == task_id,
+                    AnalysisTask.status.in_(["pending", "running"]),
+                ).values(**fields)
                 await s.execute(stmt)
                 await s.commit()
         except Exception as e:
             logger.debug("[API/generate] 更新任务状态失败: {}", str(e)[:120])
 
+    # Request-local state shared with aclose; do not reference a nested local.
+    aborted = {"flag": False}
     # SSE 事件生成器：包装 orchestrator.run_pipeline 的 AsyncGenerator
     async def event_generator():
         """SSE 事件生成器。
@@ -270,8 +275,6 @@ async def generate_test_cases(
         - 一旦发现断连，立即把 AnalysisTask 写为 status=aborted 并退出循环，
           避免任务永远停留在 running，导致前端无法再重试。
         """
-        aborted = {"flag": False}
-
         async def _mark_aborted(reason: str = "client_disconnected") -> None:
             if aborted["flag"]:
                 return
@@ -312,11 +315,11 @@ async def generate_test_cases(
                 if await request.is_disconnected():
                     await _mark_aborted("client_closed_tab_or_stop")
                     break
-                # orchestrator 产出的事件为 dict，序列化为 JSON 字符串作为 SSE data
-                yield {
-                    "event": "message",
-                    "data": json.dumps(event, ensure_ascii=False, default=str),
-                }
+                # Commit terminal quality evidence before sending done. A client
+                # may close immediately on done; persistence must not live after it.
+                if event.get("stage") == "done":
+                    from app.core.publication_policy import quality_outcome
+                    event.update(quality_outcome(event))
                 # 同步更新任务进度（基于 SSE stage）
                 stage = event.get("stage", "")
                 progress = event.get("progress", 0)
@@ -338,8 +341,9 @@ async def generate_test_cases(
                     # v3.1.3: 从回归复用摘要中读取编排器装配的复用计数
                     reuse_summary = event.get("regression_reuse_summary", {}) or {}
                     await _update_gen_task(
-                        status="completed", phase="done", progress=100,
-                        message="用例生成完成",
+                        status="failed" if event.get("completion_status") == "failed" else "completed",
+                        phase="done", progress=100,
+                        message="生成结果待人工审核" if event.get("manual_action_required") else "用例生成完成",
                         completed_at=datetime.now(timezone.utc),
                         result_json={
                             "case_count": len(done_cases),
@@ -359,7 +363,10 @@ async def generate_test_cases(
                             "reused_count": reused_count,
                             "regression_count": regression_count,
                             "regression_reuse_summary": reuse_summary,
-                            # KB 回流统计
+                            # Full quality decision survives SSE disconnection.
+                            **quality_outcome(event),
+                            "review_report": event.get("review_report", {}),
+                            "gate_result": event.get("gate_result", {}),
                             "kb_flowback": event.get("kb_flowback", {}),
                         },
                     )
@@ -413,6 +420,10 @@ async def generate_test_cases(
                     )
                 elif progress:
                     await _update_gen_task(progress=progress, message=event.get("message", "")[:200])
+                yield {
+                    "event": "message",
+                    "data": json.dumps(event, ensure_ascii=False, default=str),
+                }
         except Exception as e:
             # 兜底：orchestrator 内部未捕获的异常（正常情况已被 run_pipeline 的
             # try/except 捕获并 yield error 事件，此处为防御性处理）
@@ -453,7 +464,7 @@ async def generate_test_cases(
 
     async def _patched_aclose() -> None:
         try:
-            if not aborted.get("flag", False) if callable(getattr(aborted, "get", None)) else not aborted["flag"]:
+            if not aborted["flag"]:
                 try:
                     if await request.is_disconnected():
                         # 直接 DB 更新，不依赖 event_generator 是否还活着

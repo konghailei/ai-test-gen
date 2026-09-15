@@ -191,6 +191,12 @@ GEN_CASES = [
         "priority": "P0",
         "preconditions": ["用户已注册"],
         "steps": [{"step": 1, "action": "输入账号密码", "expected": "登录成功"}],
+        # v3.4：补齐断言——真实生成结果必带 assertions（contract 校验要求），
+        # 旧夹具缺该字段，会让"用例合同校验"把它判成畸形内容（docs/15 §4.6）
+        "assertions": [
+            {"type": "equals", "target": "operation.result", "expected_value": "登录成功",
+             "message": "账号密码正确时返回登录成功"},
+        ],
         "related_requirement": "REQ-2024-001",
         "gen_metadata": {"gen_confidence": 0.85},
     }
@@ -867,6 +873,64 @@ async def test_review_supplement_loop(result: TestResult):
 
 
 # ============================================================================
+# 测试 12: 发布门禁 fail-closed（docs/15 §4.1 / P0-2）
+# ============================================================================
+
+
+async def test_publication_gate_fail_closed(result: TestResult):
+    """畸形用例不得自动发布：不中断流水线、判 blocked、PG 与 Milvus 均不写入。
+
+    对应 docs/15 §4.1 验收：合同不合格的内容不能变成权威知识。
+    """
+    print("\n[测试 12] 发布门禁 fail-closed")
+
+    from app.db.milvus_store import vector_store
+
+    # 缺 assertions → 违反用例可执行合同（真实生成结果必带断言）
+    malformed = {
+        "id": "TC-BAD-0001", "title": "畸形用例", "type": "functional",
+        "priority": "P0",
+        "steps": [{"step": 1, "action": "提交表单", "expected": "提交成功"}],
+        "related_requirement": "REQ-2024-001",
+        "gen_metadata": {"gen_confidence": 0.9},
+    }
+
+    vector_calls = {"n": 0}
+    original_add = vector_store.add_test_case
+
+    def _counting_add(*a, **kw):
+        vector_calls["n"] += 1
+
+    vector_store.add_test_case = _counting_add
+    try:
+        # persist_to_kb 走真实实现：blocked 时必须在触碰 DB 之前返回
+        events, _ = await collect_events_with_mocks(
+            "用户登录功能",
+            parse_return=SRR_P2_FAST,
+            clarify_return=CLARIFY_PASSED,
+            impact_return=IMPACT_NOT_OPT,
+            gen_return=[malformed],
+            review_return=(REVIEW_REPORT, [{**malformed, "confidence": 0.9}]),
+        )
+    finally:
+        vector_store.add_test_case = original_add
+
+    stages = [e["stage"] for e in events]
+    result.assert_true("含 review（未因合同校验中断）", "review" in stages)
+    result.assert_true("含 done（前端能拿到终态）", "done" in stages)
+
+    done = next((e for e in events if e["stage"] == "done"), {})
+    publication = done.get("publication", {}) or {}
+    result.assert_eq("发布决策=blocked", publication.get("decision"), "blocked")
+    result.assert_true("原因含 invalid_case_content",
+                       "invalid_case_content" in (publication.get("reasons") or []))
+    result.assert_eq("终态 failed（不得 completed）", done.get("completion_status"), "failed")
+    result.assert_true("需人工介入", done.get("manual_action_required") is True)
+    result.assert_eq("Milvus 写入 0 次", vector_calls["n"], 0)
+    result.assert_true("KB 回流已跳过", (done.get("kb_flowback") or {}).get("skipped") is True)
+
+
+# ============================================================================
 # 测试 11: 错误处理
 # ============================================================================
 
@@ -1024,6 +1088,7 @@ async def async_main(result: TestResult):
     await test_pipeline_clarify_loop(result)
     await test_pipeline_force_pass(result)
     await test_review_supplement_loop(result)
+    await test_publication_gate_fail_closed(result)
     await test_pipeline_error(result)
     await test_progress_monotonic(result)
 

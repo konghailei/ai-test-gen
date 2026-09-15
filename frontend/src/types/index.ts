@@ -215,7 +215,35 @@ export interface GateResult {
   forced_pass?: boolean
 }
 
-export interface SSEEvent {
+export type CompletionStatus = 'completed' | 'awaiting_human_review' | 'failed'
+export type CoverageStatus = 'unknown' | 'mapped'
+
+export interface Publication {
+  decision: 'auto_approve' | 'human_review' | 'blocked'
+  reasons: string[]
+  policy_version: string
+}
+
+export interface PointCoverage {
+  coverage_status?: CoverageStatus
+  coverage_rate?: number
+  [key: string]: unknown
+}
+
+export interface GenerationResult {
+  completion_status?: CompletionStatus
+  publication?: Publication
+  degraded_flags?: string[]
+  failed_subtasks?: Array<string | Record<string, unknown>>
+  review_report?: ReviewReport
+  review_degraded?: boolean
+  coverage_status?: CoverageStatus
+  point_coverage?: PointCoverage
+  kb_flowback?: KbFlowback
+  manual_action_required?: boolean
+}
+
+export interface SSEEvent extends GenerationResult {
   stage: string
   message: string
   progress: number
