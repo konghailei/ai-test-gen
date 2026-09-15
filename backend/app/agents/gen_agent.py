@@ -175,16 +175,34 @@ class GenAgent:
                 if _passed:
                     async with async_session() as _s:
                         _rows = await _s.execute(
-                            _select(TestCase.id, TestCase.case_json, TestCase.modules).where(
+                            _select(TestCase.id, TestCase.case_json, TestCase.modules,
+                                    TestCase.weight).where(
                                 TestCase.id.in_([x for x, _ in _passed]),
                                 TestCase.product_id == product_id,
                                 # 双保险：Milvus 仅存 approved，但防「审批后降级」的向量残留
                                 TestCase.status == "approved",
                             )
                         )
-                        _info = {r[0]: (r[1], r[2]) for r in _rows.all()}
+                        _info = {r[0]: (r[1], r[2], r[3]) for r in _rows.all()}
                         _wanted = {m for m in modules if isinstance(m, str) and m}
-                        # 模块作为排序偏好：命中模块的优先，不足再按相似度补足
+
+                        # v3.3（docs/14 二期 10）：把 `weight` 接入检索排序。
+                        # rank = 0.6×语义相似度 + 0.3×weight_norm + 0.1×新近度
+                        #
+                        # ⚠️ weight 必须**在候选集内归一化**后再用：
+                        # 实测 weight 的 std 仅 0.058（4 个输入里 2 个近似常量），
+                        # 直接用原始值只会把相似度的权重稀释到 0.6 而不带来有效区分。
+                        # 归一化后：weight 近似常量 → 退化为常量 0.5，不扰动排序；
+                        # 有真实差异时自动生效。详见 app/utils/case_weight.py。
+                        from app.utils.case_weight import normalize_weights, rank_score
+
+                        _valid = [(c, s) for c, s in _passed if c in _info]
+                        _norms = normalize_weights(
+                            [float(_info[c][2] or 0.0) for c, _ in _valid]
+                        )
+                        _norm_map = {c: _norms[i] for i, (c, _) in enumerate(_valid)}
+
+                        # 模块作为排序偏好：命中模块的优先，不足再按综合分补足
                         for _cid, _sim in _passed:
                             if _cid not in _info:
                                 continue
@@ -192,7 +210,13 @@ class GenAgent:
                                 m.strip() for m in (_info[_cid][1] or [])
                                 if isinstance(m, str) and m.strip()
                             }
-                            (_pref if (_wanted and _wanted & _stored) else _rest).append((_cid, _sim))
+                            _rank = rank_score(_sim, _norm_map.get(_cid, 0.5))
+                            (_pref if (_wanted and _wanted & _stored) else _rest).append(
+                                (_cid, _rank)
+                            )
+                        # 组内按综合分降序（weight 生效后顺序可能不同于纯相似度序）
+                        _pref.sort(key=lambda x: -x[1])
+                        _rest.sort(key=lambda x: -x[1])
                         _seen_titles: set[str] = set()
                         for _cid, _sim in _pref + _rest:
                             if len(few_shot_cases) >= RetrievalThreshold.FEW_SHOT_TOP_K:

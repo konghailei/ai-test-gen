@@ -583,11 +583,30 @@ async def batch_feedback(
         await assert_product_visible(session, user, record.product_id)
 
     updated_count = 0
+    # v3.3（docs/14 二期 11）：批量反馈同样立即重算 weight（与单条端点保持一致）
+    try:
+        from app.utils.case_weight import calc_case_weight
+        _recalc = True
+    except Exception:  # noqa: BLE001
+        _recalc = False
+
     for record in records:
         record.status = new_status
         record.feedback = feedback_data
         record.reviewed_by = user.username
         record.reviewed_at = datetime.now(timezone.utc)
+        if _recalc:
+            try:
+                w, _detail = calc_case_weight(
+                    record.feedback, record.confidence,
+                    record.execution_count, record.last_pass_rate,
+                )
+                record.weight = w
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[API/testcases] 批量反馈重算 weight 失败 case_id={}: {}",
+                    record.id, str(e)[:120],
+                )
         updated_count += 1
 
     await session.commit()
@@ -704,6 +723,22 @@ async def submit_feedback(
     }
     record.reviewed_by = user.username
     record.reviewed_at = datetime.now(timezone.utc)
+
+    # v3.3（docs/14 二期 11）：人工反馈 → **立即重算该条 weight**。
+    # 设计 §B3 的闭环要求"反馈影响下次检索排序"；若等周期任务重算，
+    # 反馈与生效之间会隔一个周期。人工采纳率是 weight 的**最大权重项（0.35）**，
+    # 立即生效收益最直接。
+    try:
+        from app.utils.case_weight import calc_case_weight
+
+        w, _detail = calc_case_weight(
+            record.feedback, record.confidence,
+            record.execution_count, record.last_pass_rate,
+        )
+        record.weight = w
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[API/testcases] 反馈后重算 weight 失败（不阻断）: {}", str(e)[:150])
+
     await session.commit()
 
     # 同步 Milvus 向量：approved 时写入/reupsert，rejected 时删除。

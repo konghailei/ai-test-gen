@@ -983,3 +983,26 @@ N5 三缺陷中 **N5-c（无对账机制）** 是"不一致能潜伏至今"的�
 且阈值过严会重演冷启动死锁。**注入式探针 5 项全 PASS**（含"极低分也不进 Blocker"）。
 
 回归 **413/413**。
+
+### §17.23 2026-09-15 二期 10/11 落地（weight 计算 / 排序接入 / 反馈闭环）
+
+**实现前实测发现公式的 4 个输入有 2 个是近似常量**：
+`feedback.accepted` = None 1287 / true 416 / false 1；`execution_count>0` 仅 5 条；
+`last_pass_rate` 全 0（从未写入）；`weight` 现值**全部 1.0**（从未重算）。
+按公式算：**mean 0.528 / std 仅 0.058**，66% 挤在 0.5 桶——
+**区分度低于 `confidence` 单独使用**。直接接排序会稀释相似度而不带来有效区分。
+
+**解法**：候选集内归一化 + **方差守卫**（`MIN_WEIGHT_SPREAD=0.10`）。
+min-max 是线性拉伸，拉伸倍数=1/极差；**同质候选集极差可能仅 0.02，
+会把 0.01 噪声放大 50 倍** → 必须抑制。
+验证：极差 0.02/0.05 → 全 0.5（抑制）；极差 0.30 → 生效；同质集下顺序仍由相似度决定。
+
+**另一处修正**：使用频率归一化改用**固定饱和基准** `USAGE_SATURATION=50`
+（原用批次最大值会导致同一条用例的 weight 随别人变化，单条/批量重算不一致）。
+
+**落地**：新增 `app/utils/case_weight.py`（`calc_case_weight`/`normalize_weights`/
+`rank_score`/`recompute_all_weights`）；`gen_agent.py` few-shot 排序接入；
+`api/testcases.py` 单条与批量反馈端点均**立即重算 weight**。
+`recompute_all_weights()` **已执行**（1704 条）。
+
+回归 **413/413**。
