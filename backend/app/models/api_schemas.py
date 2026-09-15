@@ -116,6 +116,12 @@ class GenerateRequest(BaseModel):
     resume_from_task: str = Field(
         default="", max_length=64, description="指定续跑来源任务 ID（留空则自动查找最近可续任务）"
     )
+    # v3.4（docs/15 §4.2 第 4 条）：续跑前校验输入指纹（SRR/FP 集合/需求修订/prompt/模型/
+    # 合同版本）。任一不一致 → 409 拒绝续跑；只有显式 fallback_to_restart=true 才允许
+    # 放弃旧 checkpoint 从头开始。默认 False = 保守（宁可拒绝也不把旧产物拼到新输入上）。
+    fallback_to_restart: bool = Field(
+        default=False, description="输入指纹不一致时是否放弃旧断点从头生成"
+    )
 
 
 # ============================================================================

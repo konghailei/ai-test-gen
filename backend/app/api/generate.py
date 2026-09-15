@@ -182,6 +182,47 @@ async def generate_test_cases(
     # 从 srr_json 提取澄清答案（由 /requirements/{id}/clarify 端点存入）
     clarify_answers = srr_json.get("clarify_answers") or None
 
+    # v3.1.3 断点续跑：resume=True 时从最近一次中断/作废任务 checkpoint 继续
+    _resume_meta: dict | None = None
+    if req.resume:
+        _resume_meta = await _find_resume_checkpoint(req.resume_from_task, req.resume_from_task) if req.resume_from_task else await _find_resume_checkpoint(req.req_id)
+        if not _resume_meta:
+            logger.warning(
+                "[API/generate] 续跑请求但无可用 checkpoint，将从头生成: req_id={}, resume_from={}",
+                req.req_id, req.resume_from_task,
+            )
+        else:
+            # v3.4（docs/15 §4.2 第 3/4 条）：续跑前校验**输入指纹**。
+            # 旧 checkpoint 只记"哪些 FP 完成了"，不记它对应哪份输入 ——
+            # 改完需求再续跑，会把旧产物拼到新需求上。现在逐字段比对：
+            # 需求修订 / SRR 内容 / FP 集合 / prompt 版本 / 模型 / 合同版本，
+            # 任一不同 → 409；只有显式 fallback_to_restart=true 才放弃旧断点从头跑。
+            from app.core.pipeline_fingerprint import (
+                compare_fingerprints,
+                load_current_fingerprint,
+                mismatch_message,
+            )
+
+            async with async_session() as fp_session:
+                current_fp = await load_current_fingerprint(fp_session, requirement, srr_json)
+            stored_fp = (_resume_meta.get("checkpoint") or {}).get("fingerprint")
+            ok, diffs = compare_fingerprints(stored_fp, current_fp)
+            if not ok and not req.fallback_to_restart:
+                detail = mismatch_message(diffs)
+                logger.warning(
+                    "[API/generate] 续跑被输入指纹拦截: req_id={}, task={}, diffs={}",
+                    req.req_id, _resume_meta.get("source_task_id"),
+                    [(d["field"], d["stored"], d["current"]) for d in diffs],
+                )
+                raise HTTPException(status_code=409, detail=detail)
+            if not ok:
+                logger.warning(
+                    "[API/generate] 输入指纹不一致但已显式 fallback_to_restart，"
+                    "放弃旧断点从头生成: req_id={}, diffs={}",
+                    req.req_id, [d["field"] for d in diffs],
+                )
+                _resume_meta = None
+
     # v3.1.3 P1-2 并发互斥 → v3.4（docs/15 §4.3）改为**原子占用**：
     # 原先"session A 查活动任务 → session B 插任务"存在 TOCTOU（两个并发请求可能都查到
     # "没有活动任务"），且 `resume=True` 会绕过互斥。现在由 core/task_guard 在**同一事务**内
@@ -208,15 +249,6 @@ async def generate_test_cases(
                    f"（断点续跑同样受互斥约束）",
         )
 
-    # v3.1.3 断点续跑：resume=True 时从最近一次中断/作废任务 checkpoint 继续
-    _resume_meta: dict | None = None
-    if req.resume:
-        _resume_meta = await _find_resume_checkpoint(req.resume_from_task, req.resume_from_task) if req.resume_from_task else await _find_resume_checkpoint(req.req_id)
-        if not _resume_meta:
-            logger.warning(
-                "[API/generate] 续跑请求但无可用 checkpoint，将从头生成: req_id={}, resume_from={}",
-                req.req_id, req.resume_from_task,
-            )
 
     logger.info(
         "[API/generate] 启动 SSE 流式生成: req_id={}, task_id={}, expected_channel={}, "

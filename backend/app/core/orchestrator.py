@@ -150,6 +150,14 @@ class PipelineState(TypedDict, total=False):
     task_id: str
     _fp_subtasks: list
     _fp_groups: list
+    # ⚠️ v3.4（docs/15 §4.2 第 1 条）补声明：这三个字段此前**未声明**，会被 LangGraph
+    # 静默过滤 → `_gen_node` 里 `state.get("resume")` 恒为 False、
+    # `state.get("resume_checkpoint")` 恒为 None —— **断点续跑从未真正生效过**。
+    # 实测审计（state.get 全量比对 PipelineState 声明）抓出；同源问题已修过三例
+    #（consistency_check / functional_points / content_errors）。
+    resume: bool
+    resume_checkpoint: dict
+    _last_node: str
 
     # 控制流
     clarify_iteration: int
@@ -285,12 +293,16 @@ class Orchestrator:
     # ========================================================================
     # v3.1.3 断点续跑 checkpoint（断电/断网中断后，续跑跳过已完成功能点）
     # ========================================================================
-    async def _save_gen_checkpoint(self, task_id: str, fp_groups: list[dict]) -> None:
+    async def _save_gen_checkpoint(self, task_id: str, fp_groups: list[dict],
+                                   fingerprint: dict | None = None) -> None:
         """把各功能点已生成的结果写入 analysis_tasks.result_json，供断点续跑恢复。
 
         Args:
             task_id: 生成任务 ID
             fp_groups: 每功能点 {fp_id, fp_name, case_count, cases}
+            fingerprint: **输入指纹**（docs/15 §4.2）——记录这份断点对应哪份输入
+                （SRR/FP 集合/需求修订/prompt/模型/合同版本），续跑前逐字段比对，
+                不一致就拒绝续跑。不传时保留旧指纹（不回退成"无指纹"）。
         """
         if not task_id:
             return
@@ -304,7 +316,11 @@ class Orchestrator:
                 if t is None:
                     return
                 old = dict(t.result_json or {})
-                old["checkpoint"] = {"fp_groups": list(fp_groups), "completed": len(fp_groups)}
+                old_cp = dict(old.get("checkpoint") or {})
+                new_cp = {"fp_groups": list(fp_groups), "completed": len(fp_groups)}
+                # 指纹：新值优先；不传则保留旧值（绝不能回退成"无指纹"——那会让续跑校验失效）
+                new_cp["fingerprint"] = fingerprint or old_cp.get("fingerprint") or {}
+                old["checkpoint"] = new_cp
                 t.result_json = old
                 await _s.commit()
         except Exception as e:
@@ -975,6 +991,30 @@ class Orchestrator:
                 checkpoint_groups.append(dict(g))  # 累积，保证二次中断也能续
                 logger.info("[Orchestrator] 断点续跑：跳过已完成的 FP={}", fid)
 
+        # v3.4（docs/15 §4.2 第 3 条）：计算本任务的**输入指纹**，随每次 checkpoint 写入。
+        # 续跑时 API 层会用"当前输入"重算并逐字段比对（不一致 → 409）。
+        # 注意这里要取需求修订号（DB），保证与 API 侧的指纹字段完全一致。
+        checkpoint_fingerprint: dict = {}
+        try:
+            from app.core.pipeline_fingerprint import build_fingerprint as _build_fp
+            from app.db.database import async_session as _async_session
+            from app.db.models import Requirement as _Requirement
+            from sqlalchemy import select as _sel
+            async with _async_session() as _s:
+                _rev = (await _s.execute(
+                    _sel(_Requirement.revision).where(_Requirement.id == req_id)
+                )).scalar()
+            checkpoint_fingerprint = _build_fp(
+                req_id=req_id,
+                product_id=str((srr.get("requirement", {}) or {}).get("product_id", "")),
+                revision=_rev,
+                srr=srr,
+                functional_points=fp_list or [],
+            )
+        except Exception as _fp_err:
+            logger.warning("[Orchestrator] 输入指纹计算失败（本次 checkpoint 不带指纹，续跑时将被拒绝）: {}",
+                           str(_fp_err)[:140])
+
         fp_list = functional_points or []
         # 1) 各功能点分片定向生成（小 prompt）
         for fp in fp_list:
@@ -1027,7 +1067,7 @@ class Orchestrator:
                 {"key": fid, "name": fname, "status": "done", "cases": len(fp_cases)},
             )
             try:
-                await self._save_gen_checkpoint(task_id, checkpoint_groups)
+                await self._save_gen_checkpoint(task_id, checkpoint_groups, fingerprint=checkpoint_fingerprint)
             except Exception as e:
                 logger.debug("[Orchestrator] checkpoint 写入失败（不阻断）: {}", str(e)[:120])
 
