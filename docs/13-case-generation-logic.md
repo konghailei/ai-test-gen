@@ -41,7 +41,7 @@
 | 3 | `status == "confirmed"` | 409 | 必须先走完 需求分析→澄清→确认 |
 | 4 | 无未确认的影响分析条目 | 409 | v3.1.3 新增。`impact_analysis` 中 `confirmed_at` 为空即拦截，防止回归覆盖无声缩水 |
 | 5 | SRR 非空（`srr_json.requirement`） | 400 | **明确禁止回退到 raw_text**，防止 SRR 简化导致通道误判与质量下降 |
-| 6 | 并发互斥 | 409 | 同需求存在 pending/running 且 `created_at > now-6h` 的任务；超 6h 视为僵尸不阻塞；`resume=True` 可绕过 |
+| 6 | 并发互斥 | 409 | **v3.4 原子占用**（`core/task_guard.py`）：同一事务内 `pg_advisory_xact_lock` → 僵尸回收（updated_at>6h → interrupted）→ 活动检查 → 插入；DB 层另有 partial unique index（`database.py` init_db Step 3b）；**`resume=True` 同受互斥**。插入失败区分"唯一索引冲突（409）"与"其它 DB 错误（500）" |
 
 ### 1.2 任务与流式封装
 
@@ -53,6 +53,15 @@
 ### 1.3 断点续跑（v3.1.3）
 
 `_find_resume_checkpoint()` 从最近一次 `interrupted / aborted / cancelled / failed` 的 `generate_cases` 任务读取 `result_json.checkpoint`（必须含 `fp_groups`）。指定 `resume_from_task` 时按其 ID 精确取用。
+
+**v3.4（docs/15 §4.2）输入指纹校验**：checkpoint 必须携带输入指纹
+（req_id / product_id / revision / srr_sha256 / fp_set_sha256 / prompt_version / model / schema_version，
+`core/pipeline_fingerprint.py`）。续跑前用当前输入重算并逐字段比对，**任一不一致 → 409**
+（文案逐字段说明"checkpoint=旧 → 当前=新"）；只有显式 `fallback_to_restart=true` 才放弃旧断点
+从头生成。老 checkpoint 无指纹 → 视为不可验证，同样拒绝。
+⚠️ 校验放在原子占用槽位**之前**（纯检查无副作用），否则被拒时会把 running 任务留在库里。
+另：`PipelineState` 必须显式声明 `resume` / `resume_checkpoint`——未声明字段会被 LangGraph
+静默过滤（v3.4 之前因此**断点续跑从未生效**）。
 
 ---
 
@@ -198,7 +207,7 @@ START → parse → select_channel ─┬─(enable_clarify)→ clarify → gate
 
 **容错与续跑**：
 - 单个 FP 生成异常 → `logger.warning` + 继续下一个（**不阻断**），进度卡片标 `failed`，续跑会重试；
-- 每个 FP 成功后立即 `_save_gen_checkpoint(task_id, checkpoint_groups)` 写入 `analysis_tasks.result_json.checkpoint`；
+- 每个 FP 成功后立即 `_save_gen_checkpoint(task_id, checkpoint_groups, fingerprint=…)` 写入 `analysis_tasks.result_json.checkpoint`（v3.4 起附带**输入指纹**，续跑前逐字段比对）；
 - 续跑时跳过 `completed_fps`，已恢复的 FP 标 `status="resumed"`；
 - 细粒度进度经 `_gen_event_queue` 与 LangGraph 节点事件合并为同一队列按序透出（`fp_subtask` / `subtasks` / `fp_progress`）。
 
@@ -264,7 +273,7 @@ START → parse → select_channel ─┬─(enable_clarify)→ clarify → gate
 | `< 0.60` 或 blocker | 记录到 `error_cases` |
 | `id` 已存在（v3.1.3 修复） | 跳过，计入 `reused_skip` —— 回归复用用例带历史 ID，重复 insert 会 UniqueViolation 导致整批丢失 |
 
-- `reused_skip` 之外，向量双写 Milvus 失败会计入 `vector_write_failed` 并**上抛为 review warning**（v3.1.3 P1-4），因为 PG 已入库但回归检索基线缺失。
+- **v3.4 起 PG→Milvus 走事务性出箱**（`core/vector_outbox.py`）：approved 分支在 savepoint 内把投递意图与用例同事务入箱，由 relay 至少一次幂等投递；`stats.vector_pending` 记入箱条数。**Milvus 抖动不再判 `kb_publication_incomplete`**（出箱自愈），只有入箱失败才计 `vector_write_failed`；积压见 `pending_summary()` 与 `reconcile_cases()`。
 - **向量写入只对 approved 用例做**（v2.0 决策），避免未审核用例污染 Few-shot 检索。
 
 > 阈值 0.70 是 v3.5 从 0.85 下调的：冷启动时 `match_score=0`、`pattern_bonus=0`，理论上限仅 0.6~0.7，原阈值永远不可达，会导致 approved 恒为空、复用机制死循环。

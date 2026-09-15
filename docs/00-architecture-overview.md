@@ -105,6 +105,75 @@
 
 ---
 
+## 2.1 v3.4 可靠性与 HITL 架构（2026-09-15 落地）
+
+> 逐项审查证据、实施进度与验收结果见 `docs/15`（§6 实施进度表）。本节只记**已落地的结构性变化**。
+
+### A. 生成任务的并发互斥（`core/task_guard.py`）
+
+```
+POST /api/generate
+  ├─ 六道守卫（需求状态 / SRR 完整性 / 影响确认 …）
+  ├─ resume? → 输入指纹校验（纯检查，无副作用）        ← 见 D
+  └─ reserve_generation_slot(req_id)                   ← 原子占用（core/task_guard.py）
+       ├─ pg_advisory_xact_lock(hashtext(req_id||':generate'))   同需求请求串行化
+       ├─ 僵尸兜底：updated_at>6h 的活动任务 → interrupted（主回收方 task_watchdog）
+       ├─ 活动任务检查（与插入同事务，TOCTOU 消失）
+       └─ INSERT → partial unique index 兜底（init_db Step 3b）
+            (req_id) WHERE status IN ('pending','running')
+              AND task_type IN ('generate_cases','regenerate')
+```
+
+- `resume=True` 与普通生成**同受互斥**（旧实现可绕过）；并发冲突 → 409；
+- **错误分类**：只有唯一索引冲突算"任务在跑"，其它 DB 异常照抛——把外键错误伪装成 409
+  会把排查方向带偏；
+- SSE 事件队列由实例字段改为 **ContextVar**（请求任务各持一份），并发事件不串流。
+
+### B. PG→Milvus 事务性出箱（`core/vector_outbox.py`）
+
+```
+业务事务:  TestCase + Traceability + vector_outbox(投递意图) ──同事务 commit──►
+relay(lifespan, 5s):  FOR UPDATE SKIP LOCKED 认领 → 幂等 upsert/delete → done
+                      失败 → 指数退避 5→…→300s → 超 8 次 failed（等对账）
+```
+
+- 业务代码**不再在事务外直写 Milvus**（旧实现的 Milvus 写发生在 PG commit 之前，
+  失败即"PG 有、向量没有"且无处记录）；
+- 投递 metadata 带 `revision`（epoch 毫秒，BIGINT）+ `content_hash` → 对账能识别**陈旧向量**；
+- **职责分离**：出箱只"补缺失"（无损、自动重投）；孤儿/陈旧向量的**删除判定归对账模块
+  且只有一份实现**（`reconcile_cases(apply_deletes=False)` 默认只报告——误删不可逆）；
+- 口径变化：Milvus 抖动**不再**判 `kb_publication_incomplete`（出箱自愈），
+  只有入箱失败才计 `vector_write_failed`。
+
+### C. 发布门禁与 HITL（`core/publication_policy.py`）
+
+- fail-closed：`blocked` 时不触碰 PG/Milvus（persist 前的边界二次校验），0 用例 / 合同不合格 /
+  覆盖 unknown / 审核失败一律不自动核准；
+- 发布决策与降级证据**三处持久化**：done 事件、`analysis_tasks.result_json`、
+  `review_reports.summary`（completion_status / publication / degraded_flags /
+  failed_subtasks / content_errors）；`review_reports.passed` 与发布决策**同一口径**；
+- 前端 `PublicationPanel` + KB 回流"跳过态"展示"为什么没自动入库"；
+- prompt 候选激活必须引用服务器端 `evaluation_runs`（passed + prompt_hash 逐字一致 +
+  基线对比记录），客户端 `confirmed_eval` 声明已废弃。
+
+### D. durable execution（断点续跑，部分完成）
+
+- `PipelineState` 显式声明 `resume / resume_checkpoint`（此前被 LangGraph 静默过滤，
+  **断点续跑从未生效**——同源第 4 例，"state.get 全量比对声明集"的审计应常态化）；
+- checkpoint 带**输入指纹**（`core/pipeline_fingerprint.py`，全部可离线复算）：
+  req_id / product_id / revision / srr_sha256 / fp_set_sha256 / prompt_version / model / schema_version；
+- 续跑前重算比对：不一致 → 409（逐字段说明），`fallback_to_restart=true` 才允许从头；
+- **未做**：LangGraph PostgresSaver、任务迁出 API 进程（互为前提，留专项）。
+
+### E. 测试与验证体系
+
+- 分层：`tests/conftest.py` —— 脚本式集成套件默认不收集，**unit 层无外部服务可跑**（CI 阻断，
+  `continue-on-error` 已移除）；
+- 探针（容器内跑、不调 LLM）：`_probe_concurrency.py`（§4.3 验收 11/11）、
+  `_probe_outbox.py`（§4.4 三崩溃点 13/13）、`_probe_durable.py`（§4.2 验收 8/8）；
+- 内容回传式验收：`scripts/review_generation_run.py`（审阅台：逐条判定 + 证据回传）
+  + `scripts/apply_verdicts.py`（判定落地 approve/reject，默认干跑）。
+
 ## 3. 核心数据流
 
 ```

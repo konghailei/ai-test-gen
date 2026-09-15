@@ -935,6 +935,37 @@ ClarifyAgent 内部有 6-7 次 LLM 调用（优化检测、KB 查询生成、KB 
 
 ---
 
+### 6.29 v3.4 — 端到端可靠性收口：并发互斥 / 出箱 / 输入指纹 / 发布门禁 / HITL（2026-09-15）
+
+对应 `docs/15` 的 P0 全部收口 + P1 的 4.3/4.4 落地（逐项证据与验收见 docs/15 §6 实施进度表）。
+
+**A. 并发互斥原子化（§4.3，`core/task_guard.py`）**
+- 问题：`/api/generate` "session A 查活动任务 → session B 插任务"存在 TOCTOU；
+  `resume=True` 可绕过互斥。
+- 修复：`reserve_generation_slot()` 同一事务内 advisory lock → 僵尸回收 → 活动检查 → 插入；
+  `init_db` Step 3b 增加 partial unique index 作 DB 层最终防线；resume 不再绕过。
+- 验收：20 并发同 req_id 恰好 1 成功（探针 11/11）；SSE 隔离由 ContextVar 承载并实测不串流。
+
+**B. PG→Milvus 事务性出箱（§4.4，`core/vector_outbox.py`）**
+- 问题：双写不在同一事务，Milvus 写早于 PG commit；TestCase 无向量化状态可查。
+- 修复：业务事务内 enqueue 意图（不 commit），relay 至少一次幂等投递（退避重试）；
+  metadata 带 revision/content_hash；`reconcile_cases()` 双向对账（删除判定只在一份实现里）。
+- 验收：三个崩溃点（commit 前 / Milvus 成功后 / ack 前）注入崩溃均收敛且不重复（探针 13/13）。
+
+**C. durable execution（§4.2，`core/pipeline_fingerprint.py`，部分完成）**
+- 实测缺陷：`PipelineState` 未声明 `resume/resume_checkpoint` → **断点续跑从未生效**（同源第 4 例）。
+- 修复：补声明 + checkpoint 输入指纹（8 字段）+ 续跑前比对（不一致 409，`fallback_to_restart` 放行）。
+- 验收：完成 2 个 FP 后续跑不再调用已完成 FP；旧 revision checkpoint 被拒（探针 8/8）。
+- 剩余：PostgresSaver 与任务迁出 API 进程（互为前提，专项处理）。
+
+**D. 发布门禁与 HITL（§4.1 / §4.5）**
+- 发布决策 fail-closed 并三处持久化；`review_reports.passed` 与发布决策对齐；
+- prompt 激活改为服务器端评估证据（`evaluation_runs` + `eval_prompt_candidate.py`）；
+- 前端 `PublicationPanel` / KB 回流跳过态；审阅台（`review_generation_run.py`）+ 判定执行（`apply_verdicts.py`）。
+
+**E. 测试体系**
+- `tests/conftest.py` 分层：脚本式套件默认不收集，unit 层无服务可跑；CI 去掉 `continue-on-error`。
+
 ## 7. 架构演进路线图
 
 ### 7.1 已完成的演进主线
