@@ -126,6 +126,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("[KbMaint] 启动失败（不影响启动）: {}", str(e)[:150])
 
+    # v3.4（docs/15 §4.4）：向量库写入出箱 relay。
+    # 业务行与"投递意图"同一事务提交，这里负责至少一次把出箱投递到 Milvus
+    # （幂等 upsert/delete），失败指数退避重试；超上限转 failed 等对账。
+    try:
+        from app.core.vector_outbox import start_vector_outbox_relay, stop_vector_outbox_relay
+        start_vector_outbox_relay()
+    except Exception as e:
+        logger.warning("[VectorOutbox] relay 启动失败（不影响启动）: {}", str(e)[:150])
+
     logger.info("AI测试用例生成系统 启动完成，监听端口 {}", settings.APP_PORT)
 
     yield
@@ -142,6 +151,11 @@ async def lifespan(app: FastAPI):
         await stop_kb_maintenance()
     except Exception as e:
         logger.warning("[KbMaint] 停止失败: {}", str(e)[:150])
+    try:
+        from app.core.vector_outbox import stop_vector_outbox_relay
+        await stop_vector_outbox_relay()
+    except Exception as e:
+        logger.warning("[VectorOutbox] 停止失败: {}", str(e)[:150])
 
 
 # ============================================================================

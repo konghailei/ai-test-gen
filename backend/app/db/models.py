@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime, date, timezone
 from sqlalchemy import (
     String, Integer, Float, Text, DateTime, Date, Boolean, ForeignKey, Index, JSON,
-    UniqueConstraint,
+    BigInteger, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.database import Base
@@ -1280,4 +1280,51 @@ class EvaluationRun(Base):
 
     __table_args__ = (
         Index("idx_evalrun_target", "target", "status", "created_at"),
+    )
+
+# ============================================================================
+# 21. 向量库写入出箱（vector_outbox，v3.4 / docs/15 §4.4）
+# ============================================================================
+
+
+class VectorOutbox(Base):
+    """Transactional Outbox：PG 业务行与"要写进 Milvus 的意图"同事务提交。
+
+    为什么需要（审查证据）：
+      - Review 回流里 PG 记录与 Milvus 向量分属两套系统、不在同一事务：
+        Milvus 写甚至发生在 PG 最终 commit **之前**，失败时 PG 有、向量没有；
+      - TestCase 没有类似 Requirement 的 vectorization_status，"没写成功"无处记录；
+      - 审批/驳回（feedback）同样是 PG + Milvus 非原子双写。
+
+    语义：
+      - 业务事务内只写 TestCase + Traceability + Outbox（本表），**commit 后**由 relay
+        至少一次投递；Milvus 侧按主键幂等 upsert/delete，故重复投递不产生重复副作用；
+      - `revision` + `content_hash` 随 metadata 写进 Milvus，对账时能识别"陈旧向量"；
+      - `status`：pending（待投递）/ done（已投递）/ failed（超过重试上限，等对账或人工）。
+    """
+    __tablename__ = "vector_outbox"
+
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="事件 ID: VO-{时间戳}-{随机}")
+    aggregate_type: Mapped[str] = mapped_column(String(32), index=True, comment="聚合类型: test_case / requirement")
+    aggregate_id: Mapped[str] = mapped_column(String(64), index=True, comment="聚合 ID（用例 ID / 需求 ID）")
+    action: Mapped[str] = mapped_column(String(16), comment="upsert / delete")
+    # revision 用"变更时刻的 epoch 毫秒"做单调标记（~1.8e12）→ 必须 BIGINT，int32 会溢出
+    revision: Mapped[int] = mapped_column(BigInteger, default=1, comment="PG 侧修订号（epoch 毫秒，单调递增）")
+    content_hash: Mapped[str] = mapped_column(String(64), default="", comment="内容 hash（识别陈旧向量）")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, comment="投递所需数据（case_json / metadata）")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True, comment="pending / done / failed")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, comment="已重试次数")
+    next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="下次可投递时间（退避）"
+    )
+    error: Mapped[str] = mapped_column(Text, default="", comment="最近一次失败原因")
+    created_by: Mapped[str] = mapped_column(String(64), default="pipeline", comment="来源: pipeline / api / reconcile")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="投递完成时间")
+
+    __table_args__ = (
+        Index("idx_outbox_dispatch", "status", "next_retry_at", "created_at"),
+        Index("idx_outbox_aggregate", "aggregate_type", "aggregate_id", "created_at"),
     )

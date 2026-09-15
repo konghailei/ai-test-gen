@@ -742,7 +742,12 @@ class ReviewAgent:
             "pending_review": 0,
             "rejected": 0,
             "errors": 0,
-            "vector_write_failed": 0,  # v3.1.3 P1-4: Milvus 写入失败计数，上抛可见
+            "vector_write_failed": 0,
+            # v3.4（docs/15 §4.4）：向量投递已改为"同事务入出箱 + relay 至少一次投递"，
+            # 这里统计的是**入箱成功**的条数（真正的 Milvus 写入由出箱完成，积压可在
+            # /observability 与 reconcile 里看到）。刻意不把 pending 当成"写入失败"，
+            # 否则每次运行都会被判 kb_publication_incomplete。
+            "vector_pending": 0,
         }
 
         # Re-evaluate at the side-effect boundary; a caller-supplied 'approved'
@@ -864,6 +869,37 @@ class ReviewAgent:
                                 gen_batch_id=batch_id,
                             )
                             session.add(record)
+                            # v3.4（docs/15 §4.4）：把"要写进 Milvus"的意图与业务行
+                            # **同一事务**落出箱。原实现是事务外直接写 Milvus（且早于 PG
+                            # commit）→ 失败即"PG 有、向量没有"的静默不一致，用例侧还没有
+                            # vectorization_status 可查。现在 commit 后由 relay 至少一次投递，
+                            # 幂等 upsert，失败进重试/对账。
+                            try:
+                                from app.core.vector_outbox import enqueue as _enqueue_outbox
+                                _enqueue_outbox(
+                                    session,
+                                    aggregate_id=case_id,
+                                    action="upsert",
+                                    payload={
+                                        "case_json": case,
+                                        "metadata": {
+                                            "req_id": req_id,
+                                            "product_id": product_id,
+                                            "project_id": (srr.get("requirement", {}) or {}).get("project_id", ""),
+                                            "case_type": case_type,
+                                            "confidence": str(confidence),
+                                            "gen_batch_id": batch_id,
+                                        },
+                                    },
+                                    created_by="pipeline",
+                                )
+                                stats["vector_pending"] += 1
+                            except Exception as oe:
+                                stats["vector_write_failed"] += 1
+                                logger.warning(
+                                    "[ReviewAgent/KB] 向量出箱入队失败（不阻断入库）: case_id={}, err={}",
+                                    case_id, str(oe)[:120],
+                                )
 
                         elif not auto_allowed or Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
                             confidence >= 0.70 and is_blocked
@@ -940,27 +976,12 @@ class ReviewAgent:
                         session.add(trace)
                         # begin_nested 退出时自动 flush，失败则回滚到 savepoint
 
-                    # savepoint 成功提交后，执行向量库写入与统计（不阻断 DB 事务）
+                    # v3.4（docs/15 §4.4）：这里不再"事务外直接写 Milvus"——
+                    # 投递意图已在上面的 savepoint 内入出箱（与 TestCase 同事务提交），
+                    # 由 core/vector_outbox 的 relay 至少一次投递（幂等 upsert）。
+                    # 因此本处只做统计：入箱失败才算 vector_write_failed，真正的
+                    # "向量暂时没写成功"是出箱待投递（vector_pending），会自愈而不是报错。
                     if auto_allowed and confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
-                        try:
-                            await asyncio.to_thread(
-                                vector_store.add_test_case,
-                                case_id=case_id,
-                                case_json=case,
-                                metadata={
-                                    "req_id": req_id,
-                                    "product_id": product_id,
-                                    "case_type": case_type,
-                                    "confidence": str(confidence),
-                                    "gen_batch_id": batch_id,
-                                },
-                            )
-                        except Exception as ve:
-                            stats["vector_write_failed"] += 1
-                            logger.warning(
-                                "[ReviewAgent/KB] 向量库写入失败: case_id={}, err={}",
-                                case_id, str(ve)[:80],
-                            )
                         stats["auto_approved"] += 1
 
                     elif not auto_allowed or Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (

@@ -609,54 +609,55 @@ async def batch_feedback(
                 )
         updated_count += 1
 
-    await session.commit()
+    # v3.4（docs/15 §4.4）：向量投递意图与状态变更**同一事务**入出箱。
+    # 原实现是在 commit 之后直接写 Milvus —— 中间崩溃就是"PG 已改、向量没改"，
+    # 且没有任何地方记录这次缺失。现在改成：commit 后由 relay 至少一次投递
+    # （approved → 幂等 upsert / rejected → delete），失败进重试与对账。
+    # 入箱成功即算数（milvus_written 语义 = "已入出箱条数"，真正投递由 relay 完成）。
+    from app.core.vector_outbox import enqueue as _enqueue_outbox
 
-    # 审核通过时同步写入 Milvus 向量，建立回归检索基线。
-    # 测试发现原实现只更新 PG 不写向量，导致飞轮冷启动时必须手动逐条
-    # 调用 vector_store.add_test_case 才能建立基线。此修复使批量审批
-    # 接口成为 PG + Milvus 的双写端点，rejected 时同步删除向量。
     milvus_written = 0
     milvus_failed = 0
-    if req.accepted:
-        import asyncio
-        for record in records:
-            try:
-                case_json = record.case_json or {}
+    for record in records:
+        try:
+            if req.accepted:
+                case_json = dict(record.case_json or {})
                 case_json.setdefault("id", record.id)
-                await asyncio.to_thread(
-                    vector_store.add_test_case,
-                    case_id=record.id,
-                    case_json=case_json,
-                    metadata={
-                        "req_id": record.req_id,
-                        "product_id": record.product_id,
-                        "case_type": record.type,
-                        "confidence": str(record.confidence),
-                        "gen_batch_id": record.gen_batch_id or "",
+                _enqueue_outbox(
+                    session,
+                    aggregate_id=record.id,
+                    action="upsert",
+                    revision=int(datetime.now(timezone.utc).timestamp() * 1000),
+                    payload={
+                        "case_json": case_json,
+                        "metadata": {
+                            "req_id": record.req_id,
+                            "product_id": record.product_id,
+                            "case_type": record.type,
+                            "confidence": str(record.confidence),
+                            "gen_batch_id": record.gen_batch_id or "",
+                        },
                     },
+                    created_by="api",
                 )
-                milvus_written += 1
-            except Exception as e:
-                milvus_failed += 1
-                logger.warning(
-                    "[API/testcases] 批量审批 Milvus 写入失败: case_id={}, err={}",
-                    record.id, str(e)[:100],
+            else:
+                _enqueue_outbox(
+                    session, aggregate_id=record.id, action="delete",
+                    revision=int(datetime.now(timezone.utc).timestamp() * 1000),
+                    payload={}, created_by="api",
                 )
-    else:
-        import asyncio
-        for record in records:
-            try:
-                await asyncio.to_thread(
-                    vector_store.delete_test_case, record.id
-                )
-            except Exception as e:
-                logger.warning(
-                    "[API/testcases] 批量驳回 Milvus 删除失败: case_id={}, err={}",
-                    record.id, str(e)[:100],
-                )
+            milvus_written += 1
+        except Exception as e:
+            milvus_failed += 1
+            logger.warning(
+                "[API/testcases] 批量审批向量出箱入队失败: case_id={}, err={}",
+                record.id, str(e)[:100],
+            )
+
+    await session.commit()
 
     logger.info(
-        "[API/testcases] 批量审核: count={}, accepted={}, by={}, milvus_written={}, milvus_failed={}",
+        "[API/testcases] 批量审核: count={}, accepted={}, by={}, vector_enqueued={}, enqueue_failed={}",
         updated_count, req.accepted, user.username, milvus_written, milvus_failed,
     )
 
@@ -739,47 +740,49 @@ async def submit_feedback(
     except Exception as e:  # noqa: BLE001
         logger.warning("[API/testcases] 反馈后重算 weight 失败（不阻断）: {}", str(e)[:150])
 
+    # v3.4（docs/15 §4.4）：向量投递意图与状态变更**同一事务**入出箱
+    # （approved → 幂等 upsert / rejected → delete），commit 后由 relay 至少一次投递。
+    # 与 batch_feedback 保持同一套语义；milvus_ok 现在表示"入箱是否成功"。
+    from app.core.vector_outbox import enqueue as _enqueue_outbox
+
+    milvus_ok = True
+    try:
+        if req.accepted:
+            case_json = dict(record.case_json or {})
+            case_json.setdefault("id", case_id)
+            _enqueue_outbox(
+                session,
+                aggregate_id=case_id,
+                action="upsert",
+                revision=int(datetime.now(timezone.utc).timestamp() * 1000),
+                payload={
+                    "case_json": case_json,
+                    "metadata": {
+                        "req_id": record.req_id,
+                        "product_id": record.product_id,
+                        "case_type": record.type,
+                        "confidence": str(record.confidence),
+                        "gen_batch_id": record.gen_batch_id or "",
+                    },
+                },
+                created_by="api",
+            )
+        else:
+            _enqueue_outbox(
+                session, aggregate_id=case_id, action="delete",
+                revision=int(datetime.now(timezone.utc).timestamp() * 1000),
+                payload={}, created_by="api",
+            )
+    except Exception as e:  # noqa: BLE001
+        milvus_ok = False
+        logger.warning(
+            "[API/testcases] 单条审批向量出箱入队失败: case_id={}, err={}", case_id, str(e)[:100],
+        )
+
     await session.commit()
 
-    # 同步 Milvus 向量：approved 时写入/reupsert，rejected 时删除。
-    # 与 batch_feedback 保持一致，保证单条审核也完成 PG + Milvus 双写。
-    milvus_ok = True
-    if req.accepted:
-        import asyncio
-        try:
-            case_json = record.case_json or {}
-            case_json.setdefault("id", case_id)
-            await asyncio.to_thread(
-                vector_store.add_test_case,
-                case_id=case_id,
-                case_json=case_json,
-                metadata={
-                    "req_id": record.req_id,
-                    "product_id": record.product_id,
-                    "case_type": record.type,
-                    "confidence": str(record.confidence),
-                    "gen_batch_id": record.gen_batch_id or "",
-                },
-            )
-        except Exception as e:
-            milvus_ok = False
-            logger.warning(
-                "[API/testcases] 单条审批 Milvus 写入失败: case_id={}, err={}",
-                case_id, str(e)[:100],
-            )
-    else:
-        import asyncio
-        try:
-            await asyncio.to_thread(vector_store.delete_test_case, case_id)
-        except Exception as e:
-            milvus_ok = False
-            logger.warning(
-                "[API/testcases] 单条驳回 Milvus 删除失败: case_id={}, err={}",
-                case_id, str(e)[:100],
-            )
-
     logger.info(
-        "[API/testcases] 反馈已记录: case_id={}, accepted={}, status={}, milvus_ok={}",
+        "[API/testcases] 反馈已记录: case_id={}, accepted={}, status={}, outbox_ok={}",
         case_id,
         req.accepted,
         new_status,

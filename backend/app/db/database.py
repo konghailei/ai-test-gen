@@ -93,6 +93,8 @@ async def init_db() -> None:
         FunctionalPointCases,
         # v3.4: 评估运行记录（prompt 候选激活的服务器端证据，docs/15 §4.5 P0-5）
         EvaluationRun,
+        # v3.4: 向量库写入出箱（PG→Milvus 事务性 outbox，docs/15 §4.4）
+        VectorOutbox,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 
@@ -295,6 +297,18 @@ async def init_db() -> None:
                         "DB 迁移: 活动生成任务唯一索引创建失败（可能有并发的历史残留任务）: {}",
                         str(mig_e)[:120],
                     )
+
+            # Step 3c: vector_outbox.revision 列类型兜底
+            # v3.4（docs/15 §4.4）：revision 语义是"变更时刻的 epoch 毫秒"（~1.8e12），
+            # 建表初期若用 INTEGER 会直接 int32 溢出报错；create_all 不会修改已存在列的
+            # 类型，故这里显式且幂等地 ALTER（已是 BIGINT 时为无操作）。
+            if inspector.has_table("vector_outbox"):
+                try:
+                    conn_sync.execute(text(
+                        "ALTER TABLE vector_outbox ALTER COLUMN revision TYPE BIGINT"
+                    ))
+                except Exception as mig_e:
+                    logger.warning("DB 迁移: vector_outbox.revision 扩为 BIGINT 失败: {}", str(mig_e)[:120])
 
             # Step 4: 检索优化索引（产品/项目/模块关联查询）
             SEARCH_INDEXES: list[tuple[str, str, str]] = [
