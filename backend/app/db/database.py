@@ -277,6 +277,25 @@ async def init_db() -> None:
                         logger.warning("DB 迁移: 唯一索引 {} 创建失败（可能已存在重复数据）: {}",
                                        idx_name, str(mig_e)[:80])
 
+            # Step 3b: 活动生成任务唯一索引（partial index —— 上面的 (tbl,name,cols) 元组
+            # 描述不了 WHERE 条件，故单列一步）。
+            # v3.4（docs/15 §4.3）：生成互斥的 **DB 层最终防线**，配合 core/task_guard 的
+            # 事务内 advisory lock 使用——保证同一需求同时最多一个 pending/running 的生成任务。
+            if inspector.has_table("analysis_tasks"):
+                try:
+                    conn_sync.execute(text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_analysis_tasks_active_generation "
+                        "ON analysis_tasks (req_id) "
+                        "WHERE status IN ('pending','running') "
+                        "AND task_type IN ('generate_cases','regenerate')"
+                    ))
+                    logger.info("DB 迁移: 活动生成任务唯一索引已就绪（生成互斥）")
+                except Exception as mig_e:
+                    logger.warning(
+                        "DB 迁移: 活动生成任务唯一索引创建失败（可能有并发的历史残留任务）: {}",
+                        str(mig_e)[:120],
+                    )
+
             # Step 4: 检索优化索引（产品/项目/模块关联查询）
             SEARCH_INDEXES: list[tuple[str, str, str]] = [
                 ("requirements", "idx_req_product_project", "product_id, project_id"),

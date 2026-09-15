@@ -182,30 +182,30 @@ async def generate_test_cases(
     # 从 srr_json 提取澄清答案（由 /requirements/{id}/clarify 端点存入）
     clarify_answers = srr_json.get("clarify_answers") or None
 
-    # v3.1.3 P1-2 并发互斥：同一需求存在未结束任务时拒绝重复启动。
+    # v3.1.3 P1-2 并发互斥 → v3.4（docs/15 §4.3）改为**原子占用**：
+    # 原先"session A 查活动任务 → session B 插任务"存在 TOCTOU（两个并发请求可能都查到
+    # "没有活动任务"），且 `resume=True` 会绕过互斥。现在由 core/task_guard 在**同一事务**内
+    # 完成 advisory lock → 僵尸回收 → 活动检查 → 插入，并有 partial unique index 兜底。
     # 并发生成会导致 SRR/用例双写冲突与任务状态互相覆盖。
-    # 超过 6 小时的 running 视为僵尸任务（服务重启残留），不阻塞新生成。
-    async with async_session() as mutex_session:
-        active_task_id = (
-            await mutex_session.execute(
-                select(AnalysisTask.id)
-                .where(
-                    AnalysisTask.req_id == req.req_id,
-                    AnalysisTask.status.in_(["pending", "running"]),
-                    AnalysisTask.created_at > datetime.now(timezone.utc) - timedelta(hours=6),
-                )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-    if active_task_id and not req.resume:
+    task_id = gen_task_id()
+    from app.core.task_guard import reserve_generation_slot
+
+    slot = await reserve_generation_slot(
+        req_id=req.req_id,
+        task_id=task_id,
+        product_id=requirement.product_id,
+        created_by="api",
+    )
+    if slot["status"] == "conflict":
         logger.warning(
-            "[API/generate] 并发互斥触发，拒绝重复生成: req_id={}, active_task={}",
-            req.req_id, active_task_id,
+            "[API/generate] 并发互斥触发，拒绝重复生成: req_id={}, active_task={}, resume={}",
+            req.req_id, slot.get("active_task_id"), req.resume,
         )
         raise HTTPException(
             status_code=409,
-            detail=f"该需求已有正在执行的任务（{active_task_id}），请等待其完成，"
-                   f"或到任务管理页取消后再发起生成。",
+            detail=f"该需求已有正在执行的任务（{slot.get('active_task_id') or '未知'}），"
+                   f"请等待其完成，或到任务管理页取消后再发起生成。"
+                   f"（断点续跑同样受互斥约束）",
         )
 
     # v3.1.3 断点续跑：resume=True 时从最近一次中断/作废任务 checkpoint 继续
@@ -217,23 +217,6 @@ async def generate_test_cases(
                 "[API/generate] 续跑请求但无可用 checkpoint，将从头生成: req_id={}, resume_from={}",
                 req.req_id, req.resume_from_task,
             )
-
-    # v1.4：创建 AnalysisTask 记录（保持 SSE 流式，仅追加任务可见性）
-    task_id = gen_task_id()
-    async with async_session() as task_session:
-        task = AnalysisTask(
-            id=task_id,
-            task_type="generate_cases",
-            req_id=req.req_id,
-            product_id=requirement.product_id,
-            status="running",
-            phase="generate",
-            progress=0,
-            message="用例生成已启动...",
-            created_by="api",
-        )
-        task_session.add(task)
-        await task_session.commit()
 
     logger.info(
         "[API/generate] 启动 SSE 流式生成: req_id={}, task_id={}, expected_channel={}, "
