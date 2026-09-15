@@ -74,6 +74,98 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
         """初始化 ClarifyAgent。"""
         self._llm = llm_client
 
+    # ========================================================================
+    # v3.3（docs/14 二期 A3）：结构缺口驱动澄清
+    # ========================================================================
+    # 每个结构维度的追问模板。
+    # ⚠️ 措辞刻意避开 `_filter_questions_by_necessity` 的"猜想上限类"正则
+    # （`超过X怎么办` / `达到上限…`），否则会被当成猜想型问题删掉。
+    _STRUCTURE_GAP_TEMPLATES: dict[str, str] = {
+        "happy_path_steps": "需求文档未给出主流程步骤。请补充：正常场景下的操作步骤与预期结果。",
+        "alternate_flows": "需求文档未描述异常/分支流程。请补充：主流程之外的失败路径或替代流程。",
+        "business_rules": "需求文档未包含业务规则。请补充：该功能的判定、计算或约束规则。",
+        "non_functional": "需求文档未提出非功能需求。请补充：性能/安全/兼容性/可用性方面的要求。",
+        "preconditions": "需求文档未说明前置条件。请补充：在什么前提或状态下才能使用该功能。",
+        "data_constraints": "需求文档未说明数据约束。请补充：涉及字段的格式、取值范围或校验规则。",
+        "user_roles": "需求文档未明确涉及的用户角色。请补充：哪些角色可以使用或操作该功能。",
+        "data_model": "需求文档未描述数据模型。请补充：核心实体、字段及其关系。",
+        "title": "需求文档缺少标题。请补充一个能概括本需求范围的标题。",
+        "summary": "需求文档缺少摘要。请补充一段说明本需求目标与范围的话。",
+    }
+
+    # 取结构缺口时**只取权重 >= 该值**的维度。
+    # 依据实测（21 条需求）：`dependencies` 缺失率 86%、`api_definitions` 76%，
+    # 属"普遍不适用"而非"普遍漏写"——拿去追问会产生大量伪问题。
+    _STRUCTURE_GAP_MIN_WEIGHT: int = 5
+
+    # 结构缺口最多注入几个（避免问题列表被规则项刷屏）
+    _STRUCTURE_GAP_MAX: int = 4
+
+    @staticmethod
+    async def _load_fp_srrs(req_id: str) -> list[dict]:
+        """读取功能点子 SRR。
+
+        为什么需要：实测 `business_rules` / `data_constraints` 在**顶层 SRR 已几乎不存在**
+        （1/17、0/17，v2.40 迁移），但在 **FP 子 SRR 中 60/60 全覆盖**。
+        只看总 SRR 会把这两个维度恒判缺失。
+        """
+        if not req_id:
+            return []
+        try:
+            from sqlalchemy import select
+
+            from app.db.database import async_session
+            from app.db.models import FunctionalPoint
+
+            async with async_session() as s:
+                rows = (await s.execute(
+                    select(FunctionalPoint.srr_json).where(
+                        FunctionalPoint.requirement_id == req_id
+                    )
+                )).scalars().all()
+            return [r for r in rows if isinstance(r, dict) and r]
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[ClarifyAgent] 读取 FP 子 SRR 失败（结构完整度将仅评总 SRR）: {}",
+                str(e)[:120],
+            )
+            return []
+
+    def _structure_gap_questions(
+        self, srr: dict, fp_srrs: list[dict],
+    ) -> tuple[list[dict], dict]:
+        """把结构完整度的缺口转成澄清问题。
+
+        Returns:
+            (问题列表, 结构完整度评估结果)
+        """
+        from app.utils.requirement_quality import calc_structure_score
+
+        info = calc_structure_score(srr, fp_srrs)
+        out: list[dict] = []
+        for m in info.get("missing", []):
+            if len(out) >= self._STRUCTURE_GAP_MAX:
+                break
+            if m.get("weight", 0) < self._STRUCTURE_GAP_MIN_WEIGHT:
+                continue
+            tpl = self._STRUCTURE_GAP_TEMPLATES.get(m["key"])
+            if not tpl:
+                continue
+            out.append({
+                "id": f"SG{len(out) + 1:03d}",
+                "field": f"structure_gap.{m['key']}",
+                "priority": "important" if m.get("weight", 0) >= 8 else "optional",
+                "category": "completeness",
+                "question": tpl,
+                "context": f"结构完整度评估：需求文档未包含「{m['label']}」",
+                "default_answer": "",
+                "input_type": "text",
+                "options": [],
+                # 标记来源，便于前端区分"规则缺口"与"LLM 生成"
+                "_source": "structure_gap",
+            })
+        return out, info
+
     async def clarify(
         self,
         srr: dict,
@@ -1187,6 +1279,33 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
         # 合并后去重
         questions = self._dedup_questions(questions, stage="after_llm_semantic")
 
+        # ⑧d v3.3（docs/14 二期 A3）：**结构缺口驱动澄清**
+        #
+        # 设计：澄清问题池 = 结构缺口（规则，优先）∪ KB 缺口 ∪ LLM 生成。
+        # 结构缺口是**确定性**的（不受 LLM 波动影响），且直接对应"需求少写了什么"，
+        # 因此作为补充来源注入，让澄清有明确的补全目标，而不是等 LLM 发挥。
+        #
+        # 注意：本模块只负责生成与合并；结构分的**评分口径**在
+        # `app/utils/requirement_quality.py`（已用 21 条真实需求校准）。
+        try:
+            _fp_srrs = await self._load_fp_srrs(req_id)
+            structure_questions, structure_info = self._structure_gap_questions(
+                srr, _fp_srrs
+            )
+            if structure_questions:
+                questions.extend(structure_questions)
+                logger.info(
+                    "[ClarifyAgent] 结构缺口驱动澄清: 注入 {} 个（结构完整度 {}%）缺口={}",
+                    len(structure_questions),
+                    int(round(structure_info.get("score", 0) * 100)),
+                    [q["field"].split(".", 1)[-1] for q in structure_questions],
+                )
+        except Exception as e:  # noqa: BLE001
+            structure_info = {}
+            logger.warning(
+                "[ClarifyAgent] 结构缺口注入失败（不阻断澄清）: {}", str(e)[:150]
+            )
+
         # ⑧b 需求模式库缺失维度（docs/01 §4.3.3 遗漏检测）
         # 模式库检测出的缺失维度已在步骤②b 加入 completeness["important_missing"]，
         # 并通过步骤③的 LLM KB 查询生成器做了"原文已覆盖则跳过"过滤。
@@ -1319,6 +1438,9 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
             # 避免"质量分很高但语义层什么都没检测"的假象无法被发现。
             "degraded_flags": (["semantic_layer_failed"] if semantic_degraded else []),
             "semantic_degraded": semantic_degraded,
+            # v3.3（docs/14 二期 A2/A3/A4）：结构完整度评估结果，
+            # 供门禁（A4）与前端展示使用。`missing` 即本次注入的澄清缺口来源。
+            "structure_score": structure_info or {},
         }
 
         if semantic_degraded:

@@ -86,6 +86,18 @@ class QualityGate:
     # 冷启动阈值（KB 为空时放宽），避免冷启动死锁
     COLD_START_PASS_SCORE: float = settings.COLD_START_PASS_SCORE
 
+    # ========================================================================
+    # v3.3（docs/14 二期 A4）：结构完整度阈值
+    # ========================================================================
+    # ⚠️ **刻意只做 Warning，不做 Blocker**。
+    # 理由（设计 §A4 明确要求 + 实测）：
+    #   - 结构分低 ≠ 需求不能用；Blocker 定过严会重演冷启动死锁（v3.5 教训）
+    #   - 实测 21 条需求：均值 0.729，< 0.60 的仅 3 条（14%）——若设为 Blocker
+    #     会直接打回 14% 的历史需求，影响面过大
+    # 待积累分布数据（观察 Warning 命中率与实际返工率的相关性）后，
+    # 再决定是否把 < 0.35 升级为 Blocker。
+    STRUCTURE_WARN_THRESHOLD: float = 0.60
+
     def _resolve_pass_score(self, srr: dict, clarify_result: dict) -> tuple[float, bool]:
         """根据上下文动态选择通过分数。
 
@@ -220,6 +232,29 @@ class QualityGate:
                 "冷启动模式：知识库为空或为该产品首个需求，"
                 "质量门禁阈值已放宽至 0.60，建议人工重点审核生成结果"
             )
+
+        # 7. 结构完整度（v3.3 / docs/14 二期 A4）——**仅 Warning**
+        #
+        # 这是"需求质量"方向的主体检查：把"需求有没有写全"纳入门禁视野。
+        # 但**不阻断**：结构分低只是提示"可以更完整"，不代表需求不可用。
+        # 结构分来源：`app/utils/requirement_quality.calc_structure_score`
+        # （由 ClarifyAgent 计算并放入 clarify_result["structure_score"]）。
+        structure = clarify_result.get("structure_score") or {}
+        s_score = structure.get("score")
+        if isinstance(s_score, (int, float)):
+            miss = structure.get("missing") or []
+            if s_score < self.STRUCTURE_WARN_THRESHOLD:
+                top = "、".join(m.get("label", "") for m in miss[:3])
+                more = f" 等 {len(miss)} 项" if len(miss) > 3 else ""
+                warnings.append(
+                    f"需求结构完整度偏低（{s_score:.0%} < "
+                    f"{self.STRUCTURE_WARN_THRESHOLD:.0%}），建议补充：{top}{more}"
+                )
+            # 冷启动：保留原提示，并**附带结构缺口清单**（设计 §A4 要求）
+            if cold_start and miss:
+                warnings.append(
+                    "冷启动结构缺口清单：" + "、".join(m.get("label", "") for m in miss[:5])
+                )
 
         passed = len(blockers) == 0
         recommendation = "✅ 通过" if passed else f"❌ 未通过: {'; '.join(blockers)}"
