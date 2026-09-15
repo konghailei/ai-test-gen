@@ -4,6 +4,7 @@ import { knowledge, requirements as reqApi, products as prodApi } from '../api/c
 import type { KbEntry, KbModelStatus, KbProject } from '../types'
 import { useProduct } from '../store/ProductContext'
 import LoadingSpinner from '../components/LoadingSpinner'
+import CaseQualityReport from '../components/CaseQualityReport'
 import { STATUS_LABELS, priorityBadge, priorityLabel } from '../utils'
 
 function formatDateTime(iso?: string): string {
@@ -599,6 +600,11 @@ export default function KnowledgeBase() {
               )}
             </div>
           </div>
+
+          {/* v3.3（docs/14 方向 B / B5）：用例库质量报表。
+              放在 Tab 之前——它是**产品级**的库健康视图，
+              与下面按项目切换的条目列表是两个粒度，先总后分。 */}
+          {selectedProductId && <CaseQualityReport productId={selectedProductId} />}
 
           {/* Tab 切换 */}
           <div className="flex items-center gap-1 mb-4">

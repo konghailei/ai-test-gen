@@ -616,6 +616,43 @@ export const knowledge = {
     const params = productId ? `?product_id=${productId}` : ''
     return request<KnowledgeStats>(`/knowledge/stats${params}`)
   },
+  /**
+   * v3.3（docs/14 方向 B / B5）：用例库质量报表。
+   *
+   * 注意 `reuse.note` 与 `weight.note` 是**后端刻意附带的免责说明**：
+   * 复用计数自 v3.3 才上线（历史未计入）、weight 公式部分输入尚无数据。
+   * 前端**必须展示**这两条，否则用户会把"计数器刚上线"误读成"用例库没被用"。
+   */
+  caseQualityReport: (productId?: string, topN = 10) => {
+    const q = new URLSearchParams({ top_n: String(topN) })
+    if (productId) q.set('product_id', productId)
+    return request<{
+      product_id: string | null
+      total: number
+      status_distribution: Record<string, number>
+      status_ratio: Record<string, number>
+      reuse: {
+        approved_total: number
+        reused_count: number
+        reuse_rate: number
+        benchmark: number
+        note: string
+      }
+      weight: {
+        mean: number
+        std: number
+        min: number
+        max: number
+        histogram: { bucket: string; count: number; ratio: number }[]
+        note: string
+      }
+      top_reused: { id: string; title: string; execution_count: number; weight: number; status: string }[]
+      never_reused: {
+        count: number
+        samples: { id: string; title: string; weight: number }[]
+      }
+    }>(`/knowledge/case-quality-report?${q.toString()}`)
+  },
   patterns: (category?: string, page = 1, pageSize = 20) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
     if (category) params.set('category', category)

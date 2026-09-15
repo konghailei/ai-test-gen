@@ -141,6 +141,135 @@ async def get_knowledge_stats(
     )
 
 
+@router.get("/case-quality-report", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_case_quality_report(
+    product_id: str | None = Query(default=None, description="按产品筛选"),
+    top_n: int = Query(default=10, ge=1, le=50, description="Top-N 条数"),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """用例库质量报表（docs/14 方向 B / B5）。
+
+    四部分：三档占比 / 复用率 / weight 分布 / Top-N 复用与从未复用。
+
+    ⚠️ **两处必须向用户说明的口径**（否则会误读）：
+
+    1. **复用率会显著偏低**（实测 0.32%）。原因是 `execution_count`
+       自 v3.3 才激活（用例被检索命中注入 prompt 时 +1），**历史复用未计入**。
+       若不说明，用户会误判为"用例库完全没被使用"。报表用 `reuse.note` 显式标注。
+    2. **weight 目前区分度弱**（实测 std 0.058，66% 落在 0.5 档）。
+       原因是公式 4 个输入里 2 个尚无数据（`last_pass_rate` 全 0、
+       `execution_count` 仅 5 条有值）。报表用 `weight.note` 标注，
+       并给出分布直方图让用户自行判断。
+    """
+    def _f(stmt):
+        return stmt.where(TestCase.product_id == product_id) if product_id else stmt
+
+    # ---- ① 三档占比 ----
+    status_rows = (await session.execute(
+        _f(select(TestCase.status, func.count(TestCase.id))).group_by(TestCase.status)
+    )).all()
+    status_dist = {str(st): int(n) for st, n in status_rows}
+    total = sum(status_dist.values())
+    status_ratio = {k: round(v / total, 4) if total else 0.0 for k, v in status_dist.items()}
+
+    # ---- ② 复用率 ----
+    appr_total = status_dist.get("approved", 0)
+    reused = (await session.execute(
+        _f(select(func.count(TestCase.id))).where(
+            TestCase.status == "approved", TestCase.execution_count > 0
+        )
+    )).scalar() or 0
+    reuse_rate = round(reused / appr_total, 4) if appr_total else 0.0
+
+    # ---- ③ weight 分布 ----
+    w_rows = (await session.execute(
+        _f(select(TestCase.weight, func.count(TestCase.id))).group_by(TestCase.weight)
+    )).all()
+    w_vals = [(float(w or 0.0), int(n)) for w, n in w_rows]
+    w_total = sum(n for _, n in w_vals)
+    w_mean = (sum(w * n for w, n in w_vals) / w_total) if w_total else 0.0
+    w_var = (sum(n * (w - w_mean) ** 2 for w, n in w_vals) / w_total) if w_total else 0.0
+    # 直方图按 0.1 分桶
+    buckets: dict[float, int] = {}
+    for w, n in w_vals:
+        b = round(int(w * 10) / 10, 1)
+        buckets[b] = buckets.get(b, 0) + n
+    histogram = [
+        {"bucket": f"{b:.1f}", "count": buckets[b],
+         "ratio": round(buckets[b] / w_total, 4) if w_total else 0.0}
+        for b in sorted(buckets)
+    ]
+
+    # ---- ④ Top-N 复用 / 从未复用 ----
+    top_reused = [
+        {"id": r[0], "title": r[1], "execution_count": int(r[2] or 0),
+         "weight": round(float(r[3] or 0), 4), "status": r[4]}
+        for r in (await session.execute(
+            _f(select(TestCase.id, TestCase.title, TestCase.execution_count,
+                      TestCase.weight, TestCase.status))
+            .where(TestCase.execution_count > 0)
+            .order_by(TestCase.execution_count.desc())
+            .limit(top_n)
+        )).all()
+    ]
+    never_reused_count = (await session.execute(
+        _f(select(func.count(TestCase.id))).where(
+            TestCase.status == "approved", TestCase.execution_count == 0
+        )
+    )).scalar() or 0
+    never_reused_samples = [
+        {"id": r[0], "title": r[1], "weight": round(float(r[2] or 0), 4)}
+        for r in (await session.execute(
+            _f(select(TestCase.id, TestCase.title, TestCase.weight))
+            .where(TestCase.status == "approved", TestCase.execution_count == 0)
+            .order_by(TestCase.weight.desc())
+            .limit(top_n)
+        )).all()
+    ]
+
+    logger.info(
+        "[API/knowledge] 用例库质量报表: total={}, approved={}, 复用率={:.2%}, "
+        "weight_mean={:.4f}, std={:.4f}",
+        total, appr_total, reuse_rate, w_mean, w_var ** 0.5,
+    )
+
+    return ApiResponse(success=True, message="ok", data={
+        "product_id": product_id,
+        "total": total,
+        "status_distribution": status_dist,
+        "status_ratio": status_ratio,
+        "reuse": {
+            "approved_total": appr_total,
+            "reused_count": reused,
+            "reuse_rate": reuse_rate,
+            # 对标值仅作参照，不参与任何判定
+            "benchmark": 0.59,
+            "note": (
+                "`execution_count` 自 v3.3 起才激活（用例被检索命中并注入 prompt 时 +1），"
+                "**历史复用未计入**。因此当前复用率会显著偏低，"
+                "应看趋势而非绝对值。"
+            ),
+        },
+        "weight": {
+            "mean": round(w_mean, 4),
+            "std": round(w_var ** 0.5, 4),
+            "min": round(min((w for w, _ in w_vals), default=0.0), 4),
+            "max": round(max((w for w, _ in w_vals), default=0.0), 4),
+            "histogram": histogram,
+            "note": (
+                "weight 公式的 4 个输入中，`last_pass_rate` 尚无数据（全为中性 0.5）、"
+                "`execution_count` 仅少量有值，因此**当前区分度较弱**"
+                "（分布集中在 0.5 档）。待执行结果回流与使用量积累后自然改善，无需改代码。"
+            ),
+        },
+        "top_reused": top_reused,
+        "never_reused": {
+            "count": never_reused_count,
+            "samples": never_reused_samples,
+        },
+    })
+
+
 # ============================================================================
 # 2. 测试模式列表
 # ============================================================================
