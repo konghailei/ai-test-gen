@@ -432,7 +432,8 @@ flowchart LR
 > | P1-4.6 LLM 输出强 Schema 与业务语义门禁 | ⚠️ 部分 | 用例可执行合同已启用（`utils/case_validation.py`，实测真实数据 0.4% 不合格）；Pydantic Structured Outputs 未做 |
 > | P1-4.7 覆盖证据强制化（unknown 不冒充 100%） | ✅ 已做 | `utils/coverage.py`：`coverage_status` + `observed_coverage_rate`，废止数量比口径 |
 > | §4.1 前端 HITL（降级审批可见可操作） | ⚠️ 部分 | `PublicationPanel.tsx` + Generate 页展示决策/原因/降级/失败子任务、KB 跳过态；逐条 approve/reject 走既有反馈端点，尚未做批量审批入口 |
-> | P1（4.2 durable execution / 4.3 并发互斥 / 4.4 outbox / 4.8~4.11） | ❌ 未做 | — |
+> | P1-4.3 并发互斥与 SSE 隔离 | ✅ 已做 | `core/task_guard.py`（事务内 advisory lock + 僵尸兜底 + 原子占用）、`database.py` Step 3b partial unique index、`generate.py` 改为原子占用且 **resume 不再绕过**；SSE 隔离由 ContextVar 承载并实测（探针 11/11） |
+> | P1（4.2 durable execution / 4.4 outbox / 4.8~4.11） | ❌ 未做 | — |
 > | P2 / P3 其余 | ❌ 未做 | — |
 >
 > **已知行为后果**：覆盖标注率 < 30% 时 `coverage_status=unknown` → 永不自动核准（转人工）；
