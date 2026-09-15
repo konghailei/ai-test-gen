@@ -67,6 +67,23 @@ REASON_LABELS = {
 }
 
 
+def load_auto_verdicts(out_dir: str) -> tuple[dict, str]:
+    """读取同目录下的 verdicts-auto.json（AI 预判），用于在审阅台里预填判定。
+
+    预判只是**起点**：作者可以在 UI 里逐条改成自己的判定，改完导出的 JSON 会覆盖它。
+    """
+    path = os.path.join(out_dir, "verdicts-auto.json")
+    if not os.path.exists(path):
+        return {}, ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("items") or {}, (data.get("rule_note") or data.get("source") or "")
+    except Exception as e:  # noqa: BLE001
+        log(f"⚠️ verdicts-auto.json 读取失败（忽略）: {str(e)[:120]}")
+        return {}, ""
+
+
 def log(msg: str) -> None:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -315,11 +332,18 @@ summary{cursor:pointer;font-weight:600;font-size:13px}
 <script>
 const DATA = __DATA__;
 const LS_KEY = 'review-' + DATA.run_id;
-let verdicts = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+// 预填：优先读本机已保存的判定，其次用 verdicts-auto.json（AI 预判）——预判可逐条覆盖
+let verdicts = JSON.parse(localStorage.getItem(LS_KEY) || 'null')
+  || JSON.parse(JSON.stringify(DATA.auto_verdicts || {}));
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 function save(){ localStorage.setItem(LS_KEY, JSON.stringify(verdicts)); renderTally(); }
-function setVerdict(id, v){ verdicts[id] = verdicts[id]||{}; verdicts[id].verdict = v; save(); }
+function setVerdict(id, v){
+  verdicts[id] = verdicts[id]||{}; verdicts[id].verdict = v; verdicts[id].auto = false;
+  const chip = document.querySelector('#case-' + CSS.escape(id) + ' .badge.b-info');
+  if (chip) chip.remove();            // 用户改过就不再标"AI 预判"
+  save();
+}
 function setNote(id, t){ verdicts[id] = verdicts[id]||{}; verdicts[id].note = t; save(); }
 function renderTally(){
   const vals = Object.values(verdicts); const n = k => vals.filter(v=>v.verdict===k).length;
@@ -371,6 +395,7 @@ function renderCase(c, idx){
   return `<div class="case" data-verdict="${esc(v.verdict||'')}" id="case-${esc(c.id)}">
   <div class="chead">
     <div><span class="ctitle">${idx+1}. ${esc(c.title)}</span>
+      ${v.auto ? '<span class="badge b-info" style="margin-left:6px">AI 预判</span>' : ''}
       ${flags.map(f=>`<span class="badge b-warn" style="margin-left:6px">${esc(f)}</span>`).join('')}
     </div>
     <span class="pill">${esc(c.id)}</span>
@@ -405,6 +430,11 @@ function render(){
     html += `<div class="card" style="border-left:4px solid var(--blue);margin-bottom:14px">
       <b>说明</b><div class="muted" style="margin-top:4px">${esc(d.workspace_note)}</div></div>`;
   }
+  if (d.auto_rule_note) {
+    html += `<div class="card" style="border-left:4px solid #0ea5e9;margin-bottom:14px">
+      <b>判定已预填（AI 预判）</b><div class="muted" style="margin-top:4px">${esc(d.auto_rule_note)}
+      　→ 你可以逐条改成自己的判定，改过的条目会去掉「AI 预判」标记。</div></div>`;
+  }
   html += `<h2>一、总览</h2><div class="grid">
     <div class="card kv">任务终态<b><span class="badge ${tone}">${esc(d.outcome.status)}</span></b></div>
     <div class="card kv">发布决策<b><span class="badge ${d.outcome.decision==='auto_approve'?'b-ok':d.outcome.decision==='blocked'?'b-bad':'b-warn'}">${esc(d.outcome.decision||'-')}</span></b></div>
@@ -413,6 +443,12 @@ function render(){
     <div class="card kv">KB 回流 auto/pending<b>${esc(d.kb_summary)}</b></div>
     <div class="card kv">覆盖口径<b><span class="badge ${d.coverage.status==='mapped'?'b-ok':'b-warn'}">${esc(d.coverage.status)}</span></b>
       <div class="muted">标注率 ${d.coverage.annotation_rate} · 已证实覆盖 ${d.coverage.observed_rate}（${d.coverage.covered}/${d.coverage.total}）· 未覆盖 ${d.coverage.uncovered}</div></div>
+    ${(function(){
+      const av = d.auto_verdicts || {}; const n = k => Object.values(av).filter(v=>v.verdict===k).length;
+      if (!Object.keys(av).length) return '';
+      return `<div class="card kv">AI 预判分布<b>符合 ${n('ok')} · 不符 ${n('bad')} · 存疑 ${n('doubt')}</b>
+        <div class="muted">可逐条覆盖</div></div>`;
+    })()}
   </div>`;
 
   if (d.outcome.reasons.length) {
@@ -554,6 +590,8 @@ async def main() -> int:
         out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.from_run))
         payload["cases"] = collect_case_payload({"cases": payload.get("cases") or []},
                                                 payload.get("persisted") or [])
+        auto, rule = load_auto_verdicts(out_dir)
+        payload["auto_verdicts"], payload["auto_rule_note"] = auto, rule
         if args.note:
             payload["workspace_note"] = args.note
         html_path = os.path.join(out_dir, "review.html")
@@ -599,6 +637,8 @@ async def main() -> int:
     payload = await build_payload(args.req_id, req, done, events, persisted, persisted_new,
                                   started_iso, run_id, note)
     payload["cases"] = collect_case_payload(done, persisted)
+    auto, rule = load_auto_verdicts(out_dir)
+    payload["auto_verdicts"], payload["auto_rule_note"] = auto, rule
 
     html_path = os.path.join(out_dir, "review.html")
     with open(html_path, "w", encoding="utf-8") as f:
