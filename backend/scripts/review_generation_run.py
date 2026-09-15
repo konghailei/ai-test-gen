@@ -84,6 +84,34 @@ def load_auto_verdicts(out_dir: str) -> tuple[dict, str]:
         return {}, ""
 
 
+def load_execution(out_dir: str) -> tuple[dict, str]:
+    """读取 verdicts-executed.json（判定已落成审核动作），返回 (最新状态表, 说明)。
+
+    审阅台要显示**执行后的真实状态**：否则"已 approve 并写入向量库"这件事在界面上看不见，
+    容易被误读成"还在等人工处理"。
+    """
+    path = os.path.join(out_dir, "verdicts-executed.json")
+    if not os.path.exists(path):
+        return {}, ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        after = data.get("status_after") or {}
+        g = data.get("groups") or {}
+        acts = "；".join(
+            f"{a.get('count')} 条 → {a.get('verdict')}（HTTP {a.get('http')}）" for a in (data.get("actions") or [])
+        )
+        note = (
+            f"判定已采纳并执行（{data.get('executed_at', '')}）：{acts}；"
+            f"存疑 {g.get('doubt', 0)} 条保持 reviewed 等人工确认。"
+            f"执行前状态备份在同目录 status-before-apply.json，执行记录见 verdicts-executed.json。"
+        )
+        return after, note
+    except Exception as e:  # noqa: BLE001
+        log(f"⚠️ verdicts-executed.json 读取失败（忽略）: {str(e)[:120]}")
+        return {}, ""
+
+
 def log(msg: str) -> None:
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -430,6 +458,10 @@ function render(){
     html += `<div class="card" style="border-left:4px solid var(--blue);margin-bottom:14px">
       <b>说明</b><div class="muted" style="margin-top:4px">${esc(d.workspace_note)}</div></div>`;
   }
+  if (d.execution_note) {
+    html += `<div class="card" style="border-left:4px solid var(--ok);margin-bottom:14px">
+      <b>✅ 已执行审核动作</b><div class="muted" style="margin-top:4px">${esc(d.execution_note)}</div></div>`;
+  }
   if (d.auto_rule_note) {
     html += `<div class="card" style="border-left:4px solid #0ea5e9;margin-bottom:14px">
       <b>判定已预填（AI 预判）</b><div class="muted" style="margin-top:4px">${esc(d.auto_rule_note)}
@@ -592,6 +624,12 @@ async def main() -> int:
                                                 payload.get("persisted") or [])
         auto, rule = load_auto_verdicts(out_dir)
         payload["auto_verdicts"], payload["auto_rule_note"] = auto, rule
+        after, exec_note = load_execution(out_dir)
+        if after:
+            for c in payload["cases"]:
+                if c["id"] in after:
+                    c["persisted_status"] = after[c["id"]]["status"]
+            payload["execution_note"] = exec_note
         if args.note:
             payload["workspace_note"] = args.note
         html_path = os.path.join(out_dir, "review.html")
