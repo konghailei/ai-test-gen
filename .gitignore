@@ -88,6 +88,7 @@ REQ_FLOW_ALIGNMENT_REPORT.md
 *.png
 .playwright-cli/
 .workbuddy/
+.workbuddy-ai/
 # playwright 抓取的快照与登录态
 auth.json
 after-*.yaml
