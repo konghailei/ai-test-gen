@@ -1,0 +1,36 @@
+{
+  "name": "prompt_candidate_v1",
+  "schema_version": "prompt-eval-v1",
+  "target_hint": "gen_agent",
+  "description": "候选提示词的冻结评估集（docs/15 §4.5 P0-5）。每条样本给出输入与「合格输出必须提到的要点」；评分 = 要点命中率（确定性、可复现，不再调一次 LLM 打分）。要点措辞请保守（宁可用稳定的字段名/术语，不要用易变的句式），改动数据集必须升 name 版本 —— 数据集内容参与 hash，换了数据集旧评估自然失效。",
+  "samples": [
+    {
+      "id": "structured_output_contract",
+      "input": "需求：用户登录模块，账号密码正确时登录成功；密码连续错误 5 次锁定账号 30 分钟。请输出测试用例。",
+      "must_cover": ["assertions", "steps", "related_requirement"],
+      "reference_output": "{\"cases\":[{\"id\":\"TC-1\",\"title\":\"正常登录\",\"steps\":[{\"step\":1,\"action\":\"输入正确账号密码\",\"expected\":\"登录成功\"}],\"assertions\":[{\"type\":\"equals\",\"target\":\"operation.result\",\"expected_value\":\"登录成功\"}],\"related_requirement\":\"REQ-1\"}]}",
+      "why": "输出必须仍满足可执行合同（断言/步骤/需求关联）——否则会被 case_validation 判为畸形内容，直接 blocked。"
+    },
+    {
+      "id": "coverage_annotation",
+      "input": "需求：用户登录模块，账号密码正确时登录成功；密码连续错误 5 次锁定账号 30 分钟。请输出测试用例，并标注每条用例覆盖了哪些 SRR 要点。",
+      "must_cover": ["covered_point_ids", "happy_path"],
+      "reference_output": "{\"cases\":[{\"id\":\"TC-1\",\"title\":\"正常登录\",\"covered_point_ids\":[\"happy_path.1\"],\"steps\":[],\"assertions\":[]}]}",
+      "why": "覆盖标注率低于 30% 时 coverage_status=unknown，用例永远进不了自动核准——提示词必须继续要求结构化标注。"
+    },
+    {
+      "id": "boundary_and_lock",
+      "input": "需求：密码连续错误 5 次锁定账号 30 分钟。请给出针对该规则的测试设计要点。",
+      "must_cover": ["边界值", "5", "30"],
+      "reference_output": "针对锁定规则建议采用边界值分析：错误次数取 4 / 5 / 6，锁定时间取 29 / 30 / 31 分钟，验证第 5 次触发锁定且 30 分钟后自动解锁。",
+      "why": "候选提示词不得丢掉「按规则做边界值」的基本能力（4/5/6 次、29/30/31 分钟）。"
+    },
+    {
+      "id": "no_invention_on_missing_info",
+      "input": "需求：用户登录模块支持登录。（其余信息缺失）请输出测试用例，并对缺失信息给出澄清问题。",
+      "must_cover": ["澄清", "缺失"],
+      "reference_output": "当前需求信息缺失：未说明认证方式、失败处理与锁定策略。澄清问题：1) 是否支持第三方登录？2) 密码错误是否锁定？相关用例仅覆盖已明确内容。",
+      "why": "信息缺失时必须走澄清而不是编造业务规则——这是本项目被反复强调的纪律。"
+    }
+  ]
+}

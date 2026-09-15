@@ -43,10 +43,15 @@ jobs:
           python -m compileall -q app/
           echo "✅ 所有 backend/app/ Python 文件语法检查通过"
 
-      - name: Run pytest
+      # v3.4（docs/15 §4.5 / P0-4）：pytest 失败必须阻断。
+      # 原先此处 `continue-on-error: true`，等于"测试永不红灯"——形同没有测试门禁。
+      # 现在跑的是 unit 层：只收集无外部依赖的用例（tests/conftest.py 里对脚本式
+      # 集成用例 test_phaseN_*.py 等做了 collect_ignore），因此无需 PG/Redis 也能跑。
+      # 集成层（脚本式套件）需真实服务，本地用 AITG_RUN_INTEGRATION=1 启用；
+      # 待迁成标准 pytest + service containers 后再纳入 CI（见 docs/15 §4.5 剩余项）。
+      - name: Run unit tests (pytest, 失败即红灯)
         run: |
-          cd .. && python -m pytest backend/tests/ -v --tb=short
-        continue-on-error: true  # 测试可能依赖外部服务（PG/Redis），允许失败以不阻断语法检查
+          cd .. && python -m pytest backend/tests -q
 
   frontend-build:
     name: Frontend (Node)

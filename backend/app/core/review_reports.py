@@ -68,6 +68,10 @@ def build_case_report(
     req_title: str,
     review_report: dict,
     gen_batch_id: str = "",
+    *,
+    completion_status: str = "",
+    degraded_flags: list | None = None,
+    failed_subtasks: list | None = None,
 ) -> dict:
     """构建 case 类型评审报告记录（纯函数）。
 
@@ -78,6 +82,9 @@ def build_case_report(
         req_title: 需求标题快照
         review_report: ReviewAgent 审核报告 dict（含 issues/dimension_scores 等）
         gen_batch_id: 生成批次 ID（可从用例 gen_batch_id 提取）
+        completion_status: 任务终态（completed / awaiting_human_review / failed）
+        degraded_flags: 本次运行的降级标记
+        failed_subtasks: 失败的功能点/通道子任务
 
     Returns:
         dict: ReviewReportRecord 字段 dict（不含 ORM 对象）
@@ -86,6 +93,14 @@ def build_case_report(
     issues = _build_issues(report_id, review_report.get("issues"))
     blocked = int(review_report.get("blocked_cases", 0) or 0)
     should_supplement = bool(review_report.get("should_supplement"))
+
+    # v3.4（docs/15 P0-3）：
+    # ① passed 必须与发布决策一致——否则会出现"报告中心说通过、发布决策说待人工审核"
+    #    两套口径，复盘时不知道以谁为准；
+    # ② 降级标记 / 失败子任务 / 终态随报告落库，避免这些证据只活在 SSE 事件里。
+    publication = review_report.get("publication") or {}
+    decision = publication.get("decision")
+    passed = (decision == "auto_approve") if decision else (blocked == 0 and not should_supplement)
 
     return {
         "id": report_id,
@@ -96,11 +111,18 @@ def build_case_report(
         "req_title": (req_title or "")[:512],
         "gen_batch_id": gen_batch_id or "",
         "overall_confidence": round(float(review_report.get("avg_confidence", 0.0) or 0.0), 3),
-        "passed": blocked == 0 and not should_supplement,
+        "passed": passed,
         "issue_count": len(issues),
         "dimension_scores": review_report.get("dimension_scores") or {},
         "issues": issues,
-        "summary": review_report,
+        "summary": {
+            **review_report,
+            "completion_status": completion_status or review_report.get("completion_status", ""),
+            "publication": publication,
+            "degraded_flags": list(degraded_flags or []),
+            "failed_subtasks": list(failed_subtasks or []),
+            "content_errors": review_report.get("content_errors") or [],
+        },
         "created_by": "pipeline",
     }
 

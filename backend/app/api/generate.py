@@ -404,6 +404,10 @@ async def generate_test_cases(
                                 req_title=_req_title,
                                 review_report=_review_report,
                                 gen_batch_id=_gen_batch,
+                                # v3.4（docs/15 P0-3）：终态与降级证据一并落库
+                                completion_status=event.get("completion_status", ""),
+                                degraded_flags=event.get("degraded_flags") or [],
+                                failed_subtasks=event.get("failed_subtasks") or [],
                             ))
                         if _records:
                             await save_review_reports(_records)

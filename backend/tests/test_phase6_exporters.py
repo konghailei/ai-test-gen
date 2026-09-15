@@ -8,7 +8,8 @@
     组5：API 端点（通过 TestClient 验证四种格式端到端）
 
 运行方式：python tests/test_phase6_exporters.py
-（不通过 pytest 运行，避免 fixture 误判，与阶段3/4/5测试保持一致）
+（组1~4 是纯函数用例，也可直接被 pytest 收集；组5 需要真实 PG/Redis，
+ 标 integration，unit 层会 skip——见 tests/conftest.py 的分层策略）
 """
 
 from __future__ import annotations
@@ -20,14 +21,11 @@ import os
 import sys
 from unittest.mock import patch
 
+import pytest
+
 # 确保导入 backend 目录
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from fastapi.testclient import TestClient
-
-from app.core.auth import get_default_token
-from app.db.database import async_session
-from app.db.models import Requirement, TestCase
 from app.exporters import export_cases, SUPPORTED_FORMATS
 from app.exporters.markdown import export_markdown
 from app.exporters.gherkin import export_gherkin
@@ -434,6 +432,9 @@ TEST_CASE_JSON = {
 async def setup_fixtures() -> None:
     """插入测试夹具数据到 DB。"""
     from sqlalchemy import delete
+
+    from app.db.database import async_session
+    from app.db.models import Requirement, TestCase
     async with async_session() as session:
         # 先清理残留
         await session.execute(delete(TestCase).where(TestCase.req_id == TEST_REQ_ID))
@@ -473,13 +474,20 @@ async def setup_fixtures() -> None:
 async def cleanup_fixtures() -> None:
     """清理测试夹具数据。"""
     from sqlalchemy import delete
+
+    from app.db.database import async_session
+    from app.db.models import Requirement, TestCase
     async with async_session() as session:
         await session.execute(delete(TestCase).where(TestCase.req_id == TEST_REQ_ID))
         await session.execute(delete(Requirement).where(Requirement.id == TEST_REQ_ID))
         await session.commit()
 
 
-def test_api_endpoint(client: TestClient) -> None:
+@pytest.mark.integration
+def test_api_endpoint(client) -> None:
+    """组5：导出 API 端到端（需要真实 PG/Redis，unit 层 skip）。"""
+    from app.core.auth import get_default_token
+
     section("组5：API 端点端到端")
 
     headers = {"Authorization": f"Bearer {get_default_token()}"}
@@ -575,6 +583,8 @@ def main() -> int:
         test_factory()
 
         # 通过 TestClient 测试 API 端点
+        from fastapi.testclient import TestClient
+
         from app.main import app
         with TestClient(app) as client:
             test_api_endpoint(client)

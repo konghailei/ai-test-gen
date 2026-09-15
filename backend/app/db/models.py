@@ -1234,3 +1234,50 @@ class PromptIntegrationRecord(Base):
         Index("idx_pinteg_product", "product_id", "created_at"),
         Index("idx_pinteg_target", "target_prompt_id", "created_at"),
     )
+
+
+# ============================================================================
+# 20. 评估运行表（evaluation_runs，v3.4 / docs/15 §4.5 P0-5）
+# ============================================================================
+
+
+class EvaluationRun(Base):
+    """评估运行记录（服务器端证据）。
+
+    为什么必须有这张表：此前"候选提示词激活"只校验客户端提交的 `confirmed_eval: bool`，
+    等于自证清白——任何调用方都能把未经回归的提示词推上生产。
+    现在激活必须引用一条**服务器端 passed** 的评估运行，且其 `prompt_hash` 必须
+    与被激活的候选文本逐字一致（防止"拿旧评估顶替新候选"）。
+
+    记录内容（docs/15 §4.5 建议）：dataset hash、prompt hash、model/provider、
+    schema version、指标、artifact URI —— 便于事后复盘"这条提示词当时凭什么上线"。
+    """
+    __tablename__ = "evaluation_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="评估 ID: EV-{时间戳}-{随机}")
+    kind: Mapped[str] = mapped_column(String(32), index=True, comment="评估类型: prompt_candidate / retrieval / ...")
+    target: Mapped[str] = mapped_column(String(128), index=True, comment="被评估对象（如 prompts.gen_agent）")
+    status: Mapped[str] = mapped_column(String(16), index=True, comment="passed / failed / error")
+    dataset_name: Mapped[str] = mapped_column(String(128), default="", comment="数据集名称")
+    dataset_hash: Mapped[str] = mapped_column(String(64), default="", comment="数据集内容 hash（样本+期望）")
+    prompt_hash: Mapped[str] = mapped_column(String(64), index=True, comment="被测提示词文本 hash（激活时逐字校验）")
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, comment="样本数")
+    passed_count: Mapped[int] = mapped_column(Integer, default=0, comment="达标样本数")
+    threshold: Mapped[float] = mapped_column(Float, default=0.0, comment="通过阈值（达标率）")
+    score: Mapped[float] = mapped_column(Float, default=0.0, comment="本次得分（达标率）")
+    model: Mapped[str] = mapped_column(String(128), default="", comment="评估所用模型")
+    provider: Mapped[str] = mapped_column(String(64), default="", comment="供应商")
+    schema_version: Mapped[str] = mapped_column(String(32), default="", comment="输出/评分口径版本")
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict, comment="指标明细（含逐样本结果）")
+    artifact_uri: Mapped[str] = mapped_column(String(512), default="", comment="产物路径（可复现）")
+    notes: Mapped[str] = mapped_column(Text, default="", comment="备注 / 失败原因")
+    used_for_integration_id: Mapped[str] = mapped_column(String(64), default="", comment="被哪条候选激活消费（回填）")
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="被消费时间")
+    created_by: Mapped[str] = mapped_column(String(64), default="pipeline", comment="来源: pipeline / cli / api")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        Index("idx_evalrun_target", "target", "status", "created_at"),
+    )

@@ -191,8 +191,14 @@ async def list_evolution_targets() -> ApiResponse:
 
 
 class PromptCandidateActivateRequest(BaseModel):
-    """候选激活请求（P2-5）。confirmed_eval=false 时拒绝——回归门槛。"""
-    confirmed_eval: bool = Field(False, description="是否已在评估集完成回归验证")
+    """候选激活请求（P0-5）。
+
+    `evaluation_run_id` 是**唯一**放行依据：必须是服务器端记录、status=passed、
+    且 prompt_hash 与被激活候选文本逐字一致的评估运行。
+    `confirmed_eval` 仅为兼容旧调用方保留，**不再参与判定**（原先只信客户端自证）。
+    """
+    evaluation_run_id: str = Field("", max_length=64, description="服务器端评估运行 ID（必需）")
+    confirmed_eval: bool = Field(False, description="[已废弃] 不再作为放行依据")
     eval_notes: str = Field("", max_length=500, description="回归结果备注")
 
 
@@ -465,10 +471,18 @@ async def activate_candidate(
 ) -> ApiResponse:
     """激活候选提示词（回归门槛）。
 
-    confirmed_eval=False 时拒绝——候选必须先在评估集完成回归
-    （P2-3 统计口径 + P2-4 金标校准通过），确认后才允许落 override。
+    v3.4（docs/15 §4.5 / P0-5）：门槛从"客户端声明 confirmed_eval=true"改为
+    **服务器端评估证据**——必须提供 evaluation_run_id，且该运行满足：
+    status=passed、target 与候选目标一致、有数据集 hash、口径版本一致、
+    prompt_hash 与 candidate_prompt 逐字一致（防旧评估顶替新候选）。
     激活写入自动产生 prompt_history（回退锚点不变）。
     """
+    from app.core.evaluation import (
+        find_evaluation_run,
+        mark_evaluation_run_consumed,
+        validate_prompt_activation,
+    )
+
     record = (await session.execute(
         select(PromptIntegrationRecord).where(PromptIntegrationRecord.id == record_id)
     )).scalar_one_or_none()
@@ -476,13 +490,24 @@ async def activate_candidate(
         raise HTTPException(status_code=404, detail=f"整合记录不存在: {record_id}")
     if record.status != "pending":
         raise HTTPException(status_code=400, detail=f"记录状态为 {record.status}，仅 pending 可激活")
-    if not req.confirmed_eval:
-        raise HTTPException(
-            status_code=400,
-            detail="回归门槛未满足：请先在评估集完成回归验证（建议口径 Pass^k + 金标 kappa>0.7），再以 confirmed_eval=true 激活",
-        )
     if not record.candidate_prompt:
         raise HTTPException(status_code=400, detail="候选内容为空，无法激活")
+    if not req.evaluation_run_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "回归门槛未满足：必须提供 evaluation_run_id（服务器端评估运行）。"
+                "先执行 scripts/eval_prompt_candidate.py --integration-id "
+                f"{record_id} 生成评估，再用返回的 run_id 激活；"
+                "客户端 confirmed_eval 声明不再作为依据。"
+            ),
+        )
+    run = await find_evaluation_run(req.evaluation_run_id)
+    ok, reason = validate_prompt_activation(
+        run, target=record.target_prompt_id, candidate_prompt=record.candidate_prompt,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason)
 
     module, name = record.target_prompt_id.split(".", 1)
     prompt_store.update_prompt(module, name, record.candidate_prompt, changed_by=f"candidate:{user.username}")
@@ -492,7 +517,10 @@ async def activate_candidate(
     record.activated_by = user.username
     record.prompt_history_id = history[0]["id"] if history else record.prompt_history_id
     await session.commit()
+    await mark_evaluation_run_consumed(req.evaluation_run_id, record.id)
     return ApiResponse(success=True, message="候选提示词已激活（可经 prompt_history 回退）", data={
         "record_id": record.id, "target_prompt_id": record.target_prompt_id,
         "prompt_history_id": record.prompt_history_id,
+        "evaluation_run_id": req.evaluation_run_id,
+        "evaluation_score": (run or {}).get("score"),
     })

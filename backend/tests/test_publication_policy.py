@@ -90,3 +90,49 @@ def test_explicit_success_vs_legacy_unknown():
 
 def test_empty_done_is_failed_not_complete():
     assert quality_outcome({"cases": []})["completion_status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# 评审报告落库口径（docs/15 P0-3）：报告不得与发布决策说两套话
+# ---------------------------------------------------------------------------
+
+def test_case_report_passed_follows_publication_decision():
+    from app.core.review_reports import build_case_report
+
+    clean = {"total_cases": 1, "blocked_cases": 0, "should_supplement": False,
+             "avg_confidence": 0.9, "issues": []}
+
+    auto = build_case_report(
+        task_id="T1", req_id="REQ-1", product_id="PROD-1", req_title="t",
+        review_report={**clean, "publication": {"decision": "auto_approve", "reasons": []}},
+        completion_status="completed",
+    )
+    assert auto["passed"] is True
+
+    # 关键：报告层面"无 blocker 且不补生成"不再等于"通过"
+    human = build_case_report(
+        task_id="T1", req_id="REQ-1", product_id="PROD-1", req_title="t",
+        review_report={**clean, "publication": {"decision": "human_review",
+                                                "reasons": ["coverage_unknown"]}},
+        completion_status="awaiting_human_review",
+        degraded_flags=["integration_generate_failed"],
+        failed_subtasks=[{"key": "FP-A"}],
+    )
+    assert human["passed"] is False
+    assert human["summary"]["completion_status"] == "awaiting_human_review"
+    assert human["summary"]["degraded_flags"] == ["integration_generate_failed"]
+    assert human["summary"]["failed_subtasks"] == [{"key": "FP-A"}]
+    assert human["summary"]["publication"]["reasons"] == ["coverage_unknown"]
+
+
+def test_case_report_without_publication_keeps_legacy_rule():
+    from app.core.review_reports import build_case_report
+
+    legacy = build_case_report(
+        task_id=None, req_id="REQ-1", product_id="PROD-1", req_title="t",
+        review_report={"total_cases": 1, "blocked_cases": 0, "should_supplement": False,
+                       "avg_confidence": 0.5, "issues": []},
+    )
+    assert legacy["passed"] is True
+    assert legacy["summary"]["degraded_flags"] == []
+    assert legacy["summary"]["content_errors"] == []

@@ -91,6 +91,8 @@ async def init_db() -> None:
         FunctionalPointCRSR,
         # v3.4: 功能点最新版用例集（与 CRSR 对称，回归基线）
         FunctionalPointCases,
+        # v3.4: 评估运行记录（prompt 候选激活的服务器端证据，docs/15 §4.5 P0-5）
+        EvaluationRun,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 
