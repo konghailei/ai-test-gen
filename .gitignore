@@ -141,6 +141,9 @@ DEPLOY_OFFLINE_PACK.md
 # ===== 根目录一次性验证目录（与 _e2e_v30/ 同类，不入库） =====
 _e2e_tmp/
 _verify_tmp/
+# 端到端审阅台产物 + 无头浏览器 UI 验证脚手架（本地产物，不入库）
+_review_runs/
+_ui_tmp/
 
 # ===== backend/tests 下的一次性探针脚本（不入库） =====
 backend/tests/_probe_*.py

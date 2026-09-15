@@ -420,6 +420,26 @@ flowchart LR
 
 ## 6. 分阶段路线图
 
+> ### 实施进度（截至 2026-09-15）
+>
+> | 项 | 状态 | 落地位置 |
+> |---|---|---|
+> | P0-1 降级/门禁失败时 fail-closed（不写 + 终态可见） | ✅ 已做 | `core/publication_policy.py`、`review_agent.persist_to_kb`、`orchestrator._review_node` |
+> | P0-2 0 用例 / Schema 不合格 / 覆盖 unknown 不得 completed | ✅ 已做 | 合同校验只记录不中断（`utils/case_validation.py`）→ 决策判 `blocked` → `completion_status=failed` |
+> | P0-3 持久化 degraded_flags 与 failed_subtasks | ✅ 已做 | done 事件 + `analysis_tasks.result_json` + `review_reports.summary`（`build_case_report` 同步 `passed` 与发布决策一致） |
+> | P0-4 修复 CI：pytest 失败必须阻断 | ✅ 已做 | `.github/workflows/test.yml` 去掉 `continue-on-error`；`tests/conftest.py` 做分层（脚本式 `test_phaseN_*.py` 默认不收集）；unit 层可无服务运行 |
+> | P0-5 Prompt 激活绑定服务器端 eval run | ✅ 已做 | `db/models.py:EvaluationRun` + `core/evaluation.py` + `scripts/eval_prompt_candidate.py`；`activate_candidate` 不再认客户端 `confirmed_eval` |
+> | P1-4.6 LLM 输出强 Schema 与业务语义门禁 | ⚠️ 部分 | 用例可执行合同已启用（`utils/case_validation.py`，实测真实数据 0.4% 不合格）；Pydantic Structured Outputs 未做 |
+> | P1-4.7 覆盖证据强制化（unknown 不冒充 100%） | ✅ 已做 | `utils/coverage.py`：`coverage_status` + `observed_coverage_rate`，废止数量比口径 |
+> | §4.1 前端 HITL（降级审批可见可操作） | ⚠️ 部分 | `PublicationPanel.tsx` + Generate 页展示决策/原因/降级/失败子任务、KB 跳过态；逐条 approve/reject 走既有反馈端点，尚未做批量审批入口 |
+> | P1（4.2 durable execution / 4.3 并发互斥 / 4.4 outbox / 4.8~4.11） | ❌ 未做 | — |
+> | P2 / P3 其余 | ❌ 未做 | — |
+>
+> **已知行为后果**：覆盖标注率 < 30% 时 `coverage_status=unknown` → 永不自动核准（转人工）；
+> 当前 `prompts/gen_agent.py` 未要求模型输出 `covered_point_ids`，标注率大概率偏低，
+> 因此"自动核准"在实践中会很罕见 —— 这是 fail-closed 的**预期语义**，
+> 要提升自动核准率必须先提升结构化标注率（属 P1-4.7 的后续）。
+
 ## 阶段 P0：先阻止错误结果进入权威库
 
 1. `review_degraded` / `forced_pass` 时 fail-closed；
