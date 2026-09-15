@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle, Folder, ChevronDown, RotateCcw, Lock } from 'lucide-react'
+import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle, Folder, ChevronDown, RotateCcw, Lock, ShieldAlert } from 'lucide-react'
 import { requirements as reqApi, generateCases, testCases as tcApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { SSEEvent, Requirement, TestCase, Project, ReviewReport, ReviewIssue, KbFlowback } from '../types'
 import SSEProgress from '../components/SSEProgress'
+import PublicationPanel from '../components/PublicationPanel'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
 import { caseTypeLabel } from '../utils/labels'
 
@@ -56,6 +57,11 @@ export default function Generate() {
   const [fpCoverage, setFpCoverage] = useState<SSEEvent['fp_coverage'] | null>(null)
   const [channel, setChannel] = useState<string>('')
   const [manualActionRequired, setManualActionRequired] = useState(false)
+  // v3.4（docs/15 §4.1）：发布决策与降级证据 —— "done" 不等于"已入库"
+  const [publication, setPublication] = useState<SSEEvent['publication'] | null>(null)
+  const [completionStatus, setCompletionStatus] = useState<SSEEvent['completion_status'] | undefined>()
+  const [degradedFlags, setDegradedFlags] = useState<string[]>([])
+  const [failedSubtasks, setFailedSubtasks] = useState<SSEEvent['failed_subtasks']>([])
   const [gateResult, setGateResult] = useState<SSEEvent['gate_result'] | null>(null)
   const [regressionReuseSummary, setRegressionReuseSummary] = useState<SSEEvent['regression_reuse_summary'] | null>(null)
   const [supplementIteration, setSupplementIteration] = useState(0)
@@ -200,6 +206,11 @@ export default function Generate() {
           setRegressionReuseSummary(e.regression_reuse_summary || null)
           setSupplementIteration(Number(e.supplement_iteration || 0))
           setShouldSupplement(Boolean(e.review_report?.should_supplement))
+          // v3.4：发布决策 / 终态 / 降级证据（done ≠ 已入库）
+          setPublication(e.publication || e.review_report?.publication || null)
+          setCompletionStatus(e.completion_status)
+          setDegradedFlags(e.degraded_flags || [])
+          setFailedSubtasks(e.failed_subtasks || [])
           setMessage(e.message || '生成完成！')
           setProgress(100)
           setGenerating(false)
@@ -507,6 +518,16 @@ export default function Generate() {
         </div>
       )}
 
+      {/* v3.4 发布决策（docs/15 §4.1 HITL）：说明"为什么没自动入库" */}
+      {done && (
+        <PublicationPanel
+          completionStatus={completionStatus}
+          publication={publication || undefined}
+          degradedFlags={degradedFlags}
+          failedSubtasks={failedSubtasks}
+        />
+      )}
+
       {/* QualityGate 强制放行提示（门禁未完全通过但流水线已继续） */}
       {done && manualActionRequired && (
         <div className="card space-y-2 border-l-4 border-l-amber-500 bg-amber-50/40">
@@ -549,15 +570,31 @@ export default function Generate() {
 
       {/* KB Flowback Summary */}
       {kbFlowback && (
-        <div className="bg-gradient-to-r from-emerald-50 to-green-50 border border-emerald-100 rounded-2xl p-5">
-          <h3 className="font-semibold text-emerald-800 text-sm flex items-center gap-2 mb-3">
+        <div className={`border rounded-2xl p-5 ${kbFlowback.skipped
+          ? 'bg-gradient-to-r from-red-50 to-rose-50 border-red-100'
+          : 'bg-gradient-to-r from-emerald-50 to-green-50 border-emerald-100'}`}>
+          <h3 className={`font-semibold text-sm flex items-center gap-2 mb-3 ${kbFlowback.skipped ? 'text-red-800' : 'text-emerald-800'}`}>
             <Sparkles className="w-4 h-4" /> 知识库回流
             {channel && (
               <span className="ml-2 px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded-full">
                 {channel === 'FULL' ? '完整通道' : channel === 'FAST' ? '快速通道' : channel}
               </span>
             )}
+            {kbFlowback.skipped && (
+              <span className="px-2 py-0.5 text-xs bg-red-100 text-red-700 rounded-full">
+                已跳过（发布决策拦截，PG 与向量库均未写入）
+              </span>
+            )}
           </h3>
+          {kbFlowback.skipped ? (
+            <p className="text-xs text-red-600 flex items-start gap-1.5">
+              <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>
+                本次内容未通过发布门禁，因此没有任何用例写入知识库——这是预期行为，不是故障。
+                修正后重新生成即可，已有数据未被污染。
+              </span>
+            </p>
+          ) : (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="text-center p-3 bg-white/60 rounded-xl">
               <p className="text-lg font-bold text-emerald-600">{kbFlowback.auto_approved || 0}</p>
@@ -576,7 +613,8 @@ export default function Generate() {
               <p className="text-xs text-red-500/70">入库错误</p>
             </div>
           </div>
-          {kbFlowback.error && (
+          )}
+          {kbFlowback.error && !kbFlowback.skipped && (
             <p className="text-xs text-red-600 bg-red-50 rounded-lg p-2.5 flex items-start gap-1.5">
               <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
               <span>回流过程异常（不影响生成结果，可稍后重试或人工入库）：{kbFlowback.error}</span>

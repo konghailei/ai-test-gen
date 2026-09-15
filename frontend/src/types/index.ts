@@ -293,6 +293,14 @@ export interface ReviewReport {
   coverage_summary?: Record<string, number>
   /** 后端 hint 结构为 {case_type, reason} 对象 */
   supplement_hints?: Array<{ case_type?: string; reason?: string }>
+  /** v3.4：发布决策随审核报告一并下发（done ≠ 已入库） */
+  publication?: Publication
+  /** v3.4：审核过程中的用例合同问题（空则无） */
+  content_errors?: string[]
+  /** v3.4：审核是否降级（LLM 失败时仅规则预检） */
+  review_status?: 'complete' | 'degraded' | 'unverified' | string
+  review_degraded?: boolean
+  review_degraded_reason?: string
 }
 
 export interface ReviewIssue {
@@ -445,6 +453,10 @@ export interface KbFlowback {
   errors: number
   /** v3.3: 回流整体失败时的错误详情（后端兜底不阻断主流程） */
   error?: string
+  /** v3.4: 发布决策为 blocked 时跳过回流（PG 与 Milvus 均未写入） */
+  skipped?: boolean
+  skip_reason?: string
+  reasons?: string[]
 }
 
 export interface Product {
