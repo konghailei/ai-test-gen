@@ -29,6 +29,12 @@ litellm==1.57.4
 # Agent 编排
 # ============================================================================
 langgraph==0.2.68
+# v3.4（docs/15 §4.2）：durable execution——检查点落 PG（AsyncPostgresSaver）。
+# ⚠️ 版本矩阵：langgraph-checkpoint-postgres 2.x 配 langgraph-checkpoint 2.x（3.x 需 4.x，
+#    与 langgraph 0.2.68 不兼容——实测 3.1.2 会把 checkpoint 连升到 4.2.0）。
+langgraph-checkpoint-postgres==2.0.16
+langgraph-checkpoint==2.1.2
+psycopg[binary,pool]==3.3.5
 
 # ============================================================================
 # 向量库

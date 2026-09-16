@@ -284,8 +284,16 @@ class Orchestrator:
     """
 
     def __init__(self) -> None:
-        """初始化编排器，构建并编译 LangGraph 状态图。"""
-        self.graph = self._build_graph()
+        """初始化编排器。
+
+        v3.4（docs/15 §4.2）：图改为**惰性构建**——检查点后端（PostgresSaver）需要 async
+        初始化（连接池 + 建表），不能在 import 时的同步 __init__ 里完成；
+        首次 run_pipeline 时 `_ensure_checkpoint_backend()` → `_get_graph()`。
+        """
+        self.graph = None
+        self._checkpointer = None          # MemorySaver | AsyncPostgresSaver
+        self._checkpoint_pool = None       # psycopg AsyncConnectionPool（postgres 后端）
+        self._checkpoint_backend_degraded = False
         # v3.1.3 细粒度生成进度事件队列（run_pipeline 内创建，_gen_node 消费）
         from contextvars import ContextVar
         self._gen_event_queue: ContextVar = ContextVar("gen_event_queue", default=None)
@@ -349,7 +357,63 @@ class Orchestrator:
     # 图构建
     # ========================================================================
 
-    def _build_graph(self):
+    async def _ensure_checkpoint_backend(self) -> None:
+        """确保检查点后端就绪（幂等，首次 run_pipeline 时调用一次）。
+
+        - postgres（默认）：AsyncPostgresSaver + psycopg 连接池（autocommit），
+          `setup()` 幂等建 checkpoints/checkpoint_blobs/checkpoint_writes 三张表；
+          thread_id = task_id —— 进程重启后任务级状态仍可审计与恢复（durable execution）；
+        - memory：单进程内存（老行为），仅作为 PG 不可用时的**显式降级**
+          （日志 + `_checkpoint_backend_degraded` → done 事件的 degraded_flags 可见），
+          绝不静默。
+        """
+        if self._checkpointer is not None:
+            return
+        backend = str(getattr(settings, "PIPELINE_CHECKPOINT_BACKEND", "postgres") or "memory").lower()
+        if backend == "postgres":
+            try:
+                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+                from psycopg_pool import AsyncConnectionPool
+
+                dsn = str(settings.DATABASE_URL or "").replace("postgresql+asyncpg://", "postgresql://", 1)
+                if not dsn:
+                    raise ValueError("DATABASE_URL 为空，无法初始化 PostgresSaver")
+                pool = AsyncConnectionPool(
+                    dsn, min_size=1, max_size=4, open=False,
+                    kwargs={"autocommit": True},
+                )
+                await pool.open(wait=True, timeout=15)
+                saver = AsyncPostgresSaver(pool)
+                await saver.setup()
+                self._checkpoint_pool = pool
+                self._checkpointer = saver
+                logger.info("[Orchestrator] 检查点后端 = postgres（thread_id=task_id，表已就绪）")
+                return
+            except Exception as e:
+                self._checkpoint_backend_degraded = True
+                logger.error(
+                    "[Orchestrator] ⚠️ PostgresSaver 初始化失败，检查点降级为 memory"
+                    "（本次部署的 done 事件会带 checkpoint_backend_degraded）: {}",
+                    str(e)[:200],
+                )
+        from langgraph.checkpoint.memory import MemorySaver
+        self._checkpointer = MemorySaver()
+
+    def _get_graph(self):
+        if self.graph is None:
+            self.graph = self._build_graph(checkpointer=self._checkpointer)
+        return self.graph
+
+    async def close_checkpoint_backend(self) -> None:
+        """释放检查点连接池（lifespan 关闭阶段调用）。"""
+        if self._checkpoint_pool is not None:
+            try:
+                await self._checkpoint_pool.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._checkpoint_pool = None
+
+    def _build_graph(self, checkpointer=None):
         """构建 LangGraph 状态图。
 
         节点：parse / select_channel / clarify / gate / impact / test_design / generate / review
@@ -398,7 +462,7 @@ class Orchestrator:
             {"impact": "impact", "clarify": "clarify"},
         )
 
-        return graph.compile()
+        return graph.compile(checkpointer=checkpointer)
 
     # ========================================================================
     # 节点实现
@@ -991,6 +1055,7 @@ class Orchestrator:
                 checkpoint_groups.append(dict(g))  # 累积，保证二次中断也能续
                 logger.info("[Orchestrator] 断点续跑：跳过已完成的 FP={}", fid)
 
+        fp_list = functional_points or []
         # v3.4（docs/15 §4.2 第 3 条）：计算本任务的**输入指纹**，随每次 checkpoint 写入。
         # 续跑时 API 层会用"当前输入"重算并逐字段比对（不一致 → 409）。
         # 注意这里要取需求修订号（DB），保证与 API 侧的指纹字段完全一致。
@@ -1015,7 +1080,6 @@ class Orchestrator:
             logger.warning("[Orchestrator] 输入指纹计算失败（本次 checkpoint 不带指纹，续跑时将被拒绝）: {}",
                            str(_fp_err)[:140])
 
-        fp_list = functional_points or []
         # 1) 各功能点分片定向生成（小 prompt）
         for fp in fp_list:
             fid = fp.get("id", "")
@@ -1721,6 +1785,10 @@ class Orchestrator:
         # 任务环境上下文：整个 generator 生命周期内生效（asyncio 任务链继承），
         # 进程内常驻无害——同名任务再次运行会被下一次 set 覆盖。
         set_task_context(task_id=task_id or "", req_id=existing_req_id or "")
+
+        # v3.4（docs/15 §4.2）：检查点后端就绪 → 惰性编译图（带 checkpointer）
+        await self._ensure_checkpoint_backend()
+        graph = self._get_graph()
         initial_state: PipelineState = {
             "raw_requirement": raw_requirement,
             "srr_json": srr_json,
@@ -1777,7 +1845,14 @@ class Orchestrator:
 
             async def _producer() -> None:
                 try:
-                    async for chunk in self.graph.astream(initial_state, stream_mode="updates"):
+                    # thread_id = task_id：同任务重入共享检查点；临时运行用合成 ID
+                    import uuid as _uuid
+                    _thread_id = task_id or f"run-{_uuid.uuid4().hex}"
+                    async for chunk in graph.astream(
+                        initial_state,
+                        config={"configurable": {"thread_id": _thread_id}},
+                        stream_mode="updates",
+                    ):
                         for node_name, update in chunk.items():
                             if node_name == "__end__":
                                 continue

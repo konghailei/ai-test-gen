@@ -98,6 +98,10 @@ class Settings(BaseSettings):
     # ========== 数据库配置（PostgreSQL，系统唯一关系数据库后端） ==========
     """PostgreSQL 连接字符串（必填，格式：postgresql://user:pass@host:port/dbname）"""
     DATABASE_URL: str = ""
+    # v3.4（docs/15 §4.2）：LangGraph 检查点后端。postgres = AsyncPostgresSaver（checkpoints
+    # 落 PG，thread_id=task_id，进程重启后任务状态可审计/恢复）；memory = 单进程内存（老行为，
+    # PG 不可用时的显式降级，日志与 degraded_flags 可见）。
+    PIPELINE_CHECKPOINT_BACKEND: str = "postgres"
 
     """PG 连接池大小"""
     PG_POOL_SIZE: int = 10

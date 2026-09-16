@@ -156,6 +156,11 @@ async def lifespan(app: FastAPI):
         await stop_vector_outbox_relay()
     except Exception as e:
         logger.warning("[VectorOutbox] 停止失败: {}", str(e)[:150])
+    try:
+        from app.core.orchestrator import orchestrator
+        await orchestrator.close_checkpoint_backend()
+    except Exception as e:
+        logger.warning("[Orchestrator] 检查点连接池释放失败: {}", str(e)[:150])
 
 
 # ============================================================================
