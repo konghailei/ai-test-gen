@@ -163,14 +163,22 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     doc_text = open(doc_path, encoding="utf-8").read() if os.path.exists(doc_path) else DEFAULT_DOC
 
     def _req(method: str, url: str, **kw):
-        """带 401 自动重登的请求——跑批中途 API reload 会轮换签名密钥，
-        旧 token 全部失效（实测 401），此时重新登录换新 token 重试一次。"""
-        r = httpx.request(method, url, headers=headers, **kw)
-        if r.status_code == 401:
-            headers.clear()
-            headers.update(_login(base))
-            r = httpx.request(method, url, headers=headers, **kw)
-        return r
+        """带韧性的请求：401 自动重登（reload 轮换签名密钥）+ 读超时翻倍重试一次
+        （FP 编辑触发 SRR 同步 + 向量更新，高峰期实测远超常规超时）。"""
+        for attempt in range(3):
+            try:
+                r = httpx.request(method, url, headers=headers, **kw)
+            except httpx.ReadTimeout:
+                if attempt == 2:
+                    raise
+                kw["timeout"] = int(kw.get("timeout", 120) * 2) + 120
+                continue
+            if r.status_code == 401 and attempt < 2:
+                headers.clear()
+                headers.update(_login(base))
+                continue
+            return r
+        raise RuntimeError(f"请求重试耗尽: {url}")
 
     # 1) 上传（异步解析任务）
     r = _req("POST", f"{base}/api/requirements/upload", timeout=120, json={
