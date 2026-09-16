@@ -73,6 +73,7 @@ run_test_plan.py 产出证据包
 | `_probe_revision_lock.py` | 需求编辑乐观锁 409 / 放行 / 递增 | 7 |
 | `_probe_checkpoint_saver.py` | 检查点落 PG（thread_id=task_id）；同线程重入 | 6 |
 | `_probe_selfheal.py` | API 重启后自动续跑；指纹不一致跳过 | 6 |
+| `_probe_evidence_claims.py` | claims 解析/校验/降级；证据链经 Pydantic 往返存活；failed 问答不得纠错归档；节点 span 归属 | 13 |
 
 脚本式回归：phase2-5 共 421 项（机制不变量的历史回归）；unit 层 117 项（CI 同款）。
 

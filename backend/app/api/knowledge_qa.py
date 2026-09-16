@@ -807,16 +807,19 @@ async def kqa_correct(
     if not record:
         raise HTTPException(status_code=404, detail=f"问答记录不存在: {req.id}")
 
+    # v3.4（docs/15 §4.9）："AI 服务不可用"的降级文本不是知识，不得进入纠错归档。
+    # ⚠️ 必须放在下方 try **之前**：函数体被宽泛的 except Exception 包裹，
+    #    HTTPException 若在 try 内抛出会被吞掉转成 500（探针实测踩过）。
+    if getattr(record, "answer_status", "ok") == "failed":
+        raise HTTPException(
+            status_code=409,
+            detail="该问答是 LLM 调用失败的降级文本（answer_status=failed），不参与纠错归档。",
+        )
+
     try:
         record.corrected_answer = req.corrected_answer
         record.correction_notes = req.correction_notes
         # v2.8.56: 审核流程字段
-        # v3.4（docs/15 §4.9）："AI 服务不可用"的降级文本不是知识，不得进入纠错归档
-        if getattr(record, "answer_status", "ok") == "failed":
-            raise HTTPException(
-                status_code=409,
-                detail="该问答是 LLM 调用失败的降级文本（answer_status=failed），不参与纠错归档。",
-            )
         record.correction_status = "pending_review"
         record.correction_module = req.correction_module
         record.correction_target_type = req.correction_target_type

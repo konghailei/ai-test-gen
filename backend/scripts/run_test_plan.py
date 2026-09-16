@@ -48,6 +48,7 @@ PROBES = [
     "_probe_revision_lock.py",   # 需求编辑乐观锁
     "_probe_checkpoint_saver.py",  # PostgresSaver 落 PG
     "_probe_selfheal.py",        # 任务自愈
+    "_probe_evidence_claims.py",  # claims 协议 + 证据链 + answer_status 隔离 + 节点 span
 ]
 REGRESSION = [
     "/app/tests/test_phase2_core.py",
