@@ -202,15 +202,10 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     gr = _req("GET", f"{base}/api/requirements/{req_id}", timeout=60)
     req_data = (gr.json().get("data") or {})
     srr = req_data.get("srr_json") or {}
-    fpr = _req("GET", f"{base}/api/requirements/{req_id}/fp", timeout=60)
-    fps = ((fpr.json().get("data") or {}).get("items")
-           or (fpr.json().get("data") or {}).get("functional_points") or [])
-    if not fps and isinstance(fpr.json().get("data"), list):
-        fps = fpr.json().get("data")
     steps.append({"id": "analysis:srr", "status": PASS if srr.get("requirement") else FAIL,
                   "detail": f"SRR.requirement={'有' if srr.get('requirement') else '缺'}"})
-    steps.append({"id": "analysis:functional_points", "status": PASS if len(fps) >= 1 else FAIL,
-                  "detail": f"功能点 {len(fps)} 个"})
+    # 注意：功能点在澄清重解析时才由 FpAgent 提取，此处不查（查了恒 0）
+    fps = []
 
     # 4) 澄清（有问题则回答并等待重解析；答案给最小占位——内容由 AI 判定的是问题质量）
     q = _req("GET", f"{base}/api/requirements/{req_id}/clarify/questions", timeout=60)
@@ -234,7 +229,8 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     # 5) 状态自适应推进：draft → finalize（pending_review）；已是 pending_review 则跳过
     status_now = req_data.get("status", "")
     if status_now == "draft":
-        fz = _req("POST", f"{base}/api/requirements/{req_id}/finalize", timeout=120)
+        # ⚠️ finalize 内部有 LLM 调用（KB 增强 + 429 限流重试），实测 302s——120s 必超时
+        fz = _req("POST", f"{base}/api/requirements/{req_id}/finalize", timeout=600)
         steps.append({"id": "analysis:finalize", "status": PASS if fz.status_code == 200 else FAIL,
                       "detail": f"{fz.status_code} {str((fz.json().get('detail') or ''))[:80]}"})
     else:
@@ -242,6 +238,12 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
                       "detail": f"状态已是 {status_now}，无需 finalize"})
 
     # 5b) 功能点审核（confirm 要求全部 FP status=approved；未分配模块的先补模块）
+    # ⚠️ FP 在澄清重解析时提取——必须重新拉取，不能用解析阶段缓存的空列表
+    fpr = _req("GET", f"{base}/api/requirements/{req_id}/fp", timeout=60)
+    fps = ((fpr.json().get("data") or {}).get("items")
+           or (fpr.json().get("data") or {}).get("functional_points") or [])
+    if not fps and isinstance(fpr.json().get("data"), list):
+        fps = fpr.json().get("data")
     approved = 0
     for fp in fps:
         fpid = fp.get("id", "")
@@ -255,7 +257,10 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
         approved += 1 if ar.status_code == 200 else 0
     steps.append({"id": "analysis:fp_review",
                   "status": PASS if approved == len([f for f in fps if f.get("status") != "approved"]) else FAIL,
-                  "detail": f"审核通过 {approved} 个功能点"})
+                  "detail": f"FP {len(fps)} 个，审核通过 {approved}"})
+    steps.append({"id": "analysis:functional_points",
+                  "status": PASS if len(fps) >= 1 else FAIL,
+                  "detail": f"功能点（澄清重解析后）{len(fps)} 个"})
 
     # 6) 确认
     cf = _req("POST", f"{base}/api/requirements/{req_id}/confirm", timeout=120)
