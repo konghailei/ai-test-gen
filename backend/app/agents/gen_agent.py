@@ -380,7 +380,18 @@ class GenAgent:
         module_prefix = self._derive_module_prefix(srr)
         batch_id = gen_batch_id()
         gen_model = self._get_model_name()
-        cases = self._post_process_cases(cases, req_id, module_prefix, batch_id, gen_model, matched_patterns=matched_patterns)
+        # v3.4（docs/15 §4.9）：证据链——本次生成**实际使用**的检索证据（few-shot 历史用例 + 测试模式）。
+        # 随 gen_metadata 落库：每条用例都能回答"它的产出参考了什么"；
+        # 无检索证据（纯 SRR 推导）→ inferred=true，规则性结论不得冒充"有出处"。
+        evidence_sources: list[dict] = [
+            {"id": c.get("id", ""), "type": "historical_case", "title": str(c.get("title", ""))[:120]}
+            for c in (few_shot_cases or [])
+        ] + [
+            {"id": f"pattern:{p.get('name', '')}", "type": "pattern", "title": str(p.get("name", ""))[:120]}
+            for p in (matched_patterns or [])
+        ]
+        cases = self._post_process_cases(cases, req_id, module_prefix, batch_id, gen_model,
+                                         matched_patterns=matched_patterns, evidence_sources=evidence_sources)
 
         # v3.1.3: 要点标注系统兜底——LLM 可能未在 notes/cover_points 输出方括号要点 ID，
         # 导致覆盖映射永远失效（回退数量比、补生成无法聚焦缺口）。这里依据用例文本
@@ -656,6 +667,7 @@ class GenAgent:
         batch_id: str,
         gen_model: str,
         matched_patterns: list[dict] | None = None,
+        evidence_sources: list[dict] | None = None,
     ) -> list[dict]:
         """后处理：生成 ID、补全字段、整理 gen_metadata。
 
@@ -868,6 +880,9 @@ class GenAgent:
                 gen_metadata.setdefault("gen_confidence", Confidence.GEN_DEFAULT)  # 默认置信度
             gen_metadata.setdefault("gen_model", gen_model)
             gen_metadata.setdefault("gen_at", now)
+            # v3.4（docs/15 §4.9）：证据链——setdefault 保留 LLM 自带的更具体证据
+            gen_metadata.setdefault("evidence_sources", list(evidence_sources or []))
+            gen_metadata.setdefault("inferred", not (evidence_sources or []))
 
             # execution: 保证 int 类型（LLM 可能生成字符串 "3"）
             execution = case.get("execution") or {}

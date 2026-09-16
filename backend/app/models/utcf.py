@@ -74,6 +74,17 @@ class GenMetadata(BaseModel):
     gen_model: str = Field(default="", description="生成模型，如 deepseek-chat")
     gen_at: str = Field(default="", description="生成时间 ISO 8601")
     source_pattern: str = Field(default="", description="参考的测试模式 ID")
+    # v3.4（docs/15 §4.9）：证据链——本次生成实际使用的检索证据。
+    # evidence_sources 为空（纯 SRR 推导）→ inferred=True：
+    # 规则性结论不得冒充"有出处的事实"回流知识库。
+    evidence_sources: list[dict] = Field(
+        default_factory=list,
+        description="证据链 [{id, type, title}]（historical_case / pattern）",
+    )
+    inferred: bool = Field(
+        default=False,
+        description="True=无检索证据、纯 SRR 推导产出",
+    )
 
 
 class TestCase(BaseModel):
