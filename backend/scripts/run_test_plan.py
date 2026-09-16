@@ -350,12 +350,31 @@ def main() -> int:
 
     # L2 流程层 + L3 内容层
     ai_dir = ""
+    analysis_artifacts = None
     if args.only in ("", "flow"):
         run_dir = args.from_run or None
         if run_dir and not os.path.isabs(run_dir):
             run_dir = os.path.join(REVIEW_ROOT, run_dir)
-        flow, ai_dir = step_flow_and_content(run_dir, args.req_id or None,
+        gen_req = args.req_id or None
+
+        # v5.1：未指定需求时走**完整链路**——需求分析（上传→解析→澄清→确认）→ 生成
+        if run_dir is None and gen_req is None:
+            headers = _login(args.base)
+            analysis = step_analysis(args.base, headers, args.doc, args.poll_timeout)
+            analysis_artifacts = analysis.get("artifacts")
+            plan["layers"]["flow-analysis"] = {
+                k: v for k, v in analysis.items() if k != "artifacts"}
+            if analysis.get("pass") and analysis.get("req_id"):
+                gen_req = analysis["req_id"]
+
+        flow, ai_dir = step_flow_and_content(run_dir, gen_req,
                                              args.note or "测试计划执行")
+
+        # 需求分析产物并入 ai-review（SRR/功能点/澄清问题 → AI 判定需求分析内容）
+        if analysis_artifacts and ai_dir:
+            with open(os.path.join(ai_dir, "analysis.json"), "w", encoding="utf-8") as f:
+                json.dump(analysis_artifacts, f, ensure_ascii=False, indent=2)
+
         plan["layers"]["flow"] = flow
         plan["layers"]["content"] = {
             "layer": "content",
