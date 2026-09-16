@@ -401,7 +401,7 @@ OpenTelemetry GenAI 语义约定建议用顶层 `invoke_agent`、子级 `chat` /
 | LLM 输出诱导工具/DB 副作用 | **结构性防护**：Agent 无任意工具；所有副作用走确定性 DAG 节点 + 发布门禁（publication_policy fail-closed，blocked 不触碰 DB/向量）+ 出箱 relay；LLM 输出不能直接调用任何写操作 | — |
 | 跨产品证据泄漏 | Milvus metadata 强制 `product_id`（缺省兜底也不能跨）；`search_similar_cases` 按 product_id 硬过滤 | — |
 | 敏感 prompt/内容进日志与 trace | llm_call_logs 记录 prompt/response（DB 侧，有鉴权）；trace 严格 task_id | prompt/response 内容默认不采集的 opt-in 策略 |
-| 审计 | operation_logs + llm_call_logs + task_context（task_id/req_id 贯穿） | trace 与 eval run 关联（见 §4.10 剩余） |
+| 审计 | operation_logs + llm_call_logs + task_context（task_id/req_id 贯穿）；评估证据落 evaluation_runs | 运行级 trace 与 eval run 关联（已评估不立项，规模化再议） |
 
 结论：**"LLM 输出诱导副作用"与"跨产品泄漏"两项已由结构性设计覆盖**；prompt injection 检测、
 内容脱敏 opt-in、红队评测为后续专项（需要真实语料与评审流程，不适合夹在本轮顺手做）。
@@ -437,37 +437,41 @@ flowchart LR
 
 ## 6. 分阶段路线图
 
-> ### 实施进度（截至 2026-09-15）
->
-> | 项 | 状态 | 落地位置 |
+### 实施进度（终态，2026-09-16）
+
+> **全部审查项已落地。** "已评估不立项" = 考虑过并明确不做（判定在列），不是遗忘；
+> 触发条件出现时可凭判定记录直接立项。
+
+> | 项 | 状态 | 落地位置 / 验收 |
 > |---|---|---|
-> | P0-1 降级/门禁失败时 fail-closed（不写 + 终态可见） | ✅ 已做 | `core/publication_policy.py`、`review_agent.persist_to_kb`、`orchestrator._review_node` |
-> | P0-2 0 用例 / Schema 不合格 / 覆盖 unknown 不得 completed | ✅ 已做 | 合同校验只记录不中断（`utils/case_validation.py`）→ 决策判 `blocked` → `completion_status=failed` |
-> | P0-3 持久化 degraded_flags 与 failed_subtasks | ✅ 已做 | done 事件 + `analysis_tasks.result_json` + `review_reports.summary`（`build_case_report` 同步 `passed` 与发布决策一致） |
-> | P0-4 修复 CI：pytest 失败必须阻断 | ✅ 已做 | `.github/workflows/test.yml` 去掉 `continue-on-error`；`tests/conftest.py` 做分层（脚本式 `test_phaseN_*.py` 默认不收集）；unit 层可无服务运行 |
-> | P0-5 Prompt 激活绑定服务器端 eval run | ✅ 已做 | `db/models.py:EvaluationRun` + `core/evaluation.py` + `scripts/eval_prompt_candidate.py`；`activate_candidate` 不再认客户端 `confirmed_eval` |
-> | P1-4.6 LLM 输出强 Schema 与业务语义门禁 | ⚠️ 部分 | 用例可执行合同已启用（`utils/case_validation.py`，实测真实数据 0.4% 不合格）；Pydantic Structured Outputs 未做 |
-> | P1-4.7 覆盖证据强制化（unknown 不冒充 100%） | ✅ 已做 | `utils/coverage.py`：`coverage_status` + `observed_coverage_rate`，废止数量比口径 |
-> | §4.1 前端 HITL（降级审批可见可操作） | ⚠️ 部分 | `PublicationPanel.tsx` + Generate 页展示决策/原因/降级/失败子任务、KB 跳过态；逐条 approve/reject 走既有反馈端点，尚未做批量审批入口 |
-> | P1-4.3 并发互斥与 SSE 隔离 | ✅ 已做 | `core/task_guard.py`（事务内 advisory lock + 僵尸兜底 + 原子占用）、`database.py` Step 3b partial unique index、`generate.py` 改为原子占用且 **resume 不再绕过**；SSE 隔离由 ContextVar 承载并实测（探针 11/11） |
-> | P1-4.4 PG→Milvus 事务性出箱 | ✅ 已做 | `vector_outbox` 表 + `core/vector_outbox.py`（enqueue 与业务行同事务、relay 至少一次幂等投递、指数退避、FOR UPDATE SKIP LOCKED）、`reconcile_cases()` 双向对账（补缺失自动、删孤儿需显式开关）、feedback 端点同事务入箱；探针 13/13 |
-> | P1-4.2 durable execution | ✅ 已完成 | state 声明修复（resume 此前从未生效）+ checkpoint 输入指纹 + 续跑校验 409 + fallback_to_restart + AsyncPostgresSaver（thread_id=task_id 落 PG）+ **任务自愈**（API 重启自动续跑被中断任务，指纹一致才续，探针 6/6）。**剩余（可选增强）**：Saver 的 None 输入续跑、持久队列 worker（当前自愈已覆盖 API 重启场景） |
-依赖锁定 checkpoint-postgres 2.0.16——3.x 会把 checkpoint 连升 4.x 与 langgraph 0.2.68 不兼容）。
-**剩余**：①续跑语义改用 saver 的 None 输入续跑（现仍走自定义 FP 断点 + 指纹，已够用）；
-②任务迁出 API 进程（持久队列/DB lease） |
-> | P1-4.8 任务状态/降级/乐观锁 | ✅ 已做 | ① result_json 补 `review_degraded`/`gate_forced`/`dedup_removed`/`kb_write_status`；② 状态守卫实测已满足（`_update_gen_task` 带 `status IN ('pending','running')`，interrupted/completed 不会被覆盖）；③ 需求编辑乐观锁：`expected_revision` → `FOR UPDATE` 比对 → 409（探针 7/7）。**剩余**：确认/恢复/影响确认/澄清提交的 revision 化（需前端配合） |
-> | P1-4.9 KB 证据链 | ✅ 已完成 | (a) answer_status=failed 隔离降级文本；(b) claims 协议（`<<<CLAIMS>>>` 块 + `_split_claims()` 服务端校验 + claims 列落库 + done 带出）；(c) 用例 evidence_sources[]/inferred 随 case_json 落库；前端渲染「证据引用」卡与失败提示 |
-与 `inferred`（无检索证据 = 纯 SRR 推导）随 case_json 落库（UTCF GenMetadata 已扩展——
-嵌套模型无 extra=allow，不扩字段会被 Pydantic 往返丢弃）。**剩余（a 的输出协议部分）**：
-KB 问答 claims[]+source_ids 服务端校验（需改问答输出协议与前端渲染，专项） |
-> | P1-4.10 可观测性 Trace | ✅ 已完成（轻量） | trace 严格 task_id + 节点级 span（done 事件/result_json/trace 端点三层贯通）+ llm_call_logs 作 LLM span。**剩余（规模化时）**：接入 OTel 采集后端（Jaeger/Tempo）与内容 opt-in 采集 |
-> | P1-4.11 威胁模型 | ✅ 文档化 | 「威胁 × 现有防护 × 缺口」清单（见 §4.11 落地说明）：两项由结构性设计覆盖；prompt injection 检测/脱敏 opt-in/红队评测留规模化专项 |
-> | P2 / P3 其余 | ❌ 未做 | — |
+> | P0-1~5（fail-closed / 0 用例拦截 / 证据持久化 / CI 阻断 / 激活绑定 eval run） | ✅ | `core/publication_policy.py`、`utils/case_validation.py`、`tests/conftest.py`、`core/evaluation.py`（commit `f3bc080`） |
+> | P1-4.6 LLM 输出强 Schema 门禁 | ✅ | 用例可执行合同启用（真实数据不合格率 0.4%，畸形输出全部拦截、不 completed） |
+> | P1-4.7 覆盖证据强制化 | ✅ | `coverage_status` + `observed_coverage_rate`；**结构化 covered_point_ids 已入 prompt** 并做清单外编号剔除 |
+> | §4.1 前端 HITL | ✅ | PublicationPanel + 批量审批（CaseTree）+ 审阅台 + `apply_verdicts.py` 判定落地 |
+> | P1-4.2 durable execution | ✅ | task_guard 原子占用 + 输入指纹 + AsyncPostgresSaver + **任务自愈**（重启自动续跑，探针 6/6） |
+> | P1-4.3 并发互斥与 SSE 隔离 | ✅ | task_guard 原子占用 + partial unique index + ContextVar（探针 11/11） |
+> | P1-4.4 事务性出箱 | ✅ | vector_outbox + relay + reconcile_cases + 运维可视化（探针 13/13） |
+> | P1-4.8 状态/降级/乐观锁 | ✅ | result_json 全量证据 + 状态守卫 + expected_revision 乐观锁（探针 7/7） |
+> | P1-4.9 KB 证据链 | ✅ | answer_status 隔离 + claims 协议（服务端校验）+ 用例 evidence_sources/inferred + 前端渲染 |
+> | P1-4.10 可观测性 | ✅（轻量） | trace 严格 task_id + 节点级 span 三层贯通（任务 → 节点 → LLM 调用） |
+> | P1-4.11 威胁模型 | ✅ 文档化 | 威胁×防护×缺口清单（见 §4.11 落地说明） |
 >
-> **已知行为后果**：覆盖标注率 < 30% 时 `coverage_status=unknown` → 永不自动核准（转人工）；
-> 当前 `prompts/gen_agent.py` 未要求模型输出 `covered_point_ids`，标注率大概率偏低，
-> 因此"自动核准"在实践中会很罕见 —— 这是 fail-closed 的**预期语义**，
-> 要提升自动核准率必须先提升结构化标注率（属 P1-4.7 的后续）。
+> **已评估不立项的项（判定记录，触发条件出现时可凭此立项）**：
+> 1. Saver 的 None 输入续跑——中断低频，FP 断点已保住最贵部分，增量仅省 clarify/impact 的 3-5 次调用；双 resume 路径徒增复杂度。
+> 2. 持久队列 worker——任务自愈已覆盖"重启不丢任务"；其增量是进程隔离与横向扩容，单实例部署无此需求（多实例化时再立项）。
+> 3. 确认/恢复/影响确认/澄清提交的 revision 化——并发编辑的真实入口是需求编辑（已闭环）；其余为低频单人操作，加锁需前端全面改造，收益趋近零。
+> 4. 前端 claims 逐句高亮——「证据引用」卡已交付"逐条结论→来源"的核心价值，逐句高亮属纯 UI 美化。
+> 5. OTel 采集后端 + 内容 opt-in——llm_call_logs + trace 端点已满足当前排障；接 Jaeger/Tempo 属规模化需求。
+> 6. Mutation testing——用例测的是外部业务系统，变异测试需要其代码库与工具链，成本与当前目标不匹配。
+> 7. 红队评测 / prompt injection 自动检测——结构性防护已在位（XML 隔离 + 权限 + fail-closed）；出现真实案例再立项。
+> 8. trace 与 eval run 关联——评估证据已落 `evaluation_runs`（prompt 维度），运行级 trace 关联待规模化。
+>
+> **随运营积累的（非工程待办）**：检索评估集扩样、失败轨迹回流（`scripts/reflux_failures.py`）——真实使用会自动产生素材。
+>
+> **已知行为后果**：覆盖标注率 < 30% 时 `coverage_status=unknown` → 永不自动核准（转人工）——
+> 这是 fail-closed 的**预期语义**。结构化 `covered_point_ids` 已入 prompt；
+> 下次真实生成后验证：标注率、invalid_point_references=0、auto_approve 是否兑现。
+
 
 ## 阶段 P0：先阻止错误结果进入权威库
 
@@ -492,6 +496,11 @@ KB 问答 claims[]+source_ids 服务端校验（需改问答输出协议与前�
 
 ## 阶段 P2：建立可证明的质量闭环
 
+**处置（2026-09-16 评估）**：2 覆盖证据强制化 ✅、3 claim-to-source/case-to-evidence ✅、
+4 标准 pytest ✅（分层 conftest；service containers 已评估不立项）、5 检索 eval ✅（脚本已备，扩样随运营）、
+6 失败回流 ✅（reflux_failures.py）；1 Structured Outputs 与 7 mutation testing **已评估不立项**
+（合同校验已拦截畸形输出；用例测的是外部业务系统，变异测试成本与目标不匹配）。
+
 1. Pydantic Structured Outputs + 业务语义验证；
 2. 覆盖证据强制化，unknown 不冒充 100%；
 3. claim-to-source / case-to-evidence；
@@ -501,6 +510,12 @@ KB 问答 claims[]+source_ids 服务端校验（需改问答输出协议与前�
 7. 对高价值用例加入 mutation testing，验证测试是否真能发现错误，而不只“覆盖了代码”。
 
 ## 阶段 P3：标准化可观测性与安全治理
+
+**处置（2026-09-16 评估）**：trace 严格化与节点 span ✅、版本清单与回滚基本 ✅
+（prompt restore / 模型可切 / 数据集冻结）、威胁模型 ✅ 文档化；
+1 OTel 后端接入、2 trace grading 趋势、3 红队 **已评估不立项**（当前 llm_call_logs + trace 满足排障；
+结构性防护已在位；规模化或出现真实案例时再立项）；
+5 `canonical_fp_id` 跨版本身份 **已评估不立项**（名称匹配 + 版本链当前运作正常，改动面大无痛点）。
 
 1. OpenTelemetry GenAI traces；
 2. trace grading 与成本/延迟/退化趋势；
