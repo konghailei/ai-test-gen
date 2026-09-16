@@ -3739,8 +3739,9 @@ async def fp_merge(
 
 
 @router.patch("/{req_id}/fp/{fp_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
-async def fp_update(
-    req_id: str, fp_id: str, body: FPUpdateRequest,
+async def fp_patch_update(  # v3.4 审计修复：原名 fp_update 与上方 PUT 版同名，
+    req_id: str, fp_id: str, body: FPUpdateRequest,   # 后定义覆盖前者的模块级名字（可维护性隐患）
+
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """编辑功能点（名称/模块/类型/优先级）。

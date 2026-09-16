@@ -1259,7 +1259,7 @@ async def kqa_approve_correction(
             except Exception as crsr_e:
                 logger.warning(
                     "[API/knowledge-qa] CRSR 刷新失败（不阻断） fp_id={}: {}",
-                    fp_id, str(csr_e)[:150],
+                    fp_id, str(crsr_e)[:150],
                 )
 
         else:

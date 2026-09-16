@@ -100,7 +100,7 @@ class AddDependencyEdgeRequest(BaseModel):
 @router.get("/", response_model=ApiResponse)
 async def list_products(
     session: AsyncSession = Depends(get_session),
-    user: "CurrentUser" = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ):
     """列出用户有权查看的产品。管理员可看全部。"""
     from app.core.auth import CurrentUser
@@ -295,7 +295,7 @@ async def delete_product(
 async def list_projects(
     pid: str,
     session: AsyncSession = Depends(get_session),
-    _user: "CurrentUser" = Depends(get_current_user),
+    _user: CurrentUser = Depends(get_current_user),
 ):
     """v2.8.69: 补全统一登录态依赖（与 list_products 对齐）和空值安全防护。
     避免 r.created_at=None 时 .isoformat() 崩溃或未登录态绕过导致的前端异常。
@@ -341,7 +341,7 @@ async def list_projects(
 async def get_project_detail(
     proj_id: str,
     session: AsyncSession = Depends(get_session),
-    _user: "CurrentUser" = Depends(get_current_user),
+    _user: CurrentUser = Depends(get_current_user),
 ):
     """v3.2.7: 项目详情（支撑项目详情页"需求/用例"双标签）。
 
@@ -2646,7 +2646,7 @@ async def analyze_project_impact(
 @router.get("/admin/dashboard", response_model=ApiResponse)
 async def admin_dashboard(
     session: AsyncSession = Depends(get_session),
-    user: "CurrentUser" = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ):
     """管理后台首页：当前用户可访问的产品列表 + 统计。"""
     from app.core.auth import CurrentUser

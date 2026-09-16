@@ -38,7 +38,6 @@ from sse_starlette.sse import EventSourceResponse
 from app.core.auth import require_write, get_current_user, CurrentUser
 from app.core.orchestrator import orchestrator
 from app.core.product_access import assert_product_visible
-from app.core.orchestrator import orchestrator
 from app.db.database import async_session
 from app.db.models import Requirement, AnalysisTask
 from app.models.api_schemas import GenerateRequest
