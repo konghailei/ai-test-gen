@@ -209,10 +209,31 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     else:
         steps.append({"id": "analysis:clarify", "status": SKIPPED, "detail": "解析后无澄清问题（质量分达标）"})
 
-    # 5) finalize（draft → pending_review；confirm 仅接受 pending_review）
-    fz = httpx.post(f"{base}/api/requirements/{req_id}/finalize", headers=headers, timeout=120)
-    steps.append({"id": "analysis:finalize", "status": PASS if fz.status_code == 200 else FAIL,
-                  "detail": f"{fz.status_code} {str((fz.json().get('detail') or ''))[:80]}"})
+    # 5) 状态自适应推进：draft → finalize（pending_review）；已是 pending_review 则跳过
+    status_now = req_data.get("status", "")
+    if status_now == "draft":
+        fz = httpx.post(f"{base}/api/requirements/{req_id}/finalize", headers=headers, timeout=120)
+        steps.append({"id": "analysis:finalize", "status": PASS if fz.status_code == 200 else FAIL,
+                      "detail": f"{fz.status_code} {str((fz.json().get('detail') or ''))[:80]}"})
+    else:
+        steps.append({"id": "analysis:finalize", "status": SKIPPED,
+                      "detail": f"状态已是 {status_now}，无需 finalize"})
+
+    # 5b) 功能点审核（confirm 要求全部 FP status=approved；未分配模块的先补模块）
+    approved = 0
+    for fp in fps:
+        fpid = fp.get("id", "")
+        if not fpid or fp.get("status") == "approved":
+            continue
+        if not fp.get("module_id") and not (fp.get("modules") or []):
+            httpx.put(f"{base}/api/requirements/{req_id}/fp/{fpid}", headers=headers,
+                      timeout=60, json={"modules": ["登录安全"]})
+        ar = httpx.patch(f"{base}/api/requirements/{req_id}/fp/{fpid}/approve",
+                         headers=headers, timeout=60)
+        approved += 1 if ar.status_code == 200 else 0
+    steps.append({"id": "analysis:fp_review",
+                  "status": PASS if approved == len([f for f in fps if f.get("status") != "approved"]) else FAIL,
+                  "detail": f"审核通过 {approved} 个功能点"})
 
     # 6) 确认
     cf = httpx.post(f"{base}/api/requirements/{req_id}/confirm", headers=headers, timeout=120)
