@@ -1530,18 +1530,20 @@ async def finalize_requirement(
     # v2.8.52: 同步更新 FP（原 finalize 不更新 FP，导致 SRR 新 / FP 旧）
     if finalize_result.fps:
         try:
-            await _save_fps_to_db(session, req_id, finalize_result.fps, record.priority, product_id=record.product_id or "")
-            await _save_fp_dependencies(session, req_id, finalize_result.fp_deps)
-            await _update_fp_index_in_srr(session, req_id)
-            # 重新读取 final_data（_update_fp_index_in_srr 可能修改了 srr_json）
-            record.srr_json = final_data
+            # v3.4：savepoint 隔离——FP 同名冲突（uq_fp_req_name）只回滚嵌套事务，
+            # 外层的 status=pending_review / SRR 保存照常提交
+            async with session.begin_nested():
+                await _save_fps_to_db(session, req_id, finalize_result.fps, record.priority, product_id=record.product_id or "")
+                await _save_fp_dependencies(session, req_id, finalize_result.fp_deps)
+                await _update_fp_index_in_srr(session, req_id)
+                # 重新读取 final_data（_update_fp_index_in_srr 可能修改了 srr_json）
+                record.srr_json = final_data
         except Exception as fp_e:
             # v3.4 修复：IntegrityError（如 FP 同名撞 uq_fp_req_name）会把 session 置为
-            # rolled-back 状态——不 rollback 就继续用，commit 时抛
-            # "This Session's transaction has been rolled back" 二次异常 → finalize 500。
-            # 降级跳过的前提是先把事务回滚干净。
-            await session.rollback()
-            logger.warning("[API/requirements] finalize FP 更新失败（已回滚，降级跳过）: {}", str(fp_e)[:200])
+            # rolled-back——不回滚就继续用，commit 时抛二次异常 → finalize 500。
+            # 用 savepoint（嵌套事务）：FP 更新失败只回滚到嵌套点，
+            # 外层的 status=pending_review 与 SRR 保存不受影响。
+            logger.warning("[API/requirements] finalize FP 更新失败（savepoint 已回滚，降级跳过）: {}", str(fp_e)[:200])
 
     await session.commit()
 
