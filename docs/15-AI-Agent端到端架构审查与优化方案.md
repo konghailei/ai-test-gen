@@ -456,7 +456,7 @@ flowchart LR
 **剩余**：①续跑语义改用 saver 的 None 输入续跑（现仍走自定义 FP 断点 + 指纹，已够用）；
 ②任务迁出 API 进程（持久队列/DB lease） |
 > | P1-4.8 任务状态/降级/乐观锁 | ✅ 已做 | ① result_json 补 `review_degraded`/`gate_forced`/`dedup_removed`/`kb_write_status`；② 状态守卫实测已满足（`_update_gen_task` 带 `status IN ('pending','running')`，interrupted/completed 不会被覆盖）；③ 需求编辑乐观锁：`expected_revision` → `FOR UPDATE` 比对 → 409（探针 7/7）。**剩余**：确认/恢复/影响确认/澄清提交的 revision 化（需前端配合） |
-> | P1-4.9 KB 证据链 | ⚠️ 部分 | `answer_status=failed`：LLM 失败降级文本不再混入正常问答资产（done 带 answer_status，`/correct` 对 failed 记录 409，模型/迁移已加）。**已补（c）**：用例证据链——`gen_metadata.evidence_sources`（few-shot 用例 + 模式，实际使用的检索证据）
+> | P1-4.9 KB 证据链 | ⚠️ 部分 | `answer_status=failed`：LLM 失败降级文本不再混入正常问答资产（done 带 answer_status，`/correct` 对 failed 记录 409，模型/迁移已加）。**已补（c）**：用例证据链——`gen_metadata.evidence_sources`（few-shot 用例 + 模式，实际使用的检索证据） **已补（b）**：claims 协议——prompt 要求尾部输出 `<<<CLAIMS>>>[{claim, source_ids}]`，`_split_claims()` 服务端校验（source_ids ⊆ 本次 reference_sources，编造剔除/无来源丢弃），随 KnowledgeQA 落库（claims 列）+ done 事件带出，正文剥离 claims 块；**剩余**：前端逐句渲染 claims（API 可取，UI 高亮未做）。
 与 `inferred`（无检索证据 = 纯 SRR 推导）随 case_json 落库（UTCF GenMetadata 已扩展——
 嵌套模型无 extra=allow，不扩字段会被 Pydantic 往返丢弃）。**剩余（a 的输出协议部分）**：
 KB 问答 claims[]+source_ids 服务端校验（需改问答输出协议与前端渲染，专项） |
