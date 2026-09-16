@@ -152,10 +152,15 @@ def _poll_task(base: str, headers: dict, task_id: str, timeout_s: int,
 
 
 def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) -> dict:
-    """L2 需求分析链路：上传 → 解析 → 澄清回答 → 确认。只做结构断言，内容回传 AI。"""
+    """L2 需求分析链路：上传 → 解析 → 澄清回答 → 确认。只做结构断言，内容回传 AI。
+
+    整体容错：任何一步抛异常都记为 FAIL 步骤返回（plan-results.json 始终可产出），
+    不击穿整个测试计划执行器。
+    """
     import httpx
 
     steps: list[dict] = []
+    try:
     doc_text = open(doc_path, encoding="utf-8").read() if os.path.exists(doc_path) else DEFAULT_DOC
 
     # 1) 上传（异步解析任务）
@@ -226,10 +231,11 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
         if not fpid or fp.get("status") == "approved":
             continue
         if not fp.get("module_id") and not (fp.get("modules") or []):
+            # ⚠️ FP 编辑触发 SRR 同步 + 向量更新，实测 60s 会 ReadTimeout
             httpx.put(f"{base}/api/requirements/{req_id}/fp/{fpid}", headers=headers,
-                      timeout=60, json={"modules": ["登录安全"]})
+                      timeout=300, json={"modules": ["登录安全"]})
         ar = httpx.patch(f"{base}/api/requirements/{req_id}/fp/{fpid}/approve",
-                         headers=headers, timeout=60)
+                         headers=headers, timeout=300)
         approved += 1 if ar.status_code == 200 else 0
     steps.append({"id": "analysis:fp_review",
                   "status": PASS if approved == len([f for f in fps if f.get("status") != "approved"]) else FAIL,
@@ -242,13 +248,17 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
                   "detail": f"{cf.status_code} {str(cf.json().get('message') or cf.text)[:80]}"})
 
     # 6) 回传材料：需求分析产物（SRR/功能点/澄清问题）存 ai-review，供 AI 判定
-    artifacts = {"req_id": req_id, "title": req_data.get("title", ""),
-                 "status_after_confirm": cf_data.get("status") or req_data.get("status"),
-                 "srr": srr, "functional_points": fps,
-                 "clarify_questions": questions}
-    return {"layer": "flow-analysis", "steps": steps,
-            "pass": all(s["status"] in (PASS, SKIPPED) for s in steps),
-            "req_id": req_id, "artifacts": artifacts}
+        artifacts = {"req_id": req_id, "title": req_data.get("title", ""),
+                     "status_after_confirm": cf_data.get("status") or req_data.get("status"),
+                     "srr": srr, "functional_points": fps,
+                     "clarify_questions": questions}
+        return {"layer": "flow-analysis", "steps": steps,
+                "pass": all(s["status"] in (PASS, SKIPPED) for s in steps),
+                "req_id": req_id, "artifacts": artifacts}
+    except Exception as e:  # noqa: BLE001
+        steps.append({"id": "analysis:exception", "status": FAIL,
+                      "detail": str(e)[:200]})
+        return {"layer": "flow-analysis", "steps": steps, "pass": False, "req_id": None}
 
 
 def _structural_checks(run_dir: str) -> list[dict]:
