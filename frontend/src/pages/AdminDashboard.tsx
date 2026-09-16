@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
-import { LayoutDashboard, Package, Users, ArrowRight } from 'lucide-react'
+import { LayoutDashboard, Package, Users, ArrowRight, RefreshCw } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { apiGet } from '../api/client'
+import { apiGet, apiPost } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 
 export default function AdminDashboard() {
@@ -13,6 +13,17 @@ export default function AdminDashboard() {
   useEffect(() => {
     apiGet('/products/admin/dashboard').then(d => setData(d)).finally(() => setLoading(false))
   }, [])
+
+  // v3.4：向量出箱积压巡检（PG↔Milvus 一致性是否健康，一眼可见）
+  const [outbox, setOutbox] = useState<any>(null)
+  const [dispatching, setDispatching] = useState(false)
+  const loadOutbox = () => apiGet('/observability/vector-outbox').then(d => setOutbox(d)).catch(() => setOutbox(null))
+  useEffect(() => { loadOutbox(); const t = setInterval(loadOutbox, 30000); return () => clearInterval(t) }, [])
+  const handleDispatch = async () => {
+    setDispatching(true)
+    try { await apiPost('/observability/vector-outbox/dispatch'); loadOutbox() } catch { /* 失败留待下轮自动重试 */ }
+    finally { setDispatching(false) }
+  }
 
   const enterProduct = (product: any) => {
     setSelectedProduct(product.id, product.name)
@@ -52,6 +63,44 @@ export default function AdminDashboard() {
           <div><p className="text-2xl font-bold" style={{ color: 'var(--foreground)' }}>{(data.products || []).length}</p><p className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>可访问</p></div>
         </div>
       </div>
+
+      {outbox && (
+        <div className="card p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>
+              系统健康 · 向量出箱（PG→Milvus 一致性）
+            </h2>
+            <button onClick={handleDispatch} disabled={dispatching}
+              className="btn-secondary text-xs flex items-center gap-1" style={{ opacity: dispatching ? 0.6 : 1 }}>
+              <RefreshCw className={'w-3 h-3' + (dispatching ? ' animate-spin' : '')} /> 立即投递
+            </button>
+          </div>
+          <div className="flex gap-6 text-sm mb-2">
+            <span>待投递 <b>{outbox.summary?.by_status?.pending ?? 0}</b></span>
+            <span>已投递 <b>{outbox.summary?.by_status?.done ?? 0}</b></span>
+            <span style={{ color: (outbox.summary?.by_status?.failed ?? 0) > 0 ? 'var(--state-danger)' : undefined }}>
+              失败待对账 <b>{outbox.summary?.by_status?.failed ?? 0}</b>
+            </span>
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+              最早未完成：{outbox.summary?.oldest_unfinished || '—'}
+            </span>
+          </div>
+          {(outbox.recent || []).length > 0 && (
+            <table className="w-full text-xs">
+              <tbody>
+                {outbox.recent.slice(0, 5).map((r: any) => (
+                  <tr key={r.event_id} className="border-t" style={{ borderColor: 'var(--border)' }}>
+                    <td className="py-1.5 pr-3" style={{ color: 'var(--foreground-tertiary)' }}>{r.aggregate_id}</td>
+                    <td className="py-1.5 pr-3">{r.action}</td>
+                    <td className="py-1.5 pr-3">{r.status}</td>
+                    <td className="py-1.5 truncate" style={{ color: 'var(--foreground-tertiary)', maxWidth: 420 }}>{r.error || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       <div className="card p-0 overflow-hidden">
         <div className="px-5 py-3.5 border-b" style={{ borderColor: 'var(--border)', background: 'var(--background-muted)' }}>

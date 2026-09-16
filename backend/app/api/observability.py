@@ -13,13 +13,50 @@ from __future__ import annotations
 from sqlalchemy import select
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_write
 from app.models.api_schemas import ApiResponse
 from app.db.database import get_session
 from app.db.models import AnalysisTask, LLMCallLog
+from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["可观测性"])
+
+
+# ============================================================================
+# 向量出箱积压（v3.4 / docs/15 §4.4 的运维面：PG↔Milvus 一致性是否健康，一眼可见）
+# ============================================================================
+
+@router.get("/vector-outbox", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def vector_outbox_status(session: AsyncSession = Depends(get_session)) -> ApiResponse:
+    """出箱积压概览 + 最近待投递/失败事件（运维巡检）。
+
+    pending 长期为 0 = 正常；持续增长看 api 日志 [VectorOutbox]；
+    failed 是重试超上限的，需要人工看 error 并跑 reconcile_cases。
+    """
+    from app.core.vector_outbox import pending_summary
+
+    summary = await pending_summary()
+    recent = (await session.execute(_text("""
+        SELECT event_id, aggregate_id, action, status, retry_count, error, next_retry_at, created_at
+        FROM vector_outbox
+        WHERE status IN ('pending', 'failed')
+        ORDER BY created_at DESC
+        LIMIT 20
+    """))).mappings().all()
+    return ApiResponse(success=True, message="ok", data={
+        "summary": summary,
+        "recent": [dict(r) for r in recent],
+    })
+
+
+@router.post("/vector-outbox/dispatch", response_model=ApiResponse, dependencies=[Depends(require_write)])
+async def vector_outbox_dispatch() -> ApiResponse:
+    """手动触发一轮投递（relay 本身 5s 自动跑，这是给运维的立即重试入口）。"""
+    from app.core.vector_outbox import dispatch_batch
+
+    stats = await dispatch_batch()
+    return ApiResponse(success=True, message="ok", data=stats)
 
 
 @router.get("/trace/{task_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
