@@ -97,6 +97,130 @@ def step_unit() -> dict:
             "pass": r["status"] == PASS}
 
 
+
+
+# ── L2 需求分析链路（v5.1：从需求分析到测试用例生成的完整覆盖）──
+
+DEFAULT_DOC = """# 登录安全策略（测试计划样例 v2.0）
+
+## 1. 功能概述
+本需求定义客服工单系统登录安全策略。用户连续登录失败 5 次后账号进入锁定状态，
+锁定时长固定为 1 分钟，锁定期间禁止登录并实时提示剩余锁定时间，锁定到期后自动解锁
+且失败计数清零。失败计数按账号维度统计，成功登录时清零；密码错误提示统一返回
+"账号或密码错误"，不区分账号不存在与密码错误。
+
+## 2. 功能点
+1. 登录失败计数与锁定触发（连续失败 5 次 → 锁定 1 分钟）
+2. 锁定期间登录拒绝与剩余时间提示
+3. 锁定到期自动解锁、失败计数清零
+4. 用户名不存在与密码错误提示统一（防枚举）
+
+## 3. 业务规则
+- 连续失败第 5 次即触发锁定，提示"账号已锁定，请 1 分钟后再试"
+- 锁定期间尝试登录不增加失败计数
+- 成功登录清零失败计数
+"""
+
+
+def _login(base: str) -> dict:
+    import httpx
+    r = httpx.post(f"{base}/api/auth/login",
+                   json={"username": "admin", "password": "888888"}, timeout=180)
+    r.raise_for_status()
+    data = r.json().get("data") or {}
+    token = data.get("token") or data.get("access_token")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _poll_task(base: str, headers: dict, task_id: str, timeout_s: int,
+               interval: int = 15) -> dict:
+    """轮询 analysis_tasks 直到终态（解析/澄清重解析都是异步任务）。"""
+    import httpx
+    deadline = time.monotonic() + timeout_s
+    last = ""
+    while time.monotonic() < deadline:
+        r = httpx.get(f"{base}/api/requirements/tasks/{task_id}", headers=headers, timeout=60)
+        d = (r.json().get("data") or {})
+        status = d.get("status", "")
+        if status != last:
+            print(f"    任务 {task_id}: {status} {d.get('progress', '')}".rstrip())
+            last = status
+        if status in ("completed", "failed", "interrupted", "aborted"):
+            return {"status": status, "data": d}
+        time.sleep(interval)
+    return {"status": "timeout", "data": {}}
+
+
+def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) -> dict:
+    """L2 需求分析链路：上传 → 解析 → 澄清回答 → 确认。只做结构断言，内容回传 AI。"""
+    import httpx
+
+    steps: list[dict] = []
+    doc_text = open(doc_path, encoding="utf-8").read() if os.path.exists(doc_path) else DEFAULT_DOC
+
+    # 1) 上传（异步解析任务）
+    r = httpx.post(f"{base}/api/requirements/upload", headers=headers, timeout=120, json={
+        "raw_text": doc_text, "product_id": "PROD-53145-856",
+        "title": "登录安全策略-测试计划样例", "priority": "P0",
+        "modules": ["登录安全"],
+    })
+    up = (r.json().get("data") or {}) if r.headers.get("content-type", "").startswith("application/json") else {}
+    req_id, task_id = up.get("req_id", ""), up.get("task_id", "")
+    steps.append({"id": "analysis:upload", "status": PASS if r.status_code == 200 and req_id else FAIL,
+                  "detail": f"req_id={req_id} task_id={task_id}"})
+    if not req_id:
+        return {"layer": "flow-analysis", "steps": steps, "pass": False, "req_id": None}
+
+    # 2) 轮询解析
+    poll = _poll_task(base, headers, task_id, poll_timeout)
+    steps.append({"id": "analysis:parse", "status": PASS if poll["status"] == "completed" else FAIL,
+                  "detail": f"task={poll['status']}"})
+
+    # 3) 结构断言：SRR / 功能点
+    gr = httpx.get(f"{base}/api/requirements/{req_id}", headers=headers, timeout=60)
+    req_data = (gr.json().get("data") or {})
+    srr = req_data.get("srr_json") or {}
+    fps = srr.get("functional_points") or []
+    steps.append({"id": "analysis:srr", "status": PASS if srr.get("requirement") else FAIL,
+                  "detail": f"SRR.requirement={'有' if srr.get('requirement') else '缺'}"})
+    steps.append({"id": "analysis:functional_points", "status": PASS if len(fps) >= 1 else FAIL,
+                  "detail": f"功能点 {len(fps)} 个"})
+
+    # 4) 澄清（有问题则回答并等待重解析；答案给最小占位——内容由 AI 判定的是问题质量）
+    q = httpx.get(f"{base}/api/requirements/{req_id}/clarify/questions", headers=headers, timeout=60)
+    qdata = (q.json().get("data") or {})
+    questions = qdata.get("questions") or []
+    if questions:
+        answers = {q0.get("id") or q0.get("question_id"): "按需求文档执行" for q0 in questions
+                   if (q0.get("id") or q0.get("question_id"))}
+        cr = httpx.post(f"{base}/api/requirements/{req_id}/clarify", headers=headers,
+                        timeout=120, json={"answers": answers})
+        ctask = (cr.json().get("data") or {}).get("task_id", "")
+        if ctask:
+            poll2 = _poll_task(base, headers, ctask, poll_timeout)
+            steps.append({"id": "analysis:clarify", "status": PASS if poll2["status"] == "completed" else FAIL,
+                          "detail": f"问题 {len(questions)} 条，重解析 {poll2['status']}"})
+        else:
+            steps.append({"id": "analysis:clarify", "status": FAIL, "detail": "澄清提交未返回 task_id"})
+    else:
+        steps.append({"id": "analysis:clarify", "status": SKIPPED, "detail": "解析后无澄清问题（质量分达标）"})
+
+    # 5) 确认
+    cf = httpx.post(f"{base}/api/requirements/{req_id}/confirm", headers=headers, timeout=120)
+    cf_data = (cf.json().get("data") or {}) if cf.headers.get("content-type", "").startswith("application/json") else {}
+    steps.append({"id": "analysis:confirm", "status": PASS if cf.status_code == 200 else FAIL,
+                  "detail": f"{cf.status_code} {str(cf.json().get('message') or cf.text)[:80]}"})
+
+    # 6) 回传材料：需求分析产物（SRR/功能点/澄清问题）存 ai-review，供 AI 判定
+    artifacts = {"req_id": req_id, "title": req_data.get("title", ""),
+                 "status_after_confirm": cf_data.get("status") or req_data.get("status"),
+                 "srr": srr, "functional_points": fps,
+                 "clarify_questions": questions}
+    return {"layer": "flow-analysis", "steps": steps,
+            "pass": all(s["status"] in (PASS, SKIPPED) for s in steps),
+            "req_id": req_id, "artifacts": artifacts}
+
+
 def _structural_checks(run_dir: str) -> list[dict]:
     """L2 流程层结构断言：只验证"系统没有结构性故障"，不评判内容好坏。"""
     checks: list[dict] = []
@@ -204,6 +328,10 @@ def main() -> int:
     ap.add_argument("--only", default="", choices=["", "mechanism", "flow"],
                     help="只跑某一层")
     ap.add_argument("--note", default="", help="写入审阅台的说明")
+    ap.add_argument("--doc", default="", help="需求分析样例文档路径（缺省用内置样例）")
+    ap.add_argument("--poll-timeout", type=int, default=1800,
+                    help="解析/澄清异步任务轮询超时（秒，默认 1800）")
+    ap.add_argument("--base", default="http://127.0.0.1:8000", help="API 基地址")
     args = ap.parse_args()
 
     ts = time.strftime("%Y%m%d-%H%M%S")
