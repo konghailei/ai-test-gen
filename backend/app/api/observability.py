@@ -10,7 +10,7 @@ agent_name/req_id/duration/token_usage/success）——本模块把它们串成 
 """
 from __future__ import annotations
 
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import get_current_user
@@ -38,9 +38,12 @@ async def get_trace(
     if task is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
 
+    # v3.4（docs/15 §4.10）：trace 收紧为**严格 task_id**。
+    # 旧实现 `task_id OR req_id` 会把同一需求的**其它运行**的调用混进来，
+    # trace 就不再是"这一次运行"的轨迹。trace_id = task_id（每次运行一个 trace）。
     logs = (await session.execute(
         select(LLMCallLog)
-        .where(or_(LLMCallLog.task_id == task_id, LLMCallLog.req_id == task.req_id))
+        .where(LLMCallLog.task_id == task_id)
         .order_by(LLMCallLog.created_at.asc())
     )).scalars().all()
 

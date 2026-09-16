@@ -390,6 +390,23 @@ OpenTelemetry GenAI 语义约定建议用顶层 `invoke_agent`、子级 `chat` /
 
 ---
 
+### 落地说明（v3.4：威胁模型与防护清单）
+
+按"威胁 × 现有防护 × 缺口"盘点（代码现状核过，不是抄建议）：
+
+| 威胁 | 现有防护 | 缺口 |
+|---|---|---|
+| 上传需求/KB 文档的 prompt injection | RAG 内容与 system prompt 由 `_build_qa_prompt` 分离；检索内容只作上下文不做指令 | 可疑指令型片段的检测与过滤 |
+| 检索投毒 / 记忆污染 | 用例只取已固化（archived_at）、需求只取 archived；纠错必须过人工审核（pending_review → approve）；answer_status=failed 的降级文本不进纠错候选 | 投毒模式的自动检测 |
+| LLM 输出诱导工具/DB 副作用 | **结构性防护**：Agent 无任意工具；所有副作用走确定性 DAG 节点 + 发布门禁（publication_policy fail-closed，blocked 不触碰 DB/向量）+ 出箱 relay；LLM 输出不能直接调用任何写操作 | — |
+| 跨产品证据泄漏 | Milvus metadata 强制 `product_id`（缺省兜底也不能跨）；`search_similar_cases` 按 product_id 硬过滤 | — |
+| 敏感 prompt/内容进日志与 trace | llm_call_logs 记录 prompt/response（DB 侧，有鉴权）；trace 严格 task_id | prompt/response 内容默认不采集的 opt-in 策略 |
+| 审计 | operation_logs + llm_call_logs + task_context（task_id/req_id 贯穿） | trace 与 eval run 关联（见 §4.10 剩余） |
+
+结论：**"LLM 输出诱导副作用"与"跨产品泄漏"两项已由结构性设计覆盖**；prompt injection 检测、
+内容脱敏 opt-in、红队评测为后续专项（需要真实语料与评审流程，不适合夹在本轮顺手做）。
+
+---
 ## 5. 目标架构
 
 ```mermaid
@@ -436,7 +453,9 @@ flowchart LR
 > | P1-4.4 PG→Milvus 事务性出箱 | ✅ 已做 | `vector_outbox` 表 + `core/vector_outbox.py`（enqueue 与业务行同事务、relay 至少一次幂等投递、指数退避、FOR UPDATE SKIP LOCKED）、`reconcile_cases()` 双向对账（补缺失自动、删孤儿需显式开关）、feedback 端点同事务入箱；探针 13/13 |
 > | P1-4.2 durable execution | ⚠️ 部分 | `PipelineState` 补声明（resume/resume_checkpoint 此前被过滤，**断点续跑从未生效**）+ `core/pipeline_fingerprint.py`（checkpoint 指纹：SRR/FP 集合/修订/prompt/模型/合同版本）+ 续跑校验 409 + `fallback_to_restart`；探针 8/8。**剩余**：LangGraph PostgresSaver 与任务迁出 API 进程（互为前提） |
 > | P1-4.8 任务状态/降级/乐观锁 | ✅ 已做 | ① result_json 补 `review_degraded`/`gate_forced`/`dedup_removed`/`kb_write_status`；② 状态守卫实测已满足（`_update_gen_task` 带 `status IN ('pending','running')`，interrupted/completed 不会被覆盖）；③ 需求编辑乐观锁：`expected_revision` → `FOR UPDATE` 比对 → 409（探针 7/7）。**剩余**：确认/恢复/影响确认/澄清提交的 revision 化（需前端配合） |
-> | P1（4.9~4.11） | ❌ 未做 | — |
+> | P1-4.9 KB 证据链 | ⚠️ 部分 | `answer_status=failed`：LLM 失败降级文本不再混入正常问答资产（done 带 answer_status，`/correct` 对 failed 记录 409，模型/迁移已加）。**剩余**：claims[]+source_ids 服务端校验、用例 evidence_sources[]、inferred 标记（涉及 LLM 输出 schema 与前端，待专项） |
+> | P1-4.10 可观测性 Trace | ⚠️ 部分 | trace 收紧为**严格 task_id**（不再 `task_id OR req_id` 把同需求多次运行混入）。**剩余**：OTel span 树 / 内容 opt-in 采集 / eval run 关联 |
+> | P1-4.11 威胁模型 | ⚠️ 文档化 | 已补「威胁 × 防护 × 缺口」清单（见 §4.11 落地说明）：两项由结构性设计覆盖，三项留专项 |
 > | P2 / P3 其余 | ❌ 未做 | — |
 >
 > **已知行为后果**：覆盖标注率 < 30% 时 `coverage_status=unknown` → 永不自动核准（转人工）；

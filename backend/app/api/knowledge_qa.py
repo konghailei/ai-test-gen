@@ -465,6 +465,11 @@ async def _stream_qa_answer(
     # kb_status 仅用于 done 事件返回（前端展示诊断信息）。
 
     full_answer = ""
+    # v3.4（docs/15 §4.9）：区分"真回答"与"LLM 失败降级文本"。
+    # 失败文本以前会被当正常问答落库并发正常 done → 进纠错归档候选，
+    # 但"AI 服务不可用"不是知识。
+    answer_status = "ok"
+    answer_error = ""
 
     try:
         # 调用 LLM（非流式，一次性返回，以 chunk 事件发送）
@@ -480,6 +485,8 @@ async def _stream_qa_answer(
         yield {"event": "chunk", "data": answer}
     except Exception as e:
         logger.error("[API/knowledge-qa] LLM 调用失败: {}", str(e)[:200])
+        answer_status = "failed"
+        answer_error = str(e)[:500]
         error_msg = f"抱歉，AI 分析服务暂时不可用。错误：{str(e)[:100]}"
         full_answer = error_msg
         yield {"event": "chunk", "data": error_msg}
@@ -504,6 +511,8 @@ async def _stream_qa_answer(
             created_by="system",
             # 产品隔离：记录归属的产品 ID（归档时用于关联到正确产品）
             product_id=product_id or "PROD-DEFAULT",
+            answer_status=answer_status,
+            error_message=answer_error,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
@@ -521,6 +530,8 @@ async def _stream_qa_answer(
             "id": record_id,
             "question": question,
             "answer_full": full_answer,
+            "answer_status": answer_status,
+            "error": answer_error,
             "reference_sources": reference_sources,
             "kb_status": kb_status or {"search_ok": True, "error": "", "total": len(reference_sources)},
         }, ensure_ascii=False),
@@ -756,6 +767,12 @@ async def kqa_correct(
         record.corrected_answer = req.corrected_answer
         record.correction_notes = req.correction_notes
         # v2.8.56: 审核流程字段
+        # v3.4（docs/15 §4.9）："AI 服务不可用"的降级文本不是知识，不得进入纠错归档
+        if getattr(record, "answer_status", "ok") == "failed":
+            raise HTTPException(
+                status_code=409,
+                detail="该问答是 LLM 调用失败的降级文本（answer_status=failed），不参与纠错归档。",
+            )
         record.correction_status = "pending_review"
         record.correction_module = req.correction_module
         record.correction_target_type = req.correction_target_type

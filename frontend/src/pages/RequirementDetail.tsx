@@ -486,7 +486,14 @@ export default function RequirementDetail() {
       target = target[path[i]]
     }
     target[path[path.length - 1]] = newValue
-    await reqApi.update(id, srr)
+    // v3.4（docs/15 §4.8）：提交带乐观锁，被他人抢先修改时 409 提示刷新，不静默覆盖
+    try {
+      await reqApi.update(id, srr, undefined, localRevisionRef.current || undefined)
+    } catch (e: any) {
+      alert(e?.message || '保存失败：需求可能已被他人修改，请刷新页面后重试')
+      refreshRevisionBaseline()
+      return
+    }
     setReq(prev => prev ? { ...prev, srr_json: srr } : prev)
     // v2.33: 本地变更后刷新 revision 基线，避免下次轮询误报冲突
     refreshRevisionBaseline()
@@ -824,7 +831,8 @@ export default function RequirementDetail() {
     setSaveError('')
     try {
       const parsed = JSON.parse(editJson)
-      await reqApi.update(id, parsed)
+      // v3.4（docs/15 §4.8）：整体保存同样带乐观锁
+      await reqApi.update(id, parsed, undefined, localRevisionRef.current || undefined)
       const updated = await reqApi.get(id)
       setReq(updated)
       setEditing(false)

@@ -425,6 +425,11 @@ class KnowledgeQA(Base):
     conversation_history: Mapped[list] = mapped_column(JSON, default=list)
     corrected_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     correction_notes: Mapped[str] = mapped_column(Text, default="")
+    # v3.4（docs/15 §4.9）：LLM 调用失败时的降级文本不得混入正常问答资产——
+    # answer_status='failed' 的记录不进纠错归档候选（"AI 服务不可用"不是知识）
+    answer_status: Mapped[str] = mapped_column(String(16), default="ok", index=True,
+                                               comment="ok / failed")
+    error_message: Mapped[str] = mapped_column(Text, default="", comment="失败原因（status=failed 时）")
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     archived_type: Mapped[str] = mapped_column(String(32), default="")
     archived_id: Mapped[str] = mapped_column(String(64), default="")

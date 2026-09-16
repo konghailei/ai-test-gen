@@ -132,10 +132,12 @@ export const requirements = {
     return request<PaginatedData<Requirement>>(`/requirements?${params}`)
   },
   get: (id: string) => request<RequirementDetail>(`/requirements/${id}`),
-  update: (id: string, srrJson: Record<string, unknown>, rawText?: string) =>
+  update: (id: string, srrJson: Record<string, unknown>, rawText?: string, expectedRevision?: number) =>
     request(`/requirements/${id}`, {
       method: 'PUT',
-      body: JSON.stringify({ srr_json: srrJson, raw_text: rawText }),
+      // v3.4（docs/15 §4.8）：expected_revision 乐观锁——两人并发编辑，后提交者得 409
+      body: JSON.stringify({ srr_json: srrJson, ...(rawText != null ? { raw_text: rawText } : {}),
+        ...(expectedRevision != null ? { expected_revision: expectedRevision } : {}) }),
     }),
   upload: (raw: string, meta?: Record<string, string>) =>
     request<{ task_id: string; req_id: string; status: string }>('/requirements/upload', {
