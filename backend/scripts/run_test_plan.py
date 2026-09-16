@@ -176,11 +176,15 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     steps.append({"id": "analysis:parse", "status": PASS if poll["status"] == "completed" else FAIL,
                   "detail": f"task={poll['status']}"})
 
-    # 3) 结构断言：SRR / 功能点
+    # 3) 结构断言：SRR / 功能点（FP 在功能点表，经 GET /{req_id}/fp 查询）
     gr = httpx.get(f"{base}/api/requirements/{req_id}", headers=headers, timeout=60)
     req_data = (gr.json().get("data") or {})
     srr = req_data.get("srr_json") or {}
-    fps = srr.get("functional_points") or []
+    fpr = httpx.get(f"{base}/api/requirements/{req_id}/fp", headers=headers, timeout=60)
+    fps = ((fpr.json().get("data") or {}).get("items")
+           or (fpr.json().get("data") or {}).get("functional_points") or [])
+    if not fps and isinstance(fpr.json().get("data"), list):
+        fps = fpr.json().get("data")
     steps.append({"id": "analysis:srr", "status": PASS if srr.get("requirement") else FAIL,
                   "detail": f"SRR.requirement={'有' if srr.get('requirement') else '缺'}"})
     steps.append({"id": "analysis:functional_points", "status": PASS if len(fps) >= 1 else FAIL,
@@ -205,7 +209,12 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     else:
         steps.append({"id": "analysis:clarify", "status": SKIPPED, "detail": "解析后无澄清问题（质量分达标）"})
 
-    # 5) 确认
+    # 5) finalize（draft → pending_review；confirm 仅接受 pending_review）
+    fz = httpx.post(f"{base}/api/requirements/{req_id}/finalize", headers=headers, timeout=120)
+    steps.append({"id": "analysis:finalize", "status": PASS if fz.status_code == 200 else FAIL,
+                  "detail": f"{fz.status_code} {str((fz.json().get('detail') or ''))[:80]}"})
+
+    # 6) 确认
     cf = httpx.post(f"{base}/api/requirements/{req_id}/confirm", headers=headers, timeout=120)
     cf_data = (cf.json().get("data") or {}) if cf.headers.get("content-type", "").startswith("application/json") else {}
     steps.append({"id": "analysis:confirm", "status": PASS if cf.status_code == 200 else FAIL,
