@@ -248,17 +248,13 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
                   "detail": f"{cf.status_code} {str(cf.json().get('message') or cf.text)[:80]}"})
 
     # 6) 回传材料：需求分析产物（SRR/功能点/澄清问题）存 ai-review，供 AI 判定
-        artifacts = {"req_id": req_id, "title": req_data.get("title", ""),
-                     "status_after_confirm": cf_data.get("status") or req_data.get("status"),
-                     "srr": srr, "functional_points": fps,
-                     "clarify_questions": questions}
-        return {"layer": "flow-analysis", "steps": steps,
-                "pass": all(s["status"] in (PASS, SKIPPED) for s in steps),
-                "req_id": req_id, "artifacts": artifacts}
-    except Exception as e:  # noqa: BLE001
-        steps.append({"id": "analysis:exception", "status": FAIL,
-                      "detail": str(e)[:200]})
-        return {"layer": "flow-analysis", "steps": steps, "pass": False, "req_id": None}
+    artifacts = {"req_id": req_id, "title": req_data.get("title", ""),
+                 "status_after_confirm": cf_data.get("status") or req_data.get("status"),
+                 "srr": srr, "functional_points": fps,
+                 "clarify_questions": questions}
+    return {"layer": "flow-analysis", "steps": steps,
+            "pass": all(s["status"] in (PASS, SKIPPED) for s in steps),
+            "req_id": req_id, "artifacts": artifacts}
 
 
 def _structural_checks(run_dir: str) -> list[dict]:
