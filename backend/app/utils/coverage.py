@@ -178,6 +178,40 @@ def extract_point_ids(case: dict) -> set[str]:
     return ids
 
 
+def normalize_structured_point_ids(
+    cases: list[dict],
+    srr: dict,
+    functional_points: list[dict],
+) -> int:
+    """规范化结构化 `covered_point_ids`：剔除清单里不存在的编号（就地修改）。
+
+    背景（v3.4）：生成 prompt 要求 LLM 直接输出结构化 covered_point_ids；
+    LLM 可能编造清单里没有的编号，而 calc_point_coverage 会把未知引用记为
+    invalid_point_references → 直接阻断自动发布。这里在入库前把不在合法集合
+    （**含前置条件**——合法 ID 集 ≠ 覆盖分母，见 calc_point_coverage 注释）中的
+    编号剔除，notes 兜底与启发式回填逻辑不受影响。
+
+    Returns:
+        int: 被剔除编号的用例数量。
+    """
+    known_ids = {
+        p["id"]
+        for p in collect_points(srr, functional_points or [], include_preconditions=True)
+    }
+    fixed = 0
+    for c in cases or []:
+        if not isinstance(c, dict):
+            continue
+        ids = c.get("covered_point_ids")
+        if not isinstance(ids, list):
+            continue
+        valid = [str(i) for i in ids if str(i) in known_ids]
+        if len(valid) != len(ids):
+            c["covered_point_ids"] = valid
+            fixed += 1
+    return fixed
+
+
 def backfill_cases_point_ids(
     cases: list[dict],
     srr: dict,

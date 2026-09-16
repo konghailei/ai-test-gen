@@ -257,3 +257,31 @@ def test_unknown_precondition_still_reported_invalid():
     result = calc_point_coverage(srr, [], [{"notes": "[precondition.9]"}])
     assert result["invalid_point_ids"] == ["precondition.9"]
     assert result["covered_points"] == 0
+
+
+def test_normalize_structured_ids_drops_unknown_keeps_valid():
+    """prompt 改为要求结构化 covered_point_ids 后，编造的编号必须被剔除——
+    否则 invalid_point_references 会阻断发布。"""
+    from app.utils.coverage import normalize_structured_point_ids
+    srr = _srr(2)
+    srr["preconditions"] = ["用户已登录"]
+    cases = [
+        {"covered_point_ids": ["happy_path.1", "hallucinated.9"]},   # 混入编造编号
+        {"covered_point_ids": ["precondition.1", "happy_path.2"]},   # 前置条件合法
+        {"covered_point_ids": []},                                    # 空：不动
+        {"title": "无结构化字段"},                                    # 缺字段：不动
+    ]
+    fixed = normalize_structured_point_ids(cases, srr, [])
+    assert fixed == 1
+    assert cases[0]["covered_point_ids"] == ["happy_path.1"]          # 编造的被剔
+    assert cases[1]["covered_point_ids"] == ["precondition.1", "happy_path.2"]  # 合法保留
+    assert "covered_point_ids" not in cases[3]
+
+
+def test_normalize_does_not_touch_notes_annotation():
+    """notes 兜底标注（启发式）不归本函数管——只处理结构化字段。"""
+    from app.utils.coverage import normalize_structured_point_ids
+    cases = [{"notes": "覆盖: [happy_path.1]", "covered_point_ids": ["happy_path.1"]}]
+    assert normalize_structured_point_ids(cases, _srr(1), []) == 0
+    assert cases[0]["notes"] == "覆盖: [happy_path.1]"
+

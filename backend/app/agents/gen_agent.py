@@ -398,7 +398,13 @@ class GenAgent:
         # 与要点描述的关键词命中，为未标注用例确定性回填覆盖的要点 ID。
         # 已标注的用例跳过，仅补明显种子，避免污染。
         try:
-            from app.utils.coverage import backfill_cases_point_ids
+            from app.utils.coverage import backfill_cases_point_ids, normalize_structured_point_ids
+            # v3.4（docs/15 §4.9）：先剔除结构化标注里清单外编号（防编造 ID 触发
+            # invalid_point_references 阻断发布），再做启发式回填
+            _normalized = normalize_structured_point_ids(cases, srr, functional_points or [])
+            if _normalized:
+                logger.warning("[GenAgent] 结构化 covered_point_ids 剔除 {} 条用例的未知编号"
+                               "（编造的清单外 ID 会导致发布被阻断）", _normalized)
             _backfilled = backfill_cases_point_ids(cases, srr, functional_points or [])
             if _backfilled:
                 logger.info(
