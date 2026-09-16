@@ -233,9 +233,46 @@ def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: li
         f"{_xml_escape(question)}\n"
         "</user_question>\n\n"
         "请根据 <documents> 里的资料回答 <user_question> 中的问题。"
-        "若上下文不足以完整回答，请基于已有信息给出最佳推断，并明确说明信息局限性。"
+        "若上下文不足以完整回答，请基于已有信息给出最佳推断，并明确说明信息局限性。\n\n"
+        "回答写完后，**另起一行**输出证据引用块（严格 JSON，供系统校验，不属于回答正文）：\n"
+        "<<<CLAIMS>>>\n"
+        '[{"claim": "回答中的一个关键结论（短句）", "source_ids": ["该结论依据的 <document> 的 id"]}]\n'
+        "- claim 只写基于 <documents> 得出的结论；source_ids 只能填上面 <document> 里出现过的 id\n"
+        "- 推断性内容（无明确文档依据）不要写进 claims\n"
+        "- 若整份资料都不足以支撑任何结论，claims 输出 []"
     )
     return prompt
+
+
+def _split_claims(answer: str, valid_ids: set[str]) -> tuple[str, list[dict]]:
+    """剥离回答尾部的 <<<CLAIMS>>> 块，并**服务端校验** source_ids。
+
+    校验规则（docs/15 §4.9）：source_ids 必须来自本次检索的 reference_sources——
+    LLM 编造的来源 ID 一律剔除；claim 无任何有效来源则整条丢弃。
+    块缺失/JSON 非法 → 回答正文原样保留、claims 为空（降级不失败）。
+
+    Returns:
+        (回答正文, 校验后的 claims)
+    """
+    if "<<<CLAIMS>>>" not in answer:
+        return answer, []
+    body, _, tail = answer.partition("<<<CLAIMS>>>")
+    try:
+        start, end = tail.index("["), tail.rindex("]")
+        raw = json.loads(tail[start:end + 1])
+    except Exception:  # noqa: BLE001
+        return body.rstrip(), []
+    claims: list[dict] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("claim", "")).strip()
+        if not text:
+            continue
+        source_ids = [str(i) for i in (item.get("source_ids") or []) if str(i) in valid_ids]
+        if source_ids:
+            claims.append({"claim": text[:300], "source_ids": source_ids})
+    return body.rstrip(), claims[:50]
 
 
 def _record_to_dict(record: KnowledgeQA) -> dict:
@@ -470,6 +507,7 @@ async def _stream_qa_answer(
     # 但"AI 服务不可用"不是知识。
     answer_status = "ok"
     answer_error = ""
+    claims: list[dict] = []
 
     try:
         # 调用 LLM（非流式，一次性返回，以 chunk 事件发送）
@@ -481,8 +519,12 @@ async def _stream_qa_answer(
             max_tokens=4096,
             provider=kb_provider,
         )
-        full_answer = answer
-        yield {"event": "chunk", "data": answer}
+        # v3.4（docs/15 §4.9）：剥离尾部 claims 块并服务端校验——
+        # 正文流给用户，claims（逐条结论挂来源）结构化落库；编造的来源 ID 一律剔除
+        full_answer, claims = _split_claims(
+            answer, {s["id"] for s in reference_sources if isinstance(s, dict) and s.get("id")}
+        )
+        yield {"event": "chunk", "data": full_answer}
     except Exception as e:
         logger.error("[API/knowledge-qa] LLM 调用失败: {}", str(e)[:200])
         answer_status = "failed"
@@ -513,6 +555,7 @@ async def _stream_qa_answer(
             product_id=product_id or "PROD-DEFAULT",
             answer_status=answer_status,
             error_message=answer_error,
+            claims=claims,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
@@ -532,6 +575,7 @@ async def _stream_qa_answer(
             "answer_full": full_answer,
             "answer_status": answer_status,
             "error": answer_error,
+            "claims": claims,
             "reference_sources": reference_sources,
             "kb_status": kb_status or {"search_ok": True, "error": "", "total": len(reference_sources)},
         }, ensure_ascii=False),

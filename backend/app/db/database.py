@@ -160,6 +160,8 @@ async def init_db() -> None:
                 # v3.4（docs/15 §4.9）：LLM 失败降级标记——failed 记录不进纠错候选
                 ("answer_status", "VARCHAR(16) NOT NULL DEFAULT 'ok'", "answer_status"),
                 ("error_message", "TEXT NOT NULL DEFAULT ''", "error_message"),
+                # v3.4（docs/15 §4.9）：claims 证据链（逐条结论挂来源 ID）
+                ("claims", "JSON NOT NULL DEFAULT '[]'", "claims"),
                 ("correction_target_type", "VARCHAR(32) NOT NULL DEFAULT 'requirement'", "correction_target_type"),
                 ("correction_target_id", "VARCHAR(64) NOT NULL DEFAULT ''", "correction_target_id"),
                 ("reviewed_by", "VARCHAR(64) NOT NULL DEFAULT ''", "reviewed_by"),

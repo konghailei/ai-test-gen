@@ -430,6 +430,9 @@ class KnowledgeQA(Base):
     answer_status: Mapped[str] = mapped_column(String(16), default="ok", index=True,
                                                comment="ok / failed")
     error_message: Mapped[str] = mapped_column(Text, default="", comment="失败原因（status=failed 时）")
+    # v3.4（docs/15 §4.9）：claims 证据链——回答的关键结论逐条挂 source_ids，
+    # 服务端校验 source_ids 必须来自本次检索的 reference_sources
+    claims: Mapped[list] = mapped_column(JSON, default=list, comment="[{claim, source_ids}]")
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     archived_type: Mapped[str] = mapped_column(String(32), default="")
     archived_id: Mapped[str] = mapped_column(String(64), default="")
