@@ -67,6 +67,11 @@ class RequirementUpdateRequest(BaseModel):
     """需求编辑请求（更新 SRR 字段）。"""
     srr_json: dict = Field(..., description="更新后的完整 SRR JSON")
     raw_text: str | None = Field(default=None, description="更新原始文本（可选）")
+    # v3.4（docs/15 §4.8）：乐观锁 —— 提交时携带打开编辑页时的修订号，
+    # 与当前 revision 不一致 → 409（防止两人并发编辑互相覆盖）。缺省 = 兼容旧客户端。
+    expected_revision: int | None = Field(
+        default=None, description="期望的需求修订号（乐观锁；不传则跳过校验）"
+    )
 
 
 class RequirementSummary(BaseModel):

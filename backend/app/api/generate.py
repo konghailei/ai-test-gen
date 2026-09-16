@@ -383,6 +383,23 @@ async def generate_test_cases(
                             "review_report": event.get("review_report", {}),
                             "gate_result": event.get("gate_result", {}),
                             "kb_flowback": event.get("kb_flowback", {}),
+                            # v3.4（docs/15 §4.8）：降级与发布证据全量落 task，
+                            # 离开 SSE 页面后任务管理页/复盘仍能看到完整决策链
+                            "review_degraded": bool(
+                                (event.get("review_report") or {}).get("review_degraded")
+                            ),
+                            "gate_forced": bool(
+                                (event.get("gate_result") or {}).get("forced_pass")
+                            ),
+                            "dedup_removed": event.get("dedup_removed", []),
+                            "kb_write_status": {
+                                "skipped": bool(
+                                    (event.get("kb_flowback") or {}).get("skipped")
+                                ),
+                                "auto_approved": (event.get("kb_flowback") or {}).get("auto_approved", 0),
+                                "pending_review": (event.get("kb_flowback") or {}).get("pending_review", 0),
+                                "errors": (event.get("kb_flowback") or {}).get("errors", 0),
+                            },
                         },
                     )
 

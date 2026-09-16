@@ -1959,6 +1959,23 @@ async def update_requirement(
     # v2.46: 校验所属项目是否可编辑（pending_archive/archived 状态下冻结）
     await _assert_project_editable(session, record.project_id)
 
+    # v3.4（docs/15 §4.8）：乐观锁 —— 提交时对该行 FOR UPDATE 并比对 revision。
+    # 两人同时打开编辑页、后提交者会被 409 拒绝，而不是静默覆盖前者的改动。
+    # expected_revision 缺省时跳过（兼容旧客户端/脚本）。
+    if req.expected_revision is not None:
+        current_rev = (await session.execute(
+            text("SELECT revision FROM requirements WHERE id = :i FOR UPDATE"),
+            {"i": req_id},
+        )).scalar()
+        if current_rev != req.expected_revision:
+            await session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=(f"需求已被他人修改（当前 revision={current_rev}，"
+                        f"你的编辑基于 revision={req.expected_revision}）。"
+                        "请刷新后重试，避免覆盖他人改动。"),
+            )
+
     # 只更新需要的字段
     # v2.45 修复：检测 cross_fp_interactions 变更，手动编辑依赖规则时同步 FPDependency 表
     old_srr_json = dict(record.srr_json) if isinstance(record.srr_json, dict) else {}
