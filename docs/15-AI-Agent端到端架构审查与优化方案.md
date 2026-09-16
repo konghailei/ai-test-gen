@@ -451,7 +451,10 @@ flowchart LR
 > | §4.1 前端 HITL（降级审批可见可操作） | ⚠️ 部分 | `PublicationPanel.tsx` + Generate 页展示决策/原因/降级/失败子任务、KB 跳过态；逐条 approve/reject 走既有反馈端点，尚未做批量审批入口 |
 > | P1-4.3 并发互斥与 SSE 隔离 | ✅ 已做 | `core/task_guard.py`（事务内 advisory lock + 僵尸兜底 + 原子占用）、`database.py` Step 3b partial unique index、`generate.py` 改为原子占用且 **resume 不再绕过**；SSE 隔离由 ContextVar 承载并实测（探针 11/11） |
 > | P1-4.4 PG→Milvus 事务性出箱 | ✅ 已做 | `vector_outbox` 表 + `core/vector_outbox.py`（enqueue 与业务行同事务、relay 至少一次幂等投递、指数退避、FOR UPDATE SKIP LOCKED）、`reconcile_cases()` 双向对账（补缺失自动、删孤儿需显式开关）、feedback 端点同事务入箱；探针 13/13 |
-> | P1-4.2 durable execution | ⚠️ 部分 | `PipelineState` 补声明（resume/resume_checkpoint 此前被过滤，**断点续跑从未生效**）+ `core/pipeline_fingerprint.py`（checkpoint 指纹：SRR/FP 集合/修订/prompt/模型/合同版本）+ 续跑校验 409 + `fallback_to_restart`；探针 8/8。**剩余**：LangGraph PostgresSaver 与任务迁出 API 进程（互为前提） |
+> | P1-4.2 durable execution | ⚠️ 接近完成 | `PipelineState` 补声明（resume/resume_checkpoint 此前被过滤，**断点续跑从未生效**）+ `core/pipeline_fingerprint.py`（checkpoint 指纹：SRR/FP 集合/修订/prompt/模型/合同版本）+ 续跑校验 409 + `fallback_to_restart`；探针 8/8。**已补**：AsyncPostgresSaver 检查点后端（thread_id=task_id 落 PG，探针 6/6；
+依赖锁定 checkpoint-postgres 2.0.16——3.x 会把 checkpoint 连升 4.x 与 langgraph 0.2.68 不兼容）。
+**剩余**：①续跑语义改用 saver 的 None 输入续跑（现仍走自定义 FP 断点 + 指纹，已够用）；
+②任务迁出 API 进程（持久队列/DB lease） |
 > | P1-4.8 任务状态/降级/乐观锁 | ✅ 已做 | ① result_json 补 `review_degraded`/`gate_forced`/`dedup_removed`/`kb_write_status`；② 状态守卫实测已满足（`_update_gen_task` 带 `status IN ('pending','running')`，interrupted/completed 不会被覆盖）；③ 需求编辑乐观锁：`expected_revision` → `FOR UPDATE` 比对 → 409（探针 7/7）。**剩余**：确认/恢复/影响确认/澄清提交的 revision 化（需前端配合） |
 > | P1-4.9 KB 证据链 | ⚠️ 部分 | `answer_status=failed`：LLM 失败降级文本不再混入正常问答资产（done 带 answer_status，`/correct` 对 failed 记录 409，模型/迁移已加）。**剩余**：claims[]+source_ids 服务端校验、用例 evidence_sources[]、inferred 标记（涉及 LLM 输出 schema 与前端，待专项） |
 > | P1-4.10 可观测性 Trace | ⚠️ 部分 | trace 收紧为**严格 task_id**（不再 `task_id OR req_id` 把同需求多次运行混入）。**剩余**：OTel span 树 / 内容 opt-in 采集 / eval run 关联 |
