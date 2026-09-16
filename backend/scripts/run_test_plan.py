@@ -160,7 +160,6 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     import httpx
 
     steps: list[dict] = []
-    try:
     doc_text = open(doc_path, encoding="utf-8").read() if os.path.exists(doc_path) else DEFAULT_DOC
 
     # 1) 上传（异步解析任务）
