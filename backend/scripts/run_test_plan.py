@@ -162,8 +162,18 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     steps: list[dict] = []
     doc_text = open(doc_path, encoding="utf-8").read() if os.path.exists(doc_path) else DEFAULT_DOC
 
+    def _req(method: str, url: str, **kw):
+        """带 401 自动重登的请求——跑批中途 API reload 会轮换签名密钥，
+        旧 token 全部失效（实测 401），此时重新登录换新 token 重试一次。"""
+        r = httpx.request(method, url, headers=headers, **kw)
+        if r.status_code == 401:
+            headers.clear()
+            headers.update(_login(base))
+            r = httpx.request(method, url, headers=headers, **kw)
+        return r
+
     # 1) 上传（异步解析任务）
-    r = httpx.post(f"{base}/api/requirements/upload", headers=headers, timeout=120, json={
+    r = _req("POST", f"{base}/api/requirements/upload", timeout=120, json={
         "raw_text": doc_text, "product_id": "PROD-53145-856",
         "title": "登录安全策略-测试计划样例", "priority": "P0",
         "modules": ["登录安全"],
@@ -181,10 +191,10 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
                   "detail": f"task={poll['status']}"})
 
     # 3) 结构断言：SRR / 功能点（FP 在功能点表，经 GET /{req_id}/fp 查询）
-    gr = httpx.get(f"{base}/api/requirements/{req_id}", headers=headers, timeout=60)
+    gr = _req("GET", f"{base}/api/requirements/{req_id}", timeout=60)
     req_data = (gr.json().get("data") or {})
     srr = req_data.get("srr_json") or {}
-    fpr = httpx.get(f"{base}/api/requirements/{req_id}/fp", headers=headers, timeout=60)
+    fpr = _req("GET", f"{base}/api/requirements/{req_id}/fp", timeout=60)
     fps = ((fpr.json().get("data") or {}).get("items")
            or (fpr.json().get("data") or {}).get("functional_points") or [])
     if not fps and isinstance(fpr.json().get("data"), list):
@@ -195,13 +205,13 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
                   "detail": f"功能点 {len(fps)} 个"})
 
     # 4) 澄清（有问题则回答并等待重解析；答案给最小占位——内容由 AI 判定的是问题质量）
-    q = httpx.get(f"{base}/api/requirements/{req_id}/clarify/questions", headers=headers, timeout=60)
+    q = _req("GET", f"{base}/api/requirements/{req_id}/clarify/questions", timeout=60)
     qdata = (q.json().get("data") or {})
     questions = qdata.get("questions") or []
     if questions:
         answers = {q0.get("id") or q0.get("question_id"): "按需求文档执行" for q0 in questions
                    if (q0.get("id") or q0.get("question_id"))}
-        cr = httpx.post(f"{base}/api/requirements/{req_id}/clarify", headers=headers,
+        cr = _req("POST", f"{base}/api/requirements/{req_id}/clarify",
                         timeout=120, json={"answers": answers})
         ctask = (cr.json().get("data") or {}).get("task_id", "")
         if ctask:
@@ -216,7 +226,7 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
     # 5) 状态自适应推进：draft → finalize（pending_review）；已是 pending_review 则跳过
     status_now = req_data.get("status", "")
     if status_now == "draft":
-        fz = httpx.post(f"{base}/api/requirements/{req_id}/finalize", headers=headers, timeout=120)
+        fz = _req("POST", f"{base}/api/requirements/{req_id}/finalize", timeout=120)
         steps.append({"id": "analysis:finalize", "status": PASS if fz.status_code == 200 else FAIL,
                       "detail": f"{fz.status_code} {str((fz.json().get('detail') or ''))[:80]}"})
     else:
@@ -231,17 +241,16 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
             continue
         if not fp.get("module_id") and not (fp.get("modules") or []):
             # ⚠️ FP 编辑触发 SRR 同步 + 向量更新，实测 60s 会 ReadTimeout
-            httpx.put(f"{base}/api/requirements/{req_id}/fp/{fpid}", headers=headers,
+            _req("PUT", f"{base}/api/requirements/{req_id}/fp/{fpid}",
                       timeout=300, json={"modules": ["登录安全"]})
-        ar = httpx.patch(f"{base}/api/requirements/{req_id}/fp/{fpid}/approve",
-                         headers=headers, timeout=300)
+        ar = _req("PATCH", f"{base}/api/requirements/{req_id}/fp/{fpid}/approve", timeout=300)
         approved += 1 if ar.status_code == 200 else 0
     steps.append({"id": "analysis:fp_review",
                   "status": PASS if approved == len([f for f in fps if f.get("status") != "approved"]) else FAIL,
                   "detail": f"审核通过 {approved} 个功能点"})
 
     # 6) 确认
-    cf = httpx.post(f"{base}/api/requirements/{req_id}/confirm", headers=headers, timeout=120)
+    cf = _req("POST", f"{base}/api/requirements/{req_id}/confirm", timeout=120)
     cf_data = (cf.json().get("data") or {}) if cf.headers.get("content-type", "").startswith("application/json") else {}
     steps.append({"id": "analysis:confirm", "status": PASS if cf.status_code == 200 else FAIL,
                   "detail": f"{cf.status_code} {str(cf.json().get('message') or cf.text)[:80]}"})
