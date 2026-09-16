@@ -456,7 +456,10 @@ flowchart LR
 **剩余**：①续跑语义改用 saver 的 None 输入续跑（现仍走自定义 FP 断点 + 指纹，已够用）；
 ②任务迁出 API 进程（持久队列/DB lease） |
 > | P1-4.8 任务状态/降级/乐观锁 | ✅ 已做 | ① result_json 补 `review_degraded`/`gate_forced`/`dedup_removed`/`kb_write_status`；② 状态守卫实测已满足（`_update_gen_task` 带 `status IN ('pending','running')`，interrupted/completed 不会被覆盖）；③ 需求编辑乐观锁：`expected_revision` → `FOR UPDATE` 比对 → 409（探针 7/7）。**剩余**：确认/恢复/影响确认/澄清提交的 revision 化（需前端配合） |
-> | P1-4.9 KB 证据链 | ⚠️ 部分 | `answer_status=failed`：LLM 失败降级文本不再混入正常问答资产（done 带 answer_status，`/correct` 对 failed 记录 409，模型/迁移已加）。**剩余**：claims[]+source_ids 服务端校验、用例 evidence_sources[]、inferred 标记（涉及 LLM 输出 schema 与前端，待专项） |
+> | P1-4.9 KB 证据链 | ⚠️ 部分 | `answer_status=failed`：LLM 失败降级文本不再混入正常问答资产（done 带 answer_status，`/correct` 对 failed 记录 409，模型/迁移已加）。**已补（c）**：用例证据链——`gen_metadata.evidence_sources`（few-shot 用例 + 模式，实际使用的检索证据）
+与 `inferred`（无检索证据 = 纯 SRR 推导）随 case_json 落库（UTCF GenMetadata 已扩展——
+嵌套模型无 extra=allow，不扩字段会被 Pydantic 往返丢弃）。**剩余（a 的输出协议部分）**：
+KB 问答 claims[]+source_ids 服务端校验（需改问答输出协议与前端渲染，专项） |
 > | P1-4.10 可观测性 Trace | ⚠️ 部分 | trace 收紧为**严格 task_id**（不再 `task_id OR req_id` 把同需求多次运行混入）。**剩余**：OTel span 树 / 内容 opt-in 采集 / eval run 关联 |
 > | P1-4.11 威胁模型 | ⚠️ 文档化 | 已补「威胁 × 防护 × 缺口」清单（见 §4.11 落地说明）：两项由结构性设计覆盖，三项留专项 |
 > | P2 / P3 其余 | ❌ 未做 | — |
