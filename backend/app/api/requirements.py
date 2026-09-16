@@ -1536,7 +1536,12 @@ async def finalize_requirement(
             # 重新读取 final_data（_update_fp_index_in_srr 可能修改了 srr_json）
             record.srr_json = final_data
         except Exception as fp_e:
-            logger.warning("[API/requirements] finalize FP 更新失败（降级跳过）: {}", str(fp_e)[:200])
+            # v3.4 修复：IntegrityError（如 FP 同名撞 uq_fp_req_name）会把 session 置为
+            # rolled-back 状态——不 rollback 就继续用，commit 时抛
+            # "This Session's transaction has been rolled back" 二次异常 → finalize 500。
+            # 降级跳过的前提是先把事务回滚干净。
+            await session.rollback()
+            logger.warning("[API/requirements] finalize FP 更新失败（已回滚，降级跳过）: {}", str(fp_e)[:200])
 
     await session.commit()
 
