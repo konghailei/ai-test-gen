@@ -392,6 +392,8 @@ async def generate_test_cases(
                                 (event.get("gate_result") or {}).get("forced_pass")
                             ),
                             "dedup_removed": event.get("dedup_removed", []),
+                            # v3.4（docs/15 §4.10）：节点级 span，trace 树的中间层
+                            "node_spans": event.get("node_spans", []),
                             "kb_write_status": {
                                 "skipped": bool(
                                     (event.get("kb_flowback") or {}).get("skipped")

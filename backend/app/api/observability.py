@@ -119,6 +119,8 @@ async def get_trace(
             "progress": task.progress,
             "message": task.message,
             "phase_breakdown": result_json.get("phase_breakdown") or {},
+            # v3.4（docs/15 §4.10）：节点级 span（每个 DAG 节点的执行时长）
+            "node_spans": result_json.get("node_spans") or [],
         },
         "agents": list(agents.values()),
         "llm_call_count": len(logs),

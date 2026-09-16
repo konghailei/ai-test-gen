@@ -52,6 +52,10 @@ interface ChatMessage {
   correctionNotes?: string
   isFollowUp?: boolean
   kbStatus?: { search_ok: boolean; error: string; total: number }
+  // v3.4（docs/15 §4.9）：claims 证据链——逐条结论挂来源 ID
+  claims?: { claim: string; source_ids: string[] }[]
+  answerStatus?: 'ok' | 'failed'
+  answerError?: string
 }
 
 export default function KnowledgeQA() {
@@ -239,6 +243,9 @@ export default function KnowledgeQA() {
                     isStreaming: false,
                     recordId: doneData.id,
                     kbStatus: doneData.kb_status,
+                    claims: doneData.claims || [],
+                    answerStatus: doneData.answer_status || 'ok',
+                    answerError: doneData.error || '',
                   } : m
                 ))
                 setLoading(false)
@@ -498,6 +505,37 @@ export default function KnowledgeQA() {
                           </span>
                         </div>
                       ) : null
+                    )}
+
+                    {/* v3.4：LLM 失败降级提示（不参与纠错归档） */}
+                    {!msg.isStreaming && msg.answerStatus === 'failed' && (
+                      <div className="mt-3 flex items-start gap-2 text-xs rounded-md px-3 py-2"
+                        style={{ color: 'var(--state-danger)', background: 'var(--state-danger-surface, rgba(255,59,48,0.08))' }}>
+                        <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                        <span>
+                          本次回答由 AI 服务异常产生（{msg.answerError || '未知错误'}），不参与纠错归档，建议重新提问。
+                        </span>
+                      </div>
+                    )}
+
+                    {/* v3.4：claims 证据引用——每条关键结论挂来源 */}
+                    {!msg.isStreaming && msg.claims && msg.claims.length > 0 && (
+                      <div className="mt-3 text-xs rounded-md px-3 py-2"
+                        style={{ background: 'var(--background-muted)' }}>
+                        <p className="font-semibold mb-1" style={{ color: 'var(--foreground-secondary)' }}>
+                          证据引用（逐条结论 → 来源）
+                        </p>
+                        <ul className="space-y-1">
+                          {msg.claims.map((c, i) => (
+                            <li key={i} style={{ color: 'var(--foreground-secondary)' }}>
+                              <span>{c.claim}</span>
+                              <span style={{ color: 'var(--foreground-quaternary)' }}>
+                                {' '}← 来源：{c.source_ids.join('、')}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
 
                     {/* Action bar */}

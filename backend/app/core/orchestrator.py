@@ -1843,7 +1843,15 @@ class Orchestrator:
             queue: asyncio.Queue = asyncio.Queue()
             queue_token = self._gen_event_queue.set(queue)
 
+            # v3.4（docs/15 §4.10）：节点级 span。
+            # stream_mode="updates" 的 chunk 到达 = 该节点执行结束：
+            # 「本 chunk 到达时刻 - 上个 chunk 到达时刻」= 本 chunk 节点的执行时长
+            #（首个 chunk 的前置开销不计入任何节点）。
+            _node_spans: list[dict] = []
+            _span_last_ts: float | None = None
+
             async def _producer() -> None:
+                nonlocal _span_last_ts
                 try:
                     # thread_id = task_id：同任务重入共享检查点；临时运行用合成 ID
                     import uuid as _uuid
@@ -1853,6 +1861,15 @@ class Orchestrator:
                         config={"configurable": {"thread_id": _thread_id}},
                         stream_mode="updates",
                     ):
+                        _now = time.monotonic()
+                        _names = [k for k in chunk.keys() if k != "__end__"]
+                        if _names:
+                            if _span_last_ts is not None:
+                                _node_spans.append({
+                                    "node": _names[0],
+                                    "duration_ms": int((_now - _span_last_ts) * 1000),
+                                })
+                            _span_last_ts = _now
                         for node_name, update in chunk.items():
                             if node_name == "__end__":
                                 continue
@@ -2014,6 +2031,8 @@ class Orchestrator:
                 publication=final_state.get("publication", {}),
                 failed_subtasks=final_state.get("failed_subtasks", []),
                 dedup_removed=final_state.get("dedup_removed", []),
+                # v3.4（docs/15 §4.10）：节点级 span（trace = 任务 → 节点 → LLM 调用）
+                node_spans=_node_spans,
             )
             from app.core.publication_policy import quality_outcome
             done_event.update(quality_outcome(done_event))
