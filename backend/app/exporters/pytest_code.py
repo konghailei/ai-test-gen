@@ -47,6 +47,19 @@ from app.utils.logger import logger
 # - 注释中的换行符会使后续行脱离 # 前缀，被解析为代码
 # ============================================================================
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _strip_control(value) -> str:
+    """剥离会破坏 Python 源码的控制字符（保留 \\n \\t）。
+
+    v3.4.2（真实端到端验证发现）：用例描述/步骤里夹带 \\x00 等控制字符时，导出的
+    .py 文件无法编译——CPython 直接报 "source code string cannot contain null bytes"。
+    与 XML 导出侧的 xmind._xml_safe 属同类防护，这里统一在文本进入生成代码前过滤。
+    """
+    return _CONTROL_CHARS.sub("", str(value if value is not None else ""))
+
+
 def _sanitize_docstring(text) -> str:
     """转义三引号，用于 docstring 拼接，防止提前结束 docstring 导致代码注入。
 
@@ -58,6 +71,8 @@ def _sanitize_docstring(text) -> str:
     """
     if not text:
         return ""
+    # v3.4.2：先剥离控制字符（\x00 会让整份导出文件无法 compile）
+    text = _strip_control(text)
     # 先转义反斜杠，避免其与后续转义序列冲突
     s = str(text).replace("\\", "\\\\")
     # 转义三引号，使解析器不会将其视为 docstring 结束符
@@ -75,6 +90,8 @@ def _sanitize_comment(text) -> str:
     """
     if not text:
         return ""
+    # v3.4.2：同为防控制字符进入源码（单行化不会清除 \x00）
+    text = _strip_control(text)
     return str(text).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
 
 
@@ -120,7 +137,9 @@ def export_pytest(cases: list[dict]) -> str:
         lines.append("")
 
     logger.debug("[Exporter/pytest] 生成完成: cases={}", len(cases))
-    return "\n".join(lines)
+    # v3.4.2：整份产物兜底剥离控制字符（保留 \n \t）。逐个插值点防护容易漏，
+    # 而 CPython 遇到 \x00 会直接拒绝编译整份文件，故在出口再兜一层。
+    return _strip_control("\n".join(lines))
 
 
 # ============================================================================
@@ -206,9 +225,9 @@ def _case_to_function(case: dict, used_names: set[str]) -> str:
     doc_lines = [_sanitize_docstring(title)] if title else []
     meta_parts = []
     if priority:
-        meta_parts.append(f"Priority: {priority}")
+        meta_parts.append(f"Priority: {_strip_control(priority)}")
     if typ:
-        meta_parts.append(f"Type: {typ}")
+        meta_parts.append(f"Type: {_strip_control(typ)}")
     if case.get("related_requirement"):
         meta_parts.append(f"Req: {_sanitize_docstring(case['related_requirement'])}")
     if meta_parts:
