@@ -130,8 +130,22 @@ _PROMPT_REGISTRY: list[dict] = [
 ]
 
 
-def _init_registry():
-    """将注册表中的默认值写入 prompt_store（仅首次或默认值变更时更新）。"""
+# v3.4.1 修复 M-13：进程内缓存与 registry 初始化标记
+_registry_initialized = False
+_prompt_cache: dict[str, str] = {}
+
+
+def _init_registry(force: bool = False):
+    """将注册表中的默认值写入 prompt_store（默认只在首次执行）。
+
+    v3.4.1 修复 M-13：原实现无任何守卫，每次 get() 都全量 upsert 14 项
+    （每项 1 次 information_schema 查询 + 1 次 SELECT + 1 次 COMMIT），
+    而 get() 在每次 LLM 调用前都会触发，全部同步阻塞在 async 事件循环里。
+    现在只在首次导入（或显式 force=True）时执行。
+    """
+    global _registry_initialized
+    if _registry_initialized and not force:
+        return
     for item in _PROMPT_REGISTRY:
         prompt_store.register_default(
             module=item["module"],
@@ -139,6 +153,20 @@ def _init_registry():
             default_value=item["default"],
             description=item["description"],
         )
+    _registry_initialized = True
+
+
+def invalidate_cache(module: str | None = None, name: str | None = None) -> None:
+    """失效进程内提示词缓存（写路径调用；不传参数则清空全部）。
+
+    v3.4.1 修复 M-13：get() 现在带进程内缓存，提示词被修改后必须失效，
+    否则当前进程会一直返回旧值。单实例部署下由本函数保证一致性；
+    多实例部署时其他实例依赖其自身缓存（改提示词后需重启或后续加跨进程通知）。
+    """
+    if module is None or name is None:
+        _prompt_cache.clear()
+        return
+    _prompt_cache.pop(f"{module}.{name}", None)
 
 
 # ============================================================================
@@ -152,15 +180,24 @@ def get(module: str, name: str) -> str:
     用法：
         sys_prompt = prompt_manager.get("req_agent", "SYSTEM_PROMPT")
     """
-    # 确保 registry 已初始化
+    # v3.4.1 修复 M-13：进程内缓存命中直接返回，避免每次 LLM 调用前的同步 DB 往返
+    key = f"{module}.{name}"
+    cached = _prompt_cache.get(key)
+    if cached is not None:
+        return cached
+
+    # 确保 registry 已初始化（有 flag 短路，仅首次真正执行 DB 写入）
     _init_registry()
 
     override = prompt_store.get_prompt(module, name)
     if override is not None:
+        _prompt_cache[key] = override
         return override
 
-    # 回退到默认值
-    return prompt_store.get_prompt_default(module, name) or ""
+    # 回退到默认值（同样写缓存，含空串）
+    value = prompt_store.get_prompt_default(module, name) or ""
+    _prompt_cache[key] = value
+    return value
 
 
 def load_all_overrides() -> dict[str, str]:
@@ -186,6 +223,8 @@ def update(module: str, name: str, value: str, changed_by: str = "api") -> None:
     v2.3: 自动写入 prompt_history 表记录修改历史。
     """
     prompt_store.update_prompt(module, name, value, changed_by=changed_by)
+    # v3.4.1 修复 M-13：写路径失效进程内缓存
+    invalidate_cache(module, name)
 
 
 def reset(module: str, name: str, changed_by: str = "api") -> None:
@@ -194,6 +233,8 @@ def reset(module: str, name: str, changed_by: str = "api") -> None:
     v2.3: 自动写入 prompt_history 表记录恢复操作。
     """
     prompt_store.reset_prompt(module, name, changed_by=changed_by)
+    # v3.4.1 修复 M-13：写路径失效进程内缓存
+    invalidate_cache(module, name)
 
 
 def list_history(module: str, name: str, limit: int = 50) -> list[dict]:
@@ -211,7 +252,10 @@ def restore_from_history(history_id: int, changed_by: str = "api") -> dict:
     Returns:
         dict: 含恢复后的提示词信息
     """
-    return prompt_store.restore_prompt_from_history(history_id, changed_by=changed_by)
+    result = prompt_store.restore_prompt_from_history(history_id, changed_by=changed_by)
+    # v3.4.1 修复 M-13：不确定恢复的是哪一条，整体失效进程内缓存
+    invalidate_cache()
+    return result
 
 
 # 首次导入时自动初始化

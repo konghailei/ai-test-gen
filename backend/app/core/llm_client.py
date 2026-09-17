@@ -288,13 +288,18 @@ class LLMClient:
                       仅使用该供应商；不可用时回退到正常候选列表。
             agent_name: 调用方 Agent 名称，用于 LLM 调用日志（仅直接调用 call 时记录；
                         call_json 会自行记录并传 _skip_log=True 避免重复）。
-            return_usage: True 时返回 (content, usage_dict, model_used) 元组，
+            return_usage: True 时返回 (content, usage_dict, model_used, provider_key) 四元组，
                           供 call_json 获取 token 用量；默认 False 返回 content 字符串。
             _skip_log: True 时跳过本方法的日志记录（由调用方 call_json 统一记录）。
 
         Returns:
             str | tuple: 默认返回 LLM 生成的文本；return_usage=True 时返回
-                         (文本, token用量字典, 模型名) 元组。
+                         (文本, token用量字典, 模型名, 供应商 key) 元组。
+
+        Note（v3.4.1 修复 P-7）:
+            本方法参数 provider 会被下方 `for provider in providers` 循环变量遮蔽
+            （循环内它是 dict）。循环体内请勿把 provider 当作入参字符串使用。修正
+            docstring 与实际返回值不一致的问题（原记 3 元，实际 4 元）。
 
         Raises:
             RuntimeError: 所有提供商均不可用或重试耗尽
@@ -315,8 +320,12 @@ class LLMClient:
 
         # 优化 4：LLM 响应缓存（仅缓存 temperature=0 的确定性调用）
         import hashlib
+        # v3.4.1 修复 M-14：key 补入 response_format / max_tokens——此前 call（自由文本）
+        # 与 call_json（JSON 约束）在同一 prompt、同 agent 下共用同一缓存键，
+        # temperature=0 时互相污染。
         cache_key = hashlib.md5(
-            f"{agent_name}|{prompt}|{system_prompt or ''}|{temperature}|{model or ''}".encode()
+            f"{agent_name}|{prompt}|{system_prompt or ''}|{temperature}|{model or ''}"
+            f"|{response_format or ''}|{max_tokens or ''}".encode()
         ).hexdigest()
         cached = self._cache_get(cache_key) if temperature == 0 else None
         if cached is not None:

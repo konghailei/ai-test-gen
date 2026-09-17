@@ -40,8 +40,13 @@ STEP_SIM_COMBINED = 0.25
 
 
 def _numbers(text: object) -> set[str]:
-    """标题里的数字集合（覆盖次数/时长等口径）。"""
-    return set(re.findall(r"\d+", str(text or "")))
+    """标题里的数字集合（覆盖次数/时长等口径）。
+
+    v3.4.1 修复 L-9：先去前导零再比较。原实现下「第04次」与「第4次」的数字集合分别是
+    {"04"} / {"4"}，数字护栏会直接短路判定为不同，近重复永远合并不掉。
+    注意只归一前导零，不改变数字大小语义（"4" 与 "5" 仍视为不同边界值）。
+    """
+    return {str(int(n)) for n in re.findall(r"\d+", str(text or ""))}
 
 
 def _norm(text: object) -> str:

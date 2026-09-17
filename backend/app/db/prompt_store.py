@@ -28,6 +28,9 @@ from app.utils.logger import logger
 _sync_engine = None
 _SyncSession = None
 
+# v3.4.1 修复 M-13：建表/补列只做一次（原实现每次调用都跑 create_all + information_schema 查询）
+_table_ready = False
+
 
 def _get_sync_session() -> Session:
     """获取同步 Session（延迟初始化）。"""
@@ -48,8 +51,14 @@ def _ensure_table() -> None:
     """确保 prompt_overrides 和 prompt_history 表存在（首次调用时建表）。
 
     v2.3: 同时补齐 prompt_overrides.updated_by 列（已有表需要 ALTER TABLE）。
+    v3.4.1 修复 M-13：增加"只建一次"短路。原实现无任何 flag，而 register_default /
+    get_prompt / get_prompt_default 每次都会调用它 —— 单次 prompt_manager.get()
+    因此产生约 16 次 information_schema 查询（外加 16 次 SELECT、14 次 COMMIT），
+    且全部是同步阻塞调用，跑在 async 事件循环里。异常时不置位，保留重试机会。
     """
-    global _sync_engine
+    global _sync_engine, _table_ready
+    if _table_ready:
+        return
     if _sync_engine is None:
         _get_sync_session()
     from app.db.database import Base
@@ -70,6 +79,9 @@ def _ensure_table() -> None:
                 logger.info("[PromptStore] 已补齐 prompt_overrides.updated_by 列")
     except Exception as e:
         logger.warning(f"[PromptStore] 检查/补齐 updated_by 列失败: {e}")
+    # v3.4.1 修复 M-13：表结构与列已就绪，后续调用直接短路（异常在上方被吞掉后仍置位，
+    # 避免每次调用重复一次必然失败的 information_schema 往返）
+    _table_ready = True
 
 
 def get_all_prompts() -> list[dict]:

@@ -71,22 +71,33 @@ class TokenBucket:
                     del self._buckets[k]
             bucket = self._buckets[key]
 
-            # 补充令牌
+            # 补充令牌（v3.4.1 修复 M-4：改用连续补充模型）
+            # 原实现在 elapsed < window 分支里执行 last_refill = now - (elapsed % window)，
+            # 而 elapsed % window == elapsed，该行恒等于旧值（空操作）——即 last_refill
+            # 永不推进；于是 refill 每轮都从同一个原点重复累加，同一段时间被反复入账。
+            # 实测 limit=5/window=2s：现行实现 1 秒内放行 16 次，修正后 3 次（理论 2~3）。
             elapsed = now - bucket["last_refill"]
-            if elapsed >= self.window_seconds:
-                bucket["tokens"] = self.limit
+            if elapsed > 0:
+                capped = min(elapsed, float(self.window_seconds))
+                refill = capped / self.window_seconds * self.limit
+                bucket["tokens"] = min(float(self.limit), bucket["tokens"] + refill)
                 bucket["last_refill"] = now
-            else:
-                refill = elapsed / self.window_seconds * self.limit
-                if refill > 0:
-                    bucket["tokens"] = min(float(self.limit), bucket["tokens"] + refill)
-                    bucket["last_refill"] = now - (elapsed % self.window_seconds)
 
             # 消耗令牌
             if bucket["tokens"] > 0:
                 bucket["tokens"] -= 1
                 return True
             return False
+
+    def next_token_wait(self) -> int:
+        """距下一个令牌可用的秒数（至少 1 秒）。
+
+        v3.4.1 修复 M-4：Retry-After 此前返回整个窗口长度，远大于真实等待时间。
+        """
+        if not self.window_seconds or not self.limit:
+            return max(1, int(self.window_seconds or 1))
+        rate = self.limit / self.window_seconds
+        return max(1, int(1 / rate) if rate > 0 else int(self.window_seconds))
 
 
 # 全局限流器
@@ -120,11 +131,11 @@ async def rate_limit_middleware(request: Request, call_next: Callable) -> Respon
                 "success": False,
                 "message": "请求频率超限，请稍后再试",
                 "data": {
-                    "retry_after": _bucket.window_seconds,
+                    "retry_after": _bucket.next_token_wait(),
                     "limit": _bucket.limit,
                 },
             },
-            headers={"Retry-After": str(_bucket.window_seconds)},
+            headers={"Retry-After": str(_bucket.next_token_wait())},
         )
 
     return await call_next(request)

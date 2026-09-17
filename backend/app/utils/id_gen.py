@@ -1,4 +1,4 @@
-"""ID 生成工具。
+r"""ID 生成工具。
 
 生成符合架构文档规范的唯一 ID：
 - 需求 ID：REQ-YYYY-NNN（如 REQ-2024-001）
@@ -45,7 +45,7 @@ def gen_requirement_id() -> str:
 
 
 def gen_test_case_id(module_prefix: str = "GEN") -> str:
-    """生成测试用例 ID。
+    r"""生成测试用例 ID。
 
     Args:
         module_prefix: 模块前缀（大写字母，如 AUTH / CRUD / PAY），默认 GEN
@@ -89,7 +89,9 @@ def gen_batch_id() -> str:
     global _batch_counter
     with _id_lock:
         _batch_counter += 1
-        seq = _batch_counter
+        # v3.4.1 修复 L-8：取模保证 5 位格式不被撑破。计数器初值为随机 0~99999 且不按日
+        # 重置，原实现 seq 超过 99999 后 {seq:05d} 会输出 6 位，破坏 BATCH-YYYYMMDD-NNNNN。
+        seq = _batch_counter % 100000
     date_str = datetime.now().strftime("%Y%m%d")
     return f"BATCH-{date_str}-{seq:05d}"
 

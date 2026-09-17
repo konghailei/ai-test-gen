@@ -199,8 +199,11 @@ class QualityGate:
         # 3. 质量评分达标（冷启动模式阈值放宽至 0.60）
         quality_report = clarify_result.get("quality_report")
         if quality_report:
-            score = quality_report.get("overall_score", 0.0)
-            if score < pass_score:
+            # v3.4.1 修复 M-15：缺 overall_score 的半残报告此前被 get(..., 0.0) 当作 0 分
+            # 直接判为 Blocker（无覆盖证据时 clarify_score 故意不写 overall_score）。
+            # 语义应为"无从判断"→ 跳过评分检查，而非按最低分拦截。
+            score = quality_report.get("overall_score")
+            if score is not None and score < pass_score:
                 cold_hint = "（冷启动模式）" if cold_start else ""
                 blockers.append(
                     f"质量评分 {score} 低于阈值 {pass_score}{cold_hint}"
