@@ -12,6 +12,11 @@
 > 复核同时发现 7 条属"机制真但触发条件/影响面写错"，修复一律以后者为准。
 > 回归验证：phase2 78/78、phase3 91/91(2 skipped)、phase4 151/151、phase5 101/101、
 > unit 117 passed/1 skipped —— 与基线一致，零回归。
+>
+> **🔬 2026-09-17 真实端到端测试（v3.4.2）**：修复后对**真实服务**做了一轮端到端验证
+> （真实 HTTP + 真实 PG / Redis / Milvus，含脏数据注入与并发），**27 项检查全部通过**，
+> 并额外挖出 **2 个此前从未被真实走过的缺陷**（见 §四）。
+> 复现脚本：`verify_real_fixes.py`、`verify_llm_and_race.py`（已被 .gitignore 忽略，手工执行）。
 
 ---
 
@@ -282,7 +287,40 @@
 
 ---
 
-## 修复进度统计（v3.4.1，2026-09-17）
+## 四、真实测试新发现的缺陷（v3.4.2）
+
+> 来源：修复完成后对真实服务的端到端验证（真实 HTTP + 真实 DB/Redis/Milvus）。
+> 这两条在静态复核与四套回归中都**没有暴露**——回归用例没有覆盖对应路径。
+> 教训：**"用例全绿"不等于"功能可用"**，修复后必须用真实数据跑一遍。
+
+### 🔴 N-1 confirmed 需求提交澄清必然 500 —— 已修复
+
+- **位置**：`backend/app/api/requirements.py`（`submit_clarify_answers` 的 confirmed 分支）
+- **问题**：原写作 `_func.count(FunctionalPoint.id).where(...)`。`count()` 返回的是函数
+  表达式，**没有 `.where` 方法**，必然抛
+  `AttributeError: Neither 'count' object nor 'Comparator' object has an attribute 'where'` → 500。
+- **影响**：只要需求处于 confirmed 且用户提交澄清，请求直接 500。这也是 H-1 所述
+  "confirmed 澄清失败后回退成 draft"**根本走不到**的原因——在取快照之前就炸了。
+  换言之：H-1 的 bug 被这个更前置的 500 掩盖着。
+- **为何长期未被发现**：该分支只在 `record.status == "confirmed"` 时进入；
+  phase5 回归只覆盖了 draft 路径；静态复核时注意力在快照时机，未逐行审这一段。
+- **修复**：改为 `select(func.count(...)).where(...)`。
+- **真实验证**：`POST /api/requirements/{confirmed_req}/clarify` → **200**，
+  快照 `original_status='confirmed'`，任务正常创建（修复前该请求 500）。
+
+### 🟢 N-2 pytest 导出未过滤控制字符，整份文件无法编译 —— 已修复
+
+- **位置**：`backend/app/exporters/pytest_code.py`（`_sanitize_docstring` / `_sanitize_comment` + 出口）
+- **问题**：用例正文（描述/步骤/预期）夹带 `\x00` 等控制字符时被原样写进生成的 `.py`，
+  `compile()` 直接报 `source code string cannot contain null bytes`，**整份导出不可用**。
+  与 L-3（XMind/XML）属同类问题，但此前只防护了 XML 侧。
+- **修复**：新增 `_strip_control()`（保留 `\n` `\t`），在净化入口与整份产物出口各过滤一次。
+- **真实验证**：创建含 `\x00\x08\x07`、换行、`type="边界 异常"` 的用例 → 导出 pytest
+  → `compile()` 通过，`@pytest.mark` 名净化正确。
+
+---
+
+## 修复进度统计（v3.4.1 + v3.4.2，2026-09-17）
 
 | 严重程度 | 总数 | 已修复 | 误报关闭 | 暂缓 |
 |---------|------|--------|---------|------|
@@ -290,6 +328,9 @@
 | 🟡 中 | 15 | 13 | 2（M-3 / M-12） | 0 |
 | 🟢 低 | 15 | 13 | 0 | 2（L-14 / L-15） |
 | **合计** | **35** | **31** | **2** | **2** |
+
+**真实端到端测试另新增 2 条（N-1 / N-2），均已修复** —— 即累计 **37 条中已修复 33 条**。
+真实测试通过项：27 项（22 项接口/服务层 + 5 项 H-1/H-4/M-8 链路）。
 
 **P 系列（待确认 11 条）**：已修复 5（P-3 / P-5 / P-6 / P-7 / P-8）、未修 5（P-1 / P-2 / P-4 / P-9 / P-10）、重复合并 1（P-11）。
 
