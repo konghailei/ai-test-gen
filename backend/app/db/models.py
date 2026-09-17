@@ -117,6 +117,13 @@ class TestCase(Base):
     # 归档时间：归档时设置，用户可手动修改。区别于 updated_at（任何字段修改都会刷新）。
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # v3.4.1 修复 H-3：向量化状态追踪（与 Requirement / FunctionalPoint 对齐）。
+    # 此前 TestCase 缺这两列，而 tasks/embedding_tasks.py 对其赋值——SQLAlchemy 对未声明
+    # 属性的赋值静默忽略，commit 空转，前端"用例向量化状态"永久显示幽灵 pending。
+    # null = 未尝试 / 'processing' / 'completed' / 'failed'
+    vectorization_status: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
+    vectorization_error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
     __table_args__ = (
         Index("idx_case_type", "type"),
         Index("idx_case_priority", "priority"),

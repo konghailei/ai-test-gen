@@ -140,6 +140,10 @@ async def init_db() -> None:
             "test_cases": [
                 # 用例归档时间真实字段
                 ("archived_at", "TIMESTAMP WITH TIME ZONE", "archived_at"),
+                # v3.4.1 修复 H-3：向量化状态追踪（与 requirements / functional_points 对齐）。
+                # 缺列时 embedding_tasks._update_tc_vectorization_status 的赋值被静默丢弃。
+                ("vectorization_status", "VARCHAR(20)", "vectorization_status"),
+                ("vectorization_error", "TEXT", "vectorization_error"),
             ],
             "projects": [
                 # v2.45 修复：version 字段补 NOT NULL，与 models.py 一致

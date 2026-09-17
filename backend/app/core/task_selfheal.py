@@ -28,6 +28,18 @@ from app.utils.logger import logger
 SELFHEAL_WINDOW_HOURS = 24
 SELFHEAL_MAX_TASKS = 5
 
+# v3.4.1 修复 H-5：后台任务强引用集合——CPython 事件循环只弱引用 task，
+# 裸 create_task 的协程可能被 GC 静默丢弃，任务永远停在 running
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _create_bg_task(coro) -> asyncio.Task:
+    """创建后台任务并持有强引用，结束后自动移出集合。"""
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return task
+
 
 async def find_selfheal_candidates(limit: int = SELFHEAL_MAX_TASKS) -> list[dict]:
     """扫描可自愈的中断任务：每个需求取最近一条，排除已有活动任务的。"""
@@ -190,7 +202,8 @@ async def selfheal_interrupted_generations(max_tasks: int = SELFHEAL_MAX_TASKS) 
             entry["action"] = "resumed"
             entry["task_id"] = new_task_id
             results.append(entry)
-            asyncio.get_running_loop().create_task(
+            # v3.4.1 修复 H-5：改用带强引用的 _create_bg_task，防 GC 静默丢弃
+            _create_bg_task(
                 _run_selfheal(new_task_id, req_id, srr_json, cand["checkpoint"])
             )
         except Exception as e:  # noqa: BLE001

@@ -37,10 +37,15 @@ from app.core.product_access import (
     get_visible_product_ids,
 )
 from app.db.database import get_session
-from app.db.models import TestCase, Traceability, ErrorCase
+from app.db.models import TestCase, Traceability, ErrorCase, Requirement
 from app.db.milvus_store import vector_store
 from app.models.api_schemas import ApiResponse, FeedbackRequest, TestCaseCreateRequest, TestCaseUpdateRequest
 from app.utils.logger import logger
+
+
+# v3.4.1 修复 P-5：无功能点归属用例的分组哨兵值（用例生成链路的约定值）。
+# 此前散落为裸字符串字面量，且部分调用点未做过滤，会把哨兵值原样回显给前端。
+FP_SENTINEL_UNASSIGNED = "业务场景"
 
 
 def _extract_fp(case_json: dict | None) -> str:
@@ -48,6 +53,14 @@ def _extract_fp(case_json: dict | None) -> str:
     if not case_json:
         return ""
     return case_json.get("related_fp", "") or case_json.get("functional_point", "") or ""
+
+
+def _fp_display_name(case_json: dict | None, fp_name_map: dict) -> str:
+    """用例的功能点展示名：哨兵值不展示，映射不到时回退原值。"""
+    fp = _extract_fp(case_json)
+    if not fp or fp == FP_SENTINEL_UNASSIGNED:
+        return ""
+    return fp_name_map.get(fp, fp)
 
 
 router = APIRouter()
@@ -125,7 +138,7 @@ async def list_testcases(
     req_ids = set()
     for r in rows:
         fp_id = _extract_fp(r.case_json)
-        if fp_id and fp_id != "业务场景":
+        if fp_id and fp_id != FP_SENTINEL_UNASSIGNED:
             fp_ids.add(fp_id)
         req_ids.add(r.req_id)
     fp_name_map: dict[str, str] = {}
@@ -166,7 +179,7 @@ async def list_testcases(
             "status": r.status,
             "confidence": r.confidence,
             "gen_batch_id": r.gen_batch_id,
-            "functional_point": fp_name_map.get(_extract_fp(r.case_json), _extract_fp(r.case_json)),
+            "functional_point": _fp_display_name(r.case_json, fp_name_map),
             "description": (r.case_json or {}).get("description", ""),
             "preconditions": (r.case_json or {}).get("preconditions", []),
             "steps": (r.case_json or {}).get("steps", []),
@@ -255,9 +268,9 @@ async def create_testcase(
     """人工新增测试用例。
 
     必须关联到具体需求（req_id）；若未传 product_id，则从需求记录自动推导。
-    生成 ID 格式：TC-{REQ后缀}-{时间戳后6位}，避免与 AI 生成用例冲突。
+    用例 ID 由 id_gen.gen_test_case_id() 生成（TC-MANUAL-{批次}-{序号}）；
+    v3.4.1 起不再使用秒级时间戳（同秒重复提交会撞主键）。
     """
-    import time
     from app.db.models import Requirement
 
     # 1) 校验需求存在
@@ -272,9 +285,12 @@ async def create_testcase(
     await assert_product_visible(session, user, product_id)
 
     # 3) 生成用例 ID
-    req_suffix = req.req_id.split("-")[-1] if "-" in req.req_id else req.req_id[:6]
-    ts_suffix = int(time.time()) % 1000000
-    case_id = f"TC-{req_suffix}-{ts_suffix}"
+    # v3.4.1 修复 H-2：改用 gen_test_case_id()（100 秒分桶 + 递增序号 + 线程锁）。
+    # 原实现 ts_suffix = int(time.time()) % 1000000 只有秒级精度，同一秒内对同一需求
+    # 重复提交（双击/多人协作）会生成相同 ID，第二次 commit 抛 IntegrityError 500，
+    # 且无重试与幂等。项目已有 v3.1.3 因同类碰撞引入的 gen_test_case_id，手工路径未使用。
+    from app.utils.id_gen import gen_test_case_id
+    case_id = gen_test_case_id(module_prefix="MANUAL")
 
     # 4) 构造 case_json
     case_json = {
@@ -449,13 +465,13 @@ async def batch_delete_by_requirement(
     from sqlalchemy import delete as sa_delete
     from sqlalchemy import select as sa_select
 
-    # P1-1 产品隔离：取该需求下任一用例的 product_id 校验可见性
-    probe = await session.execute(
-        sa_select(TestCase.product_id).where(TestCase.req_id == req_id).limit(1)
-    )
-    probe_pid = probe.scalar_one_or_none()
-    if probe_pid:
-        await assert_product_visible(session, user, probe_pid)
+    # P1-1 产品隔离（v3.4.1 修复 M-9）：改为按需求归属校验。
+    # 原实现用 limit(1) 抽查该需求下"任意一条"用例的 product_id，混合数据（迁移/修复产生）
+    # 时会漏校验；且该需求下无用例时整段校验被跳过，后面却按 req_id 全量删除
+    # （含 Traceability、ErrorCase 与 Milvus 向量）。此处改查 Requirement.product_id。
+    req_row = await session.get(Requirement, req_id)
+    if req_row is not None:
+        await assert_product_visible(session, user, req_row.product_id)
 
     # 先删该需求下所有用例的追溯记录
     tc_ids_subquery = sa_select(TestCase.id).where(TestCase.req_id == req_id)
@@ -582,6 +598,11 @@ async def batch_feedback(
     for record in records:
         await assert_product_visible(session, user, record.product_id)
 
+    # v3.4.1 修复 M-10：请求中存在、但库里查不到的 ID 此前被静默忽略（不报错、也不计入
+    # updated_count），前端误以为全部成功。现在显式回传 not_found 列表。
+    found_ids = {r.id for r in records}
+    not_found_ids = [cid for cid in dict.fromkeys(req.case_ids or []) if cid not in found_ids]
+
     updated_count = 0
     # v3.3（docs/14 二期 11）：批量反馈同样立即重算 weight（与单条端点保持一致）
     try:
@@ -663,9 +684,14 @@ async def batch_feedback(
 
     return ApiResponse(
         success=True,
-        message=f"已批量{'通过' if req.accepted else '驳回'} {updated_count} 个用例",
+        message=(
+            f"已批量{'通过' if req.accepted else '驳回'} {updated_count} 个用例"
+            + (f"，另有 {len(not_found_ids)} 个用例不存在已跳过" if not_found_ids else "")
+        ),
         data={
             "updated_count": updated_count,
+            "not_found": not_found_ids,
+            "not_found_count": len(not_found_ids),
             "new_status": new_status,
             "accepted": req.accepted,
             "milvus_written": milvus_written,

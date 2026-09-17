@@ -774,7 +774,7 @@ async def list_requirements(
     status: str | None = Query(default=None, description="按状态筛选 analyzing/draft/pending_review/confirmed/archived"),
     search: str | None = Query(default=None, description="按标题模糊搜索"),
     page: int = Query(default=1, ge=1, description="页码，从 1 开始"),
-    page_size: int = Query(default=20, ge=1, le=300, description="每页条数，最大 300"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页条数，最大 100（v3.4.1 修复 L-5：与 paginate 内部上限对齐，避免大于 100 时被静默截断而回显值失真）"),
     user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -1239,6 +1239,10 @@ async def submit_clarify_answers(
             status_code=409,
             detail=f"当前状态 {record.status} 不可提交澄清（仅 draft/pending_review/confirmed 可提交）",
         )
+    # v3.4.1 修复 H-1：在任何状态修改之前快照原始状态。
+    # 此前快照发生在 confirmed→draft 改写之后，导致 confirmed 需求澄清失败后
+    # 回退成 draft 而非 confirmed（生成入口仅认 confirmed，用户被迫重走完整确认链）。
+    original_status_snapshot = record.status
     # v2.8.52: confirmed 状态提交澄清时明确提示——已审核 FP 将被重建
     if record.status == "confirmed":
         # 检查是否有已审核的 FP
@@ -1392,10 +1396,10 @@ async def submit_clarify_answers(
     )
 
     # v2.15: 标记需求为 analyzing 状态
-    # v2.8.52: 先快照原始状态，再修改（避免 original_status 被覆盖为 "analyzing"）
-    original_status_snapshot = record.status
+    # v3.4.1 修复 H-4：状态变更与任务插入合并到同一次 commit——此前两次 commit 之间
+    # advisory lock（事务级）已释放，存在并发双建任务的竞态窗口。
+    # v3.4.1 修复 H-1：状态快照已在函数开头（任何修改之前）完成。
     record.status = "analyzing"
-    await session.commit()
 
     # ===== ② 创建 AnalysisTask + 启动后台协程 =====
     task_id = gen_task_id()
@@ -1879,8 +1883,9 @@ async def regenerate_requirement(
     await _check_no_running_task(req_id, session=session)
 
     # v2.15: 标记需求为 analyzing 状态
+    # v3.4.1 修复 H-4：状态变更与任务插入合并到同一次 commit，消除 advisory lock
+    # 在两次 commit 之间释放的竞态窗口
     record.status = "analyzing"
-    await session.commit()
 
     # 创建 AnalysisTask + 启动后台协程
     task_id = gen_task_id()
@@ -2210,6 +2215,9 @@ async def delete_requirement(
         ec_count.rowcount, tc_count.rowcount, gb_count.rowcount, dep_count.rowcount, at_count.rowcount, tr_count.rowcount, len(fp_ids),
     )
 
+    # v3.4.1 修复 M-2：删除前留存 product_id（commit 后 ORM 属性会失效，不能再读），
+    # 供删除向量后失效该产品的 KB 检索缓存，避免"已删除需求还在"。
+    deleted_product_id = record.product_id
     await session.delete(record)
     await session.commit()
 
@@ -2217,8 +2225,8 @@ async def delete_requirement(
     try:
         from app.db.milvus_store import vector_store
 
-        # 删除主需求向量
-        await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
+        # 删除主需求向量（v3.4.1 修复 M-2：传 product_id 以同步失效 KB 缓存）
+        await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id, deleted_product_id)
         logger.info("[API/requirements] 已同步删除向量库主记录: req_id={}", req_id)
 
         # P0 修复：级联删除 FP-{fp_id} 向量，避免孤儿
@@ -2338,6 +2346,10 @@ async def update_go_live_date(
                 status_code=400,
                 detail=f"上线时间格式不正确: {body.go_live_date}，需为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD",
             )
+    # v3.4.1 修复 M-6：naive datetime 赋给 DateTime(timezone=True) 列会按 DB 会话时区
+    # 解释（UTC+8 部署偏差 8 小时），与 products.py 修改项目上线时间处的兜底保持一致
+    if parsed_go_live.tzinfo is None:
+        parsed_go_live = parsed_go_live.replace(tzinfo=timezone.utc)
 
     old_go_live = record.go_live_date
     record.go_live_date = parsed_go_live
@@ -3718,7 +3730,8 @@ async def fp_merge(
     await session.commit()
 
     fp_ids = [fp.id for fp in fps_to_merge]
-    asyncio.create_task(
+    # v3.4.1 修复 H-5：裸 create_task 无强引用可能被 GC 静默丢弃，统一走 _create_bg_task
+    _create_bg_task(
         _run_fp_merge_task(
             task_id=task_id, req_id=req_id, fp_ids=fp_ids,
             merged_name=body.merged_name, product_id=req.product_id,
