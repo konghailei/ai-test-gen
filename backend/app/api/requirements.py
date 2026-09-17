@@ -1246,9 +1246,13 @@ async def submit_clarify_answers(
     # v2.8.52: confirmed 状态提交澄清时明确提示——已审核 FP 将被重建
     if record.status == "confirmed":
         # 检查是否有已审核的 FP
-        from sqlalchemy import func as _func
+        # v3.4.2（真实端到端验证发现）：此处原写作 _func.count(X).where(...)，
+        # 而 count() 返回的是函数表达式，没有 .where 方法 → confirmed 需求提交澄清
+        # 必然抛 AttributeError 500。该分支只在 confirmed 状态下进入，此前未被真实走过，
+        # 现改为 select(func.count(...)).where(...)。
+        from sqlalchemy import func as _func, select as _select
         approved_count = (await session.execute(
-            _func.count(FunctionalPoint.id).where(
+            _select(_func.count(FunctionalPoint.id)).where(
                 FunctionalPoint.requirement_id == req_id,
                 FunctionalPoint.status == "approved",
             )
