@@ -25,11 +25,16 @@ from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import func, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user, require_write
+from app.core.auth import CurrentUser, get_current_user, require_write
+from app.core.product_access import (
+    apply_visible_product_filter,
+    assert_product_visible,
+    get_visible_product_ids,
+)
 from app.utils.pagination import paginate
 from app.core.llm_client import llm_client
 from app.core import prompt_manager
-from app.db.database import get_session
+from app.db.database import async_session, get_session
 from app.db.models import KnowledgeQA, Requirement, TestCase, Product, FunctionalPoint
 from app.db.milvus_store import vector_store
 from app.models.api_schemas import (
@@ -464,13 +469,18 @@ async def _stream_qa_answer(
     question: str,
     kb_sources: list[dict],
     product_id: str | None,
-    session: AsyncSession,
     kb_status: dict | None = None,
     kb_provider: str | None = None,
 ):
     """流式生成问答回答（SSE 事件流）。
 
     流程：检索 → 构建 Prompt → 流式 LLM 输出。
+
+    v3.4.1 修复 M-8：本生成器不再接收请求级 session。
+    请求级 session 由 FastAPI 依赖注入持有，直到请求结束才 commit/close；而本生成器
+    会跨越整个 LLM 调用（数十秒）。若客户端读流慢或挂起，该 session 会一直占用数据库
+    连接（pool_size=10 + max_overflow=10），多并发下耗尽连接池。此处改为在需要时
+    开短生命周期的独立 session，用完即还。
 
     Args:
         kb_status: 知识库检索状态诊断信息，含:
@@ -486,7 +496,9 @@ async def _stream_qa_answer(
     kb_sources = kb_sources[:8]
 
     # 丰富来源信息（查询产品名+标题），同时过滤孤儿向量
-    reference_sources = await _enrich_sources(kb_sources, session)
+    # v3.4.1 修复 M-8：用独立短 session，不再借用请求级 session
+    async with async_session() as enrich_session:
+        reference_sources = await _enrich_sources(kb_sources, enrich_session)
 
     # 发送来源信息作为第一条事件（保持数组格式，前端兼容）
     yield {
@@ -559,8 +571,10 @@ async def _stream_qa_answer(
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
-        session.add(record)
-        await session.commit()
+        # v3.4.1 修复 M-8：用独立短事务保存，避免占用请求级 session
+        async with async_session() as save_session:
+            save_session.add(record)
+            await save_session.commit()
         logger.info("[API/knowledge-qa] 问答完成并保存: id={}, answer_len={}", record_id, len(full_answer))
     except Exception as e:
         logger.error("[API/knowledge-qa] 保存问答记录失败: {}", str(e)[:200])
@@ -682,8 +696,9 @@ async def kqa_ask(
     from app.api.knowledge import get_kb_llm_provider
     kb_provider = await get_kb_llm_provider(session)
 
+    # v3.4.1 修复 M-8：不再把请求级 session 传进长生命周期 SSE 生成器
     return EventSourceResponse(_stream_qa_answer(
-        question, kb_sources, product_id, session, kb_status,
+        question, kb_sources, product_id, kb_status,
         kb_provider=kb_provider,
     ))
 
@@ -847,6 +862,7 @@ async def kqa_correct(
 @router.post("/archive", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def kqa_archive(
     req: KbQAArchiveRequest,
+    user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """将纠错后的内容归档到知识库。
@@ -864,6 +880,21 @@ async def kqa_archive(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail=f"问答记录不存在: {req.id}")
+
+    # v3.4.1 修复 P-3：归档是写操作，先校验该记录所属产品对当前用户可见
+    await assert_product_visible(session, user, record.product_id)
+
+    # v3.4.1 修复 M-7：归档幂等。原实现不检查 record.archived，重复点击/网络重试每次都
+    # 新建一条 archived Requirement（新 ID，不触发唯一约束）并重写向量库，archived_id
+    # 被覆盖而旧条目成为孤儿。
+    if record.archived:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"该问答记录已归档（archived_id={record.archived_id or '未知'}），"
+                f"请勿重复归档；如需重新归档请先撤销原归档条目"
+            ),
+        )
 
     # 使用的最终内容：优先使用纠错后的内容
     final_content = req.content
@@ -998,19 +1029,31 @@ async def kqa_archive(
 async def kqa_history(
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页条数"),
+    user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """获取知识问答历史记录。
 
+    v3.4.1 修复 P-3：补充产品可见性过滤——原实现连 user 都未注入，直接返回全产品
+    数据；同文件的写端点有权限校验，读端点漏做，构成越权读。
+
     Args:
         page: 页码
         page_size: 每页条数
+        user: 当前用户（用于产品可见性过滤）
         session: 数据库会话
 
     Returns:
         ApiResponse: data 含 items / total / page / page_size
     """
+    # v3.4.1 修复 P-3：按用户可见产品集合过滤（admin 返回 None → 不做限制）
+    visible_ids = await get_visible_product_ids(session, user)
+    conditions: list = []
+    apply_visible_product_filter(conditions, visible_ids, KnowledgeQA.product_id)
+
     total_stmt = select(func.count(KnowledgeQA.id))
+    for cond in conditions:
+        total_stmt = total_stmt.where(cond)
     total = (await session.execute(total_stmt)).scalar() or 0
 
     stmt = (
@@ -1019,6 +1062,8 @@ async def kqa_history(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
+    for cond in conditions:
+        stmt = stmt.where(cond)
     result = await session.execute(stmt)
     records = result.scalars().all()
 
@@ -1043,12 +1088,16 @@ async def kqa_history(
 @router.get("/history/{record_id}", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
 async def kqa_detail(
     record_id: str,
+    user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """获取单条问答详情。
 
+    v3.4.1 修复 P-3：补充产品可见性校验。
+
     Args:
         record_id: 问答记录 ID
+        user: 当前用户（用于产品可见性校验）
         session: 数据库会话
 
     Returns:
@@ -1058,6 +1107,9 @@ async def kqa_detail(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail=f"问答记录不存在: {record_id}")
+
+    # v3.4.1 修复 P-3：不可见产品直接 403
+    await assert_product_visible(session, user, record.product_id)
 
     return ApiResponse(
         success=True,
@@ -1073,12 +1125,16 @@ async def kqa_detail(
 @router.delete("/history/{record_id}", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def kqa_delete(
     record_id: str,
+    user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """删除问答记录。
 
+    v3.4.1 修复 P-3：补充产品可见性校验（同类越权面，删除端口此前同样未注入 user）。
+
     Args:
         record_id: 问答记录 ID
+        user: 当前用户（用于产品可见性校验）
         session: 数据库会话
 
     Returns:
@@ -1088,6 +1144,9 @@ async def kqa_delete(
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail=f"问答记录不存在: {record_id}")
+
+    # v3.4.1 修复 P-3：不可见产品的问答记录不允许删除
+    await assert_product_visible(session, user, record.product_id)
 
     await session.delete(record)
 
@@ -1109,6 +1168,7 @@ async def kqa_corrections(
     product_id: str = Query(default="", description="按产品筛选"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
     """获取纠正审核列表（支持按模块、状态、产品筛选）。
@@ -1131,7 +1191,14 @@ async def kqa_corrections(
     if module:
         conditions.append(KnowledgeQA.correction_module == module)
     if product_id:
+        # v3.4.1 修复 P-3：指定产品时先校验该产品对当前用户可见（原实现直接按传入
+        # product_id 过滤，传任意产品 ID 都能拉到他人数据）
+        await assert_product_visible(session, user, product_id)
         conditions.append(KnowledgeQA.product_id == product_id)
+
+    # v3.4.1 修复 P-3：补充可见性过滤——未指定产品时原实现跨产品返回全部纠正记录
+    visible_ids = await get_visible_product_ids(session, user)
+    apply_visible_product_filter(conditions, visible_ids, KnowledgeQA.product_id)
 
     # 分页查询 —— v3.2.2 收敛
     stmt = select(KnowledgeQA)
