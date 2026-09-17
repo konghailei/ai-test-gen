@@ -186,8 +186,12 @@ def _case_to_function(case: dict, used_names: set[str]) -> str:
     lines: list[str] = []
 
     # 装饰器：@pytest.mark.{type}（按 docs/04 §4.1）
-    if typ:
-        lines.append(f"@pytest.mark.{typ}")
+    # v3.4.1 修复 P-6：type 此前未净化直接拼接。人工创建/编辑用例的 type 未经白名单约束
+    # （API 侧仅 max_length=32），含空格/中文/点时会产生 `@pytest.mark.边界 异常`，
+    # 整个导出文件 SyntaxError。此处与下方 tag 的净化口径保持一致。
+    safe_typ = re.sub(r"[^a-zA-Z0-9_]", "_", str(typ))
+    if safe_typ and not keyword.iskeyword(safe_typ):
+        lines.append(f"@pytest.mark.{safe_typ}")
 
     # 额外的标签装饰器（如 smoke / regression）
     for tag in tags:

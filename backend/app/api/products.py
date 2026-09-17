@@ -693,6 +693,10 @@ async def archive_project(
                 status_code=400,
                 detail=f"上线时间格式不正确: {body.go_live_date}，需为 YYYY-MM-DDTHH:MM 或 YYYY-MM-DD",
             )
+    # v3.4.1 修复 M-6：naive datetime 赋给 DateTime(timezone=True) 列偏差 8 小时，
+    # 与修改项目上线时间处的兜底保持一致（下游 :756/:820/:889 均复用该值）
+    if parsed_go_live.tzinfo is None:
+        parsed_go_live = parsed_go_live.replace(tzinfo=timezone.utc)
 
     # 4. 更新项目状态
     now = datetime.now(timezone.utc)

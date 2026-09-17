@@ -69,33 +69,37 @@ async def _sweep_once(stale_minutes: int) -> int:
             )
         )
         reclaimed = result.rowcount or 0
-        if reclaimed:
-            # 与 database.py:427 的重启清扫保持一致：联动回退卡死需求，
-            # 否则需求停在 analyzing 会导致澄清/确认/提交全部被拒。
-            # 只回退那些确实没有其它活跃任务在跑的需求，避免误伤刚提交的重试。
-            active_req_ids = [
-                row[0]
-                for row in (
-                    await s.execute(
-                        select(AnalysisTask.req_id).where(
-                            AnalysisTask.status.in_(["pending", "running"])
-                        )
+        # 与 database.py:427 的重启清扫保持一致：联动回退卡死需求，
+        # 否则需求停在 analyzing 会导致澄清/确认/提交全部被拒。
+        # 只回退那些确实没有其它活跃任务在跑的需求，避免误伤刚提交的重试。
+        #
+        # v3.4.1 修复 L-12：需求回退不再挂在 `if reclaimed:` 分支下。
+        # 原实现要求"本轮确实回收了任务"才回退需求——若某需求停在 analyzing，而它的
+        # 僵尸任务在更早一轮已被标记 interrupted，之后每轮 reclaimed 都是 0，该需求
+        # 就永远不会被回退。现在每轮都幂等执行（无匹配行时 UPDATE 影响 0 行，无副作用）。
+        active_req_ids = [
+            row[0]
+            for row in (
+                await s.execute(
+                    select(AnalysisTask.req_id).where(
+                        AnalysisTask.status.in_(["pending", "running"])
                     )
-                ).fetchall()
-                if row[0]
-            ]
-            stmt = update(Requirement).where(Requirement.status == "analyzing")
-            if active_req_ids:
-                stmt = stmt.where(Requirement.id.notin_(active_req_ids))
-            req_result = await s.execute(stmt.values(status="draft"))
-            await s.commit()
-            if req_result.rowcount:
-                logger.info(
-                    "[Watchdog] 联动回退卡死需求: {} 个 analyzing → draft",
-                    req_result.rowcount,
                 )
-        else:
-            await s.commit()
+            ).fetchall()
+            if row[0]
+        ]
+        stmt = update(Requirement).where(Requirement.status == "analyzing")
+        if active_req_ids:
+            stmt = stmt.where(Requirement.id.notin_(active_req_ids))
+        req_result = await s.execute(stmt.values(status="draft"))
+        await s.commit()
+        if req_result.rowcount:
+            logger.info(
+                "[Watchdog] 联动回退卡死需求: {} 个 analyzing → draft",
+                req_result.rowcount,
+            )
+        elif reclaimed:
+            logger.info("[Watchdog] 回收僵尸任务 {} 个（无待回退需求）", reclaimed)
 
     return reclaimed
 

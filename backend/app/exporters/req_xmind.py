@@ -25,7 +25,7 @@ v2.48 变更：
 
 from __future__ import annotations
 
-import io, json, uuid, zipfile
+import io, json, re, uuid, zipfile
 from datetime import datetime, timezone
 from xml.etree.ElementTree import Element, SubElement, tostring
 
@@ -180,13 +180,25 @@ def _assumption_type_cn(atype: str) -> str:
     return ASSUMPTION_TYPE_CN.get(atype.lower(), atype)
 
 
+_INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_safe(value) -> str:
+    """过滤 XML 1.0 非法控制字符（v3.4.1 修复 L-3）。
+
+    ElementTree 只转义 & < >，不会剥离 \\x00-\\x08 等控制字符；LLM 文本夹带时
+    整个导出文件会变成非良构 XML，XMind 无法打开。
+    """
+    return _INVALID_XML_CHARS.sub("", str(value if value is not None else ""))
+
+
 def _id() -> str: return uuid.uuid4().hex
 
 
 def _topic(title: str, tid: str | None = None) -> Element:
     """创建独立 topic 元素（不附加到任何父节点）。"""
     t = Element("topic", {"id": tid or _id(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
-    te = SubElement(t, "title"); te.text = str(title)
+    te = SubElement(t, "title"); te.text = _xml_safe(title)
     return t
 
 

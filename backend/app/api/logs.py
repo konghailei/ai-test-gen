@@ -26,26 +26,38 @@ from app.models.api_schemas import ApiResponse
 router = APIRouter()
 
 
+# v3.4.1 修复 M-5：日期筛选按**业务时区**（Asia/Shanghai）解释"当天"，再换算成 UTC 边界。
+# 原实现硬编码 .replace(tzinfo=utc)：中国用户筛选"当天 D"时得到的是 UTC D 00:00~23:59，
+# 即本地 D 08:00 ~ D+1 08:00 —— 既漏掉本地 00:00~08:00 的日志（UTC D-1 16:00~24:00），
+# 又误含次日凌晨的日志。
+try:
+    from zoneinfo import ZoneInfo
+
+    _BIZ_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:  # noqa: BLE001 - 时区库不可用时退化为 UTC（行为与修复前一致）
+    _BIZ_TZ = _tz.utc
+
+
 def _parse_date_start(value: str) -> datetime | None:
-    """将 'YYYY-MM-DD' 转为当日 00:00:00 UTC datetime。无效返回 None。"""
+    """将 'YYYY-MM-DD' 转为业务时区当日 00:00:00 对应的 UTC datetime。无效返回 None。"""
     if not value:
         return None
     try:
-        dt = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=_tz.utc)
-        return dt
+        dt = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=_BIZ_TZ)
+        return dt.astimezone(_tz.utc)
     except ValueError:
         return None
 
 
 def _parse_date_end(value: str) -> datetime | None:
-    """将 'YYYY-MM-DD' 转为当日 23:59:59 UTC datetime。无效返回 None。"""
+    """将 'YYYY-MM-DD' 转为业务时区当日 23:59:59 对应的 UTC datetime。无效返回 None。"""
     if not value:
         return None
     try:
         dt = datetime.strptime(value, "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, tzinfo=_tz.utc
+            hour=23, minute=59, second=59, tzinfo=_BIZ_TZ
         )
-        return dt
+        return dt.astimezone(_tz.utc)
     except ValueError:
         return None
 

@@ -952,7 +952,13 @@ async def _update_task(task_id: str, **fields) -> None:
             await s.execute(stmt)
             await s.commit()
     except Exception as e:
-        logger.warning("[Task] 更新任务状态失败: task_id={}, error={}", task_id, str(e)[:150])
+        # v3.4.1 修复 P-8：状态回写失败此前只记 warning，任务会长期停在旧状态
+        # （如 running），进而被看门狗误判为僵尸。这里升级为 error 并带上目标状态，
+        # 便于从日志定位"状态失真"根因；仍不抛出，避免打断主流水线。
+        logger.error(
+            "[Task] 更新任务状态失败（状态可能失真）: task_id={}, target_status={}, error={}",
+            task_id, fields.get("status", "-"), str(e)[:200],
+        )
 
 async def _run_requirement_analysis(
     task_id: str,

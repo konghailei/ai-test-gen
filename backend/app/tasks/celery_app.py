@@ -12,11 +12,23 @@ from __future__ import annotations
 from app.config import settings
 from app.utils.logger import logger
 
+
+class _CeleryDisabled(Exception):
+    """Celery 未启用（未安装或未配置 broker）时用于跳出初始化。"""
+
+
 try:
     from celery import Celery
 
-    broker = settings.CELERY_BROKER_URL or "redis://localhost:6379/1"
-    backend = settings.CELERY_RESULT_BACKEND or "redis://localhost:6379/2"
+    # v3.4.1 修复 M-11：broker 未配置时直接走同步降级，不再用 localhost 兜底。
+    # 原实现的 `or "redis://localhost:6379/1"` 使"未配 broker 即降级"这条分支不可达
+    # （celery_app is None 只在 ImportError 时出现）；若本机恰好有 Redis，send_task
+    # 会静默入队且无人消费，任务永久 pending —— 比直接失败更难排查。
+    if not settings.CELERY_BROKER_URL:
+        logger.warning("[Celery] CELERY_BROKER_URL 未配置，异步双写降级为同步执行")
+        raise _CeleryDisabled()
+    broker = settings.CELERY_BROKER_URL
+    backend = settings.CELERY_RESULT_BACKEND or broker
 
     celery_app = Celery(
         "ai_test_gen",
@@ -52,6 +64,7 @@ try:
         },
     )
     logger.info("[Celery] 应用已初始化: broker={}", broker)
-except ImportError:
-    logger.warning("[Celery] celery 未安装，异步双写降级为同步")
+except (ImportError, _CeleryDisabled):
+    # v3.4.1 修复 M-11：未安装或未配置 broker 都走同步降级（celery_app = None）
+    logger.warning("[Celery] celery 未安装或 broker 未配置，异步双写降级为同步")
     celery_app = None

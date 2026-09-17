@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-import io, json, uuid, zipfile
+import io, json, re, uuid, zipfile
 from datetime import datetime, timezone
 
 
@@ -307,6 +307,19 @@ def _xid() -> str:
     return _uuid.uuid4().hex
 
 
+_INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_safe(value) -> str:
+    """过滤 XML 1.0 非法控制字符。
+
+    v3.4.1 修复 L-3：LLM 文本夹带 \\x00-\\x08 等控制字符时，ElementTree 只转义
+    & < > 而不会剥离它们，写进 content.xml 后整个导出文件变成非良构 XML，
+    XMind／任何解析器都无法打开。
+    """
+    return _INVALID_XML_CHARS.sub("", str(value if value is not None else ""))
+
+
 def _xtopic(title: str, tid: str | None = None, structure_class: str | None = None) -> Element:
     """创建 XMAP topic 元素。
 
@@ -317,7 +330,7 @@ def _xtopic(title: str, tid: str | None = None, structure_class: str | None = No
         attrs["structure-class"] = structure_class
     t = Element("topic", attrs)
     te = SubElement(t, "title")
-    te.text = str(title)
+    te.text = _xml_safe(title)
     return t
 
 
@@ -448,7 +461,7 @@ def export_to_xmind_xml(cases: list[dict], project_name: str = "", include_detai
 
     # 3. 构建 XMAP 2.0 XML
     sheet = Element("sheet", {"id": _xid(), "timestamp": str(int(datetime.now().timestamp() * 1000))})
-    SubElement(sheet, "title").text = root_title
+    SubElement(sheet, "title").text = _xml_safe(root_title)
     sheet.append(root_topic)
 
     xmap = Element("xmap-content", {

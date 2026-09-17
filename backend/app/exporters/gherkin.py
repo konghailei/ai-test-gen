@@ -28,6 +28,15 @@ from app.utils.logger import logger
 # 主导出函数
 # ============================================================================
 
+def _one_line(value) -> str:
+    """把文本压成单行（折叠所有空白）。
+
+    v3.4.1 修复 L-2：Gherkin 的 Scenario 标题与步骤必须单行，LLM 文本里夹带的换行
+    会把一条语句截成两行，产出非法 Gherkin。
+    """
+    return " ".join(str(value if value is not None else "").split())
+
+
 def export_gherkin(cases: list[dict]) -> str:
     """将用例列表导出为 Gherkin Feature 文件。
 
@@ -95,12 +104,13 @@ def _append_scenario(lines: list[str], case: dict) -> None:
         - 每个步骤的 expected：Then
         - 使用 And 连接连续相同关键词，提升可读性
     """
-    title = case.get("title", "（无标题）")
-    priority = case.get("priority", "N/A")
-    typ = case.get("type", "unknown")
+    title = _one_line(case.get("title") or "（无标题）")
+    priority = _one_line(case.get("priority", "N/A"))
+    typ = _one_line(case.get("type", "unknown"))
     case_id = case.get("id", "")
 
     # Scenario 标题（含 case_id 便于追溯）
+    # v3.4.1 修复 L-2：标题/步骤/前置条件统一单行化，避免换行产出非法 Gherkin
     scenario_title = title
     if case_id:
         scenario_title = f"[{case_id}] {title}"
@@ -110,15 +120,15 @@ def _append_scenario(lines: list[str], case: dict) -> None:
     # 前置条件 → Given
     preconditions = case.get("preconditions") or []
     for pc in preconditions:
-        lines.append(f"    Given {pc}")
+        lines.append(f"    Given {_one_line(pc)}")
 
     # 步骤 → When/Then
     steps = case.get("steps") or []
     has_preconditions = bool(preconditions)
 
     for idx, step in enumerate(steps):
-        action = step.get("action", "")
-        expected = step.get("expected", "")
+        action = _one_line(step.get("action", ""))
+        expected = _one_line(step.get("expected", ""))
 
         # 第一个步骤的 action：无前置条件时用 Given，否则用 When（docs/04 §3.1）
         if idx == 0 and not has_preconditions:
@@ -131,6 +141,6 @@ def _append_scenario(lines: list[str], case: dict) -> None:
             lines.append(f"    Then {expected}")
 
     # 整体预期（可选，追加为最后一个 Then）
-    overall_expected = case.get("expected")
+    overall_expected = _one_line(case.get("expected"))
     if overall_expected and not steps:
         lines.append(f"    Then {overall_expected}")

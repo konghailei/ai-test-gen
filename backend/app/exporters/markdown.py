@@ -22,7 +22,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.utils.logger import logger
 
@@ -45,6 +45,18 @@ _TYPE_CN_LABEL: dict[str, str] = {
 # ============================================================================
 # 主导出函数
 # ============================================================================
+
+def _cell(value) -> str:
+    """把任意文本规整为可安全放进 Markdown 表格单元格的单行文本。
+
+    v3.4.1 修复 L-1：换行（\\r\\n / \\n / 单独 \\r）会截断表格行，竖线会多分出一列，
+    两者都会破坏表格结构，这里统一先单行化再转义。
+    """
+    text = str(value if value is not None else "")
+    for ch in ("\r\n", "\n", "\r"):
+        text = text.replace(ch, " ")
+    return text.replace("|", "\\|")
+
 
 def export_markdown(cases: list[dict]) -> str:
     """将用例列表导出为 Markdown 文档。
@@ -71,7 +83,8 @@ def export_markdown(cases: list[dict]) -> str:
     lines.append("# 测试用例文档")
     lines.append("")
     lines.append(f"**用例数量**: {len(cases)}  ")
-    lines.append(f"**导出时间**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}  ")
+    # v3.4.1 修复 L-4：datetime.utcnow() 自 Python 3.12 起已废弃，且返回 naive datetime
+    lines.append(f"**导出时间**: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC  ")
     # 从首个用例提取需求 ID（若所有用例关联同一需求）
     req_ids = {c.get("related_requirement") for c in cases if c.get("related_requirement")}
     if len(req_ids) == 1:
@@ -189,11 +202,10 @@ def _append_case_markdown(lines: list[str], case: dict) -> None:
         lines.append("|------|------|---------|")
         for idx, step in enumerate(steps, start=1):
             step_no = step.get("step", idx)
-            action = step.get("action", "")
-            expected = step.get("expected", "")
-            # 转义表格中的竖线，避免破坏表格结构
-            action = str(action).replace("|", "\\|")
-            expected = str(expected).replace("|", "\\|")
+            # v3.4.1 修复 L-1：Markdown 表格单元格内不能有换行，否则表格被撑裂；
+            # 先单行化再转义竖线，避免破坏表格结构
+            action = _cell(step.get("action", ""))
+            expected = _cell(step.get("expected", ""))
             lines.append(f"| {step_no} | {action} | {expected} |")
         lines.append("")
 

@@ -1,4 +1,4 @@
-"""LangGraph DAG 编排器。
+r"""LangGraph DAG 编排器。
 
 将 6 个 Agent 串联为 DAG 工作流，实现从原始需求到测试用例的端到端生成。
 使用 LangGraph StateGraph 声明流程结构，通过 astream 流式输出 SSE 事件。
@@ -1017,7 +1017,12 @@ class Orchestrator:
                 fp_subtasks.append(subtask)
             snap = [dict(s) for s in fp_subtasks]
             covered_now = sum(1 for s in fp_subtasks if s.get("status") in ("done", "resumed"))
-            total_now = sum(1 for s in fp_subtasks if not s.get("key", "").startswith("__"))
+            # v3.4.1 修复 L-13：分母固定为功能点总数（functional_points）。
+            # 原实现取"已产生 subtask 的 FP 个数"作分母，会随生成推进逐条增长 ——
+            # 第 1 个 FP 完成时显示 100%，第 2 个 FP 开始时又掉回 50%，进度来回跳；
+            # 且失败的 FP 计入分母却永不计入分子，进度永远到不了 100%。
+            # max(...) 保留原兜底：FP 为空走全量兜底时 total 至少等于 covered。
+            total_now = len(functional_points or [])
             ev = make_sse_event(
                 "generate", msg,
                 fp_subtask=subtask,
