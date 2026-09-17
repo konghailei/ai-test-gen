@@ -215,6 +215,12 @@ class LLMClient:
     PROVIDER_FAILURE_THRESHOLD = 3
     PROVIDER_DISABLE_SECONDS = 600  # 10 分钟
 
+    # v3.4.2：单次 call() 的总墙钟预算（秒），跨 provider × 跨重试累计。
+    # 供应商全挂时应快速失败并提示更换供应商，而不是逐家等满 180s 首响应超时
+    # （3 家 × 180s ≈ 9 分钟，再叠加重试可达数十分钟）。优先读
+    # settings.LLM_CALL_TOTAL_BUDGET。
+    DEFAULT_CALL_TOTAL_BUDGET = 240
+
     def __init__(self) -> None:
         """初始化客户端。"""
         self._breaker = CircuitBreaker()
@@ -343,7 +349,23 @@ class LLMClient:
         # 构建候选提供商列表（主 -> 备）
         providers = self._candidate_providers(model, provider=provider)
         if not providers:
-            err = LLMNoProviderAvailable("无可用 LLM 提供商（未配置 API Key）")
+            # v3.4.2：区分"一家都没配"与"全都被禁用"——后者是典型的供应商全挂，
+            # 必须给出"更换供应商"的明确指引（此前只报"未配置 API Key"，误导排查方向）。
+            now_ts = time.time()
+            disabled = [
+                k for k, until in self._provider_disabled_until.items() if until > now_ts
+            ]
+            if disabled:
+                err = LLMNoProviderAvailable(
+                    f"所有 LLM 提供商均不可用（{len(disabled)} 家处于禁用期："
+                    f"{'、'.join(disabled[:4])}）。"
+                    "请到「系统设置 → LLM 供应商」更换可用供应商，或检查 API Key / 额度。"
+                )
+            else:
+                err = LLMNoProviderAvailable(
+                    "无可用 LLM 提供商（未配置 API Key）。"
+                    "请到「系统设置 → LLM 供应商」添加并启用供应商。"
+                )
             if not _skip_log:
                 await self._log_call(
                     agent_name, system_prompt or "", prompt, "", None,
@@ -352,14 +374,31 @@ class LLMClient:
             raise err
 
         start_ts = time.time()
+        # v3.4.2：单次调用的总墙钟预算（跨 provider × 跨重试累计）。
+        # 供应商全挂时立即失败并提示更换供应商，不再逐家等满 180s 首响应超时。
+        budget = int(getattr(settings, "LLM_CALL_TOTAL_BUDGET", 0) or self.DEFAULT_CALL_TOTAL_BUDGET)
+        deadline = start_ts + budget
         last_error: Exception | None = None
-        for provider in providers:
+        last_provider_key = ""
+        failure_notes: list[str] = []
+        attempted = 0
+
+        for prov in providers:
+            remaining = deadline - time.time()
+            if remaining <= 3:
+                logger.warning(
+                    "[LLM] 调用总预算 {}s 已耗尽，跳过剩余 {} 家提供商（已尝试 {} 家）",
+                    budget, len(providers) - attempted, attempted,
+                )
+                break
+            attempted += 1
+            last_provider_key = prov["key"]
             try:
                 content, usage, model_used = await self._call_with_retry(
-                    provider, messages, temperature, response_format, max_tokens
+                    prov, messages, temperature, response_format, max_tokens, deadline=deadline
                 )
                 self._breaker.record_success()
-                self._provider_failures.pop(provider["key"], None)
+                self._provider_failures.pop(prov["key"], None)
                 # 优化 4：写入缓存（仅 temperature=0 的确定性调用）
                 if temperature == 0:
                     self._cache_put(cache_key, content)
@@ -370,45 +409,60 @@ class LLMClient:
                         agent_name, system_prompt or "", prompt, content, None,
                         temperature, duration_ms, usage, True, "",
                         model_used=model_used,
-                        provider_used=provider["key"],
+                        provider_used=prov["key"],
                     )
                 if return_usage:
-                    return content, usage, model_used, provider["key"]
+                    return content, usage, model_used, prov["key"]
                 return content
             except _FirstResponseTimeoutError as e:
                 # v3.3（N4 根治）：模型在首响应预算内无任何输出（含思考内容）
                 # → 直接切换备用提供商，不重试同一模型
                 last_error = e
-                self._record_provider_failure(provider)
+                self._record_provider_failure(prov)
+                failure_notes.append(f"{prov['key']} 首响应超时")
                 logger.warning(
                     "提供商 {} 首响应超时，切换备用: {}",
-                    provider["key"],
+                    prov["key"],
                     str(e)[:200],
                 )
             except _RetryableError as e:
                 # 重试耗尽 → 记录失败，尝试下一提供商
                 last_error = e
-                self._record_provider_failure(provider)
+                self._record_provider_failure(prov)
+                failure_notes.append(f"{prov['key']} 重试耗尽")
                 logger.warning(
                     "提供商 {} 重试耗尽，尝试故障转移: {}",
-                    provider["key"],
+                    prov["key"],
                     str(e)[:200],
                 )
             except _NonRetryableError as e:
                 # 4xx 等不可重试错误 → 直接故障转移（docs/03 §6.3：4xx 不重试）
+                # v3.4.2：额度耗尽/认证失败属"硬失败"，立即禁用该提供商（不等累计 3 次），
+                # 使当前调用马上换下一家、后续调用直接跳过它。
                 last_error = e
-                self._record_provider_failure(provider)
-                logger.warning("提供商 {} 不可重试错误，故障转移: {}", provider["key"], str(e)[:200])
+                self._disable_provider_now(prov, reason=str(e)[:80])
+                failure_notes.append(f"{prov['key']} {str(e)[:60]}")
+                logger.warning("提供商 {} 不可重试错误，故障转移: {}", prov["key"], str(e)[:200])
 
-        # 所有提供商均失败
+        # 所有提供商均失败（或总预算耗尽）
         self._breaker.record_failure()
         duration_ms = int((time.time() - start_ts) * 1000)
-        err = LLMNoProviderAvailable(f"所有 LLM 提供商均不可用: {last_error}")
+        detail = "；".join(failure_notes[:4]) if failure_notes else str(last_error or "")
+        hint = "请到「系统设置 → LLM 供应商」更换可用供应商，或检查 API Key / 额度。"
+        if attempted == 0:
+            err = LLMNoProviderAvailable(
+                f"所有 LLM 提供商均不可用（候选 {len(providers)} 家当前均处于禁用期）。{hint}"
+            )
+        else:
+            err = LLMNoProviderAvailable(
+                f"所有 LLM 提供商均不可用（已尝试 {attempted} 家，耗时 {duration_ms // 1000}s）。{hint}"
+                + (f" 明细：{detail}" if detail else "")
+            )
         if not _skip_log:
             await self._log_call(
                 agent_name, system_prompt or "", prompt, "", None,
                 temperature, duration_ms, {}, False, str(err)[:500],
-                provider_used=provider["key"] if providers else "",
+                provider_used=last_provider_key,
             )
         raise err
 
@@ -896,6 +950,7 @@ class LLMClient:
         temperature: float,
         response_format: str | None,
         max_tokens: int | None,
+        deadline: float | None = None,
     ) -> str:
         """对单个提供商执行全抖动重试调用。
 
@@ -905,6 +960,9 @@ class LLMClient:
             temperature: 采样温度
             response_format: "json" 或 None
             max_tokens: 最大 token 数
+            deadline: 调用方给定的总预算截止时间戳（time.time() 口径）。
+                v3.4.2：到点即不再重试、且首响应等待不超过剩余预算，
+                避免供应商全挂时单次调用悬挂数十分钟。
 
         Returns:
             tuple[str, dict, str]: (生成文本, token 使用量字典, 实际使用的模型名)
@@ -917,6 +975,11 @@ class LLMClient:
         """
         last_error: Exception | None = None
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            # v3.4.2：调用方总预算耗尽则立即停止重试（避免"全挂"场景把时间耗在重试上）
+            if deadline is not None and time.time() >= deadline - 2:
+                raise _RetryableError(
+                    f"LLM 调用总预算耗尽（第 {attempt}/{self.MAX_ATTEMPTS} 次尝试前）: {last_error}"
+                )
             try:
                 kwargs: dict[str, Any] = {
                     "model": provider["model"],
@@ -968,6 +1031,12 @@ class LLMClient:
                     getattr(settings, "LLM_FIRST_RESPONSE_TIMEOUT", 0)
                     or self.DEFAULT_FIRST_RESPONSE_TIMEOUT
                 )
+                # v3.4.2：首响应等待也不得超过调用总预算的剩余时间——
+                # 供应商全挂时避免"每家都等满 180s"把单次调用拖到数十分钟。
+                if deadline is not None:
+                    _remain = int(deadline - time.time())
+                    if _remain > 0:
+                        _first_response_timeout = min(_first_response_timeout, _remain)
                 # 非流式回退专用预算：该路径没有中间 chunk 信号，只能按「总时长」兜底，
                 # 故仍按 prompt 长度放宽（上限 1800s），避免长输出被误杀。
                 _fallback_total_timeout = _base_timeout
@@ -1208,6 +1277,22 @@ class LLMClient:
                 self.PROVIDER_FAILURE_THRESHOLD,
                 self.PROVIDER_DISABLE_SECONDS,
             )
+
+    def _disable_provider_now(self, provider: dict, reason: str = "") -> None:
+        """立即禁用某提供商（不等累计阈值）。
+
+        v3.4.2：适用于"硬失败"——额度耗尽（403 Free quota exhausted）、认证失败（401）、
+        模型不存在等。这类错误**重试与等待都无意义**，立即禁用 10 分钟可让当前调用
+        立刻跳到下一家、后续调用直接跳过它，从而把"全挂"的判断从数十分钟压到一次探测。
+        """
+        key = provider["key"]
+        self._provider_failures[key] = max(
+            self._provider_failures.get(key, 0), self.PROVIDER_FAILURE_THRESHOLD
+        )
+        self._provider_disabled_until[key] = time.time() + self.PROVIDER_DISABLE_SECONDS
+        logger.warning(
+            "提供商 {} 立即禁用 {} 秒（{}）", key, self.PROVIDER_DISABLE_SECONDS, reason or "硬失败"
+        )
 
     async def _log_call(
         self,
