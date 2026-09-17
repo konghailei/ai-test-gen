@@ -432,6 +432,14 @@ class MilvusVectorStore:
         srr_for_meta = self._srr_for_metadata(srr_json)
         meta["srr_json"] = json.dumps(srr_for_meta, ensure_ascii=False)
         self._upsert("requirements", [req_id], [text], [meta])
+        # v3.4.1 修复 M-2：写入后失效该产品的 KB 检索缓存（24h TTL），
+        # 否则新归档/更新的需求在已有缓存命中的 query 上"搜不到"。
+        # 放在此处可覆盖全部写入路径（outbox relay / Celery worker / 同步降级）。
+        try:
+            from app.db.kb_cache import kb_cache
+            kb_cache.invalidate_by_product_sync(meta.get("product_id") or "PROD-DEFAULT")
+        except Exception as e:
+            logger.debug("[Milvus] 失效 KB 缓存失败（不阻断写入）: {}", str(e)[:100])
 
     def search_similar_requirements(
         self,
@@ -534,20 +542,58 @@ class MilvusVectorStore:
             parsed.append({"id": r["id"], "metadata": meta or {}, "document": r.get("document", "")})
         return parsed
 
-    def delete_requirement(self, req_id: str) -> None:
+    def delete_requirement(self, req_id: str, product_id: str | None = None) -> None:
         """删除需求向量。
 
         v2.8.51 修复：必须 flush 才能让 delete 在 query/num_entities 中生效，
         否则 BOUNDED 一致性下查询仍会返回已删除的记录（导致删除产品后向量遗留）。
+
+        v3.4.1 修复 M-2：新增可选 product_id 参数——传入时同步失效该产品的 KB
+        检索缓存，避免已删除的需求在 24h TTL 内仍被检索到（"删了还在"）。
         """
         self._ensure_connected()
         collection = self._get_collection("requirements")
         collection.delete(f'id == "{_safe_id(req_id, "req_id")}"')
         collection.flush()
+        if product_id:
+            try:
+                from app.db.kb_cache import kb_cache
+                kb_cache.invalidate_by_product_sync(product_id)
+            except Exception as e:
+                logger.debug("[Milvus] 失效 KB 缓存失败（不阻断删除）: {}", str(e)[:100])
 
-    def delete_requirement_from_kb(self, req_id: str) -> None:
+    def delete_requirement_from_kb(self, req_id: str, product_id: str | None = None) -> None:
         """从知识库删除需求（与 delete_requirement 同）。"""
-        self.delete_requirement(req_id)
+        self.delete_requirement(req_id, product_id=product_id)
+
+    def _delete_by_expr_paged(self, collection, expr: str, log_desc: str) -> int:
+        """按表达式循环「查询 → 删除」，直到查空为止。
+
+        v3.4.1 修复 L-6：Milvus 单次 query 有 16384 条上限。原实现各处都是
+        `query(limit=16384)` → 一次 delete → `return len(ids)`，把"本次查到的条数"
+        当作"已全部删除"返回，超出上限的部分被静默漏删（无异常、无日志告警）。
+
+        Args:
+            collection: Milvus collection 对象
+            expr: 过滤表达式（调用方需自行做 ID 字面量安全处理）
+            log_desc: 日志描述
+
+        Returns:
+            int: 实际删除的向量总数
+        """
+        total = 0
+        while True:
+            results = collection.query(expr=expr, output_fields=["id"], limit=16384)
+            if not results:
+                break
+            ids = [r["id"] for r in results]
+            # Milvus expr 字面量须用双引号
+            ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
+            collection.delete(f"id in [{ids_expr}]")
+            collection.flush()
+            total += len(ids)
+            logger.info("[Milvus] {} 分批删除: 本批 {} 条，累计 {} 条", log_desc, len(ids), total)
+        return total
 
     def delete_requirement_by_product(self, product_id: str) -> int:
         """按 product_id 批量删除需求向量。
@@ -564,21 +610,14 @@ class MilvusVectorStore:
         self._ensure_connected()
         collection = self._get_collection("requirements")
         safe_pid = _safe_id(product_id, "product_id")
-        # 1) 查询该 product_id 下所有向量 id
-        results = collection.query(
-            expr=f'metadata["product_id"] == "{safe_pid}"',
-            output_fields=["id"],
-            limit=16384,
+        # v3.4.1 修复 L-6：改为循环分批删除，规避单次 query 16384 上限造成的静默漏删
+        count = self._delete_by_expr_paged(
+            collection,
+            f'metadata["product_id"] == "{safe_pid}"',
+            f"按 product_id 删除需求向量(product={product_id})",
         )
-        if not results:
-            return 0
-        ids = [r["id"] for r in results]
-        # 2) 批量 delete（Milvus expr 字面量须用双引号）
-        ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
-        collection.delete(f'id in [{ids_expr}]')
-        collection.flush()
-        logger.info("[Milvus] 按 product_id 批量删除需求向量: product={}, count={}", product_id, len(ids))
-        return len(ids)
+        logger.info("[Milvus] 按 product_id 批量删除需求向量: product={}, count={}", product_id, count)
+        return count
 
     def delete_requirement_by_project(self, project_id: str) -> int:
         """按 project_id 批量删除需求向量（v2.45 新增）。
@@ -594,19 +633,14 @@ class MilvusVectorStore:
         self._ensure_connected()
         collection = self._get_collection("requirements")
         safe_pid = _safe_id(project_id, "project_id")
-        results = collection.query(
-            expr=f'metadata["project_id"] == "{safe_pid}"',
-            output_fields=["id"],
-            limit=16384,
+        # v3.4.1 修复 L-6：改为循环分批删除
+        count = self._delete_by_expr_paged(
+            collection,
+            f'metadata["project_id"] == "{safe_pid}"',
+            f"按 project_id 删除需求向量(project={project_id})",
         )
-        if not results:
-            return 0
-        ids = [r["id"] for r in results]
-        ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
-        collection.delete(f'id in [{ids_expr}]')
-        collection.flush()
-        logger.info("[Milvus] 按 project_id 批量删除需求向量: project={}, count={}", project_id, len(ids))
-        return len(ids)
+        logger.info("[Milvus] 按 project_id 批量删除需求向量: project={}, count={}", project_id, count)
+        return count
 
     def update_requirement_metadata(self, req_id: str, metadata_updates: dict) -> None:
         """更新需求向量的元数据（如 go_live_date 变更）。
@@ -771,19 +805,14 @@ class MilvusVectorStore:
         self._ensure_connected()
         collection = self._get_collection("test_cases")
         safe_pid = _safe_id(product_id, "product_id")
-        results = collection.query(
-            expr=f'metadata["product_id"] == "{safe_pid}"',
-            output_fields=["id"],
-            limit=16384,
+        # v3.4.1 修复 L-6：改为循环分批删除
+        count = self._delete_by_expr_paged(
+            collection,
+            f'metadata["product_id"] == "{safe_pid}"',
+            f"按 product_id 删除用例向量(product={product_id})",
         )
-        if not results:
-            return 0
-        ids = [r["id"] for r in results]
-        ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
-        collection.delete(f'id in [{ids_expr}]')
-        collection.flush()
-        logger.info("[Milvus] 按 product_id 批量删除用例向量: product={}, count={}", product_id, len(ids))
-        return len(ids)
+        logger.info("[Milvus] 按 product_id 批量删除用例向量: product={}, count={}", product_id, count)
+        return count
 
     def delete_test_case_by_project(self, project_id: str) -> int:
         """按 project_id 批量删除用例向量（v2.45 新增，用于项目恢复活动时清理）。
@@ -797,19 +826,14 @@ class MilvusVectorStore:
         self._ensure_connected()
         collection = self._get_collection("test_cases")
         safe_pid = _safe_id(project_id, "project_id")
-        results = collection.query(
-            expr=f'metadata["project_id"] == "{safe_pid}"',
-            output_fields=["id"],
-            limit=16384,
+        # v3.4.1 修复 L-6：改为循环分批删除
+        count = self._delete_by_expr_paged(
+            collection,
+            f'metadata["project_id"] == "{safe_pid}"',
+            f"按 project_id 删除用例向量(project={project_id})",
         )
-        if not results:
-            return 0
-        ids = [r["id"] for r in results]
-        ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
-        collection.delete(f'id in [{ids_expr}]')
-        collection.flush()
-        logger.info("[Milvus] 按 project_id 批量删除用例向量: project={}, count={}", project_id, len(ids))
-        return len(ids)
+        logger.info("[Milvus] 按 project_id 批量删除用例向量: project={}, count={}", project_id, count)
+        return count
 
     def delete_cases_by_req_id(self, req_id: str) -> None:
         """按 req_id 批量删除用例向量（优化 2：重新生成前清理旧用例）。

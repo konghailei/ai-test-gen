@@ -88,9 +88,10 @@ class HybridSearcher:
 
         # 2. PG BM25 关键词检索
         bm25_results: list[dict] = []
+        bm25_level = ""  # v3.4.1 修复 L-11：BM25 命中级别（Level C 兜底不进长 TTL 缓存）
         if session:
             try:
-                bm25_results = await self._bm25_search(
+                bm25_results, bm25_level = await self._bm25_search(
                     session, query, product_id, top_k * 2, status, modules
                 )
             except Exception as e:
@@ -110,17 +111,23 @@ class HybridSearcher:
         fused = self._apply_time_decay(fused)
 
         # 5. Cross-Encoder 重排（基于时间衰减后的排序结果）
+        # v3.4.1 修复 M-1：top_n 取 max(top_k, MATCH_FINAL_N)。原实现写死 MATCH_FINAL_N=5，
+        # 与请求 top_k 无关地把融合结果截到 5 条，而截断后的列表又按原 top_k 分桶写入
+        # 24h 缓存，使 top_k=20/40 的检索最多只返回 5 条。
+        rerank_n = max(top_k, settings.MATCH_FINAL_N)
         if settings.RERANKER_ENABLED and len(fused) > settings.MATCH_FINAL_N:
             try:
                 from app.db.reranker import reranker
                 fused = await asyncio.to_thread(
-                    reranker.rerank, query, fused, top_n=settings.MATCH_FINAL_N
+                    reranker.rerank, query, fused, top_n=rerank_n
                 )
             except Exception as e:
                 logger.warning("[HybridSearch] 重排失败，使用 RRF 排序: {}", str(e)[:200])
 
         # 6. 写入缓存（只有两路检索至少一路有效，避免降级结果污染长 TTL 缓存；同时写入 status/top_k）
-        cacheable = bool(vector_results) or bool(bm25_results)
+        # v3.4.1 修复 L-11：Level C 是关键词 OR 兜底，命中的结果过于宽松，
+        # 写 24h 长缓存会把低质量结果反复喂给上层，故 Level C 命中时跳过缓存写。
+        cacheable = (bool(vector_results) or bool(bm25_results)) and bm25_level != "or_tokens"
         if cacheable:
             await kb_cache.set(
                 query, product_id or "", "requirements", fused,
@@ -138,7 +145,7 @@ class HybridSearcher:
         top_k: int,
         status: str | None,
         modules: list[str] | None = None,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], str]:
         """PostgreSQL BM25 全文检索（优先 zhparser 中文分词，回退 simple）。
 
         安全修复（C1）：不再用 f-string 拼接 ts_config 到 SQL 文本中，改用
@@ -156,7 +163,8 @@ class HybridSearcher:
             modules: 按模块过滤（只匹配 modules 数组有交集的记录）
 
         Returns:
-            list[dict]: BM25 检索结果，格式与向量检索一致
+            tuple[list[dict], str]: (BM25 检索结果, 命中的查询级别)
+                级别取值 "websearch" / "plainto" / "or_tokens"，均未命中时为 ""
         """
         ts_config = await self._get_ts_config(session)
         # modules 过滤：传入逗号分隔字符串，SQL 中用 string_to_array + && (数组交集) 过滤
@@ -192,6 +200,8 @@ class HybridSearcher:
         """
 
         rows = []
+        # v3.4.1 修复 L-11：记录命中的查询级别，Level C 兜底结果不写长 TTL 缓存
+        matched_level = ""
         # 使用 savepoint 隔离每一级查询，任何一级失败都不影响外层
         for lvl_name, tsquery_fn in query_levels:
             async with session.begin_nested():
@@ -207,6 +217,7 @@ class HybridSearcher:
                     })
                     rows = result.all()
                     if rows:
+                        matched_level = lvl_name
                         break
                 except Exception as e:  # 例如 websearch_to_tsquery 在不支持版本/特殊 query 语法时失败
                     logger.debug("[HybridSearch] BM25 {} query skipped: {}", lvl_name, e)
@@ -236,9 +247,11 @@ class HybridSearcher:
                             "top_k": safe_top_k,
                         })
                         rows = result.all()
+                        if rows:
+                            matched_level = "or_tokens"
                     except Exception as e:
                         logger.debug("[HybridSearch] BM25 Level-C OR query skipped: {}", e)
-        return [
+        results_formatted = [
             {
                 "id": r.id,
                 "similarity": float(r.rank),
@@ -252,6 +265,7 @@ class HybridSearcher:
             }
             for r in rows
         ]
+        return results_formatted, matched_level
 
     async def _get_ts_config(self, session: AsyncSession) -> str:
         """检测可用的中文文本搜索配置，缓存结果。

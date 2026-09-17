@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections import OrderedDict
@@ -118,7 +119,9 @@ class KbCache:
         redis = self._get_redis()
         if redis:
             try:
-                cached = redis.get(key)
+                # v3.4.1 修复 L-10：redis-py 同步客户端在 async 函数里直调会阻塞事件循环，
+                # 统一包 asyncio.to_thread（Redis 抖动时不再拖住整个 API 进程）
+                cached = await asyncio.to_thread(redis.get, key)
                 if cached:
                     # 回填 L2
                     with self._lru_lock:
@@ -162,39 +165,59 @@ class KbCache:
         redis = self._get_redis()
         if redis:
             try:
-                redis.setex(key, self.CACHE_TTL, value)
+                # v3.4.1 修复 L-10：同步 setex 包 to_thread，避免阻塞事件循环
+                await asyncio.to_thread(redis.setex, key, self.CACHE_TTL, value)
             except Exception as e:
                 logger.debug("[KbCache] Redis 写入失败: {}", str(e)[:80])
 
-    async def invalidate_by_product(self, product_id: str) -> int:
-        """v2.8.55 Bug A-2: 按产品失效缓存。
+    def _invalidate_prefix_sync(self, prefix: str) -> int:
+        """同步清理指定前缀的缓存条目（L2 LRU + L1 Redis）。
 
-        归档项目时调用，防止 KB augmentation 使用过期缓存（24h TTL 内）。
-        返回失效的缓存条目数。
+        v3.4.1：抽公共实现。Redis 用的是同步客户端，因此本方法只应在同步上下文
+        （to_thread / Celery worker / 同步工具函数）中调用。
         """
         count = 0
-        prefix = f"kb_cache:{product_id}:"
-
-        # L2 LRU: 遍历删除匹配前缀的 key
         with self._lru_lock:
             keys_to_del = [k for k in self._lru if k.startswith(prefix)]
             for k in keys_to_del:
                 del self._lru[k]
             count += len(keys_to_del)
 
-        # L1 Redis: SCAN + DELETE
         redis = self._get_redis()
         if redis:
             try:
-                deleted = 0
                 for key in redis.scan_iter(match=f"{prefix}*", count=500):
                     redis.delete(key)
-                    deleted += 1
-                count += deleted
+                    count += 1
             except Exception as e:
-                logger.warning("[KbCache] Redis 失效缓存失败: product_id={}, err={}",
-                               product_id, str(e)[:100])
+                logger.debug("[KbCache] Redis 失效缓存失败: prefix={}, err={}",
+                             prefix, str(e)[:100])
+        return count
 
+    def invalidate_by_product_sync(self, product_id: str) -> int:
+        """按产品失效缓存的同步版本。
+
+        v3.4.1 修复 M-2：知识库内容变更（需求向量新增/删除）后必须失效缓存，
+        否则 24h TTL 内会返回旧结果（新归档需求"搜不到"、已删除需求"还在"）。
+        同步版供 milvus_store 等同步代码路径调用（常已被 to_thread 包裹）。
+        """
+        count = self._invalidate_prefix_sync(f"kb_cache:{product_id}:")
+        if count:
+            logger.info("[KbCache] 按产品失效缓存(sync): product_id={}, 清理 {} 条",
+                        product_id, count)
+        return count
+
+    async def invalidate_by_product(self, product_id: str) -> int:
+        """v2.8.55 Bug A-2: 按产品失效缓存。
+
+        归档项目时调用，防止 KB augmentation 使用过期缓存（24h TTL 内）。
+        返回失效的缓存条目数。
+
+        v3.4.1 修复 L-10：整体放线程池执行（内部含同步 Redis SCAN/DELETE）。
+        """
+        count = await asyncio.to_thread(
+            self._invalidate_prefix_sync, f"kb_cache:{product_id}:"
+        )
         logger.info("[KbCache] 按产品失效缓存: product_id={}, 清理 {} 条",
                     product_id, count)
         return count
