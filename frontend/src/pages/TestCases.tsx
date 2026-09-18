@@ -71,13 +71,25 @@ export default function TestCases({ fixedProjectId, embedded = false }: TestCase
   useEffect(() => {
     const pid = selectedProductId || undefined
     const load = async () => {
-      try {
-        let r = await reqApi.list(1, 300, pid, filterProject || undefined)
-        setReqs(r.items || [])
-        if ((!r.items || r.items.length === 0) && pid) {
-          r = await reqApi.list(1, 300, undefined, undefined)
-          setReqs(r.items || [])
+      // 分页拉全（后端 requirements page_size 上限 100，传超限会 422 → 筛选下拉静默变空）
+      const fetchAll = async (product: string | undefined, project: string | undefined) => {
+        const out: Requirement[] = []
+        let p = 1
+        while (p <= 10) {
+          const r = await reqApi.list(p, 100, product, project || undefined)
+          const items = r.items || []
+          out.push(...items)
+          if (items.length < 100 || out.length >= (r.total || 0)) break
+          p++
         }
+        return out
+      }
+      try {
+        let items = await fetchAll(pid, filterProject)
+        if (items.length === 0 && pid) {
+          items = await fetchAll(undefined, undefined)
+        }
+        setReqs(items)
       } catch { setReqs([]) }
       pid ? prodApi.listProjects(pid).then((r: any) => setProjects(Array.isArray(r) ? r : [])).catch(() => {}) : Promise.resolve()
     }

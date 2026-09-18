@@ -588,8 +588,9 @@ export const testCases = {
     steps?: { step: number; action: string; expected: string }[]
     expected?: string
     assertions?: { target: string; comparison: string; value: string }[]
+    functional_point?: string
   }) =>
-    request<{ id: string; req_id: string; product_id: string; title: string; type: string; priority: string; status: string }>(
+    request<{ id: string; req_id: string; product_id: string; title: string; type: string; priority: string; status: string; functional_point?: string }>(
       '/testcases',
       { method: 'POST', body: JSON.stringify(data) },
     ),

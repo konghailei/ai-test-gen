@@ -67,6 +67,11 @@ export default function XMindEditPage() {
   const meRef = useRef<any>(null)
   // 最新用例数据（事件回调/保存时读取，避免闭包过期）
   const casesRef = useRef<TestCase[]>([])
+  // 数据库基线（最近一次从库中加载/经弹窗确认写入的状态）。
+  // 备注编辑只更新 casesRef（工作区展示用），handleSave 必须以 dbCasesRef 为
+  // diff 基线——否则备注反解字段合并进 casesRef 后，差异比对恒为"无变更"，
+  // 备注修改永远不会写回数据库（B-1）
+  const dbCasesRef = useRef<TestCase[]>([])
   // 树重建版本号：仅在数据加载完成或结构性变化时递增，
   // 弹窗编辑单条用例只 setData 局部更新，不整树重建（防止丢失未保存的结构修改）
   const [treeVersion, setTreeVersion] = useState(0)
@@ -101,11 +106,17 @@ export default function XMindEditPage() {
         const pjs = await prodApi.listProjects(pid)
         setProjects(Array.isArray(pjs) ? pjs : [])
       }
-      // 项目下需求
+      // 项目下需求（循环分页拉全；B-7：接口 page_size 上限 100，传 300 会 422）
       let reqsData: Requirement[] = []
       try {
-        const r = await reqApi.list(1, 300, pid, projectId || undefined)
-        reqsData = r.items || []
+        let rp = 1
+        while (rp <= 10) {
+          const r = await reqApi.list(rp, 100, pid, projectId || undefined)
+          const items = r.items || []
+          reqsData.push(...items)
+          if (items.length < 100 || reqsData.length >= (r.total || 0)) break
+          rp++
+        }
       } catch { reqsData = [] }
       setReqs(reqsData)
       // 项目下用例（循环分页拉全）
@@ -120,6 +131,9 @@ export default function XMindEditPage() {
       }
       setCases(all)
       casesRef.current = all
+      dbCasesRef.current = all
+      // 树重建后节点实例全部失效，丢弃未提交的备注草稿（刷新 = 放弃未保存修改）
+      pendingNotesRef.current.clear()
       // 数据加载完成 → 重建树
       setTreeVersion(v => v + 1)
     } catch (e: any) { setErr(String(e?.message || e)) }
@@ -240,9 +254,35 @@ export default function XMindEditPage() {
     const onNoteClick = (node: any) => {
       openCaseEditRef.current?.(node)
     }
+    // 拖拽改型同步（B-2）：拖拽到别的类型分支 = 位置即意图，
+    // 拖拽结束时把用例节点的 type 元数据同步为所在分支类型；
+    // 保存时优先读节点元数据，避免表单弹窗改的类型被分支推断回退
+    let dragNode: any = null
+    const onNodeMousedown = (node: any) => { dragNode = node }
+    const onNodeDragend = () => {
+      const n = dragNode
+      dragNode = null
+      if (!n) return
+      try {
+        const d: XNodeData = n.getData?.() || {}
+        if (d.kind !== 'case' || !d.caseId) return
+        let p = n.parent
+        while (p) {
+          const pd: XNodeData = p.getData?.() || {}
+          if (pd.kind === 'type') {
+            if ((pd.type || '') !== (d.type || '')) n.setData?.({ type: pd.type || '' })
+            return
+          }
+          if (pd.kind === 'fp' || pd.kind === 'req' || pd.kind === 'root') return
+          p = p.parent
+        }
+      } catch { /* noop */ }
+    }
     me.on('node_contextmenu', onNodeContextmenu)
     me.on('contextmenu', onBlankContextmenu)
     me.on('node_note_click', onNoteClick)
+    me.on('node_mousedown', onNodeMousedown)
+    me.on('node_dragend', onNodeDragend)
 
     // 居中显示
     try { me.view?.setViewCenter?.() } catch { /* noop */ }
@@ -251,6 +291,8 @@ export default function XMindEditPage() {
       me.off('node_contextmenu', onNodeContextmenu)
       me.off('contextmenu', onBlankContextmenu)
       me.off('node_note_click', onNoteClick)
+      me.off('node_mousedown', onNodeMousedown)
+      me.off('node_dragend', onNodeDragend)
       if (meRef.current) { try { meRef.current.destroy() } catch { /* noop */ } ; meRef.current = null }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -277,14 +319,19 @@ export default function XMindEditPage() {
         return
       }
     }
-    // 新建叶子节点：向上找需求 ID
+    // 新建叶子节点：向上找需求 ID / 功能点 / 类型分支（作为新建用例的默认归属）
     const hasChildren = (node?.nodeData?.children || []).length > 0
     if (d.caseId || node?.isRoot || hasChildren) return
     let reqId = ''
+    let fp = ''
+    let branchType = ''
     let p = node?.parent
     while (p) {
       const pd: XNodeData = p.getData?.() || {}
-      if (pd.reqId) { reqId = pd.reqId; break }
+      if (!reqId && pd.reqId) reqId = pd.reqId
+      if (!branchType && pd.kind === 'type') branchType = pd.type || ''
+      if (!fp && pd.kind === 'fp') fp = pd.fp || ''
+      if (pd.kind === 'req' || pd.kind === 'root') break
       p = p.parent
     }
     // 兜底：项目下只有一个需求时直接使用
@@ -300,11 +347,12 @@ export default function XMindEditPage() {
         req_id: reqId,
         product_id: productId,
         title: d.text || '',
-        type: 'functional',
+        type: branchType || 'functional',
         priority: 'P1',
         status: 'draft',
         confidence: 0,
-        functional_point: '',
+        // 节点所在功能点分支作为默认归属（"业务场景"分支 = 无功能点）
+        functional_point: fp && fp !== BIZ_SCENE ? fp : '',
         description: '',
         preconditions: [],
         steps: [],
@@ -346,17 +394,24 @@ export default function XMindEditPage() {
 
   // 用例详情弹窗保存成功回调：更新本地数据 + 局部刷新节点
   const handleCaseSaved = useCallback((updated: TestCase) => {
-    const orig = casesRef.current.find(c => c.id === updated.id)
+    const orig = dbCasesRef.current.find(c => c.id === updated.id)
     const typeChanged = !!orig && orig.type !== updated.type
     const isNew = !orig
-    // 更新本地缓存（新建的用例加入列表，保存按钮对比时不再重复新增）
-    casesRef.current = isNew
-      ? [...casesRef.current, updated]
-      : casesRef.current.map(c => (c.id === updated.id ? { ...c, ...updated } : c))
+    // 表单弹窗已直接写库 → 工作区（casesRef）与数据库基线（dbCasesRef）同步更新，
+    // 保证 handleSave 的 diff 仍以库中真实状态为基线（B-1）
+    const merge = (list: TestCase[]) =>
+      isNew ? [...list, updated] : list.map(c => (c.id === updated.id ? { ...c, ...updated } : c))
+    casesRef.current = merge(casesRef.current)
+    dbCasesRef.current = merge(dbCasesRef.current)
     setCases(casesRef.current)
     const node = editState?.node
     setEditState(null)
     setErr('')
+    // 表单保存已直接落库并重建节点备注 → 该节点未提交的备注草稿作废，
+    // 避免保存时旧草稿覆盖表单刚写入的新值（B-5）
+    if (node) pendingNotesRef.current.delete(node)
+    // 新建用例的功能点归属已随 create 请求直接写入（B-6：后端 create 已支持
+    // functional_point 字段，避免用户不点页面「保存」时用例丢失 FP 归属）
     // 局部更新节点（普通编辑 & 新建均适用；不整树重建，保留未保存的结构修改）
     try {
       // 元数据仅更新数据层（SET_NODE_DATA 不触发渲染）
@@ -382,7 +437,8 @@ export default function XMindEditPage() {
     if (parsed.type && st.caseData.id && parsed.type !== st.caseData.type) {
       moveNodeToType(st.node, parsed.type)
     }
-    // 本地数据同步：再次打开弹窗/详情时显示最新内容
+    // 本地数据同步（仅工作区 casesRef，供再次打开弹窗/详情时显示最新内容）：
+    // 刻意不更新 dbCasesRef——备注尚未写库，保存时以 dbCasesRef 为 diff 基线才能检出变更
     if (st.caseData.id) {
       const merged = { ...st.caseData, ...parsed } as TestCase
       casesRef.current = casesRef.current.map(c => (c.id === merged.id ? merged : c))
@@ -426,14 +482,17 @@ export default function XMindEditPage() {
         if (kind === 'req') reqId = d.reqId || reqId
         if (kind === 'fp') { fp = d.fp || node.data?.text || BIZ_SCENE; type = '' }
         if (kind === 'type') type = d.type || labelType(node.data?.text || '')
-        if ((kind === 'case' || (!kind && children.length === 0)) && children.length === 0) {
+        if (kind === 'case' || (!kind && children.length === 0)) {
+          // kind='case' 的节点即使被用户加了子节点也必须计入用例行（B-3）：
+          // 否则它不进 seenIds，保存时会被当作"已从树中删除"而误删该用例
           rows.push({ node, reqId, fp, type })
         }
         children.forEach((c: any) => walk(c, depth + 1, reqId, fp, type))
       }
       if (tree) walk(tree, 0, '', '', '')
-      // 对照原始数据：构建原用例 id → 位置（用 casesRef 取最新，含弹窗已保存的变更）
-      const origById = new Map(casesRef.current.map(c => [c.id, c]))
+      // 对照数据库基线：用例 id → 库中状态（B-1：备注编辑只进工作区 casesRef，
+      // diff 必须以 dbCasesRef 为准，否则备注修改会被判为"无变更"而永不落库）
+      const origById = new Map(dbCasesRef.current.map(c => [c.id, c]))
       // 变更集
       const addOps: any[] = []
       const updateOps: Array<{ id: string; data: Record<string, unknown> }> = []
@@ -492,7 +551,11 @@ export default function XMindEditPage() {
         const newFp = r.fp === BIZ_SCENE ? '' : r.fp
         if (newFp !== (orig.functional_point || '')) patch.functional_point = newFp
         if ((r.reqId || '') !== orig.req_id) patch.req_id = r.reqId
-        if ((r.type || 'other') !== (orig.type || 'other')) patch.type = r.type || 'other'
+        // 类型（B-2）：优先节点元数据 d.type（表单编辑保存 / 拖拽结束同步时写入），
+        // 其次按所在类型分支推断。否则表单改了类型但目标分支不存在时，
+        // 节点留在旧分支，分支推断会把类型改回旧值，覆盖用户刚保存的修改
+        const effType = (d.type as string) || r.type || 'other'
+        if (effType !== (orig.type || 'other')) patch.type = effType
         // 备注里显式修改的字段优先于树结构推断（用户主动编辑 > 位置推断）
         if (parsed) {
           if (parsed.type && parsed.type !== (orig.type || 'other')) patch.type = parsed.type
@@ -511,8 +574,8 @@ export default function XMindEditPage() {
         }
         if (Object.keys(patch).length > 0) updateOps.push({ id: caseId, data: patch })
       }
-      // 删除：原有用例不在新树中
-      for (const c of casesRef.current) {
+      // 删除：数据库基线中已有、但不在当前树的用例
+      for (const c of dbCasesRef.current) {
         if (!seenIds.has(c.id)) deleteIds.push(c.id)
       }
 
@@ -586,8 +649,9 @@ export default function XMindEditPage() {
       // 通知其他标签页（用例列表页）刷新，保证列表与导图一致
       notifyCasesChanged()
       // 无论成败都重拉数据并重建树：失败时也必须让导图回到与库一致的状态，
-      // 否则用户会在过期结构上继续编辑，产生二次覆盖
-      if ((addCount + updateCount + deleteCount) > 0) {
+      // 否则用户会在过期结构上继续编辑，产生二次覆盖（B-4：全部失败时同样刷新，
+      // 与错误提示"已按数据库实际状态刷新"保持一致）
+      if ((addCount + updateCount + deleteCount) > 0 || failCount > 0) {
         await load()
         notifyCasesChanged()
       }

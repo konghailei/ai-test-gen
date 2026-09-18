@@ -96,6 +96,8 @@ export default function CaseEditDialog({ caseData, onClose, onSaved }: Props) {
           steps: payload.steps,
           expected: payload.expected,
           assertions: payload.assertions,
+          // XMind 树位置归属的功能点（后端 create 已支持该字段）
+          functional_point: caseData.functional_point || '',
         })
         onSaved({
           ...caseData,
@@ -106,6 +108,7 @@ export default function CaseEditDialog({ caseData, onClose, onSaved }: Props) {
           type: created.type,
           priority: created.priority,
           status: created.status,
+          functional_point: created.functional_point ?? caseData.functional_point ?? '',
           description: payload.description,
           preconditions: payload.preconditions,
           steps: payload.steps,

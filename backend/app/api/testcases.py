@@ -292,7 +292,7 @@ async def create_testcase(
     from app.utils.id_gen import gen_test_case_id
     case_id = gen_test_case_id(module_prefix="MANUAL")
 
-    # 4) 构造 case_json
+    # 4) 构造 case_json（functional_point 与 update 口径一致：存 case_json，非独立列）
     case_json = {
         "title": req.title,
         "type": req.type,
@@ -304,6 +304,9 @@ async def create_testcase(
         "assertions": req.assertions or [],
         "source": "manual",
     }
+    if req.functional_point:
+        case_json["related_fp"] = req.functional_point
+        case_json["functional_point"] = req.functional_point
 
     # 5) 写入
     record = TestCase(
@@ -337,6 +340,7 @@ async def create_testcase(
             "type": record.type,
             "priority": record.priority,
             "status": record.status,
+            "functional_point": req.functional_point or "",
         },
     )
 

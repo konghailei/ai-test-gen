@@ -160,6 +160,7 @@ class TestCaseCreateRequest(BaseModel):
     steps: list[dict] | None = Field(default=None, description="测试步骤列表")
     expected: str = Field(default="", max_length=2000, description="整体预期结果")
     assertions: list[dict] | None = Field(default=None, description="断言列表")
+    functional_point: str | None = Field(default=None, max_length=255, description="功能点名称（可选，来自 XMind 树位置归属）")
 
 
 class ExportRequest(BaseModel):
