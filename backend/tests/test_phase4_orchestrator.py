@@ -479,13 +479,11 @@ def test_route_functions(result: TestResult):
     print("\n[测试 3] 路由函数")
     orch = Orchestrator()
 
-    # _route_after_channel（v3.x: enable_clarify 由 channel_config 决定，
-    # 生产路径 select_channel 节点总会写入 config；缺失视为禁用走 gate）
-    state_full: PipelineState = {"channel": "FULL",
-                                 "channel_config": {"channel": "FULL", "enable_clarify": True}}
-    state_fast: PipelineState = {"channel": "FAST"}
-    result.assert_eq("FULL → clarify", orch._route_after_channel(state_full), "clarify")
-    result.assert_eq("FAST → gate", orch._route_after_channel(state_fast), "gate")
+    # _route_after_channel（v3.4.4：FAST/FULL 概念已删除，只看 channel_config.enable_clarify）
+    state_enabled: PipelineState = {"channel_config": {"enable_clarify": True}}
+    state_disabled: PipelineState = {"channel_config": {"enable_clarify": False}}
+    result.assert_eq("启用生成期澄清 → clarify", orch._route_after_channel(state_enabled), "clarify")
+    result.assert_eq("未启用（已确认需求）→ gate", orch._route_after_channel(state_disabled), "gate")
 
     # _route_after_gate：通过 → impact
     state_passed: PipelineState = {"gate_result": {"passed": True, "forced_pass": False}, "clarify_iteration": 1}
@@ -498,8 +496,7 @@ def test_route_functions(result: TestResult):
     # _route_after_gate：未通过 & iteration < MAX & clarify 启用 → clarify
     state_retry: PipelineState = {"gate_result": {"passed": False, "forced_pass": False},
                                   "clarify_iteration": 1,
-                                  "channel": "FULL",
-                                  "channel_config": {"channel": "FULL", "enable_clarify": True}}
+                                  "channel_config": {"enable_clarify": True}}
     result.assert_eq("未通过(第1轮) → clarify", orch._route_after_gate(state_retry), "clarify")
 
     # _route_after_gate：未通过 & iteration >= MAX → impact（兜底）
@@ -669,9 +666,9 @@ async def test_pipeline_full(result: TestResult):
                        all(s in stages for s in ["parse", "select_channel", "gate", "impact", "test_design", "generate", "review", "done"]))
     result.assert_true("无 retrieve 节点", "retrieve" not in stages)
 
-    # FULL 通道
+    # 生成准备节点（原通道选择）：v3.4.4 起不再携带 channel 字段（通道分级已删除）
     sc_event = next(e for e in events if e["stage"] == "select_channel")
-    result.assert_eq("channel=FULL", sc_event.get("channel"), "FULL")
+    result.assert_true("事件不再携带 channel 字段", "channel" not in sc_event)
 
     # clarify 在 gate 前
     result.assert_true("clarify 在 gate 前", stages.index("clarify") < stages.index("gate"))

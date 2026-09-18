@@ -106,9 +106,8 @@ async def generate_test_cases(
         HTTPException 404: req_id 对应的需求不存在
 
     Note:
-        - 通道选择：当前由 orchestrator 内部 select_channel 自动决定。
-          req.channel 作为"期望通道"接收并记录日志，实际通道以响应中 done 事件的
-          channel 字段为准。强制覆盖通道的能力留待后续优化。
+        - 生成期澄清：本链路默认跳过（需求已在上传阶段澄清并确认，
+          见 orchestrator 生成准备节点）；v3.4.4 起不再有 FAST/FULL 通道概念。
         - 澄清答案：若需求已提交澄清答案（存储在 srr_json.clarify_answers），
           会透传给 orchestrator.run_pipeline，在 _clarify_node 首轮应用到 SRR。
         - 错误处理：orchestrator 内部异常会 yield 一个 error 事件，SSE 流正常结束。
@@ -250,11 +249,10 @@ async def generate_test_cases(
 
 
     logger.info(
-        "[API/generate] 启动 SSE 流式生成: req_id={}, task_id={}, expected_channel={}, "
+        "[API/generate] 启动 SSE 流式生成: req_id={}, task_id={}, "
         "has_clarify_answers={}, has_srr={}, raw_text_len={}",
         req.req_id,
         task_id,
-        req.channel,
         bool(clarify_answers),
         has_srr,
         len(raw_text),

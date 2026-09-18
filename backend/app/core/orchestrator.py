@@ -13,12 +13,12 @@ r"""LangGraph DAG 编排器。
 - docs/03-case-generation-flow.md §6.7 ClarifyLoopGuard 死锁预防
 - docs/05-technical-selection.md §3.2 LangGraph 流程定义示例
 
-DAG 结构：
-    START → parse → select_channel
+DAG 结构（v3.4.4：原 FAST/FULL 通道分级已删除，分支条件改为「是否启用生成期澄清」）：
+    START → parse → select_channel（生成准备）
                       ↓
                 [route_after_channel]
                  /              \
-               FULL             FAST
+        启用生成期澄清        未启用（生产实际路径）
                 ↓                ↓
             clarify          gate(直接)
                 ↓                ↓
@@ -28,7 +28,7 @@ DAG 结构：
            ↓     ↓      ↓       ↓
         clarify impact impact   ↓
                   ↓      ↓      ↓
-          test_design test_design  ↓   ⭐ v2.3 新增测试设计节点
+          test_design test_design  ↓
                   ↓      ↓      ↓
                generate ←──────┘
                   ↓
@@ -58,7 +58,7 @@ from app.agents.req_agent import req_agent
 from app.agents.review_agent import review_agent
 from app.agents.test_design_agent import test_design_agent
 from app.config import settings
-from app.core.channel_selector import select_channel
+from app.core.channel_selector import build_generation_config
 from app.core.quality_gate import quality_gate
 from app.utils.logger import logger
 
@@ -85,8 +85,7 @@ class PipelineState(TypedDict, total=False):
         # ---- 各节点输出 ----
         srr: ReqAgent 解析后的 SRR JSON
         req_id: 需求 ID（从 SRR 提取，便于日志追踪）
-        channel: 通道类型 "FAST" / "FULL"
-        channel_config: ChannelConfig 序列化后的 dict
+        channel_config: GenerationConfig 序列化后的 dict（本次生成的环节开关）
         clarify_result: ClarifyAgent 输出
         gate_result: QualityGate 输出（dict 形式）
         impact_result: ImpactAnalysisAgent 输出
@@ -118,7 +117,6 @@ class PipelineState(TypedDict, total=False):
     # 节点输出
     srr: dict
     req_id: str
-    channel: str
     channel_config: dict
     clarify_result: dict
     gate_result: dict
@@ -418,7 +416,7 @@ class Orchestrator:
 
         节点：parse / select_channel / clarify / gate / impact / test_design / generate / review
         条件边：
-            - select_channel → clarify (FULL) / gate (FAST)
+            - select_channel → clarify（仅当启用生成期澄清；已确认需求恒走 gate）
             - gate → impact (通过或强制) / clarify (回环重试)
 
         Returns:
@@ -428,7 +426,7 @@ class Orchestrator:
 
         # 注册节点（v3.1：移除 retrieve 节点，SRR 足够详细无需 KB 检索）
         graph.add_node("parse", self._parse_node)
-        graph.add_node("select_channel", self._select_channel_node)
+        graph.add_node("select_channel", self._prepare_node)
         graph.add_node("clarify", self._clarify_node)
         graph.add_node("gate", self._gate_node)
         graph.add_node("impact", self._impact_node)
@@ -448,7 +446,7 @@ class Orchestrator:
         graph.add_edge("generate", "review")
         graph.add_edge("review", END)
 
-        # 条件边：select_channel → FULL 走 clarify / FAST 直接到 gate
+        # 条件边：select_channel → 启用生成期澄清则走 clarify，否则直接到 gate
         graph.add_conditional_edges(
             "select_channel",
             self._route_after_channel,
@@ -529,57 +527,51 @@ class Orchestrator:
             "start_time": time.time(),
         }
 
-    async def _select_channel_node(self, state: PipelineState) -> dict:
-        """节点 2：通道选择（FAST / FULL）。
+    async def _prepare_node(self, state: PipelineState) -> dict:
+        """节点 2：生成准备（原「通道选择」；v3.4.4 去除通道分级后更名）。
 
-        对应 docs/00 §9.1。
-        判定规则：priority==P0 或 happy_path 步骤 > 5 或 含 optimization_context → FULL。
+        节点 key 仍为 "select_channel"，以保持 SSE stage 与前端契约不变。
 
-        重要修正（v3.x 新增）：
-            若传入 existing_req_id，说明用户已通过 API 走完确认流程
-            （SRR / FP / 影响分析均已审核确认，status == confirmed），
-            此时**不应**再自动回 clarify 回环，否则会导致：
-                ① 生成前无谓消耗 LLM（产出的 needs_clarification 问题已无意义，
-                  因为无人回答）
-                ② 网络/配额等故障导致 clarify 卡死，长时间看似无 LLM 调用
-            因此对已确认需求强制跳过 enable_clarify（但保留 multi_type /
-            full_review / impact_analysis 等"高质量生成侧"能力，等同于
-            FULL 通道仅关闭 clarify）。
+        v3.4.4 变更：
+            原 FAST / FULL 通道分级已于 v1.6 废止（恒为 FULL，原因见
+            `core/channel_selector.py` 模块 docstring），本次清理掉 channel 概念。
+            本节点现在的实际职责是**决定本次生成启用哪些环节**。
+
+        关键行为：
+            若传入 existing_req_id（两个生产入口 generate.py / task_selfheal.py 都会传），
+            说明需求已走完确认流程、澄清已在需求分析链路完成，因此强制跳过生成期澄清：
+                - 生成期再澄清无意义（问题无人回答）
+                - 且易因 LLM 配额 / 网络故障卡死
+            multi_type / full_review / impact_analysis 等质量能力全部保留。
 
         Returns:
-            dict: state 更新，含 channel / channel_config
+            dict: state 更新，含 channel_config（环节开关）
         """
         srr = state.get("srr", {})
         req_id = state.get("req_id", "")
         existing_req_id = state.get("existing_req_id", "") or ""
 
-        logger.info("[Orchestrator] ▶ 节点 select_channel: req_id={} existing_req_id={}", req_id, existing_req_id)
+        logger.info(
+            "[Orchestrator] ▶ 节点 select_channel(生成准备): req_id={} existing_req_id={}",
+            req_id, existing_req_id,
+        )
 
-        config = select_channel(srr)
-        # 已确认需求：强制跳过 clarify（进入 gate → impact → ...），
-        # 仍保留 FULL 的其他质量能力（多类型、完整审核、影响分析）。
+        config = build_generation_config(srr)
+        # 已确认需求：强制跳过生成期澄清（进入 gate → impact → ...），
+        # 多类型生成、完整审核、影响分析等质量能力全部保留。
         if existing_req_id:
-            from app.core.channel_selector import ChannelConfig
-            config = ChannelConfig(
-                channel=config.channel,  # 保留 FULL 名义
-                enable_clarify=False,    # ★ 关键：不再跑 clarify 回环
-                enable_impact_analysis=config.enable_impact_analysis,
-                enable_multi_type_generation=True,
-                enable_full_review=True,
-            )
+            config = config.model_copy(update={"enable_clarify": False})
             logger.info(
-                "[Orchestrator] 确认需求已存在（existing_req_id={})，跳过 ClarifyAgent 回环: "
+                "[Orchestrator] 确认需求已存在（existing_req_id={}），跳过生成期澄清: "
                 "保留 multi_type & full_review & impact_analysis，仅把 enable_clarify=False",
                 existing_req_id,
             )
-        next_node = "clarify" if (config.is_full and config.enable_clarify) else "gate"
-        channel = config.channel
+        next_node = "clarify" if config.enable_clarify else "gate"
 
         logger.info(
             "[Orchestrator] ◀ 节点 select_channel 完成 ▶ 下一节点 {}: "
-            "channel={}, clarify={}, impact={}, multi_type={}, full_review={}",
+            "clarify={}, impact={}, multi_type={}, full_review={}",
             next_node,
-            channel,
             config.enable_clarify,
             config.enable_impact_analysis,
             config.enable_multi_type_generation,
@@ -587,7 +579,6 @@ class Orchestrator:
         )
 
         return {
-            "channel": channel,
             "channel_config": config.model_dump(),
         }
 
@@ -670,11 +661,10 @@ class Orchestrator:
         result = await quality_gate.check(srr, clarify_result)
         gate_dict = result.model_dump()
 
-        channel = state.get("channel", "FAST")
-        # v3.x：已确认需求（enable_clarify=False）与 FAST 通道同待遇：
+        # v3.4.4：FAST 概念已删除，此处只看 enable_clarify（已确认需求恒为 False）。
         # gate 未通过时直接强制通过，不回环 clarify（无人回答，回环无意义且易卡死）
         _cfg = state.get("channel_config", {}) or {}
-        clarify_disabled = channel == "FAST" or not (
+        clarify_disabled = not (
             _cfg.get("enable_clarify", False) if isinstance(_cfg, dict)
             else getattr(_cfg, "enable_clarify", False)
         )
@@ -685,7 +675,7 @@ class Orchestrator:
             forced = True
             gate_dict["forced_pass"] = True
             warnings = gate_dict.get("warnings", []) or []
-            warnings.append("跳过澄清场景（FAST 通道或已确认需求），QualityGate 未通过但强制放行")
+            warnings.append("未启用生成期澄清（已确认需求），QualityGate 未通过但强制放行")
             gate_dict["warnings"] = warnings
             logger.warning(
                 "[Orchestrator] 跳过澄清场景 gate 未通过，强制放行（不回环 clarify）"
@@ -951,7 +941,7 @@ class Orchestrator:
         """节点 7：GenAgent 生成测试用例。
 
         对应 docs/00 §3 阶段⑤。
-        根据 ChannelConfig 决定是否启用分类生成，注入影响分析指导。
+        根据 channel_config（本次生成的环节开关）决定是否启用分类生成，注入影响分析指导。
         v1.4：若需求已拆分功能点（FP），从 DB 加载并传入 GenAgent，
         使 LLM 按 FP 定向生成用例，用例标注 related_fp 供追溯。
 
@@ -1592,11 +1582,10 @@ class Orchestrator:
     # ========================================================================
 
     def _route_after_channel(self, state: PipelineState) -> str:
-        """条件路由：select_channel 后选择 FULL→clarify / FAST→gate。
+        """条件路由：生成准备后决定是否进入生成期澄清。
 
-        v3.x 新增：当 state.channel_config.enable_clarify=False（confirmed 需求跳过），
-        即使 channel=="FULL" 也直接走 gate，避免 confirmed 需求在生成阶段
-        无谓进入 clarify 回环（无人回答、易卡死于 LLM 配额/网络）。
+        v3.4.4：FAST/FULL 概念已删除，只看 channel_config.enable_clarify。
+        已确认需求该值为 False（其澄清在需求分析链路完成），故生产路径恒走 gate。
 
         Args:
             state: 当前流水线状态
@@ -1604,12 +1593,9 @@ class Orchestrator:
         Returns:
             str: "clarify" 或 "gate"
         """
-        channel = state.get("channel", "FAST")
         cfg = state.get("channel_config", {}) or {}
         enable_clarify = cfg.get("enable_clarify", False) if isinstance(cfg, dict) else getattr(cfg, "enable_clarify", False)
-        if channel == "FULL" and enable_clarify:
-            return "clarify"
-        return "gate"
+        return "clarify" if enable_clarify else "gate"
 
     def _route_after_gate(self, state: PipelineState) -> str:
         """条件路由：gate 后判断走 impact / 回 clarify。
@@ -1633,13 +1619,13 @@ class Orchestrator:
         if passed or forced:
             return "impact"
 
-        # v3.x 防御：clarify 被禁用（已确认需求 / FAST）时绝不回环
+        # v3.4.4 防御：未启用生成期澄清（已确认需求）时绝不回环
         _cfg = state.get("channel_config", {}) or {}
         _enable_clarify = (
             _cfg.get("enable_clarify", False) if isinstance(_cfg, dict)
             else getattr(_cfg, "enable_clarify", False)
         )
-        if not _enable_clarify or state.get("channel", "FAST") == "FAST":
+        if not _enable_clarify:
             logger.warning(
                 "[Orchestrator] QualityGate 未通过但 clarify 已禁用，兜底强制进入 impact"
             )
@@ -1897,8 +1883,6 @@ class Orchestrator:
                             # 附加节点关键数据（便于前端展示）
                             if node_name == "parse":
                                 event["req_id"] = final_state.get("req_id", "")
-                            elif node_name == "select_channel":
-                                event["channel"] = final_state.get("channel", "")
                             elif node_name == "clarify":
                                 cr = final_state.get("clarify_result", {}) or {}
                                 event["clarify_status"] = cr.get("status", "")
@@ -2017,7 +2001,6 @@ class Orchestrator:
                 "done",
                 done_message,
                 req_id=final_state.get("req_id", ""),
-                channel=final_state.get("channel", ""),
                 srr=final_state.get("srr"),
                 cases=final_state.get("reviewed_cases", []),
                 review_report=final_state.get("review_result", {}),
@@ -2071,7 +2054,6 @@ class Orchestrator:
                     task_type="pipeline",
                     payload={
                         "req_id": final_state.get("req_id", ""),
-                        "channel": final_state.get("channel", ""),
                         "stage": final_state.get("_last_node", "unknown"),
                     },
                     error=str(e)[:2000],

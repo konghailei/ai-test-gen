@@ -85,7 +85,7 @@ START → parse → select_channel ─┬─(enable_clarify)→ clarify → gate
 
 **① `_parse_node`** — 不调用 LLM。直接复用已确认 SRR；`existing_req_id` 会覆盖 SRR 内的 `requirement.id`，避免重新解析产生新 ID 导致 `test_cases` 外键冲突。SRR 为空直接 `ValueError`。
 
-**② `_select_channel_node`** — 调 `select_channel()`，当前**恒返回 FULL**（`enable_clarify=True`、`enable_multi_type_generation=True`、`enable_full_review=True`；`enable_impact_analysis` 仅当存在 `optimization_context`）。
+**② `_select_channel_node`**（v3.4.4 起内部实现更名为 `_prepare_node`，节点 key 保持 `select_channel` 以稳定 SSE 契约）— 调 `build_generation_config()` 构造环节开关。**FAST/FULL 通道分级已删除**（v1.6 起恒 FULL，v3.4.4 清理掉 channel 概念）；`enable_impact_analysis` 仅当存在 `optimization_context`。
 
 > ⚠️ 关键分支：只要传入 `existing_req_id`（即从 API 生成的已确认需求），**强制 `enable_clarify=False`**，其余能力保留。原因有三：① 已确认 SRR 产出的 `needs_clarification` 无人回答；② 回环纯烧 LLM；③ 网络/配额故障会让 clarify 卡死，表面看像"没有 LLM 调用"。
 
@@ -377,7 +377,7 @@ draft ──分析──► pending_review ──confirm──► confirmed ─�
 ## 7. 关键设计决策与已知取舍
 
 1. **SRR 是唯一真源**：入口、parse、GenAgent 三层都不允许回退 raw_text。代价是需求分析阶段的错误会一路传导到底。
-2. **`select_channel` 已成"名义决策"**：恒 FULL，FAST 通道实际未启用。`existing_req_id` 关闭 clarify 才是真正生效的分支 —— 建议后续要么删掉 FAST 相关死代码，要么恢复分级能力。
+2. **✅ 已完成（v3.4.4）**：`select_channel` 的"名义决策"已清理——FAST 相关死代码全部删除，`channel` 概念不复存在；模块职责收敛为 `build_generation_config`（环节开关构造器），`existing_req_id` 关闭 clarify 的行为保持不变。
 3. **四层去重防线**（GenAgent 四级 + persist 前标题级）说明**跨子轮重复**是真实痛点；FP 分片越细，重复概率越高。
 4. **回归复用优先于重新生成**：成本可控、结果稳定；只有缺口才交给 LLM。代价是强依赖 `related_fp` 标注质量与 `go_live_date` 归属正确性。
 5. **版本标注体系（2026-09-11 已治理）**：项目里有两套编号并行——`VERSION` 文件是对外发布版本（当前 `3.2.14`），代码注释里的 `vX.Y` 是**内部变更批次号**。本轮把 `v4.x` / `v5.x` 共 21 个编号形式（95 处代码 + 19 处文档）经 git 溯源后统一归并为 `v3.1.3`（共同引入提交 `fd349cf`，2026-09-07）。`v1.x` / `v2.x` / `v3.x` 经溯源确认是**多条并行编号流**（`v2.3` 早于 `v2.0`、`v3.1` 早于 `v2.34`），与发布版本不存在单调映射，保留原样。

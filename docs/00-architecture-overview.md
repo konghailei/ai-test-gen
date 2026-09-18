@@ -281,7 +281,7 @@ relay(lifespan, 5s):  FOR UPDATE SKIP LOCKED 认领 → 幂等 upsert/delete →
 ```
 
 > **v3.3 编排语义补充（强制放行 + 回归基线 + 补生成闭环）**：
-> - **DAG/SSE 对齐**：编排节点为 `parse → select_channel → clarify → gate → impact → test_design → generate → review → done`（SSE stage 同名）；FULL 通道执行澄清，FAST 跳过澄清。
+> - **DAG/SSE 对齐**：编排节点为 `parse → select_channel → clarify → gate → impact → test_design → generate → review → done`（SSE stage 同名）；v3.4.4 起已无 FAST/FULL 通道概念——生成期澄清仅当 `enable_clarify=True` 才执行，已确认需求恒跳过（其澄清在需求分析链路完成）。
 > - **QualityGate 强制放行**：达到最大澄清轮次（`MAX_CLARIFY_ITERATIONS`）仍不达标时 `forced_pass=True` 继续流水线，不再阻断生成；done 事件 `manual_action_required=True`，前端提示「人工修改需求内容并重新确认后再生成」。
 > - **回归基线复用**：影响分析确认（confirmed_at）的受影响 FP，读取**产品+功能点维度最新版 approved 用例**（`aggregate_latest_cases`）转换为 `type=regression / source=reused` 用例并入结果；无历史用例的 FP 形成覆盖缺口，由 GenAgent 定向补生成。
 > - **审核缺口补生成**：首次审核 `should_supplement=True` 时补生成一次（`supplement_iteration` 最多 1）→ 合并去重（历史回归优先保留）→ **二次审核**，KB 回流使用第二次审核结果。

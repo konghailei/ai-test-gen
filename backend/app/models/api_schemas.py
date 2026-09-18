@@ -112,9 +112,6 @@ class RegenerateRequest(BaseModel):
 class GenerateRequest(BaseModel):
     """用例生成请求。"""
     req_id: str = Field(..., description="需求 ID")
-    channel: Literal["FAST", "FULL"] | None = Field(
-        default=None, description="通道选择（留空则自动选择）"
-    )
     # v3.1.3 断点续跑：resume=True 时从最近一次中断/作废任务的 checkpoint 继续，
     # 跳过已生成完成的功能点，仅补未完成部分。
     resume: bool = Field(default=False, description="是否断点续跑")

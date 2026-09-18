@@ -55,7 +55,6 @@ export default function Generate() {
   // v2.0：新增一致性检查、FP 覆盖率、通道展示
   const [consistencyCheck, setConsistencyCheck] = useState<SSEEvent['consistency_check'] | null>(null)
   const [fpCoverage, setFpCoverage] = useState<SSEEvent['fp_coverage'] | null>(null)
-  const [channel, setChannel] = useState<string>('')
   const [manualActionRequired, setManualActionRequired] = useState(false)
   // v3.4（docs/15 §4.1）：发布决策与降级证据 —— "done" 不等于"已入库"
   const [publication, setPublication] = useState<SSEEvent['publication'] | null>(null)
@@ -200,7 +199,6 @@ export default function Generate() {
           setKbFlowback(e.kb_flowback || null)
           setConsistencyCheck(e.consistency_check || null)
           setFpCoverage(e.fp_coverage || null)
-          setChannel(e.channel || '')
           setManualActionRequired(Boolean(e.manual_action_required))
           setGateResult(e.gate_result || null)
           setRegressionReuseSummary(e.regression_reuse_summary || null)
@@ -575,11 +573,6 @@ export default function Generate() {
           : 'bg-gradient-to-r from-emerald-50 to-green-50 border-emerald-100'}`}>
           <h3 className={`font-semibold text-sm flex items-center gap-2 mb-3 ${kbFlowback.skipped ? 'text-red-800' : 'text-emerald-800'}`}>
             <Sparkles className="w-4 h-4" /> 知识库回流
-            {channel && (
-              <span className="ml-2 px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded-full">
-                {channel === 'FULL' ? '完整通道' : channel === 'FAST' ? '快速通道' : channel}
-              </span>
-            )}
             {kbFlowback.skipped && (
               <span className="px-2 py-0.5 text-xs bg-red-100 text-red-700 rounded-full">
                 已跳过（发布决策拦截，PG 与向量库均未写入）

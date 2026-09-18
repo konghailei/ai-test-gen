@@ -209,45 +209,41 @@ class TestResult:
 # ============================================================================
 
 def test_channel_selector(result: TestResult):
-    """测试通道选择器。"""
-    print("\n[测试 1] channel_selector 通道选择器")
-    from app.core.channel_selector import select_channel, ChannelConfig
+    """测试生成配置构造器（原通道选择器；v3.4.4 已去除 FAST/FULL 通道分级）。"""
+    print("\n[测试 1] generation_config 生成环节开关（原 channel_selector）")
+    from app.core.channel_selector import build_generation_config, GenerationConfig
 
-    # 1.1 P0 优先级 → FULL 通道
-    cfg = select_channel(VALID_SRR_P0)
-    result.assert_eq("P0 需求 → FULL 通道", cfg.channel, "FULL")
-    result.assert_true("P0 启用 clarify", cfg.enable_clarify)
-    result.assert_true("P0 启用 multi_type", cfg.enable_multi_type_generation)
-    result.assert_true("P0 启用 full_review", cfg.enable_full_review)
-    result.assert_true("P0 非优化需求不启用 impact_analysis", not cfg.enable_impact_analysis)
-    result.assert_true("is_full 属性", cfg.is_full)
-    result.assert_true("is_fast 属性为 False", not cfg.is_fast)
+    # 1.1 默认配置：clarify 由编排器按"是否已确认需求"决定，其余质量开关恒开
+    cfg = build_generation_config(VALID_SRR_P0)
+    result.assert_true("默认启用 clarify（编排器按已确认需求关闭）", cfg.enable_clarify)
+    result.assert_true("启用 multi_type", cfg.enable_multi_type_generation)
+    result.assert_true("启用 full_review", cfg.enable_full_review)
+    result.assert_true("非优化需求不启用 impact_analysis", not cfg.enable_impact_analysis)
 
-    # 1.2 P2 简单需求 → v1.6 起统一 FULL 通道（避免通道误判导致漏生成用例）
-    cfg = select_channel(SIMPLE_SRR_P2)
-    result.assert_eq("P2 简单需求 → FULL 通道（v1.6 全 FULL）", cfg.channel, "FULL")
-    result.assert_true("FULL 启用 clarify", cfg.enable_clarify)
-    result.assert_true("FULL 启用 multi_type", cfg.enable_multi_type_generation)
-    result.assert_true("FULL 启用 full_review", cfg.enable_full_review)
-    result.assert_true("is_full 属性", cfg.is_full)
+    # 1.2 P2 简单需求：v3.4.4 起不再有通道分级，配置与 P0 完全一致
+    cfg = build_generation_config(SIMPLE_SRR_P2)
+    result.assert_true("简单需求同样启用 multi_type（不再走快速通道）", cfg.enable_multi_type_generation)
+    result.assert_true("简单需求同样启用 full_review", cfg.enable_full_review)
+    result.assert_true("简单需求不启用 impact_analysis", not cfg.enable_impact_analysis)
 
-    # 1.3 优化需求（含 optimization_context）→ FULL + impact_analysis
-    cfg = select_channel(OPT_SRR)
-    result.assert_eq("优化需求 → FULL 通道", cfg.channel, "FULL")
+    # 1.3 优化需求（含 optimization_context）→ 额外启用 impact_analysis
+    cfg = build_generation_config(OPT_SRR)
     result.assert_true("优化需求启用 impact_analysis", cfg.enable_impact_analysis)
 
-    # 1.4 步骤 >5 → FULL 通道（即使 P2 优先级）
+    # 1.4 步骤 >5 的需求：同样无特殊分支（历史 FAST 判据已删除）
     long_srr = json.loads(json.dumps(SIMPLE_SRR_P2))
     long_srr["requirement"]["priority"] = "P2"
     long_srr["flows"]["happy_path"]["steps"] = [
         {"order": i, "action": f"步骤{i}", "expect": f"预期{i}"} for i in range(1, 7)
     ]
-    cfg = select_channel(long_srr)
-    result.assert_eq("步骤>5 → FULL 通道", cfg.channel, "FULL")
+    cfg = build_generation_config(long_srr)
+    result.assert_true("长流程需求仍启用完整能力", cfg.enable_multi_type_generation and cfg.enable_full_review)
 
-    # 1.5 缺失字段容错（空 SRR）→ v1.6 起统一 FULL
-    cfg = select_channel({})
-    result.assert_eq("空 SRR → FULL 通道（v1.6 全 FULL）", cfg.channel, "FULL")
+    # 1.5 缺失字段容错（空 SRR）
+    cfg = build_generation_config({})
+    result.assert_true("空 SRR 不报错且不启用 impact_analysis", not cfg.enable_impact_analysis)
+    result.assert_true("空 SRR 仍启用 multi_type", cfg.enable_multi_type_generation)
+    result.assert_true("配置对象类型正确", isinstance(cfg, GenerationConfig))
 
 
 # ============================================================================
