@@ -221,6 +221,22 @@ class LLMClient:
     # settings.LLM_CALL_TOTAL_BUDGET。
     DEFAULT_CALL_TOTAL_BUDGET = 240
 
+    # v3.4.3 修复 L-15：厂商"不支持流式"的**精确**错误短语白名单。
+    # 原判定是「错误里含 stream 且含 support/invalid/unknown/not found」——过宽：
+    # 像 `stream error: api key not found`（认证问题）、`invalid stream timeout` 之类
+    # 都会被误判成"厂商不支持流式"，白跑一次非流式回退，日志还把真因写成流式问题。
+    STREAM_UNSUPPORTED_PHRASES = (
+        "does not support stream",
+        "does not support streaming",
+        "streaming is not supported",
+        "streaming not supported",
+        "stream is not supported",
+        "stream not supported",
+        "stream parameter is not supported",
+        "unsupported parameter: stream",
+        "stream=true is not supported",
+    )
+
     def __init__(self) -> None:
         """初始化客户端。"""
         self._breaker = CircuitBreaker()
@@ -1153,10 +1169,10 @@ class LLMClient:
                         raise _FirstResponseTimeoutError(
                             f"首响应超时（{_first_response_timeout}s 内无任何响应，含思考内容）"
                         ) from _stream_err
+                    # v3.4.3 修复 L-15：改为命中厂商已知精确短语才算"不支持流式"，
+                    # 避免把认证/超时/参数类错误误判成流式能力问题（详见类常量注释）。
                     _se = str(_stream_err).lower()
-                    _unsupported = "stream" in _se and any(
-                        k in _se for k in ("support", "invalid", "unknown", "not found")
-                    )
+                    _unsupported = any(p in _se for p in self.STREAM_UNSUPPORTED_PHRASES)
                     if not _unsupported:
                         raise
                     logger.warning(

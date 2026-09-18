@@ -1066,21 +1066,24 @@ class Orchestrator:
         # 注意这里要取需求修订号（DB），保证与 API 侧的指纹字段完全一致。
         checkpoint_fingerprint: dict = {}
         try:
-            from app.core.pipeline_fingerprint import build_fingerprint as _build_fp
+            # v3.4.3 修复 P-1：写入侧改为复用 API 续跑校验侧的**同一个函数**
+            # load_current_fingerprint（它从 DB 取 product_id / revision / srr_json / FP 集），
+            # 从此两侧取值完全同源，不可能再分叉。
+            # 原实现写入侧取 SRR 内的 product_id、校验侧取 DB 列；普查实测 42 条需求中有 13 条
+            # 的 SRR 里没有该字段 —— 这类需求一旦生成中断后续跑，指纹比对必然不一致 → 409。
+            from app.core.pipeline_fingerprint import load_current_fingerprint as _load_fp
             from app.db.database import async_session as _async_session
             from app.db.models import Requirement as _Requirement
-            from sqlalchemy import select as _sel
             async with _async_session() as _s:
-                _rev = (await _s.execute(
-                    _sel(_Requirement.revision).where(_Requirement.id == req_id)
-                )).scalar()
-            checkpoint_fingerprint = _build_fp(
-                req_id=req_id,
-                product_id=str((srr.get("requirement", {}) or {}).get("product_id", "")),
-                revision=_rev,
-                srr=srr,
-                functional_points=fp_list or [],
-            )
+                _req_obj = await _s.get(_Requirement, req_id)
+                if _req_obj is not None:
+                    checkpoint_fingerprint = await _load_fp(
+                        _s, _req_obj, _req_obj.srr_json or {}
+                    )
+                else:
+                    logger.warning(
+                        "[Orchestrator] 需求 {} 不存在，本次 checkpoint 不带输入指纹", req_id
+                    )
         except Exception as _fp_err:
             logger.warning("[Orchestrator] 输入指纹计算失败（本次 checkpoint 不带指纹，续跑时将被拒绝）: {}",
                            str(_fp_err)[:140])
