@@ -614,11 +614,25 @@ class LLMClient:
         if not providers:
             raise LLMNoProviderAvailable("无可用多模态 LLM 提供商（未配置 API Key）")
 
+        # v3.4.4（自审补漏 N-3）：多模态链路此前没有总预算，供应商全挂时会逐家等满
+        # provider.timeout（默认 300s）× 最多 5 次重试 ≈ 数十分钟。现与文本链路对齐：
+        # 总预算内逐家故障转移，预算耗尽立即失败并给出可行动的提示。
+        start_ts = time.time()
+        budget = int(getattr(settings, "LLM_CALL_TOTAL_BUDGET", 0) or self.DEFAULT_CALL_TOTAL_BUDGET)
+        deadline = start_ts + budget
         last_error: Exception | None = None
+        attempted = 0
         for prov in providers:
+            if deadline - time.time() <= 3:
+                logger.warning(
+                    "[LLM] 多模态调用总预算 {}s 已耗尽，跳过剩余 {} 家提供商（已尝试 {} 家）",
+                    budget, len(providers) - attempted, attempted,
+                )
+                break
+            attempted += 1
             try:
                 result = await self._call_vision_with_retry(
-                    prov, messages, temperature, max_tokens
+                    prov, messages, temperature, max_tokens, deadline=deadline
                 )
                 self._breaker.record_success()
                 self._provider_failures.pop(prov["key"], None)
@@ -633,11 +647,16 @@ class LLMClient:
                 )
             except _NonRetryableError as e:
                 last_error = e
-                self._record_provider_failure(prov)
+                # v3.4.4：额度耗尽 / 认证失败等硬失败立即禁用（与文本链路一致）
+                self._disable_provider_now(prov, reason=str(e)[:80])
                 logger.warning("视觉提供商 {} 不可重试错误，故障转移: {}", prov["key"], str(e)[:200])
 
         self._breaker.record_failure()
-        raise LLMNoProviderAvailable(f"所有多模态 LLM 提供商均不可用: {last_error}")
+        raise LLMNoProviderAvailable(
+            f"所有多模态 LLM 提供商均不可用（已尝试 {attempted} 家，耗时 {int(time.time() - start_ts)}s）。"
+            "请到「系统设置 → LLM 供应商」更换支持视觉的可用供应商，或检查 API Key / 额度。"
+            + (f" 明细：{str(last_error)[:120]}" if last_error else "")
+        )
 
     async def _call_vision_with_retry(
         self,
@@ -645,10 +664,20 @@ class LLMClient:
         messages: list[dict],
         temperature: float,
         max_tokens: int | None,
+        deadline: float | None = None,
     ) -> str:
-        """对单个视觉提供商执行全抖动重试调用（多模态格式）。"""
+        """对单个视觉提供商执行全抖动重试调用（多模态格式）。
+
+        Args:
+            deadline: 调用方总预算截止时间戳（v3.4.4），到点即不再重试。
+        """
         last_error: Exception | None = None
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            # v3.4.4（自审补漏 N-3）：多模态链路与文本链路一致地受总预算约束
+            if deadline is not None and time.time() >= deadline - 2:
+                raise _RetryableError(
+                    f"多模态 LLM 调用总预算耗尽（第 {attempt}/{self.MAX_ATTEMPTS} 次尝试前）: {last_error}"
+                )
             try:
                 kwargs: dict[str, Any] = {
                     "model": provider["model"],

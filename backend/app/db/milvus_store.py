@@ -582,17 +582,26 @@ class MilvusVectorStore:
             int: 实际删除的向量总数
         """
         total = 0
-        while True:
+        # v3.4.4（自审加固）：轮次上限。原 while True 在 Milvus BOUNDED 一致性出现延迟时
+        # （delete+flush 后 query 仍返回同批 id）会死循环；16 轮 × 16384 ≈ 26 万条已远超
+        # 单产品数据量，触顶即告警并返回，交由人工核查。
+        max_rounds = 16
+        for _round in range(1, max_rounds + 1):
             results = collection.query(expr=expr, output_fields=["id"], limit=16384)
             if not results:
-                break
+                return total
             ids = [r["id"] for r in results]
             # Milvus expr 字面量须用双引号
             ids_expr = ",".join(json.dumps(i, ensure_ascii=False) for i in ids)
             collection.delete(f"id in [{ids_expr}]")
             collection.flush()
             total += len(ids)
-            logger.info("[Milvus] {} 分批删除: 本批 {} 条，累计 {} 条", log_desc, len(ids), total)
+            logger.info("[Milvus] {} 分批删除: 第 {}/{} 轮，本批 {} 条，累计 {} 条",
+                        log_desc, _round, max_rounds, len(ids), total)
+        logger.error(
+            "[Milvus] {} 分页删除达到轮次上限 {}（疑似一致性延迟或数据量异常），累计删除 {} 条，请人工核查剩余数据",
+            log_desc, max_rounds, total,
+        )
         return total
 
     def delete_requirement_by_product(self, product_id: str) -> int:
@@ -616,6 +625,14 @@ class MilvusVectorStore:
             f'metadata["product_id"] == "{safe_pid}"',
             f"按 product_id 删除需求向量(product={product_id})",
         )
+        # v3.4.4（自审补漏 M-2）：批量删除该产品全部需求向量后失效 KB 检索缓存——
+        # 与 add_requirement 的失效对称。此前只有单条 delete_requirement(product_id) 失效，
+        # 而删除产品/项目走本函数批量清理，导致 24h TTL 内"已删除产品的需求仍能被检索到"。
+        try:
+            from app.db.kb_cache import kb_cache
+            kb_cache.invalidate_by_product_sync(product_id)
+        except Exception as e:
+            logger.debug("[Milvus] 失效 KB 缓存失败（不阻断删除）: {}", str(e)[:100])
         logger.info("[Milvus] 按 product_id 批量删除需求向量: product={}, count={}", product_id, count)
         return count
 

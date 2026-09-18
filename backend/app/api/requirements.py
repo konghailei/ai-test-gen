@@ -4033,6 +4033,10 @@ async def fp_delete(
     if not fp or fp.requirement_id != req_id:
         raise HTTPException(status_code=404, detail="功能点不存在")
 
+    # v3.4.4（自审补漏 M-2）：提前留存 product_id（下方多次 commit 后 ORM 属性会失效，
+    # 不能再直接访问），供删除 FP 向量后失效该产品 KB 检索缓存使用
+    fp_req_product_id = req.product_id
+
     # ---- C3 修复：级联清理跨需求 SRR.impact_analysis 中的 fp_id 引用 ----
     # v3.1.3 修复 P4：srr_json 列类型为 json（非 jsonb），原 SQL 直接用 jsonb_set/
     # jsonb_array_elements 操作 json 列会导致 "function jsonb_set(json) does not exist"
@@ -4116,9 +4120,13 @@ async def fp_delete(
     except Exception as e:
         logger.warning("[FP-Delete] 更新 fp_index/fp_summary 失败（不阻断）: {}", str(e)[:200])
     # v2.45 修复：清理 Milvus 中的 FP 向量（边界场景：归档→恢复→删除FP 时避免孤儿向量）
+    # v3.4.4（自审补漏 M-2）：传入 product_id，删除后同步失效该产品的 KB 检索缓存，
+    # 否则单独删 FP 后 24h TTL 内"已删除的 FP 仍会被检索到"。
     try:
         from app.db.milvus_store import vector_store
-        await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{fp_id}")
+        await asyncio.to_thread(
+            vector_store.delete_requirement_from_kb, f"FP-{fp_id}", fp_req_product_id
+        )
     except Exception as e:
         logger.warning("[FP-Delete] 清理 FP 向量失败（不阻断）: fp_id={}, error={}", fp_id, str(e)[:150])
     await log_operation(

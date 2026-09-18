@@ -283,6 +283,14 @@ async def delete_product(
             except Exception as inner_e:
                 logger.warning("[API/products] 单条需求向量清理失败: req_id={}, error={}", req_id, str(inner_e)[:100])
 
+    # v3.4.4（自审补漏 M-2）：统一失效该产品 KB 缓存。批量路径已由
+    # delete_requirement_by_product 内部失效，这里兜底覆盖"批量失败走单条退化清理"的路径。
+    try:
+        from app.db.kb_cache import kb_cache
+        await kb_cache.invalidate_by_product(pid)
+    except Exception as e:
+        logger.warning("[API/products] 失效 KB 缓存失败(不阻断): pid={}, error={}", pid, str(e)[:100])
+
     logger.info("[API/products] 产品已删除: id={}, name={}, 关联需求 {} 条已清理", pid, prod.name, len(req_ids))
     return ApiResponse(success=True, message="已删除")
 

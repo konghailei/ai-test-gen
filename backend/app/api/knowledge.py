@@ -501,14 +501,20 @@ async def delete_kb_entry(
         record = result.scalar_one_or_none()
         if not record:
             raise HTTPException(status_code=404, detail=f"需求 {entry_id} 不存在或未归档")
+        # v3.4.4（自审补漏 M-2）：提前留存 product_id（下方 commit 后 ORM 属性会失效），
+        # 供向量删除后失效该产品 KB 缓存使用
+        entry_product_id = record.product_id
         record.status = "active"
         await session.commit()
         db_deleted = True
         logger.info("[API/knowledge] 需求退出知识库: id={}", entry_id)
 
-        # 从向量库移除
+        # 从向量库移除（v3.4.4：传 product_id，删除后失效该产品 KB 检索缓存——
+        # 否则退出知识库的需求在 24h TTL 内仍会被检索到）
         try:
-            await asyncio.to_thread(vector_store.delete_requirement_from_kb, entry_id)
+            await asyncio.to_thread(
+                vector_store.delete_requirement_from_kb, entry_id, entry_product_id
+            )
             kb_deleted = True
         except Exception as e:
             kb_error = str(e)[:300]
