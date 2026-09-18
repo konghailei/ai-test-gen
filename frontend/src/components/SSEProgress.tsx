@@ -11,7 +11,7 @@ interface Props {
 
 const stageLabels: Record<string, string> = {
   parse: '加载已确认需求',
-  select_channel: '选择生成通道',
+  select_channel: '生成准备',
   clarify: '需求校验',
   gate: '用例质量门禁',
   impact: '影响分析',

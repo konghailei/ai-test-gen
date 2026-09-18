@@ -3,7 +3,7 @@
 
 对应 DevBlog 全链路 spec 的 T5：
     `rule` TR-5.2: SSE 阶段顺序 9 节点完整，Content-Type=text/event-stream，
-                   done 带 cases 和 channel=FULL
+                   done 带 cases（v3.4.4 起 channel 字段已删除，断言改为「不含 channel」）
     `rule` TR-5.5: 补生成 ≤ 1 次；最终用例取自第二次审核结果
 
 载体选择说明（重要）
@@ -265,8 +265,8 @@ async def recheck() -> None:
        f"覆盖 {9 - len(missing)}/9；缺失 {missing}", stages_seen=seen)
     ck("TR-5.2④ done 事件带 cases", bool(done_payload.get("cases")),
        f"cases = {len(done_payload.get('cases') or [])}")
-    ck("TR-5.2⑤ done 事件 channel=FULL", done_payload.get("channel") == "FULL",
-       f"channel={done_payload.get('channel')}")
+    ck("TR-5.2⑤ done 事件不含 channel（v3.4.4 已删除）", "channel" not in done_payload,
+       f"channel={done_payload.get('channel', '<absent>')}")
     supplement = [s for s in stages if s in ("regenerate", "supplement")]
     ck("TR-5.5 补生成 ≤ 1 次", len(supplement) <= 1, f"补生成 {len(supplement)} 次")
 
@@ -379,10 +379,10 @@ async def main() -> None:
        stages_seen=seen, missing=missing, clarify_triggered="clarify" in seen)
 
     has_cases = bool(done_payload.get("cases"))
-    channel = done_payload.get("channel")
     ck("TR-5.2④ done 事件带 cases", has_cases,
        f"cases 数量 = {len(done_payload.get('cases') or [])}")
-    ck("TR-5.2⑤ done 事件 channel=FULL", channel == "FULL", f"channel={channel}")
+    ck("TR-5.2⑤ done 事件不含 channel（v3.4.4 已删除）", "channel" not in done_payload,
+       f"channel={done_payload.get('channel', '<absent>')}")
 
     # TR-5.5：补生成次数
     supplement = [s for s in stages if s in ("regenerate", "supplement")]

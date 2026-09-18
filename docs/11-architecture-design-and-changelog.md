@@ -43,7 +43,7 @@
 │  LangGraph DAG Pipeline:                                            │
 │  ReqAgent → ClarifyAgent → QualityGate → ImpactAgent                │
 │            → GenAgent → ReviewAgent                                 │
-│  通道选择: FAST (简单需求) / FULL (复杂需求)                         │
+│  生成准备: 构造环节开关（已确认需求跳过生成期澄清；v3.4.4 前为 FAST/FULL 通道分级） │
 │  🔒 L2: 断路器 | 指数退避重试 | 多 LLM 提供商故障转移                │
 └──────────────────────────┬──────────────────────────────────────────┘
                            │
@@ -153,7 +153,7 @@ ai-test-gen/
 | 模块 | 职责 |
 |------|------|
 | orchestrator.py | LangGraph DAG 编排器（流水线入口 + SSE 事件分发） |
-| channel_selector.py | 通道选择器（FAST / FULL 自动判定） |
+| channel_selector.py | 生成配置构造器（环节开关；原通道选择器，v3.4.4 删除 FAST/FULL 分级） |
 | quality_gate.py | 质量门禁（Blocker 阻断 / Warning 放行） |
 | llm_client.py | LLM 统一调用客户端（含重试、超时、故障转移） |
 | auth.py | JWT 认证中间件 + 权限校验 |
@@ -287,7 +287,7 @@ START → parse → select_channel
                       ↓
                 [route_after_channel]
                  /              \
-               FULL             FAST
+        启用生成期澄清      未启用（生产实际路径）
                 ↓                ↓
             clarify          gate(直接)
                 ↓                ↓
@@ -309,21 +309,26 @@ START → parse → select_channel
 | 节点 | SSE stage | 进度 | 职责 |
 |------|-----------|------|------|
 | `_parse_node` | parse | 20% | 使用已确认的 SRR（不重新解析） |
-| `_select_channel_node` | select_channel | 25% | 通道选择（FAST / FULL） |
+| `_prepare_node`（节点 key 保持 select_channel） | select_channel | 25% | 生成准备（构造环节开关；已确认需求跳过生成期澄清） |
 | `_clarify_node` | clarify | 30% | ClarifyAgent 澄清 + KB 补全 |
 | `_gate_node` | gate | 40% | QualityGate 门禁检查 |
 | `_impact_node` | impact | 50% | ImpactAgent 影响分析（仅优化需求） |
 | `_gen_node` | generate | 70% | GenAgent 生成用例 + FP 定向 + 一致性检查 |
 | `_review_node` | review | 90% | ReviewAgent 审核 + KB 回流 |
 
-### 3.3 通道选择策略
+### 3.3 生成准备策略（v3.4.4：原「通道选择策略」）
 
-由 [core/channel_selector.py](file:///e:/git-down/ai-test-gen/backend/app/core/channel_selector.py) 决定：
+由 [core/channel_selector.py](file:///e:/git-down/ai-test-gen/backend/app/core/channel_selector.py) 的 `build_generation_config()` 决定：
 
-| 通道 | 触发条件 | 启用能力 |
+| 环节开关 | 取值 | 说明 |
 |------|---------|---------|
-| **FULL** | v1.6 起所有需求统一走 FULL | Clarify + Impact + 多类型生成 + 完整审核 |
-| **FAST** | （保留通道，当前未启用） | 跳过 Clarify + 单次批量生成 + 采样审核 |
+| `enable_clarify` | 已确认需求恒 False | 澄清已在需求分析链路完成；DAG 条件路由仍以它为准 |
+| `enable_impact_analysis` | 仅优化需求 | 由 SRR 的 `optimization_context` 决定 |
+| `enable_multi_type_generation` | 恒 True | 4 类型分类生成（功能/边界/异常/安全），质量保证核心 |
+| `enable_full_review` | 恒 True | 完整审核，质量保证核心 |
+
+> **历史**：v1.6 前曾有 FAST/FULL 通道分级，因误判 FAST 导致只生成 1 个用例而废止
+> （恒走完整流程）；v3.4.4 清理掉全部 FAST 死代码，channel 字段不复存在。
 
 **Clarify 回环保护**（`ClarifyLoopGuard`）：最多 3 轮，超过则强制通过 + 警告，避免死锁。
 

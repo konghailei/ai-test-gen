@@ -117,7 +117,7 @@ START → parse → select_channel ─┬─(enable_clarify)→ clarify → gate
 - `passed` 或 `forced_pass` → 走 impact
 - 未通过且 `iteration < MAX_CLARIFY_ITERATIONS(3)` → 回 clarify
 - 达上限 → `forced_pass=true` + warning "达到最大澄清轮次（3），强制通过"
-- **clarify 被禁用时**（FAST / 已确认需求）未通过也直接强制放行，绝不回环
+- **clarify 被禁用时**（已确认需求）未通过也直接强制放行，绝不回环
 
 `forced_pass` 会透传到 done 事件（`manual_action_required=true`），前端提示"门禁未完全通过，请人工修改需求后再确认"。
 

@@ -99,7 +99,7 @@ flowchart LR
 - `review_agent._llm_review()` 失败时返回 `review_degraded=True`；
 - `orchestrator._review_node()` 在识别 `review_degraded` **之前**，已经调用 `persist_to_kb()`；
 - `persist_to_kb()` 仍按置信度把用例写成 `approved` 并写 Milvus；
-- `QualityGate` 在 FAST / 已确认需求上失败时会 `forced_pass=True`，后续仍进入生成、审核和回流。
+- `QualityGate` 在未启用生成期澄清（已确认需求）的场景失败时会 `forced_pass=True`，后续仍进入生成、审核和回流。
 
 关键位置：
 

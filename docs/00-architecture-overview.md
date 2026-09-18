@@ -621,46 +621,32 @@ Phase 3: 成熟 + 持续优化 (8-12 周)
 | DLQ | ❌ | ✅ | ✅ | MVP 可接受偶尔写入失败 |
 | 进度反馈 | ❌（HTTP 轮询） | ✅（SSE） | ✅ | MVP 用轮询代替 |
 
-### 配置驱动的通道选择
+### 配置驱动的生成准备（原「通道选择」）
+
+> **v3.4.4 变更**：原「FAST/FULL 通道分级」已删除——分级判定在 v1.6 被废止
+> （曾因误判 FAST 导致只生成 1 个用例），此后恒走完整流程，channel 字段成为死代码。
+> 模块现名 `channel_selector.build_generation_config()`，职责收敛为构造环节开关。
 
 ```python
-# 根据需求复杂度自动选择处理通道
-# 注意：字段路径必须与 SRR Schema（doc-01 §2.1）一致
-#   - priority 在 srr["requirement"]["priority"]
-#   - happy_path 步骤在 srr["flows"]["happy_path"]["steps"]
-#   - 是否优化需求通过 srr.get("optimization_context") 判断（doc-01 §7）
-def select_channel(srr: dict) -> dict:
-    priority = srr.get("requirement", {}).get("priority", "P2")
-    happy_steps = srr.get("flows", {}).get("happy_path", {}).get("steps", []) or []
-    has_opt_context = bool(srr.get("optimization_context"))
-
-    # 复杂需求判定：P0 优先级 / happy_path 步骤 > 5 / 优化需求（需影响分析）
-    is_complex = (priority == "P0") or (len(happy_steps) > 5) or has_opt_context
-
-    if is_complex:
-        # 复杂需求 → 完整通道
-        return {
-            "channel": "FULL",
-            "enable_clarify": True,
-            "enable_impact_analysis": has_opt_context,  # 仅优化需求触发
-            "enable_multi_type_generation": True,  # 4 类型并行
-            "enable_full_review": True,            # 100% 审核
-        }
-    else:
-        # 简单需求 → 快速通道（MVP 链路）
-        return {
-            "channel": "FAST",
-            "enable_clarify": False,
-            "enable_impact_analysis": False,
-            "enable_multi_type_generation": False,  # 1 次批量生成
-            "enable_full_review": False,            # 采样 5%
-        }
+# 构造本次生成的环节开关（core/channel_selector.py）
+def build_generation_config(srr: dict) -> GenerationConfig:
+    return GenerationConfig(
+        # 生成期澄清默认开启，由 orchestrator 在"已确认需求"场景改为 False
+        # （澄清已在需求分析链路完成，生成期再澄清无意义且易卡死）
+        enable_clarify=True,
+        # 仅优化需求触发影响分析（srr.get("optimization_context")，doc-01 §7）
+        enable_impact_analysis=bool(srr.get("optimization_context")),
+        # 4 类型并行：功能/边界/异常/安全——质量保证核心，恒开
+        enable_multi_type_generation=True,
+        # 完整审核——质量保证核心，恒开
+        enable_full_review=True,
+    )
 ```
 
-> **修复说明**（P2-6）：原代码使用 `req["priority"]` / `req.get("is_optimization", False)` 路径错误：
+> **历史修复说明**（P2-6，针对已删除的旧 select_channel）：原代码使用
+> `req["priority"]` / `req.get("is_optimization", False)` 路径错误：
 > - `priority` 实际位于 `srr["requirement"]["priority"]`（见 [doc-01 §2.1 SRR 示例](./01-requirement-parsing.md#21-level-1-标准化需求模板-markdown)）
 > - SRR 中无 `is_optimization` 字段，优化需求通过 `optimization_context` 是否存在判断（见 [doc-01 §7 优化需求上下文](./01-requirement-parsing.md#优化需求上下文自动补全-核心增强)）
-> - 同时抽出为函数 `select_channel`，便于在 LangGraph 编排层（[doc-00 §3](#3-编排层-langgraph-dag)）的入口节点统一调用，避免散落在多个节点中重复判定。
 
 ---
 

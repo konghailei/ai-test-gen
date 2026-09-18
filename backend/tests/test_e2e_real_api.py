@@ -277,11 +277,16 @@ def phase_sse_generate() -> dict:
                     error_payload = payload
     elapsed = time.time() - t0
     check("SSE 流正常结束", not error_payload, short(error_payload))
-    expect_stages = ["parse", "select_channel", "clarify", "gate", "impact", "test_design", "generate", "review", "done"]
+    # v3.4.4 起无 FAST/FULL 通道概念：生产路径（已确认需求）enable_clarify 恒为 False，
+    # clarify 节点被条件路由跳过，SSE 不产出该 stage（事件由 astream 按实际执行节点产出）。
+    expect_stages = ["parse", "select_channel", "gate", "impact", "test_design", "generate", "review", "done"]
     missing = [s for s in expect_stages if s not in stages]
-    check("9 节点 stage 事件齐全", not missing, f"缺少 {missing}，实际 {stages}")
+    check("8 节点 stage 事件齐全", not missing, f"缺少 {missing}，实际 {stages}")
+    check("clarify stage 已跳过（已确认需求恒跳过生成期澄清）",
+          "clarify" not in stages, f"实际出现 {stages}")
     check("done 事件包含 cases", bool(done_payload.get("cases")), short(done_payload, 300))
-    check("done 事件包含 channel", bool(done_payload.get("channel")), short(done_payload, 200))
+    check("done 事件不含 channel（v3.4.4 已删除该字段）",
+          "channel" not in done_payload, short(done_payload, 200))
     cases = done_payload.get("cases") or []
     check(f"生成用例数量 ≥ 5（实际 {len(cases)}，耗时 {elapsed:.0f}s）", len(cases) >= 5)
     return done_payload

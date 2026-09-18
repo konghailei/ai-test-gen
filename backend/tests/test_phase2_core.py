@@ -1,10 +1,10 @@
 """阶段2核心组件测试脚本。
 
 使用 docs/01-requirement-parsing.md §2.2 的真实 SRR 示例（用户登录功能）
-验证 channel_selector、quality_gate、prompts 各模块功能正确。
+验证 channel_selector（生成配置构造器）、quality_gate、prompts 各模块功能正确。
 
 测试覆盖：
-1. channel_selector: FAST/FULL 通道选择逻辑
+1. channel_selector: 生成环节开关构造（v3.4.4 前为 FAST/FULL 通道选择）
 2. quality_gate: 7 项检查 + 动态阈值（冷启动/正常）
 3. prompts: 5 个提示词模块的导入和函数调用
 """

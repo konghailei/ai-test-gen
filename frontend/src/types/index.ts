@@ -248,7 +248,6 @@ export interface SSEEvent extends GenerationResult {
   message: string
   progress: number
   req_id?: string
-  channel?: string
   cases?: TestCase[]
   review_report?: ReviewReport
   impact_result?: Record<string, unknown>

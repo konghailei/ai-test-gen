@@ -50,7 +50,7 @@ function DagPipelineDiagram() {
         </marker>
       </defs>
       {node(60, 40, 150, 44, '#E6F1FB', '#185FA5', 'parse', '需求解析')}
-      {node(250, 40, 170, 44, '#EEEDFE', '#534AB7', 'select_channel', '通道选择')}
+      {node(250, 40, 170, 44, '#EEEDFE', '#534AB7', 'select_channel', '生成准备')}
       {node(60, 140, 150, 44, '#FAEEDA', '#BA7517', 'clarify', '需求澄清(含KB补全)')}
       {node(250, 140, 150, 44, '#FAECE7', '#993C1D', 'gate', '质量门禁')}
       {node(450, 140, 150, 44, '#E1F5EE', '#0F6E56', 'impact', '影响分析')}
@@ -66,8 +66,8 @@ function DagPipelineDiagram() {
       {arrow(525, 184, 525, 230)}
       {arrow(450, 252, 400, 342)}
       {arrow(250, 342, 160, 342)}
-      <text x="222" y="104" fontSize={10} fill="#94a3b8">FULL</text>
-      <text x="352" y="118" fontSize={10} fill="#94a3b8">FAST</text>
+      <text x="196" y="104" fontSize={10} fill="#94a3b8">启用澄清</text>
+      <text x="348" y="118" fontSize={10} fill="#94a3b8">默认路径</text>
       <text x="422" y="150" fontSize={10} fill="#94a3b8">pass</text>
       <text x="224" y="156" fontSize={10} fill="#94a3b8">retry</text>
     </svg>
@@ -196,7 +196,7 @@ const SECTIONS: ManualSection[] = [
     ],
     features: [
       { label: '流水线', desc: '需求分析到用例生成的端到端链路（由 LangGraph 编排）：上传 → 解析(SRR+FP拆分) → 澄清(含知识库基线补全) → 质量门禁 → 功能点审核 → 确认完成 → 影响分析 → 生成(四级去重) → 审核(一致性检查) → 入库' },
-      { label: '通道选择', desc: 'select_channel（通道选择）按需求复杂度分流：FULL 走澄清闭环，FAST 直接进质量门禁' },
+      { label: '生成准备', desc: 'select_channel（生成准备）构造本次生成的环节开关：已确认需求跳过生成期澄清（澄清已在需求分析阶段完成），直接进入质量门禁；多类型生成与完整审核始终启用' },
       { label: '质量门禁', desc: 'gate（质量门禁）评估完整性；未通过且可重试则回到 clarify，达到上限强制通过' },
       { label: '功能点审核', desc: '解析后自动拆分功能点(FP)，用户逐个审核通过(approved)后需求变为 pending_review（待确认）' },
       { label: '确认完成', desc: '需求状态 pending_review 时点击「确认完成」变为 confirmed，只有 confirmed 状态可生成用例' },
@@ -212,7 +212,7 @@ const SECTIONS: ManualSection[] = [
     logic: [
       {
         step: 'DAG 编排',
-        detail: 'LangGraph（LLM 应用编排框架）的 StateGraph 把节点编译为可执行 DAG。需求分析链路：parse（解析+SRR+FP拆分）→ select_channel（通道选择）→ clarify（澄清+KB补全）→ gate（质量门禁）。用例生成链路（需需求 confirmed）：impact（影响分析）→ generate（生成+四级去重）→ review（审核+一致性检查+向量库写入）。select_channel 按条件分支（FULL / FAST），gate 按条件分支（通过 / 未通过回 clarify 重试）',
+        detail: 'LangGraph（LLM 应用编排框架）的 StateGraph 把节点编译为可执行 DAG。需求分析链路：parse（解析+SRR+FP拆分）→ select_channel（生成准备）→ clarify（澄清+KB补全）→ gate（质量门禁）。用例生成链路（需需求 confirmed）：impact（影响分析）→ generate（生成+四级去重）→ review（审核+一致性检查+向量库写入）。select_channel 按是否启用生成期澄清分支（已确认需求恒跳过），gate 按条件分支（通过 / 未通过回 clarify 重试）',
       },
       {
         step: '需求状态机',
@@ -398,8 +398,8 @@ const SECTIONS: ManualSection[] = [
     ],
     logic: [
       {
-        step: '1. SRR 加载与通道选择',
-        detail: '从数据库加载已确认需求的 SRR JSON → select_channel 按需求复杂度分流：FULL（走澄清闭环）/ FAST（直接进质量门禁）。需求分析阶段的 SRR 已包含知识库基线补全的上下文，生成阶段不再单独检索知识库',
+        step: '1. SRR 加载与生成准备',
+        detail: '从数据库加载已确认需求的 SRR JSON → select_channel（生成准备）构造环节开关：已确认需求跳过生成期澄清（澄清已在需求分析阶段完成），直接进入质量门禁；影响分析仅优化需求启用。需求分析阶段的 SRR 已包含知识库基线补全的上下文，生成阶段不再单独检索知识库',
       },
       {
         step: '2. 测试模式检索',

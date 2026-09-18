@@ -191,7 +191,7 @@ def make_sse_event(stage: str, message: str, **extra: Any) -> dict:
     Args:
         stage: 阶段名称（parse/select_channel/clarify/gate/impact/test_design/generate/review/done/error）
         message: 人类可读的进度消息
-        **extra: 附加字段（如 req_id、channel、cases_count 等）
+        **extra: 附加字段（如 req_id、cases_count 等）
 
     Returns:
         dict: SSE 事件，格式：

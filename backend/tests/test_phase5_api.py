@@ -566,15 +566,15 @@ def test_generate_sse(client: TestClient) -> None:
 
     # 7.4 生成 - mock orchestrator，验证 SSE 流
     async def mock_run_pipeline(*args, **kwargs):
-        """模拟 orchestrator 产出 SSE 事件流。"""
+        """模拟 orchestrator 产出 SSE 事件流（v3.4.4：事件不再携带 channel 字段）。"""
         yield {"stage": "parse", "message": "解析中", "progress": 20, "req_id": TEST_REQ_ID2}
-        yield {"stage": "select_channel", "message": "通道选择", "progress": 25, "channel": "FULL"}
+        yield {"stage": "select_channel", "message": "生成准备", "progress": 25}
         yield {"stage": "gate", "message": "门禁检查", "progress": 40, "gate_passed": True}
         yield {"stage": "generate", "message": "生成中", "progress": 75, "cases_count": 3}
         yield {"stage": "review", "message": "审核中", "progress": 90, "review_passed": 3}
         yield {
             "stage": "done", "message": "完成", "progress": 100,
-            "req_id": TEST_REQ_ID2, "channel": "FULL",
+            "req_id": TEST_REQ_ID2,
             "cases": [{"id": "TC-1"}, {"id": "TC-2"}, {"id": "TC-3"}],
             "review_report": {"total_cases": 3, "passed_cases": 3},
         }
