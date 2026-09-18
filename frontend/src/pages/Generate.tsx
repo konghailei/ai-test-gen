@@ -158,7 +158,6 @@ export default function Generate() {
     // v2.0：重置新增状态
     setConsistencyCheck(null)
     setFpCoverage(null)
-    setChannel('')
     setManualActionRequired(false)
     setGateResult(null)
     setRegressionReuseSummary(null)
