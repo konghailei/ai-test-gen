@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-test-gen · Harness 工程亮点</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 15px; line-height: 1.72; color: #2C2C2A; background: #F6F6F4;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 40px 24px 80px; }
+
+  header.hero { padding: 4px 0 28px; border-bottom: 1px solid #E3E3DE; margin-bottom: 32px; }
+  header.hero h1 { font-size: 26px; font-weight: 500; margin: 0 0 10px; color: #1A1A18; letter-spacing: -0.2px; }
+  header.hero .sub { font-size: 15px; color: #5F5E5A; margin: 0 0 18px; }
+  header.hero .meta { font-size: 13px; color: #888780; }
+  .thesis {
+    margin: 20px 0 0; padding: 16px 20px; background: #E6F1FB;
+    border-left: 3px solid #185FA5; border-radius: 0 8px 8px 0;
+    font-size: 14px; color: #0C447C;
+  }
+  .thesis strong { font-weight: 500; }
+
+  .layout { display: grid; grid-template-columns: 210px 1fr; gap: 40px; align-items: start; }
+  nav.toc { position: sticky; top: 24px; font-size: 13px; }
+  nav.toc .toc-title { font-size: 12px; color: #888780; margin-bottom: 10px; letter-spacing: 0.4px; }
+  nav.toc a {
+    display: block; padding: 5px 10px; margin-bottom: 1px; color: #5F5E5A;
+    text-decoration: none; border-left: 2px solid transparent; border-radius: 0 4px 4px 0;
+  }
+  nav.toc a:hover { background: #EDEDEA; color: #1A1A18; }
+  nav.toc a.on { color: #0C447C; border-left-color: #185FA5; background: #E6F1FB; }
+
+  section { margin-bottom: 44px; scroll-margin-top: 24px; }
+  h2 { font-size: 18px; font-weight: 500; margin: 0 0 6px; color: #1A1A18; }
+  h2 .idx {
+    display: inline-block; min-width: 26px; height: 26px; line-height: 26px;
+    text-align: center; background: #1A1A18; color: #fff;
+    border-radius: 7px; font-size: 13px; margin-right: 10px; vertical-align: 2px;
+  }
+  .lead { font-size: 14px; color: #5F5E5A; margin: 0 0 18px; }
+
+  .card {
+    background: #fff; border: 1px solid #E3E3DE; border-radius: 12px;
+    padding: 22px 24px; margin-bottom: 18px;
+  }
+  .card h3 { font-size: 16px; font-weight: 500; margin: 0 0 4px; color: #1A1A18; }
+  .card .tag {
+    display: inline-block; font-size: 12px; padding: 2px 9px; border-radius: 20px;
+    background: #E1F5EE; color: #085041; margin-bottom: 12px;
+  }
+  .card p { margin: 0 0 12px; font-size: 14px; color: #444441; }
+  .card .why {
+    font-size: 13px; color: #0F6E56; background: #E1F5EE;
+    padding: 9px 14px; border-radius: 8px; margin: 14px 0 0;
+  }
+  .card .why b { font-weight: 500; }
+  .files { margin: 0 0 14px; padding: 0; list-style: none; font-size: 13px; }
+  .files li { padding: 3px 0 3px 16px; position: relative; color: #444441; }
+  .files li::before { content: ""; position: absolute; left: 3px; top: 13px;
+    width: 5px; height: 5px; border-radius: 50%; background: #B4B2A9; }
+  code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12.5px; background: #F1EFE8; padding: 1.5px 5px;
+    border-radius: 4px; color: #712B13;
+  }
+  .cmd { position: relative; margin: 0 0 10px; }
+  .cmd pre {
+    margin: 0; background: #2C2C2A; color: #E8E8E4; padding: 13px 56px 13px 16px;
+    border-radius: 9px; overflow-x: auto;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12.5px; line-height: 1.6;
+  }
+  .cmd pre .c { color: #97C459; }
+  .cmd button {
+    position: absolute; top: 9px; right: 9px; padding: 4px 10px;
+    font-size: 11.5px; font-family: inherit; color: #C8C8C2;
+    background: #444441; border: none; border-radius: 6px; cursor: pointer;
+  }
+  .cmd button:hover { background: #5F5E5A; color: #fff; }
+
+  .diagram { background: #fff; border: 1px solid #E3E3DE; border-radius: 12px; padding: 22px 20px; margin-bottom: 8px; }
+  .diagram svg { display: block; width: 100%; height: auto; }
+
+  ol.rules { margin: 0; padding-left: 0; list-style: none; counter-reset: r; }
+  ol.rules > li {
+    counter-increment: r; position: relative; padding: 12px 0 12px 44px;
+    border-bottom: 1px solid #EDEDEA; font-size: 14px;
+  }
+  ol.rules > li:last-child { border-bottom: none; }
+  ol.rules > li::before {
+    content: counter(r); position: absolute; left: 0; top: 12px;
+    width: 26px; height: 26px; line-height: 26px; text-align: center;
+    background: #E6F1FB; color: #0C447C; border-radius: 50%; font-size: 12.5px;
+  }
+  ol.rules b { font-weight: 500; color: #1A1A18; }
+  .muted { color: #888780; font-size: 13px; }
+  .ok { color: #0F6E56; font-weight: 500; }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid #E3E3DE;
+    font-size: 12.5px; color: #888780; }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; gap: 24px; }
+    nav.toc { position: static; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>ai-test-gen · Harness 工程亮点</h1>
+  <p class="sub">围绕「非确定性 LLM 流水线」搭建的判定、执行与证据基础设施</p>
+  <p class="meta">仓库 konghailei/ai-test-gen · 整理于 2026-09-16 · 全部条目均经代码实读核实</p>
+  <div class="thesis">
+    <strong>一句话结论：</strong>这个项目最值钱的 harness 设计不是某个脚本，而是
+    <strong>「脚本只判结构与机制，内容判定回传给 AI」</strong>的分层原则，以及与之配套的
+    <strong>服务端证据链</strong>——任何"上线/发布/跳过"的决定都必须引用可复现证据，而不是调用方的声明。
+  </div>
+</header>
+
+<div class="layout">
+
+<nav class="toc">
+  <div class="toc-title">目录</div>
+  <a href="#s0">三层结构总览</a>
+  <a href="#s1">1 · 三层测试计划执行器</a>
+  <a href="#s2">2 · 故障注入探针</a>
+  <a href="#s3">3 · 服务端评测门禁</a>
+  <a href="#s4">4 · fail-closed 发布决策</a>
+  <a href="#s5">5 · 判定器自身的可信度</a>
+  <a href="#s6">6 · 指纹续跑与启动自愈</a>
+  <a href="#s7">7 · 并发互斥与事务性出箱</a>
+  <a href="#s8">8 · 静默降级扫描与真实数据定标</a>
+  <a href="#s9">9 · 人机闭环与失败回流</a>
+  <a href="#s10">可迁移的方法论</a>
+  <a href="#s11">边界与未做项</a>
+</nav>
+
+<main>
+
+<section id="s0">
+  <h2>三层结构总览</h2>
+  <p class="lead">判定层决定什么叫合格；执行层兜住跑不完、跑错了；证据层回答"凭什么信它"。</p>
+  <div class="diagram">
+<svg viewBox="0 0 680 466" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>ai-test-gen 的 harness 三层结构</title>
+<desc>三层 harness：判定层决定什么算合格，执行层处理跑不完与跑错，证据层提供可复算凭据。</desc>
+<rect x="40" y="28" width="600" height="118" rx="20" fill="#E6F1FB" stroke="#85B7EB" stroke-width="0.5"/>
+<text x="62" y="59" style="font-size:14px;font-weight:500;fill:#0C447C">判定层 · 什么算合格</text>
+<rect x="62" y="76" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#185FA5" stroke-width="0.5"/>
+<text x="148" y="94" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#0C447C">服务端评测门禁</text>
+<text x="148" y="112" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#185FA5">prompt_hash 逐字绑定</text>
+<rect x="254" y="76" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#185FA5" stroke-width="0.5"/>
+<text x="340" y="94" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#0C447C">fail-closed 决策</text>
+<text x="340" y="112" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#185FA5">纯函数，异常改终态</text>
+<rect x="446" y="76" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#185FA5" stroke-width="0.5"/>
+<text x="532" y="94" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#0C447C">确定性合同与评分</text>
+<text x="532" y="112" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#185FA5">命中率，不用 LLM 打分</text>
+<rect x="40" y="166" width="600" height="118" rx="20" fill="#E1F5EE" stroke="#5DCAA5" stroke-width="0.5"/>
+<text x="62" y="197" style="font-size:14px;font-weight:500;fill:#085041">执行层 · 跑不完 / 跑错了怎么办</text>
+<rect x="62" y="214" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="148" y="232" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#085041">三层并发互斥</text>
+<text x="148" y="250" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#0F6E56">advisory lock + 唯一索引</text>
+<rect x="254" y="214" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="340" y="232" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#085041">指纹断点续跑</text>
+<text x="340" y="250" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#0F6E56">8 字段复算 + 启动自愈</text>
+<rect x="446" y="214" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#0F6E56" stroke-width="0.5"/>
+<text x="532" y="232" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#085041">事务性出箱</text>
+<text x="532" y="250" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#0F6E56">同事务入箱，幂等投递</text>
+<rect x="40" y="304" width="600" height="118" rx="20" fill="#F1EFE8" stroke="#B4B2A9" stroke-width="0.5"/>
+<text x="62" y="335" style="font-size:14px;font-weight:500;fill:#444441">证据层 · 凭什么信它</text>
+<rect x="62" y="352" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="148" y="370" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#444441">40 个故障注入探针</text>
+<text x="148" y="388" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#5F5E5A">按验收口径反推</text>
+<rect x="254" y="352" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="340" y="370" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#444441">静默降级扫描器</text>
+<text x="340" y="388" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#5F5E5A">AST 扫「捕获不标记」</text>
+<rect x="446" y="352" width="173" height="56" rx="8" fill="#FFFFFF" stroke="#5F5E5A" stroke-width="0.5"/>
+<text x="532" y="370" text-anchor="middle" dominant-baseline="central" style="font-size:13px;font-weight:500;fill:#444441">人机判定闭环</text>
+<text x="532" y="388" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#5F5E5A">审阅台→落地→回流</text>
+<text x="340" y="446" text-anchor="middle" dominant-baseline="central" style="font-size:12px;fill:#888780">被测对象：非确定性 LLM 流水线（8 节点 · 三通道 · 多供应商）</text>
+</svg>
+  </div>
+</section>
+
+<section id="s1">
+  <h2><span class="idx">1</span>三层测试计划执行器</h2>
+  <p class="lead">把"验证 LLM 流水线"拆成机器可判 / 人（或 AI）可判的两类问题。</p>
+  <div class="card">
+    <h3>脚本只判结构与机制，内容判定回传 AI</h3>
+    <span class="tag">核心设计</span>
+    <p>L1 机制层用探针 + 回归脚本断言<b>不变量</b>（互斥、幂等、状态守卫、指纹）；L2 流程层跑真实 API，
+    <b>零内容断言</b>，只判状态码、终态合法性、字段齐全、计数一致；L3 内容层把生成内容原样打包成
+    <code>ai-review/</code> 证据包 + <code>AI-REVIEW-TASK.md</code> 任务书（判什么、按什么标准、交付什么），
+    交 AI 逐条判定后经落地脚本写库。</p>
+    <ul class="files">
+      <li><code>backend/scripts/run_test_plan.py</code> — <code>step_mechanism()</code> / <code>step_unit()</code> /
+        <code>_structural_checks()</code> / <code>write_ai_task()</code></li>
+      <li>L1 覆盖清单在 <code>PROBES</code> 与 <code>REGRESSION</code> 常量里，改测试计划只改这两处</li>
+      <li>输出：<code>/app/_review_runs/plan-&lt;ts&gt;/plan-results.json</code>（三层结果汇总）</li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 只跑 L1 机制层（秒级，不烧额度）</span>
+docker exec ai-test-gen-api python /app/scripts/run_test_plan.py --only mechanism
+
+<span class="c"># 完整三层：需求分析 → 生成 → 结构断言 → 打包给 AI 判定</span>
+docker exec ai-test-gen-api python /app/scripts/run_test_plan.py</pre>
+    </div>
+    <p class="why"><b>为什么值得迁移：</b>用脚本断言 LLM 的输出内容必然误判。把"机器可判的不变量"和
+    "需要判断力的内容"分开，前者交给脚本（客观、可重复、秒级），后者回传给模型并保留证据包。</p>
+  </div>
+</section>
+
+<section id="s2">
+  <h2><span class="idx">2</span>40 个故障注入探针</h2>
+  <p class="lead">不等故障自然发生，而是按验收口径主动制造故障点。</p>
+  <div class="card">
+    <h3>把非确定性问题拆成可确定复现的断言</h3>
+    <span class="tag">确定性验证</span>
+    <p><code>backend/_probe_*.py</code> 共 40 个，命名即验收点。全部跑在容器内、<b>不调用 LLM</b>，
+    用真实 PG/Milvus + 桩 Agent，秒级出结果。典型手法是在关键边界注入崩溃，然后断言"最终收敛且不重复"。
+    本次实跑 <code>_probe_outbox.py</code> 为 <span class="ok">13 项通过 / 0 项失败</span>，
+    三个崩溃点分别是：PG commit 前崩溃（事务回滚）、投递失败后退避重试、Milvus 成功后 ack 前崩溃（重复投递幂等）。</p>
+    <ul class="files">
+      <li><code>backend/_probe_outbox.py</code> — 出箱三崩溃点收敛</li>
+      <li><code>backend/_probe_concurrency.py</code> — 并发互斥 + SSE 隔离</li>
+      <li><code>backend/_probe_durable.py</code> — 断点续跑 + 输入指纹</li>
+      <li><code>backend/_probe_revision_lock.py</code> / <code>_probe_selfheal.py</code> / <code>_probe_first_response.py</code> …</li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 单个探针（示例：出箱）</span>
+docker exec ai-test-gen-api python /app/_probe_outbox.py
+
+<span class="c"># 查看权威清单（PROBES 常量）</span>
+docker exec ai-test-gen-api python /app/scripts/run_test_plan.py --only mechanism</pre>
+    </div>
+    <p class="why"><b>为什么值得迁移：</b>失败路径的验证用<b>注入</b>而不用等待——确定性、秒级、不烧额度。
+    项目里多次用"换桩 + 断言降级标记"的方式验证 LLM 失败路径。</p>
+  </div>
+</section>
+
+<section id="s3">
+  <h2><span class="idx">3</span>服务端评测门禁</h2>
+  <p class="lead">"提示词能不能上线"从调用方声明，改成服务端可复现证据。</p>
+  <div class="card">
+    <h3>prompt_hash 逐字绑定 + 基线不劣化</h3>
+    <span class="tag">证据链</span>
+    <p>原本激活候选提示词只校验客户端提交的 <code>confirmed_eval: bool</code>——等于自证清白。
+    现在激活接口必须引用一条服务器端 <code>passed</code> 的评估运行，且通过 6 项校验：运行存在 →
+    状态为 passed → target 一致 → 数据集 hash 非空 → 口径版本一致 → <b>prompt_hash 逐字匹配</b>；
+    另外必须有基线对比记录，证明"不比线上更差"。候选文本改一个字，旧评估立即作废。</p>
+    <ul class="files">
+      <li><code>backend/app/core/evaluation.py</code> — <code>validate_prompt_activation()</code>（纯函数，便于单测）</li>
+      <li><code>backend/scripts/eval_prompt_candidate.py</code> — 候选 vs 线上基线 A/B</li>
+      <li><code>backend/scripts/eval_retrieval.py</code> — 检索质量 recall@5/10/20 + MRR</li>
+      <li><code>mark_evaluation_run_consumed()</code> 记录"这条提示词凭什么上线"</li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 冷启动冒烟（1 条样本，省额度）</span>
+docker exec ai-test-gen-api python /app/scripts/eval_prompt_candidate.py \
+  --integration-id PI-xxx --limit 1
+
+<span class="c"># 检索质量（依赖 backend/eval/retrieval_evalset.jsonl 的人工标注）</span>
+docker exec ai-test-gen-api python /app/scripts/eval_retrieval.py --top-k 20</pre>
+    </div>
+    <p class="why"><b>为什么值得迁移：</b>LLM 资产（提示词、检索配置、模型路由）的每次变更都应有
+    <b>版本化数据集 + 可复现评估记录 + 内容 hash 绑定</b>三件套，否则"评估过"只是一句口头承诺。</p>
+  </div>
+</section>
+
+<section id="s4">
+  <h2><span class="idx">4</span>fail-closed 发布决策</h2>
+  <p class="lead">合格与否是纯函数算出来的三态，不是抛异常。</p>
+  <div class="card">
+    <h3>Unknown is not success：未知一律降级为人工复核</h3>
+    <span class="tag">门禁</span>
+    <p><code>decide_publication()</code> 只认正向证据：没有用例、内容合同错误 → <code>blocked</code>；
+    其余缺失（覆盖口径未知、审核降级、质量门未过、子任务失败、任一降级标记）→ <code>human_review</code>；
+    全部通过才 <code>auto_approve</code>。原因码可枚举（<code>coverage_unknown</code>、
+    <code>review_llm_failed</code>、<code>invalid_point_references</code>…），前端可直接展示。
+    与之配套的 <code>quality_outcome()</code> 产出 done 事件的 <code>completion_status</code>
+    （completed / awaiting_human_review / failed）。</p>
+    <ul class="files">
+      <li><code>backend/app/core/publication_policy.py</code> — <code>decide_publication()</code> / <code>quality_outcome()</code></li>
+      <li><code>backend/app/utils/case_validation.py</code> — 用例可执行合同（断言 type/target/expected_value、steps）</li>
+      <li>合同校验与覆盖未知<b>只记录、不抛异常</b>，处置权留在策略层</li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 纯离线单测，无需任何服务</span>
+python -m pytest backend/tests/test_publication_policy.py -q</pre>
+    </div>
+    <p class="why"><b>关键教训：</b>把"不合格"写成 <code>raise</code> → 节点异常 → 流水线中途终止 →
+    <b>连 done 事件都不会发出</b>，终态与原因全无从上报。正确形态是「不写副作用 + 终态可见 + 前端可判定」，
+    验收断言要检查 done 事件本身，而不只是"没写库"。</p>
+  </div>
+</section>
+
+<section id="s5">
+  <h2><span class="idx">5</span>判定器自身的可信度</h2>
+  <p class="lead">评分器、Judge、A/B 对比各有一套护栏。</p>
+  <div class="card">
+    <h3>确定性评分优先，Judge 必须过金标校准，对比必须过显著性检验</h3>
+    <span class="tag">元验证</span>
+    <p><b>① 评分不用 LLM。</b><code>score_sample()</code> 用 <code>must_cover</code> 要点命中率打分
+    （<code>KEYPOINT_MIN_RATIO = 0.6</code>），注释写明理由：让 LLM 再打一次分不可复现、且成本翻倍。
+    没有期望要点的样本保守判为不达标——不能白送分。</p>
+    <p><b>② 用 Judge 必须先校准。</b><code>calibrate_judge.py</code> 强制在金标集上算
+    <b>Cohen's kappa &gt; 0.7</b> 才允许启用 LLM-as-Judge（<code>MIN_SAMPLES = 30</code>），
+    退出码即结论：0 可用 / 1 不可用 / 2 数据不足；换模型或改 rubric 必须重校。</p>
+    <p><b>③ A/B 对比要过统计。</b><code>eval_stats.py</code> 提供配对 McNemar 精确检验、Wilson 置信区间
+    与 pass^k 稳定性口径——两个配置比分数不是裸比命中率。</p>
+    <ul class="files">
+      <li><code>backend/app/core/evaluation.py</code> — <code>score_sample()</code> / <code>score_dataset()</code></li>
+      <li><code>backend/scripts/calibrate_judge.py</code> — <code>KAPPA_THRESHOLD = 0.7</code></li>
+      <li><code>backend/scripts/eval_stats.py</code> + <code>backend/app/core/eval_stats.py</code></li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># Judge 金标校准</span>
+docker exec ai-test-gen-api python /app/scripts/calibrate_judge.py \
+  --report-id RR-xxxx --golden /app/eval/golden/review_golden.jsonl
+
+<span class="c"># 两个配置的配对显著性检验</span>
+docker exec ai-test-gen-api python /app/scripts/eval_stats.py pair run_a.jsonl run_b.jsonl</pre>
+    </div>
+    <p class="why"><b>为什么值得迁移：</b>自动化判定的可信度本身必须被度量，否则"评估通过"只是另一个黑盒。
+    kappa 门槛 + 显著性检验是让评测结论站得住的最小成本做法。</p>
+  </div>
+</section>
+
+<section id="s6">
+  <h2><span class="idx">6</span>指纹断点续跑与启动自愈</h2>
+  <p class="lead">续跑的前提是"输入没变"，宁可不续，不乱续。</p>
+  <div class="card">
+    <h3>8 字段输入指纹 + 保守自愈策略</h3>
+    <span class="tag">执行可靠性</span>
+    <p>checkpoint 里记录 req_id / product_id / revision / srr_sha256 / fp_set_sha256 / prompt_version /
+    model / schema_version，续跑前全部离线复算比对，任一不一致返回 409（只有显式
+    <code>fallback_to_restart=true</code> 才允许从头）。<b>指纹校验必须在占用并发槽位之前</b>——
+    放在原子占用之后会把 running 任务留在库里，造成槽位泄漏。</p>
+    <p>API 启动时另有自愈：扫描近 24h 内 <code>interrupted</code> 且有 <code>checkpoint.fp_groups</code>
+    的生成任务自动续跑，但规则极保守——每个需求最多续一个、需求状态非 confirmed 跳过、
+    <b>指纹校验不过就跳过并保留 interrupted 交人工</b>。文件里的原话是"自愈绝不把旧产物拼到新输入上"。</p>
+    <ul class="files">
+      <li><code>backend/app/core/pipeline_fingerprint.py</code> — <code>compare_fingerprints()</code> / <code>load_current_fingerprint()</code></li>
+      <li><code>backend/app/core/task_selfheal.py</code> — <code>SELFHEAL_WINDOW_HOURS = 24</code> / <code>SELFHEAL_MAX_TASKS = 5</code></li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 断点续跑 + 指纹校验</span>
+docker exec ai-test-gen-api python /app/_probe_durable.py
+
+<span class="c"># 启动自愈调度</span>
+docker exec ai-test-gen-api python /app/_probe_selfheal.py</pre>
+    </div>
+    <p class="why"><b>为什么值得迁移：</b>长耗时 LLM 任务必然被中断。要能安全续跑，就得把
+    "输入指纹"显式化成可复算的数据结构，并且给自动化一个保守的默认动作（跳过而非猜测）。</p>
+  </div>
+</section>
+
+<section id="s7">
+  <h2><span class="idx">7</span>并发互斥与事务性出箱</h2>
+  <p class="lead">两个最容易出现"看不见的脏数据"的地方，各有一层专门机制。</p>
+  <div class="card">
+    <h3>三层互斥 + 失败必须分类</h3>
+    <span class="tag">一致性</span>
+    <p><code>reserve_generation_slot()</code> 在<b>同一事务</b>内按 <code>hashtext(req_id || ':generate')</code>
+    取 advisory 锁 → 回收僵尸 → 检查活动任务 → 插入；DB 层再有一个 partial unique index 兜底
+    （仅约束 <code>status IN ('pending','running')</code> 的生成类任务）。<code>resume=True</code> 不绕过互斥。</p>
+    <p>最有价值的是错误分类：最初实现把任何插入异常都返回 <code>conflict</code>，导致外键错误被读成
+    "已有任务在跑"，排查方向全错。现在只把唯一索引冲突当 conflict，其余照抛 500。</p>
+    <ul class="files">
+      <li><code>backend/app/core/task_guard.py</code> — <code>reserve_generation_slot()</code></li>
+      <li><code>backend/app/db/database.py</code> — init_db 里的 partial unique index</li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 20 并发同 req_id，断言只有 1 个成功</span>
+docker exec ai-test-gen-api python /app/_probe_concurrency.py</pre>
+    </div>
+    <p class="why"><b>判据：</b>错误分类错了，比不报错更贵。</p>
+  </div>
+  <div class="card">
+    <h3>跨库写入走"出箱"（outbox）</h3>
+    <span class="tag">一致性</span>
+    <p>PG 与 Milvus 无法同事务，项目里禁止在业务事务外直写向量：业务行与出箱意图<b>同事务提交</b>，
+    relay 用 <code>FOR UPDATE SKIP LOCKED</code> 认领、幂等 upsert、5→300s 指数退避、超 8 次转 failed
+    等对账处理。向量 metadata 带 revision 与 content_hash 用于识别陈旧数据；删除类判定只有一份实现。</p>
+    <ul class="files">
+      <li><code>backend/app/core/vector_outbox.py</code> — <code>enqueue()</code> / relay</li>
+      <li><code>backend/app/core/kb_vector_reconcile.py</code> — 对账（周期任务与 CLI 共用同一实现）</li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 三个崩溃点：commit 前 / 投递失败 / ack 前</span>
+docker exec ai-test-gen-api python /app/_probe_outbox.py
+
+<span class="c"># 出箱单测</span>
+python -m pytest backend/tests/test_vector_outbox.py -q</pre>
+    </div>
+    <p class="why"><b>为什么值得迁移：</b>凡是"两个存储要一致"的地方，出箱模式几乎是唯一能在崩溃语义下
+    说清楚"最终会发生什么"的方案。</p>
+  </div>
+</section>
+
+<section id="s8">
+  <h2><span class="idx">8</span>静默降级扫描与真实数据定标</h2>
+  <p class="lead">让"能力静默缺失"这类最隐蔽的缺陷可机械发现。</p>
+  <div class="card">
+    <h3>AST 扫描"捕获不标记"，输出待判定清单而非缺陷清单</h3>
+    <span class="tag">可观测性</span>
+    <p>判定规则很明确：捕获块类型为 <code>Exception</code>/<code>BaseException</code> +
+    块体内没有 <code>raise</code> + 块体内有 <code>logger.warning/error</code>，再按是否出现
+    降级标记关键字（<code>degraded</code>/<code>skip_reason</code>）分档。实测有
+    <b>40 处静默捕获、36 处无降级标记</b>。工具刻意把自己定位为"待判定清单"——很多命中是合理兜底，
+    需按「是否让产出质量看起来正常而实际缺失」逐条判定。</p>
+    <p>与之呼应的还有阈值定标：<code>RetrievalThreshold.FEW_SHOT_MIN_SIMILARITY = 0.50</code> 来自真实
+    分布实测（信号 0.413~0.588 / 噪声 0.345~0.458），代码注释明确写着
+    <b>"不是照搬业界 0.75"</b>——照搬会把 100% 的候选过滤掉。模式检索阈值 0.45，因为它误注入代价更低。</p>
+    <ul class="files">
+      <li><code>scripts/scan_silent_degradation.py</code> — AST 扫描器（含 <code>HOT_FILES</code> 优先清单）</li>
+      <li><code>backend/app/core/constants.py</code> — <code>RetrievalThreshold</code>（含实测分布注释）</li>
+      <li><code>backend/app/core/task_watchdog.py</code> — 每 120s 回收超 60 分钟的任务，置 <code>interrupted</code></li>
+      <li><code>backend/app/orchestrator.py</code> 组装 <code>degraded_flags</code>，前端可直接展示</li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 扫描 app 全量</span>
+python scripts/scan_silent_degradation.py --all
+
+<span class="c"># 去重阈值单测（真实数据标定后的边界用例）</span>
+python -m pytest backend/tests/test_case_dedup.py backend/tests/test_coverage_evidence.py -q</pre>
+    </div>
+    <p class="why"><b>为什么值得迁移：</b>"失败但看起来成功"是 LLM 系统最贵的缺陷类型。
+    两个可迁移动作：① 任何降级都要打可观测标记并复用现有的标记通道；
+    ② 阈值一律先在真实数据上定标，再写进常量并留下实测分布注释。</p>
+  </div>
+</section>
+
+<section id="s9">
+  <h2><span class="idx">9</span>人机闭环与失败回流</h2>
+  <p class="lead">内容判定的人工环节也要有产物、有快照、有回流。</p>
+  <div class="card">
+    <h3>审阅台 → 判定落地 → 评估集回流</h3>
+    <span class="tag">闭环</span>
+    <p><b>审阅台：</b>真实跑一次生成，把 done 事件、落库状态、覆盖口径渲染成单文件 HTML，
+    供人逐条判定。关键约束是"展示事实的工具必须复用系统同一套口径"——覆盖标注直接 import 后端
+    <code>extract_point_ids</code>，不自己实现一套，否则会把 54 条有标注的用例全标成"未标注"。
+    产物写容器内 <code>/tmp</code>，因为往 <code>/app</code> 写会触发 reload 杀掉在飞任务。</p>
+    <p><b>判定落地：</b><code>apply_verdicts.py</code> 默认干跑，<code>--execute</code> 才写库；
+    符合→批量 approve（同步写向量），不符→批量 reject，存疑→不动，并自动快照执行前状态以便回溯。</p>
+    <p><b>失败回流：</b><code>reflux_failures.py</code> 把生产 <code>failed/error</code> 任务脱敏后导出到
+    <code>backend/eval/failure_cases.jsonl</code>，按 task_id 幂等，让评估集成为活资产。</p>
+    <p><b>CI 门禁：</b><code>backend/tests/conftest.py</code> 用 <code>AITG_RUN_INTEGRATION=1</code>
+    决定是否收集脚本式集成套件，使 unit 层无需 PG/Redis 即可跑（91 passed / 1 skipped）；
+    CI 里的 <code>continue-on-error</code> 已移除，pytest 失败即红灯。</p>
+    <ul class="files">
+      <li><code>backend/scripts/review_generation_run.py</code> — 审阅台（<code>--req-id</code> 真跑 / <code>--task-id</code> 重建 / <code>--from-run</code> 重渲染）</li>
+      <li><code>backend/scripts/apply_verdicts.py</code> — 判定落地</li>
+      <li><code>backend/scripts/reflux_failures.py</code> — 失败轨迹回流</li>
+      <li><code>backend/tests/conftest.py</code> + <code>.github/workflows/test.yml</code></li>
+    </ul>
+    <div class="cmd">
+      <pre><button>复制</button><span class="c"># 生成 + 收集证据 + 出审阅台（约 25 分钟，消耗额度）</span>
+docker exec ai-test-gen-api python /app/scripts/review_generation_run.py \
+  --req-id REQ-xxx --note "口径修复后的复测"
+
+<span class="c"># 落地判定（默认干跑，加 --execute 才写库）</span>
+docker exec ai-test-gen-api python /app/scripts/apply_verdicts.py \
+  --run-dir /app/_review_runs/20260916-xxxxxx
+
+<span class="c"># 失败回流到评估集</span>
+docker exec ai-test-gen-api python /app/scripts/reflux_failures.py --limit 20 --days 30
+
+<span class="c"># CI 同款 unit 层（无需 PG/Redis）</span>
+python -m pytest backend/tests -q</pre>
+    </div>
+    <p class="why"><b>为什么值得迁移：</b>人工判定如果不能落库、不能回流、不能复现系统口径，
+    就只是"看过一遍"。三件套（证据包 / 干跑默认 / 幂等回流）让它变成可累积的资产。</p>
+  </div>
+</section>
+
+<section id="s10">
+  <h2>可迁移的方法论</h2>
+  <p class="lead">换到任何 LLM 应用都成立的五条。</p>
+  <ol class="rules">
+    <li><b>脚本判结构与不变量，内容判定回传模型。</b>不要写断言去判 LLM 生成文本好不好。</li>
+    <li><b>任何"上线 / 激活 / 跳过"的决定都要引用服务端可复现证据</b>，并用内容 hash 逐字绑定；
+    调用方的自我声明一律不算。</li>
+    <li><b>合格判定写成纯函数返回三态，不要抛异常。</b>异常会吃掉终态，前端只剩空白；
+    未知应当 fail-closed 到人工复核。</li>
+    <li><b>失败路径用注入验证，不要等它自然发生。</b>换桩 + 断言降级标记，确定性、秒级、不烧额度；
+    同时要确认标记真的到达了消费方，中间层返回值不等于最终输出。</li>
+    <li><b>阈值与合同先用真实数据定标，再谈调参。</b>项目里反复验证：判定键选错了，调阈值零收益。</li>
+  </ol>
+</section>
+
+<section id="s11">
+  <h2>边界与未做项</h2>
+  <p class="lead">避免把这份清单读成"已经完美"。</p>
+  <ol class="rules">
+    <li><b>生成任务仍跑在 API 进程内。</b>完整持久任务队列（迁出进程）是架构级改造，目前 40% 的价值
+    靠启动自愈续跑顶住；API 重启仍会杀掉在飞任务，只是能被自动续跑捡回来。</li>
+    <li><b>集成层尚未进 CI。</b>脚本式套件（<code>test_phaseN_*.py</code>）需真实 PG/Redis/Milvus，
+    要等迁成标准 pytest + service containers 后才能进 CI 门禁；目前 CI 只跑 unit 层。</li>
+    <li><b>探针是本地资产。</b><code>backend/_probe_*.py</code> 被 gitignore，40 个探针在仓库里不可见，
+    新环境需要按 <code>run_test_plan.py</code> 的 <code>PROBES</code> 清单重建。</li>
+    <li><b>覆盖率仍有盲区。</b>要点采集只覆盖 5 类要点，FP 为空时 <code>business_rules</code> 与
+    <code>data_constraints</code> 两个维度会消失；标注率低于 30% 时补生成不会触发。这是当前
+    最高优先级的已知风险。</li>
+  </ol>
+</section>
+
+<footer>
+  条目均来自 <code>backend/app/core/</code>、<code>backend/scripts/</code>、<code>scripts/</code>、
+  <code>backend/tests/</code> 与 <code>docs/13</code>、<code>docs/15</code> 的代码与文档实读；
+  第 2 条的探针数据为 2026-09-16 本机实跑结果。文档路径 <code>docs/harness-design-highlights.html</code>。
+</footer>
+
+</main>
+</div>
+</div>
+
+<script>
+(function () {
+  document.querySelectorAll('.cmd').forEach(function (box) {
+    var btn = box.querySelector('button');
+    var pre = box.querySelector('pre');
+    if (!btn || !pre) return;
+    btn.addEventListener('click', function () {
+      var clone = pre.cloneNode(true);
+      var b = clone.querySelector('button');
+      if (b) b.remove();
+      var text = clone.textContent.replace(/^\s+|\s+$/g, '');
+      var done = function () {
+        btn.textContent = '已复制';
+        setTimeout(function () { btn.textContent = '复制'; }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(text, done); });
+      } else {
+        fallback(text, done);
+      }
+    });
+  });
+
+  function fallback(text, done) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) { }
+    document.body.removeChild(ta);
+  }
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('nav.toc a'));
+  var targets = links.map(function (a) {
+    return document.querySelector(a.getAttribute('href'));
+  }).filter(Boolean);
+
+  function sync() {
+    var best = null;
+    var bestTop = -Infinity;
+    targets.forEach(function (t) {
+      var top = t.getBoundingClientRect().top;
+      if (top < 120 && top > bestTop) { bestTop = top; best = t; }
+    });
+    if (!best && targets.length) best = targets[0];
+    links.forEach(function (a) {
+      a.classList.toggle('on', best && a.getAttribute('href') === '#' + best.id);
+    });
+  }
+
+  window.addEventListener('scroll', sync, { passive: true });
+  sync();
+})();
+</script>
+</body>
+</html>
