@@ -189,13 +189,28 @@ class ReviewAgent:
                          [(c.get("id", ""), c.get("confidence", 0)) for c in reviewed_cases])
 
         # 3. LLM 深度审核：完整性 + 去重 + 一致性 + 覆盖率（非 blocker 子集，方案 B）
-        logger.info("[ReviewAgent] 调用 LLM 6维度审核（剔除 blocker {} 条）...", len(blocker_ids))
-        llm_report = await self._llm_review(
-            srr, reviewed_cases, exclude_case_ids=blocker_ids
+        # v3.5 方案 A：规模够大（非 blocker ≥ 24 且分片后 >1 片）走 FP 分片审核
+        # （组内富信息 + 跨组集合级），小集合保留单发全量审核（避免 N+1 次小调用
+        # 的固定开销反噬）。
+        use_shards = self._should_use_shard_review(test_cases, blocker_ids)
+        logger.info(
+            "[ReviewAgent] 调用 LLM 6维度审核（剔除 blocker {} 条，路径={}）...",
+            len(blocker_ids), "fp_shards" if use_shards else "single",
         )
+        if use_shards:
+            llm_report = await self._llm_review_shards(
+                srr, reviewed_cases, exclude_case_ids=blocker_ids
+            )
+        else:
+            llm_report = await self._llm_review(
+                srr, reviewed_cases, exclude_case_ids=blocker_ids
+            )
         llm_issues = llm_report.get("issues", [])
-        logger.info("[ReviewAgent] LLM 审核完成: issues={}, avg_confidence={}",
-                    len(llm_issues), llm_report.get("avg_confidence", 0))
+        logger.info(
+            "[ReviewAgent] LLM 审核完成: path={}, issues={}, avg_confidence={}",
+            "shards" if use_shards else "single",
+            len(llm_issues), llm_report.get("avg_confidence", 0),
+        )
 
         # 4. 合并审核结果（含要点级覆盖映射，口径与 GenAgent._log_coverage_stats 一致）
         point_coverage = calc_point_coverage(srr, functional_points or [], reviewed_cases)
@@ -356,6 +371,261 @@ class ReviewAgent:
                 })
 
         return issues
+
+    # ========================================================================
+    # 方案 A：FP 分片审核（v3.5，docs/KNOWN-ISSUES.md L-17 问题 2+3 前半）
+    # ========================================================================
+
+    # 分片审核的并发上限：分片数通常 ≤ FP 数（几十级），信号量防极端情况
+    # （几百个未分组碎片）打爆供应商免费额度与 LLM 总预算。
+    _SHARD_CONCURRENCY = 4
+
+    # 走分片审核的规模门槛：分片后 >1 片才值得 N+1 次调用；且总用例数达到
+    # 该阈值才启用（小集合单发一次就够，省固定开销）。两个条件取与。
+    _SHARD_MIN_CASES = 24
+
+    @classmethod
+    def _should_use_shard_review(
+        cls, test_cases: list[dict], exclude_case_ids: set[str]
+    ) -> bool:
+        """判断是否走 FP 分片审核（方案 A 规模开关）。
+
+        条件：非 blocker 用例数 ≥ _SHARD_MIN_CASES **且** 按 related_fp 分片后
+        分片数 > 1。单分片（全部用例同 FP 或全未标注）时分片无意义，保留单发。
+        """
+        non_blocker = [
+            c for c in test_cases if c.get("id", "") not in (exclude_case_ids or set())
+        ]
+        if len(non_blocker) < cls._SHARD_MIN_CASES:
+            return False
+        groups = cls._group_cases_by_fp(non_blocker)
+        return len(groups) > 1
+
+    @staticmethod
+    def _group_cases_by_fp(
+        cases: list[dict],
+    ) -> dict[str, list[dict]]:
+        """按 related_fp 把用例分组（方案 A 第一步：分片）。
+
+        Args:
+            cases: 用例列表（已剔除 blocker）
+
+        Returns:
+            dict: 分片映射 {fp_id: [case, ...]}，related_fp 为空的用例进
+            "" 兜底桶（线上实测 23.5% 用例无此标注）。
+        """
+        groups: dict[str, list[dict]] = {}
+        for c in cases:
+            fp_id = str(c.get("related_fp", "") or "")
+            groups.setdefault(fp_id, []).append(c)
+        return groups
+
+    async def _llm_review_shards(
+        self,
+        srr: dict,
+        test_cases: list[dict],
+        exclude_case_ids: set[str],
+    ) -> dict:
+        """FP 分片审核调度器（方案 A 主体，v3.5 L-17）。
+
+        替代"单次全量 call_json"：按 related_fp 分片 → 每片一次组内富信息审核
+        （并发上限 _SHARD_CONCURRENCY）→ 一次跨组集合级审核（判跨组重复/矛盾/
+        分布）。分片失败不静默：至少一片成功才合并结果，部分失败打
+        review_shard_partial_failure（不降级——已成功分片的证据仍有效）；
+        全失败才落 review_degraded 终态（fail-closed：发布策略按
+        review_llm_failed 拦截自动发布）。
+
+        Args:
+            srr: SRR JSON 字典
+            test_cases: 用例列表（全量，含 blocker；blocker 会被剔除）
+            exclude_case_ids: 剔出 LLM 审核清单的用例 ID（方案 B 的 blocker 集合）
+
+        Returns:
+            dict: 与单发审核同形的报告（issues/avg_confidence/review_degraded/...）
+        """
+        exclude_case_ids = exclude_case_ids or set()
+        non_blocker = [
+            c for c in test_cases if c.get("id", "") not in exclude_case_ids
+        ]
+
+        if not non_blocker:
+            # 全是 blocker / 空集合：无 LLM 可审内容，但不算降级（方案 B 语义：
+            # blocker 已在规则预检被拦截，非"审核能力缺失"）
+            return {"issues": [], "avg_confidence": 0.0, "review_degraded": False}
+
+        # ---- 1. 分片（未分组兜底桶排最后） ----
+        groups = self._group_cases_by_fp(non_blocker)
+        fp_ids = sorted(groups.keys(), key=lambda k: (k == "", k))
+
+        # ---- 2. 评审供应商只读一次（分片化后若每片都读会放大 N 倍 DB 往返） ----
+        judge_provider: str | None = None
+        try:
+            from app.db.database import async_session as _as
+            from app.api.settings import get_review_llm_provider
+            async with _as() as _s:
+                judge_provider = await get_review_llm_provider(_s)
+        except Exception as e:
+            logger.debug(
+                "[ReviewAgent] 读取评审供应商设置失败（跟随主力）: {}", str(e)[:100]
+            )
+
+        async def _run_shard(fp_id: str, shard_cases: list[dict]) -> tuple[str, dict | None, str]:
+            """跑一个分片：组内富信息审核。返回 (fp_id, 结果或 None, 错误信息)。"""
+            async with sem:
+                gen_confs = [
+                    c.get("gen_metadata", {}).get("gen_confidence", 0.5)
+                    for c in shard_cases
+                ]
+                prompt = prompts.build_group_review_prompt(
+                    srr, fp_id, "", shard_cases, gen_confs
+                )
+                kwargs = dict(
+                    prompt=prompt,
+                    system_prompt=prompt_manager.get("review_agent", "SYSTEM_PROMPT"),
+                    schema_hint={"issues": list, "avg_confidence": float},
+                    temperature=0.2,
+                    agent_name="ReviewAgent",
+                )
+
+                async def _call() -> dict:
+                    if judge_provider:
+                        try:
+                            r = await self._llm.call_json(**kwargs, provider=judge_provider)
+                            return _validated_review_payload(r, shard_cases)
+                        except Exception as e:
+                            logger.warning(
+                                "[ReviewAgent] 分片 {} 评审供应商 {} 失败，回退主力池: {}",
+                                fp_id, judge_provider, str(e)[:120],
+                            )
+                    r = await self._llm.call_json(**kwargs)
+                    return _validated_review_payload(r, shard_cases)
+
+                try:
+                    return fp_id, await _call(), ""
+                except Exception as e:
+                    logger.error(
+                        "[ReviewAgent] 分片 {} 组内审核失败: {}", fp_id, str(e)[:150]
+                    )
+                    return fp_id, None, str(e)[:150]
+
+        sem = asyncio.Semaphore(self._SHARD_CONCURRENCY)
+        shard_results = await asyncio.gather(
+            *(_run_shard(fid, groups[fid]) for fid in fp_ids)
+        )
+        ok_shards = [r for r in shard_results if r[1] is not None]
+        failed_shards = [r for r in shard_results if r[1] is None]
+
+        # ---- 3. 跨组集合级审核（仅当分片数 > 1，且至少一片成功） ----
+        cross_issues: list[dict] = []
+        if ok_shards and len(fp_ids) > 1:
+            known_ids = {c.get("id", "") for c in non_blocker}
+            type_dists: dict[str, dict[str, int]] = {
+                fid: {} for fid in fp_ids
+            }
+            for c in non_blocker:
+                fid = str(c.get("related_fp", "") or "")
+                t = str(c.get("type", "") or "functional")
+                type_dists[fid][t] = type_dists[fid].get(t, 0) + 1
+            group_summaries = [
+                {
+                    "fp_id": fid or "（未分组）",
+                    "case_count": len(groups[fid]),
+                    "type_distribution": type_dists.get(fid, {}),
+                    "titles": [str(c.get("title", "")) for c in groups[fid]],
+                }
+                for fid in fp_ids
+            ]
+            try:
+                cross_kwargs = dict(
+                    prompt=prompts.build_cross_group_review_prompt(srr, group_summaries),
+                    system_prompt=prompt_manager.get("review_agent", "SYSTEM_PROMPT"),
+                    schema_hint={"issues": list},
+                    temperature=0.2,
+                    agent_name="ReviewAgent",
+                )
+                cross_raw = (
+                    await self._llm.call_json(**cross_kwargs, provider=judge_provider)
+                    if judge_provider
+                    else await self._llm.call_json(**cross_kwargs)
+                )
+                # 跨组 issues 与组内同合同校验（补 avg_confidence 占位以满足
+                # LLMReviewPayload；case_id 未知即拒收，防 LLM 编造）
+                payload_raw = dict(cross_raw) if isinstance(cross_raw, dict) else {}
+                payload_raw.setdefault("avg_confidence", 0.5)
+                cross_payload = LLMReviewPayload.model_validate(payload_raw)
+                cross_issues = [
+                    i.model_dump() for i in cross_payload.issues
+                    if not i.case_id or i.case_id in known_ids
+                ]
+            except Exception as e:
+                # 跨组审核失败不算全链路失败：组内证据已足够支撑报告，不静默
+                logger.warning(
+                    "[ReviewAgent] 跨组集合级审核失败（组内证据保留）: {}", str(e)[:150]
+                )
+                cross_issues = [{
+                    "case_id": "",
+                    "dimension": "consistency",
+                    "severity": "info",
+                    "message": f"跨组集合级审核未完成: {str(e)[:80]}",
+                    "suggestion": "建议人工抽查跨功能点重复与组合一致性",
+                }]
+        else:
+            logger.debug("[ReviewAgent] 分片数 <=1 或无成功分片，跳过跨组审核")
+
+        # ---- 4. 终态判定（fail-closed 落终态，不抛异常） ----
+        if not ok_shards:
+            logger.error(
+                "[ReviewAgent] ⛔ FP 分片审核全部失败（{} 片）→ review_degraded",
+                len(fp_ids),
+            )
+            return {
+                "issues": [],
+                "avg_confidence": 0.0,
+                "review_degraded": True,
+                "review_degraded_reason": (
+                    f"shard_review_all_failed: "
+                    f"{'; '.join(e[:60] for _, _, e in failed_shards)}"
+                ),
+            }
+
+        merged_issues: list[dict] = []
+        for _, res, _err in ok_shards:
+            merged_issues.extend(res.get("issues", []))
+        merged_issues.extend(cross_issues)
+
+        # avg_confidence：LLM 自评估口径，分片均值按用例数加权（每条用例权重相同，
+        # 与单发口径一致）
+        total_conf = 0.0
+        weight_sum = 0
+        for fid, res, _err in ok_shards:
+            n = len(groups[fid])
+            total_conf += float(res.get("avg_confidence", 0)) * n
+            weight_sum += n
+        avg_conf = (total_conf / weight_sum) if weight_sum else 0.0
+
+        ok_ids = {fid for fid, _, _ in ok_shards}
+        partial = [fid for fid in fp_ids if fid not in ok_ids]
+        report: dict = {
+            "issues": merged_issues,
+            "avg_confidence": round(avg_conf, 3),
+            "review_degraded": False,
+            "review_status": "complete",
+            "shard_review": {
+                "total_shards": len(fp_ids),
+                "ok_shards": len(ok_shards),
+                "failed_shards": [
+                    {"fp_id": fid, "error": err} for fid, _, err in failed_shards
+                ],
+            },
+        }
+        if partial:
+            # 部分失败：已成功分片的证据仍有效，不算降级，但必须可见
+            report["review_shard_partial_failure"] = True
+            logger.warning(
+                "[ReviewAgent] ⚠️ 分片审核部分失败: {}/{} 成功，失败分片={}",
+                len(ok_shards), len(fp_ids), partial,
+            )
+        return report
 
     # ========================================================================
     # LLM 深度审核

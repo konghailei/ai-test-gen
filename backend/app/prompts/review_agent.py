@@ -168,6 +168,138 @@ def build_user_prompt(
 
 
 # ============================================================================
+# 方案 A：FP 分片审核（v3.5 L-17）
+# ============================================================================
+# 背景（docs/KNOWN-ISSUES.md L-17 问题 2）：单次全量审核在 prompt 降载后每条用例
+# 只剩 8 个精简字段，LLM 名义"六维深度审核"、实际只能做集合级诊断。
+# 方案 A 把审核拆成两层：
+#   1. 组内富信息审核（build_group_review_prompt）：按 related_fp 分片，每片一次
+#      小调用，字段放宽（前置条件、前 2 步的 action/expected、预期 200 字），
+#      LLM 恢复"步骤级语义审核"能力；
+#   2. 跨组集合级审核（build_cross_group_review_prompt）：一次小调用，仅注入各片
+#      的标题/类型/分布，判跨组重复与组合矛盾。
+# 调用次数 1 → N+1，但每次小、可并发，总 prompt 体积远小于单次全量注入。
+
+def build_group_review_prompt(
+    srr: dict,
+    fp_id: str,
+    fp_name: str,
+    test_cases: list[dict],
+    gen_confidences: list[float] | None = None,
+) -> str:
+    """构建单个 FP 分片（组内富信息）审核的用户指令。
+
+    Args:
+        srr: SRR JSON 字典（仅取紧凑需求概要）
+        fp_id: 本分片的功能点 ID（"" 表示未分组兜底桶）
+        fp_name: 本分片的功能点名称（可为空）
+        test_cases: 本分片的用例列表（非 blocker 子集的一个分片）
+        gen_confidences: 本分片各用例的 gen_confidence 列表
+
+    Returns:
+        str: 组内审核用户指令
+    """
+    confidence_hint = ""
+    if gen_confidences:
+        confidence_hint = f"""
+【本分片各用例的 GenAgent 自评估置信度（仅参考，不作最终值）】
+{gen_confidences}"""
+
+    _req = srr.get("requirement", {}) if isinstance(srr, dict) else {}
+    _srr_compact = {
+        "title": _req.get("title", ""),
+        "summary": _req.get("summary", "") or _req.get("title", ""),
+        "modules": _req.get("modules", []) or [],
+        "business_rules_snippet": (str(srr.get("business_rules", ""))[:600] if isinstance(srr, dict) else ""),
+    }
+
+    # 组内富信息：比单次全量审核（8 字段）放宽——前置条件、前 2 步的
+    # action/expected、预期 200 字。分片小 prompt 允许富信息（L-17 问题 2 的解法）。
+    _rich_cases = []
+    for _c in test_cases:
+        _steps = (_c.get("steps", []) or [])[:2]
+        _preconds = _c.get("preconditions", []) or []
+        _rich_cases.append(
+            {
+                "id": _c.get("id", ""),
+                "title": _c.get("title", ""),
+                "type": _c.get("type", ""),
+                "priority": _c.get("priority", ""),
+                "precondition": (str(_preconds[0]) if _preconds else "")[:60],
+                "steps_head": [
+                    {
+                        "action": str(s.get("action", ""))[:80],
+                        "expected": str(s.get("expected", ""))[:80],
+                    }
+                    for s in _steps
+                ],
+                "expected": (str(_c.get("expected", "")) or "").strip()[:200],
+                "assertions": len(_c.get("assertions", []) or []),
+                "related_requirement": _c.get("related_requirement", ""),
+            }
+        )
+
+    fp_label = f"{fp_id} {fp_name}".strip() or "（未标注功能点的未分组兜底桶）"
+    return f"""请对以下【单个功能点分片】的测试用例进行组内质量审核。
+
+本次只审核该分片**内部**的维度：组内完整性（相对该功能点场景）、可执行性（步骤/预期是否具体可判定）、组内去重、组内一致性、追溯性。
+**跨功能点的重复与组合问题由另一个汇总审核负责，请勿在此报告**（避免与汇总审核重复上报）。
+
+{REVIEW_REPORT_SCHEMA}
+{confidence_hint}
+
+【需求概要（用于追溯性/一致性判断）】
+{json.dumps(_srr_compact, ensure_ascii=False, indent=2)}
+
+【本分片功能点】{fp_label}
+【待审核用例（分片内富信息：含前置条件、前 2 步操作与预期、预期要点）】
+{json.dumps(_rich_cases, ensure_ascii=False, indent=2)}
+
+请直接输出审核报告 JSON，不要包含其他解释性文字。"""
+
+
+def build_cross_group_review_prompt(
+    srr: dict,
+    group_summaries: list[dict],
+) -> str:
+    """构建跨组集合级审核的用户指令（仅标题 + 类型 + 分布）。
+
+    Args:
+        srr: SRR JSON 字典（仅取紧凑需求概要）
+        group_summaries: 各分片摘要列表，每项形如
+            {"fp_id", "fp_name", "case_count", "type_distribution", "titles"}
+
+    Returns:
+        str: 跨组审核用户指令
+    """
+    _req = srr.get("requirement", {}) if isinstance(srr, dict) else {}
+    _srr_compact = {
+        "title": _req.get("title", ""),
+        "summary": _req.get("summary", "") or _req.get("title", ""),
+        "modules": _req.get("modules", []) or [],
+    }
+    return f"""各功能点分片已完成组内审核。请对整个用例集做【跨分片集合级审核】，只负责三个跨组维度：
+
+1. 跨组去重（deduplication）：不同分片中语义重复的用例（同一测试点换表述）。
+2. 组合一致性（consistency）：分片之间相互矛盾的预期或业务规则。
+3. 分布异常（coverage）：类型/优先级分布明显失衡（如全部 functional、零 boundary/exception）。
+
+输入仅含各分片的标题与分布信息（无步骤细节），**无法确认的问题不要上报**——宁可漏审，不报无证据的问题。
+
+输出 JSON 结构：
+{{"issues": [{{"case_id": "TC-XXX-XXXX-XXXX 或空", "dimension": "deduplication|consistency|coverage", "severity": "blocker|warning|info", "message": "问题描述", "suggestion": "修正建议"}}]}}
+（无需 avg_confidence。case_id 必须来自下方标题列表对应的用例 ID；集合级问题 case_id 可留空。）
+
+【需求概要】
+{json.dumps(_srr_compact, ensure_ascii=False, indent=2)}
+
+【各分片摘要（fp_id / 名称 / 用例数 / 类型分布 / 标题列表）】
+{json.dumps(group_summaries, ensure_ascii=False, indent=2)}
+
+请直接输出审核报告 JSON，不要包含其他解释性文字。"""
+
+
+# ============================================================================
 # 置信度计算（多因子加权，非 LLM 调用）
 # ============================================================================
 
