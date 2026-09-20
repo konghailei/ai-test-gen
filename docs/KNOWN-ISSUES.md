@@ -290,7 +290,7 @@
   3. **方案裁定**：条目原方案（删 BFS、消费确认条目）**直接采纳**。另需补两点条目未覆盖的边界：① `impact_analysis` 为空的优化需求（从未跑过影响分析）当前**允许生成**（守卫只拦"存在未确认条目"）——重构后该场景 fallback 为"无确认影响"并打 `degraded_flags` 提示（现状是 BFS 空转出同样结果，行为不变、可观测性提升）；② done 事件 `impact_result` 形状（`test_phase4:715-721` 断言 is_optimization/generation_guidance）保持不变。
 - **修复记录（2026-09-20）**：已按方案裁定实施——`analyze()` 前半段改为纯消费 `srr.impact_analysis` 确认条目（优化需求路径零 DB 调用），删除生成期 `_find_regression_requirements`；`impact_unconfirmed` 标记经 `_impact_node` 透传 `degraded_flags`；orchestrator 类 docstring 的过时 FULL/FAST 叙述顺带修正。回归全绿（unit 117/1、phase2 74、phase3 91、phase4 151、phase5 101、phase6 141，与基线一致）。commit 见 git log "L-16"。
 
-### 🟡 L-17 ReviewAgent 审核链路的分层低效：执行顺序倒置、LLM 职责与输入错配、无分批能力 —— 方案 B+C 已修复；方案 A 待立项（问题 2 未解）
+### 🟡 L-17 ReviewAgent 审核链路的分层低效：执行顺序倒置、LLM 职责与输入错配、无分批能力 —— 方案 A+B+C 已全部修复（2026-09-20）
 
 > 来源：2026-09-20 审核链路（review 节点）代码走查（对应 `review_agent.py` / `orchestrator.py _review_node`）。
 > 分层职责划分本身正确（确定性检查已前置、LLM 只做语义判断、发布决策带证据复核），
@@ -313,7 +313,8 @@
   3. **无分批属实 + 规模实测**：`_llm_review` 单次 `call_json` 全量注入。线上分布（按入库日聚合）：单日最高 397 条入库（2026-09-03），p50≈89、最大 737（累计口径）——**L-17 预估的 300-500 条区间已被线上实际触及**（390+ 条日已有两日），方案 A 的"观察后立项"前置条件已满足，不必再等。
   4. **补充证据·置信度消费方**：case 级 `confidence` 下游有**三处硬依赖**——`persist_to_kb` 入库分档（≥0.70 auto_approve，review_agent.py:850）、标题级去重保留高分（:801-804）、列表筛选 `min_confidence`（api/testcases.py:82-125）。**方案 B 重排顺序时 blocker 用例的 confidence 计算不能省**（去重与落库仍需），只省向量检索与 LLM 输入——即 blocker 用例需一个不查 KB 的降级置信度路径（gen_self+completeness 因子仍可算，match_score=0），否则标题去重会拿 0 分错杀高质 blocker。
 - **修复记录（2026-09-20，方案 B+C）**：已实施——①重排为 规则预检→置信度→LLM，blocker 用例跳过 KB 检索（`skip_search_ids`，置信度走冷启动 quality_base 兜底照算）且剔除出 LLM 清单（`exclude_case_ids`），report 全量口径不变；②新增 `milvus_store.search_similar_cases_batch()`（一次批量 embed + pymilvus 2.4 多向量 search，N 次 embed+N 次 RPC → 1+1），批量失败回退逐条。签名向后兼容，回归全绿（同 L-16 口径）。commit 见 git log "L-17"。
-- **遗留（方案 A 待立项）**：问题 2（LLM 输入错配，名义六维/实际集合级）未解决——需按 `related_fp` 分组的富信息小审核 + 跨组集合级审核。规模前置条件已满足（线上单日 397 条实测），下一迭代立项。
+- **修复记录（2026-09-20，方案 A）**：已实施——`review_agent.py` 新增 FP 分片审核调度器 `_llm_review_shards()`：按 `related_fp` 分组（空标注进 "" 兜底桶，线上实测 23.5% 用例无标注）→ 每片一次**组内富信息审核**（`prompts.build_group_review_prompt`：放宽至前置条件 + 前 2 步 action/expected + 预期 200 字，恢复步骤级语义审核能力；声明"跨组问题勿在此报告"避免与汇总审核重复上报）→ 一次**跨组集合级审核**（`prompts.build_cross_group_review_prompt`：仅各片标题+类型分布，判跨组重复/组合矛盾/分布失衡，未知 case_id 拒收防 LLM 编造）。规模开关 `_should_use_shard_review`：非 blocker ≥24 条**且**分片数 >1 才走分片（小集合/单 FP 保留单发，避免 N+1 次调用的固定开销反噬）；并发上限 `_SHARD_CONCURRENCY=4`（信号量）。**失败语义（fail-closed 落终态）**：部分分片失败→不降级，已成功分片证据保留，报告打 `review_shard_partial_failure` + `shard_review.failed_shards` 明细；全部分片失败→`review_degraded=True`（`shard_review_all_failed`，发布策略按 review_llm_failed 拦截自动发布）；跨组审核失败→组内证据保留 + info 级提示（不静默）。avg_confidence 按分片用例数加权（口径与单发一致）。容器内桩测 8 分支全过（全成功/部分失败/全失败/跨组失败/编造 case_id 拒收/全 blocker/规模开关三态）+ 全量回归绿（unit 117/1 + phase2 74 + phase3 91 + phase4 151 + phase5 101 + phase6 141）。commit 见 git log "L-17 方案A"。
+- **状态更新：L-17 三个子问题（顺序倒置/输入错配/无分批）全部修复**。监控建议：上线后观察 `shard_review.failed_shards` 出现频率与分片审核耗时（日志 path=fp_shards），若部分失败率持续偏高再考虑失败分片自动重试（当前一次即终态）。
 
 ---
 
