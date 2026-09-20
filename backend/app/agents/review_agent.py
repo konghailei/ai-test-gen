@@ -166,8 +166,17 @@ class ReviewAgent:
             }, []
         logger.info("[ReviewAgent] ▶ 开始审核: req_id={}, cases={}", req_id, len(test_cases))
 
-        # 1. 计算 final_confidence（多因子加权，非 LLM）
-        reviewed_cases = await self._calculate_confidences(srr, test_cases)
+        # 1. 规则预检：追溯性 + 可执行性（零成本，先于置信度/LLM，方案 B）
+        rule_issues = self._rule_based_review(srr, test_cases)
+        blocker_ids = {i.get("case_id", "") for i in rule_issues if i.get("severity") == "blocker"}
+        rule_blockers = len(blocker_ids)
+        logger.info("[ReviewAgent] 规则预检: issues={}, blockers={}",
+                    len(rule_issues), rule_blockers)
+
+        # 2. 计算 final_confidence（多因子加权；blocker 跳 KB 检索但仍算置信度，方案 B）
+        reviewed_cases = await self._calculate_confidences(
+            srr, test_cases, skip_search_ids=blocker_ids
+        )
         confidences = [c.get("confidence", 0) for c in reviewed_cases]
         avg_gen_conf = sum(
             c.get("gen_metadata", {}).get("gen_confidence", 0.5) for c in reviewed_cases
@@ -179,15 +188,11 @@ class ReviewAgent:
             logger.debug("[ReviewAgent] 各用例置信度: {}",
                          [(c.get("id", ""), c.get("confidence", 0)) for c in reviewed_cases])
 
-        # 2. 规则预检：追溯性 + 可执行性（快速检查）
-        rule_issues = self._rule_based_review(srr, reviewed_cases)
-        rule_blockers = sum(1 for i in rule_issues if i.get("severity") == "blocker")
-        logger.info("[ReviewAgent] 规则预检: issues={}, blockers={}",
-                    len(rule_issues), rule_blockers)
-
-        # 3. LLM 深度审核：完整性 + 去重 + 一致性 + 覆盖率
-        logger.info("[ReviewAgent] 调用 LLM 6维度审核...")
-        llm_report = await self._llm_review(srr, reviewed_cases)
+        # 3. LLM 深度审核：完整性 + 去重 + 一致性 + 覆盖率（非 blocker 子集，方案 B）
+        logger.info("[ReviewAgent] 调用 LLM 6维度审核（剔除 blocker {} 条）...", len(blocker_ids))
+        llm_report = await self._llm_review(
+            srr, reviewed_cases, exclude_case_ids=blocker_ids
+        )
         llm_issues = llm_report.get("issues", [])
         logger.info("[ReviewAgent] LLM 审核完成: issues={}, avg_confidence={}",
                     len(llm_issues), llm_report.get("avg_confidence", 0))
@@ -222,26 +227,55 @@ class ReviewAgent:
         self,
         srr: dict,
         test_cases: list[dict],
+        skip_search_ids: set[str] | None = None,
     ) -> list[dict]:
-        """为每个用例计算 final_confidence。
+        """为每个用例计算 final_confidence（方案 C：批量 KB 检索）。
 
         对应 docs/03 §5.2 的 calculate_confidence 函数。
-        多因子加权：match_score×0.4 + completeness×0.3 + consistency×0.2 + gen_self×0.1 + pattern_bonus
+        多因子加权：match_score×0.2 + completeness×0.3 + consistency×0.25 + gen_self×0.15 + pattern_bonus + quality_base
 
         Args:
             srr: SRR JSON 字典
             test_cases: 用例列表
+            skip_search_ids: 命中该集合的用例**跳过 KB 相似检索**（match_results=[]），
+                但仍照常计算置信度（走冷启动 quality_base 兜底）。用于方案 B 的 blocker
+                用例——它们本就要补充生成/被拦截，无需再消耗检索 I/O，但跳过检索会让
+                标题去重拿 0 分错杀，故置信度仍须计算。
 
         Returns:
             list[dict]: 更新后的用例列表（confidence 字段被写入 final_confidence）
         """
+        skip_search_ids = skip_search_ids or set()
         reviewed: list[dict] = []
         product_id = srr.get("requirement", {}).get("product_id", "")
-        for case in test_cases:
-            # 异步检索 KB 相似用例（用于 match_score）— v2.2: 按 product_id 过滤
-            match_results = await self._search_similar_for_review(case, product_id=product_id)
 
-            # 计算最终置信度
+        # 方案 C：收集需检索的用例，一次批量 embedding + 一次多向量 search。
+        # blocker 用例（skip_search_ids）已被剔除，不进检索池。
+        to_search = [c for c in test_cases if c.get("id", "") not in skip_search_ids]
+        match_by_id: dict[str, list[dict]] = {}
+        if to_search:
+            queries = [c.get("title", "") for c in to_search]
+            try:
+                batched = await asyncio.to_thread(
+                    vector_store.search_similar_cases_batch,
+                    queries, top_k=3, product_id=product_id or None,
+                )
+                for case, mr in zip(to_search, batched):
+                    match_by_id[case.get("id", "")] = mr
+            except Exception as e:
+                # 整批失败 → 回退逐条（保持单条失败返回 [] 的既有行为），并打 warning
+                logger.warning(
+                    "[ReviewAgent] 批量置信度检索失败 → 回退逐条检索: {}", str(e)[:150]
+                )
+                for case in to_search:
+                    match_by_id[case.get("id", "")] = await self._search_similar_for_review(
+                        case, product_id=product_id
+                    )
+
+        for case in test_cases:
+            case_id = case.get("id", "")
+            # blocker 用例：跳过 KB 检索（方案 B），仍计算置信度
+            match_results = [] if case_id in skip_search_ids else match_by_id.get(case_id, [])
             final_conf = prompts.calculate_confidence(case, match_results)
 
             # 写入 confidence 字段（即 final_confidence，UTCF.confidence）
@@ -331,23 +365,35 @@ class ReviewAgent:
         self,
         srr: dict,
         test_cases: list[dict],
+        exclude_case_ids: set[str] | None = None,
     ) -> dict:
         """调用 LLM 执行 6 维度深度审核。
 
         Args:
             srr: SRR JSON 字典
             test_cases: 用例列表
+            exclude_case_ids: 从 LLM 审核清单中剔除的用例 ID（方案 B：blocker 用例已在
+                _rule_based_review 被拦截，无需再送 LLM 复核）。注意 report 的全量口径
+                （total_cases/blocked_cases/avg_confidence）由 _merge_review_results 保证，
+                此处仅缩减 LLM 输入。
 
         Returns:
             dict: LLM 审核报告
         """
-        # 提取 gen_confidence 列表（仅作 LLM 参考）
-        gen_confidences = [
-            c.get("gen_metadata", {}).get("gen_confidence", 0.5)
-            for c in test_cases
+        # 方案 B：blocker 用例已从 LLM 审核清单剔除（它们在 _rule_based_review 已被拦截，
+        # 送 LLM 复核是浪费；report 全量口径由 _merge_review_results 用全量 reviewed_cases 保证）。
+        exclude_case_ids = exclude_case_ids or set()
+        non_blocker = [
+            c for c in test_cases if c.get("id", "") not in exclude_case_ids
         ]
 
-        user_prompt = prompts.build_user_prompt(srr, test_cases, gen_confidences)
+        # 提取 gen_confidence 列表（仅作 LLM 参考，基于非 blocker 子集）
+        gen_confidences = [
+            c.get("gen_metadata", {}).get("gen_confidence", 0.5)
+            for c in non_blocker
+        ]
+
+        user_prompt = prompts.build_user_prompt(srr, non_blocker, gen_confidences)
 
         # P1-1 评审异构路由：评审可配置专属供应商（与生成模型家族不同 → 偏见正交，
         # 依据《深入理解 AI Agent》6.5.1 同源偏见）。未配置/失败时回退主力池，尽力而为。
@@ -371,7 +417,7 @@ class ReviewAgent:
             try:
                 result = await self._llm.call_json(**_review_kwargs, provider=judge_provider)
                 logger.info("[ReviewAgent] 评审走异构供应商: {}", judge_provider)
-                return _validated_review_payload(result, test_cases)
+                return _validated_review_payload(result, non_blocker)
             except Exception as e:
                 logger.warning(
                     "[ReviewAgent] 评审供应商 {} 失败，回退主力池: {}",
@@ -379,7 +425,7 @@ class ReviewAgent:
                 )
         try:
             result = await self._llm.call_json(**_review_kwargs)
-            return _validated_review_payload(result, test_cases)
+            return _validated_review_payload(result, non_blocker)
         except Exception as e:
             # v3.3（修 N8）：LLM 审核失败 → 规则降级。
             #

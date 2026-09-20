@@ -781,6 +781,86 @@ class MilvusVectorStore:
             formatted = filtered[:top_k]
         return formatted
 
+    def search_similar_cases_batch(
+        self,
+        queries: list[str],
+        top_k: int = 5,
+        case_type: str | None = None,
+        req_id: str | None = None,
+        product_id: str | None = None,
+        project_id: str | None = None,
+    ) -> list[list[dict]]:
+        """批量检索相似用例（方案 C：embedding 一次 + 多向量 search 一次）。
+
+        与 search_similar_cases 等效，但把 N 条用例的「N 次 embed + N 次 Milvus
+        search RPC」收敛为「1 次批量 embed（embed_texts）+ 1 次多向量 search」。
+
+        pymilvus 2.4.x 的 collection.search(data=[v1, v2, ...]) 支持多 query 向量，
+        返回的 results 与 queries 等长对齐（results[i] 对应 queries[i] 的命中列表）。
+
+        Args:
+            queries: 查询文本列表（每条用例一个）
+            top_k / case_type / req_id / product_id / project_id：同 search_similar_cases
+
+        Returns:
+            list[list[dict]]：每个 query 对应的标准化命中列表，顺序与 queries 对齐。
+        """
+        if not queries:
+            return []
+        self._ensure_connected()
+        conditions = []
+        if case_type:
+            conditions.append(f'metadata["case_type"] == "{_safe_id(case_type, "case_type")}"')
+        if req_id:
+            conditions.append(f'metadata["req_id"] == "{_safe_id(req_id, "req_id")}"')
+        if product_id:
+            conditions.append(f'metadata["product_id"] == "{_safe_id(product_id, "product_id")}"')
+        if project_id:
+            conditions.append(f'metadata["project_id"] == "{_safe_id(project_id, "project_id")}"')
+        where_filter = " && ".join(conditions) if conditions else None
+
+        # 方案 C：一次批量 embedding（N 条文本 → N 个向量），避免每条一次 embed 调用
+        vectors = self._embed(queries)
+
+        collection = self._get_collection("test_cases")
+        # HNSW 检索参数（docs/02 §9.3）
+        search_params = {"metric_type": "COSINE", "params": {"ef": 64}}
+        results = collection.search(
+            data=vectors,
+            anns_field="vector",
+            param=search_params,
+            limit=top_k,
+            expr=where_filter,
+            output_fields=["id", "metadata", "document"],
+        )
+
+        formatted_all: list[list[dict]] = []
+        for hits in results:
+            formatted = []
+            for hit in hits:
+                # pymilvus Entity.get() 在某些版本不支持默认值参数，
+                # 使用 try/except 安全访问各字段。
+                meta_raw = "{}"
+                doc_raw = ""
+                try:
+                    meta_raw = hit.entity.get("metadata")
+                except Exception as e:
+                    logger.warning("[Milvus] 读取 metadata 字段失败: {}", str(e)[:150])
+                try:
+                    doc_raw = hit.entity.get("document")
+                except Exception as e:
+                    logger.warning("[Milvus] 读取 document 字段失败: {}", str(e)[:150])
+                if isinstance(meta_raw, str):
+                    meta_raw = json.loads(meta_raw)
+                formatted.append({
+                    "id": hit.id,
+                    "similarity": round(hit.distance, 4),
+                    "metadata": meta_raw or {},
+                    "document": doc_raw or "",
+                })
+            formatted_all.append(formatted)
+        return formatted_all
+
     def get_all_test_cases(self, product_id: str | None = None, limit: int = 100) -> list[dict]:
         """获取所有用例向量（product_id 为空时不过滤，避免空表达式报错）。"""
         self._ensure_connected()
