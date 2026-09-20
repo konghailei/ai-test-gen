@@ -274,6 +274,47 @@
   （认证 / 超时 / 未知参数 / 模型不存在）→ **不再误判**；1 条精确短语 → 正常命中。
 - **修复记录**：v3.4.3 commit（见 git log）
 
+### 🟢 L-16 生成阶段 impact 节点重复执行影响分析 BFS，且与人工确认的影响范围存在漂移风险 —— 已修复（2026-09-20）
+
+- **位置**：`backend/app/agents/impact_agent.py:43-121`（`analyze()` 主入口，第②③步）；`backend/app/core/orchestrator.py:715-748`（`_impact_node`）
+- **问题**：需求分析阶段已通过 `analyze_requirement_impact()`（`impact_agent.py:615-833`，模块 BFS + FP 双向 BFS）产出受影响 FP 候选，经人工确认后写入 `srr.impact_analysis`（`is_affected=True 且 confirmed_at 非空`）。但生成 DAG 的 impact 节点对优化需求会**重新执行一遍**模块依赖图 BFS（`_analyze_module_impact`）与受影响需求定位（`_find_regression_requirements`，按 `Requirement.module` 模块名匹配）：
+  1. **重复计算**：同样的边表、同样的 ≤3 跳遍历跑两次，多两趟全表加载；
+  2. **口径不一致**：需求分析阶段是 FP 级精度（`FunctionalPoint.module_id` + fan_in 排序 + 同名 FP 去重），生成阶段是 Requirement.module 字符串匹配，两个模块归属口径可能对不上；
+  3. **一致性风险（最关键）**：两次 BFS 之间若依赖边被增删（如新依赖通过审核），生成阶段现算的范围可能与**人工确认过的影响范围不一致**，相当于用机器新算的结果悄悄覆盖了人工背书的结论。而消费端 RTS 回归装配（`orchestrator.py:843-938` `_assemble_regression_cases`）本来就只认 `srr.impact_analysis` 的确认条目——重算的 BFS 结果仅流入 `generation_guidance` 文本与 done 事件报告，实际价值很低。
+- **建议方案**：`analyze()` 前半段改为直接消费 `srr.impact_analysis` 中已确认条目（FP 名单 / 归属需求 / 模块名均已在条目内），删除重复 BFS；`_find_regression_requirements` 的模块名匹配可换成确认条目里现成的 `req_id`/`req_title`。**保留**后半段 diff 驱动的用例操作规划（`_plan_case_operations` / `_plan_regression` / `_build_guidance`）——其输入 `optimization_context.diff` + 原需求历史用例是需求分析阶段没有的，不可替代。
+- **收益**：少两趟全表加载 BFS；消除双口径不一致；影响范围与人工确认严格一致（消除漂移）。
+- **影响面**：仅 `impact_agent.analyze()` 前半段，不动 API 层与 DAG 结构；`_analyze_fp_impact`（FP 单点分析，API 触发）不受影响。
+- **2026-09-20 复核结论：成立，且比条目所写更严重（证据已入库核实）**
+  1. **加重证据·生成侧 BFS 实为空转**：`Requirement.module` 列存的是**模块名**（实测 '工单管理'/'智能问答'），而依赖边表 `ModuleDependency` 的写入侧（`products.py:2119-2127`）按 **Module.id**（'MOD-856-…'）校验存键。生成侧 `analyze()` 用 `involved_modules`（模块名）做 BFS 起点，在 ID 键控的邻接表上**一步都走不动**（线上边表现有 0 条，即使有也匹配不上）→ `_analyze_module_impact` 恒返回 direct=模块名、indirect=∅。`_find_regression_requirements` 的 `Requirement.module.in_(affected)` 退化为"同名单模块内其他需求"的字符串碰撞，与依赖图无关。
+  2. **对照确认**：需求分析侧 `analyze_requirement_impact()`（:615）FP 精度、人工确认、守卫完备（generate.py:151-165 拒绝未确认条目），条目形状实测含 `fp_id/fp_name/module_id/source_req_id/is_affected/confirmed_at`——生成侧"消费确认条目"所需的全部字段**现成可用**。
+  3. **方案裁定**：条目原方案（删 BFS、消费确认条目）**直接采纳**。另需补两点条目未覆盖的边界：① `impact_analysis` 为空的优化需求（从未跑过影响分析）当前**允许生成**（守卫只拦"存在未确认条目"）——重构后该场景 fallback 为"无确认影响"并打 `degraded_flags` 提示（现状是 BFS 空转出同样结果，行为不变、可观测性提升）；② done 事件 `impact_result` 形状（`test_phase4:715-721` 断言 is_optimization/generation_guidance）保持不变。
+- **修复记录（2026-09-20）**：已按方案裁定实施——`analyze()` 前半段改为纯消费 `srr.impact_analysis` 确认条目（优化需求路径零 DB 调用），删除生成期 `_find_regression_requirements`；`impact_unconfirmed` 标记经 `_impact_node` 透传 `degraded_flags`；orchestrator 类 docstring 的过时 FULL/FAST 叙述顺带修正。回归全绿（unit 117/1、phase2 74、phase3 91、phase4 151、phase5 101、phase6 141，与基线一致）。commit 见 git log "L-16"。
+
+### 🟡 L-17 ReviewAgent 审核链路的分层低效：执行顺序倒置、LLM 职责与输入错配、无分批能力 —— 方案 B+C 已修复；方案 A 待立项（问题 2 未解）
+
+> 来源：2026-09-20 审核链路（review 节点）代码走查（对应 `review_agent.py` / `orchestrator.py _review_node`）。
+> 分层职责划分本身正确（确定性检查已前置、LLM 只做语义判断、发布决策带证据复核），
+> 问题集中在**执行顺序、信息配比、规模扩展性**三处。
+
+- **位置**：`backend/app/agents/review_agent.py:102-215`（`review()` 主流程）、`:221-250`（`_calculate_confidences`）、`:330-404`（`_llm_review`）、`backend/app/prompts/review_agent.py:128-165`（prompt 降载）
+- **问题**（三处独立，可分别处理）：
+  1. **执行顺序倒置（最省事的修复）**：`review()` 按 ①置信度计算（每条用例一次向量检索，N 次 I/O，最贵）→ ②规则预检（零成本）→ ③LLM 六维 的顺序执行。已判 blocker 的用例（如缺 related_requirement）照样做了向量检索、照样进 LLM 清单。blocker 占比高时（畸形生成/供应商异常）白烧 N 次检索并污染 LLM 输入。应改为：规则预检先行 → blocker 出局 → 存活用例才做置信度检索与 LLM 审核。
+  2. **LLM 职责与输入错配**：v3.1.3 prompt 降载后（正确方向，避免 200K+ 卡死），每条用例仅剩 8 个精简字段（`steps`=数量、`assertions`=数量、`expected` 截 160 字），LLM 实际只能做"集合级诊断"（组合合理性/类型分布/与需求概要的语义一致性），却仍以"六维深度审核"的名义产出 issues——名义职责 > 输入支持的职责。单条用例质量实际只有规则预检在管，中间层是空的。
+  3. **单次全量调用无分批**：条目全量进一次 LLM 调用（精简后每条约 60-80 token）。当前用例数（FP 分片生成，通常几十条）安全；但大需求下 集成 + 多类型 + 补生成合并后可上探 300-500 条（20-50K），逼近危险区。与生成端不对称：**生成做了 FP 分片，审核没有**。置信度检索（N 次逐条 `search_similar_cases`）同样在大用例集下先成为瓶颈——可仿照生成端 L4 去重的做法（`embed_texts` 批量一次 + 内存余弦）批量化。
+- **建议方案**（按性价比排序）：
+  - **B（零风险）**：重排执行顺序（问题 1），纯顺序调整不改语义；
+  - **C（纯工程）**：置信度检索批量化（问题 3 后半），`_calculate_confidences` 与模式库检索改为批量 embedding + 内存计算；
+  - **A（治本，观察后立项）**：审核同构走 FP 分片（问题 2+3 前半）——按 `related_fp` 分组每组一次小审核（组内可放宽字段截断、放回步骤前 2 步，小 prompt 允许富信息），再补一次跨组集合级小审核（仅标题+类型+分布，判跨组重复/组合问题）。调用次数 1→N+1 但每次小、可并行；顺带解决 LLM 审核的语义矛盾。
+- **不建议**：回退全量 prompt（200K 卡死是实测过的）；砍掉 LLM 六维只留规则预检（语义一致性判断规则写不出来）。
+- **触发观察指标**：线上任务用例数分布（>300 条占比）与 review 节点耗时 / LLM 首 token 时长，超过阈值再启动方案 A。
+- **2026-09-20 复核结论：三个子问题全部成立（证据已入库/读码核实）**
+  1. **顺序倒置属实**：`review()` 实际顺序 = ①`_calculate_confidences`（:170，逐条 `search_similar_cases`，N 次 Milvus I/O）→ ②`_rule_based_review`（:183，纯内存零成本）→ ③`_llm_review`（:190）。blocker 判定在 ② 才出现，已注定 blocker 的用例已白付 ① 的向量检索、且照样进 ③ 的 LLM 清单。
+  2. **输入错配属实**：`prompts/review_agent.py:139-154` 实测每条用例仅 8 字段（id/title/type/priority/related_fp/steps=数量/assertions=数量/expected 截 160 字），LLM 无从执行"步骤级语义审核"——名义六维、实际集合级诊断。单条质量检查只剩规则预检（blocker 仅 traceability 一类 + executability warning/info），中间层确为空。
+  3. **无分批属实 + 规模实测**：`_llm_review` 单次 `call_json` 全量注入。线上分布（按入库日聚合）：单日最高 397 条入库（2026-09-03），p50≈89、最大 737（累计口径）——**L-17 预估的 300-500 条区间已被线上实际触及**（390+ 条日已有两日），方案 A 的"观察后立项"前置条件已满足，不必再等。
+  4. **补充证据·置信度消费方**：case 级 `confidence` 下游有**三处硬依赖**——`persist_to_kb` 入库分档（≥0.70 auto_approve，review_agent.py:850）、标题级去重保留高分（:801-804）、列表筛选 `min_confidence`（api/testcases.py:82-125）。**方案 B 重排顺序时 blocker 用例的 confidence 计算不能省**（去重与落库仍需），只省向量检索与 LLM 输入——即 blocker 用例需一个不查 KB 的降级置信度路径（gen_self+completeness 因子仍可算，match_score=0），否则标题去重会拿 0 分错杀高质 blocker。
+- **修复记录（2026-09-20，方案 B+C）**：已实施——①重排为 规则预检→置信度→LLM，blocker 用例跳过 KB 检索（`skip_search_ids`，置信度走冷启动 quality_base 兜底照算）且剔除出 LLM 清单（`exclude_case_ids`），report 全量口径不变；②新增 `milvus_store.search_similar_cases_batch()`（一次批量 embed + pymilvus 2.4 多向量 search，N 次 embed+N 次 RPC → 1+1），批量失败回退逐条。签名向后兼容，回归全绿（同 L-16 口径）。commit 见 git log "L-17"。
+- **遗留（方案 A 待立项）**：问题 2（LLM 输入错配，名义六维/实际集合级）未解决——需按 `related_fp` 分组的富信息小审核 + 跨组集合级审核。规模前置条件已满足（线上单日 397 条实测），下一迭代立项。
+
 ---
 
 ## 二、待进一步确认上下文的问题（复核时未逐行验证）
