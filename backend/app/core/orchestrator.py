@@ -267,9 +267,12 @@ class Orchestrator:
     将 5 个 Agent 串联为 DAG 工作流：
         ReqAgent → ClarifyAgent → QualityGate → [ImpactAgent] → GenAgent → ReviewAgent
 
-    通道选择（doc-00 §9.1）：
-        - FULL：完整流程（含 clarify 回环 + impact + 多类型生成 + 完整审核）
-        - FAST：跳过 clarify，直接 gate → gen → review
+    通道选择（doc-00 §9.1）已于 v3.4.4 删除，现无 FULL/FAST 通道机制。
+    生成准备节点（select_channel）只构造环节开关，由各节点据此决定执行或跳过：
+        - enable_clarify：是否启用澄清（已确认需求生成期 clarify 恒跳过）
+        - enable_impact_analysis：是否启用影响分析（impact 节点据此决定执行或跳过）
+        - enable_multi_type_generation：是否启用多类型用例生成
+        - enable_full_review：是否启用完整审核
 
     Clarify 回环（doc-01 §5.3 + doc-03 §6.7）：
         - QualityGate 不达标且无 blocker-only 问题时，回环到 ClarifyAgent
@@ -740,16 +743,22 @@ class Orchestrator:
         is_opt = result.get("is_optimization", False)
         guidance_len = len(result.get("generation_guidance", "") or "")
 
+        # 透传影响分析未确认标记到 degraded_flags（保持与 _test_design_node 同构）
+        degraded_flags: list[str] = list(state.get("degraded_flags", []) or [])
+        if result.get("impact_unconfirmed"):
+            degraded_flags.append("impact_unconfirmed")
+
         logger.info(
             # v3.1.3: 修正过时日志——v2.3 起 impact 的下一节点是 test_design 而非 generate
             "[Orchestrator] ◀ 节点 impact 完成 ▶ 下一节点 test_design: "
-            "is_optimization={}, guidance_len={}, original_cases={}",
+            "is_optimization={}, guidance_len={}, original_cases={}, unconfirmed={}",
             is_opt,
             guidance_len,
             len(original_cases),
+            bool(result.get("impact_unconfirmed")),
         )
 
-        return {"impact_result": result}
+        return {"impact_result": result, "degraded_flags": degraded_flags}
 
     # v3.1：已移除 KB 检索节点（原 _retrieve_node）。用例生成直接基于 SRR，
     # 不再从知识库检索相似需求/用例/模式注入（该节点已不注册进 LangGraph）。

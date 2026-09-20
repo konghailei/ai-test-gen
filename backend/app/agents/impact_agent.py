@@ -1,19 +1,25 @@
-"""ImpactAnalysisAgent 影响分析 Agent（模块依赖图谱 BFS 版）。
+"""ImpactAnalysisAgent 影响分析 Agent（生成期影响范围消费端）。
 
-混合分析策略（方案 C — 最成熟方案）：
-  Step 1（模块级粗筛）：给定项目涉及模块 → 模块依赖图 BFS → 受影响模块
-  Step 2（需求级定位）：受影响模块 → 追溯矩阵 → 需回归的用例
+影响范围的**单一事实源**来自需求分析阶段（上传需求时）：
+  analyze_requirement_impact() 产出受影响 FP 候选，写入 srr.impact_analysis
+  数组；人工确认后（is_affected is True 且 confirmed_at 非空）才成为"确认条目"。
+
+生成期不再重新跑模块依赖图 BFS——模块 BFS（_analyze_module_impact）与
+FP BFS 仅在需求分析侧使用。本 Agent 的 analyze() 仅从确认条目派生：
+  - direct_modules：当前需求涉及的模块（保持原语义）
+  - indirect_modules：确认条目去重后的 module_id
+  - indirect_requirements：确认条目去重后的 source_req_id
 
 设计依据：
 - docs/03-case-generation-flow.md §1.5（ImpactAnalysisAgent 设计）
-- docs/02-knowledge-base.md §2.4（模块依赖图谱）
-- 混合方案：模块级粗筛 + 追溯矩阵精确定位
+- RTS 回归装配（orchestrator._assemble_regression_cases）只认
+  srr.impact_analysis 确认条目，不消费生成期 BFS 结果。
 
-工作流程：
-  ① 检测是否为优化需求 → ② 模块依赖图 BFS 遍历 →
-  ③ 用例操作规划 → ④ 回归范围精确定位 → ⑤ 构建生成指导
+工作流程（优化需求路径，零 DB 调用）：
+  ① 检测是否为优化需求 → ② 提取确认条目 →
+  ③ 用例操作规划 → ④ 回归范围规划 → ⑤ 构建生成指导
 
-输入：SRR JSON（含 optimization_context）+ 原始用例列表
+输入：SRR JSON（含 optimization_context + impact_analysis）+ 原始用例列表
 输出：影响分析报告（含 impact / case_operations / regression_scope）
 """
 
@@ -35,7 +41,12 @@ from app.utils.logger import logger
 
 
 class ImpactAnalysisAgent:
-    """影响分析 Agent（模块依赖图谱 BFS + 追溯矩阵精确定位）。"""
+    """影响分析 Agent（生成期消费端）。
+
+    影响范围单一事实源 = 需求分析阶段人工确认的 srr.impact_analysis 条目；
+    生成期 analyze() 仅从确认条目派生 direct/indirect modules 与
+    indirect_requirements，不再现算模块依赖图 BFS（BFS 仅在需求分析侧使用）。
+    """
 
     def __init__(self) -> None:
         self._llm = llm_client
@@ -45,12 +56,15 @@ class ImpactAnalysisAgent:
         srr: dict,
         original_cases: list[dict] | None = None,
     ) -> dict:
-        """ImpactAnalysisAgent 主入口：规则化影响分析（BFS 依赖图），输出受影响 FP 与生成指导。
-        """
-        """分析变更影响范围。
+        """影响分析主入口（生成期消费端）。
+
+        影响范围来自需求分析阶段人工确认的 srr.impact_analysis 条目
+        （单一事实源），生成期不再现算模块依赖图 BFS。
+
+        优化需求路径上零 DB 调用：本方法不打开任何数据库会话。
 
         Args:
-            srr: SRR JSON 字典
+            srr: SRR JSON 字典（含 optimization_context + impact_analysis）
             original_cases: 原始用例列表
 
         Returns:
@@ -58,15 +72,16 @@ class ImpactAnalysisAgent:
                 {
                     "is_optimization": bool,
                     "impact": {
-                        "direct_modules": [...],      # 直接涉及的模块
-                        "indirect_modules": [...],     # 图谱 BFS 找到的间接受影响模块
-                        "all_affected_modules": [...], # 所有受影响模块
-                        "direct_requirements": [...],  # 直接需求
-                        "indirect_requirements": [...],# 间接受影响的需求
+                        "direct_modules": [...],       # 直接涉及的模块（当前需求 modules）
+                        "indirect_modules": [...],      # 确认条目去重后的 module_id
+                        "all_affected_modules": [...],  # 所有受影响模块
+                        "direct_requirements": [...],   # 直接需求
+                        "indirect_requirements": [...], # 确认条目去重后的 source_req_id
                     },
                     "case_operations": {update, add, delete, keep},
-                    "regression_scope": [...],         # 需回归的用例
+                    "regression_scope": [...],          # 需回归的用例
                     "generation_guidance": str
+                    # impact_unconfirmed: True  仅当确认条目为空（非优化需求时不出此键）
                 }
         """
         opt_context = srr.get("optimization_context")
@@ -82,42 +97,79 @@ class ImpactAnalysisAgent:
         diff = opt_context.get("diff", {})
         original_cases = original_cases or []
 
-        # ② 模块依赖图 BFS 遍历
-        involved_modules = req_data.get("modules", []) or []
-        async with async_session() as session:
-            impact = await self._analyze_module_impact(involved_modules, session)
-            logger.info("[ImpactAgent] 模块图分析: direct={}, indirect={}",
-                        len(impact["direct_modules"]), len(impact["indirect_modules"]))
+        # ② 提取需求分析阶段人工确认的条目（单一事实源）
+        #    确认条件：is_affected is True 且 confirmed_at 非空
+        confirmed = [
+            e for e in (srr.get("impact_analysis") or [])
+            if e.get("is_affected") is True and e.get("confirmed_at")
+        ]
 
-            # ③ 追溯矩阵定位：受影响模块下的所有需求 → 用例
-            regression_reqs = await self._find_regression_requirements(
-                impact["all_affected_modules"], srr, session
-            )
+        # 直接涉及模块：当前需求的 modules（保持原语义）
+        direct_modules = list(set(req_data.get("modules", []) or []))
 
-        # ④ 用例操作规划
+        # 间接受影响模块：确认条目去重后的 module_id
+        #    形状对齐现有 indirect_modules: [{"module_id", "reason", "depth"}]
+        indirect_modules: list[dict] = []
+        seen_module_ids: set[str] = set()
+        for e in confirmed:
+            mid = e.get("module_id")
+            if not mid or mid in seen_module_ids:
+                continue
+            seen_module_ids.add(mid)
+            indirect_modules.append({
+                "module_id": mid,
+                "reason": e.get("impact_description") or "人工确认影响",
+                "depth": 1,
+            })
+
+        # 间接受影响的需求：确认条目去重后的 source_req_id
+        #    形状对齐旧返回：{"id", "title", "matched_modules"}
+        #    不查库，title 用条目 req_title 字段，缺失则置空字符串
+        indirect_requirements: list[dict] = []
+        seen_req_ids: set[str] = set()
+        for e in confirmed:
+            rid = e.get("source_req_id")
+            if not rid or rid in seen_req_ids:
+                continue
+            seen_req_ids.add(rid)
+            indirect_requirements.append({
+                "id": rid,
+                "title": e.get("req_title", "") or "",
+                "matched_modules": [e["module_id"]] if e.get("module_id") else [],
+            })
+
+        impact = {
+            "direct_modules": direct_modules,
+            "indirect_modules": indirect_modules,
+            "all_affected_modules": direct_modules + [m["module_id"] for m in indirect_modules],
+            "direct_requirements": [req_id],
+            "indirect_requirements": indirect_requirements,
+        }
+
+        # ③ 用例操作规划
         case_operations = self._plan_case_operations(diff, original_cases)
 
-        # ⑤ 回归范围
+        # ④ 回归范围
         regression_cases = self._plan_regression(case_operations, original_cases)
 
         # 构建影响报告
-        impact_report = {
+        impact_report: dict = {
             "is_optimization": True,
-            "impact": {
-                "direct_modules": impact["direct_modules"],
-                "indirect_modules": impact["indirect_modules"],
-                "all_affected_modules": impact["all_affected_modules"],
-                "direct_requirements": [req_id],
-                "indirect_requirements": regression_reqs,
-            },
+            "impact": impact,
             "case_operations": case_operations,
             "regression_scope": regression_cases,
-            "generation_guidance": self._build_guidance(impact, regression_reqs, case_operations),
+            "generation_guidance": self._build_guidance(
+                impact, indirect_requirements, case_operations
+            ),
         }
 
+        # fallback：确认条目为空时标记未确认（非优化需求路径不产出此键）
+        if not confirmed:
+            impact_report["impact_unconfirmed"] = True
+
         logger.info("[ImpactAgent] ◀ 完成: dir_mod={}, indir_mod={}, reg_reqs={}, reg_cases={}",
-                    len(impact["direct_modules"]), len(impact["indirect_modules"]),
-                    len(regression_reqs), len(regression_cases))
+                    len(direct_modules), len(indirect_modules),
+                    len(indirect_requirements), len(regression_cases))
         return impact_report
 
     # ========================================================================
@@ -204,48 +256,6 @@ class ImpactAnalysisAgent:
             "indirect_modules": indirect,
             "all_affected_modules": list(visited),
         }
-
-    # ========================================================================
-    # 追溯矩阵精确定位
-    # ========================================================================
-
-    async def _find_regression_requirements(
-        self, affected_modules: list[str], srr: dict, session
-    ) -> list[dict]:
-        """在受影响模块中，找到需要回归的需求。
-
-        排除当前需求自身，仅返回受影响模块下的其他需求。
-        """
-        current_req_id = srr.get("requirement", {}).get("id", "")
-        current_product_id = srr.get("requirement", {}).get("product_id", "")
-
-        if not affected_modules:
-            return []
-
-        # v2.2: 按 product_id 过滤，防止跨产品数据泄漏
-        query_filters = [
-            Requirement.id != current_req_id,
-            Requirement.module.in_(affected_modules),
-        ]
-        if current_product_id:
-            query_filters.append(Requirement.product_id == current_product_id)
-
-        result = await session.execute(
-            select(Requirement).where(*query_filters).order_by(Requirement.created_at.desc())
-        )
-        candidate_reqs = result.scalars().all()
-
-        regression_reqs = []
-        for req in candidate_reqs:
-            req_modules = set(req.modules or [])
-            if req_modules & set(affected_modules):
-                regression_reqs.append({
-                    "id": req.id,
-                    "title": req.title,
-                    "matched_modules": list(req_modules & set(affected_modules)),
-                })
-
-        return regression_reqs
 
     # ========================================================================
     # 用例操作规划
