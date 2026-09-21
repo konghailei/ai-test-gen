@@ -260,6 +260,8 @@ async def load_db_config_to_settings(session: AsyncSession) -> None:
 
         if primary_config:
             settings.LLM_PROVIDER = primary_config["provider"]
+            # v3.4.5（E2）：先全量清空，再按 DB 当前内容重写，避免已删除的供应商僵尸残留
+            _reset_provider_configs([c["provider"] for c in all_configs])
             # 应用所有供应商配置到 _all_provider_configs（供 llm_client 故障转移使用）
             for cfg in all_configs:
                 _apply_config_to_settings(cfg)
@@ -272,6 +274,36 @@ async def load_db_config_to_settings(session: AsyncSession) -> None:
 
     except Exception as e:
         logger.warning("[settings] 从 DB 加载 LLM 配置失败（使用 .env 默认值）: {}", str(e)[:120])
+
+
+def _reset_provider_configs(keep: list[str]) -> list[str]:
+    """以 DB 为准确认内存中的供应商集合，清空后交由调用方重新写入。
+
+    v3.4.5（自审补漏 E2）：`_apply_config_to_settings` 是**只增不删**的字典写入，
+    配置热重载（DB 供应商数变少）时，已从 DB 移除的供应商会残留在
+    `settings._all_provider_configs` 里，继续参与 llm_client 的故障转移。
+
+    实证：DB `llm_config` 只剩 3 行，运行时 `available_providers` 却是
+    `["qwen","日日新","qwen1","openrouter","火山","qwen2"]`，
+    04:00 那次故障转移实际打到了 DB 里已不存在的 `qwen:qwen3.8-max`——
+    用着旧 api_key 调一家已经删掉的供应商，失败原因无法解释，排查方向被误导。
+
+    Args:
+        keep: 应当保留的 provider 名称列表（通常来自 DB 全量配置）
+
+    Returns:
+        被清理掉的残留 provider 列表（供调用方留痕；空列表表示无残留）
+    """
+    old = getattr(settings, "_all_provider_configs", {}) or {}
+    keep_set = set(keep)
+    stale = [p for p in old if p not in keep_set]
+    if stale:
+        logger.info(
+            "[settings] 清理已从 DB 移除的供应商配置（防僵尸残留参与故障转移）: {}",
+            ", ".join(stale),
+        )
+    settings._all_provider_configs = {}
+    return stale
 
 
 def _apply_config_to_settings(cfg: dict) -> None:
@@ -447,6 +479,9 @@ async def update_llm_config(
     await session.commit()
 
     # 3. 更新 settings 单例（即时生效）
+    # v3.4.5（E2）：本次是全量替换（DB 已 delete+insert），内存中被移除的供应商必须一并清掉，
+    # 否则会继续参与故障转移——调到一家用户已经删掉的供应商上。
+    _reset_provider_configs([r.provider for r in new_records])
     for record in new_records:
         cfg = {
             "provider": record.provider,

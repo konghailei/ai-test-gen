@@ -416,6 +416,18 @@ def test_settings(client: TestClient) -> None:
         finally:
             await conn.close()
 
+    async def _reload_settings_from_db() -> None:
+        """用 DB 当前内容刷新 settings 单例（含 _all_provider_configs）。
+
+        测试过程中的 PUT 会改写模块级 settings 单例；仅恢复 DB 表不足以让
+        运行中的进程回到原状——内存里仍留着测试用的供应商，后续故障转移会
+        打到它们头上。必须显式触发一次从 DB 重载。
+        """
+        from app.api.settings import load_db_config_to_settings
+        from app.db.database import async_session
+        async with async_session() as session:
+            await load_db_config_to_settings(session)
+
     snapshot_rows = asyncio.run(_snapshot_llm_config())
     try:
         # 5.1 获取 LLM 配置
@@ -489,6 +501,28 @@ def test_settings(client: TestClient) -> None:
         check("无标记时回退第一项为主供应商",
               len(primaries) == 1 and primaries[0].get("provider") == "provider_x")
 
+        # 5.4d 供应商移除后不得残留（E2 回归：僵尸供应商不得继续参与故障转移）
+        #   观测口：/api/settings/review-llm 的 available_providers 直接反映
+        #   settings._all_provider_configs 的键集合。
+        #   缺陷形态：DB 只剩 3 家、运行时却仍有 6 家，故障转移会打到已删除的供应商上。
+        client.put("/api/settings/llm", json={
+            "providers": [
+                {"provider": "ghost_a", "api_key": "sk-aaa1234567890", "is_primary": True},
+                {"provider": "ghost_b", "api_key": "sk-bbb1234567890", "is_primary": False},
+            ]
+        })
+        resp = client.put("/api/settings/llm", json={
+            "providers": [
+                {"provider": "keep_only", "api_key": "sk-zzz1234567890", "is_primary": True},
+            ]
+        })
+        check("PUT 收敛为单个供应商返回 200", resp.status_code == 200)
+        resp = client.get("/api/settings/review-llm")
+        available = resp.json().get("data", {}).get("available_providers", [])
+        check("已移除的供应商不再残留在运行时配置中（无僵尸）",
+              "ghost_a" not in available and "ghost_b" not in available)
+        check("当前供应商存在于运行时配置中", "keep_only" in available)
+
         # 5.5 测试连通性 - mock litellm.acompletion
         with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = MagicMock(
@@ -501,7 +535,10 @@ def test_settings(client: TestClient) -> None:
         check("连通测试含 latency_ms", "latency_ms" in data)
     finally:
         asyncio.run(_restore_llm_config(snapshot_rows))
-        check("已恢复原 LLM 配置（环境保护）", True)
+        # PUT 改写的是 settings 单例，只还原 DB 表不够——必须再触发一次从 DB 重载，
+        # 否则运行中的进程会一直用测试供应商做故障转移。
+        asyncio.run(_reload_settings_from_db())
+        check("已恢复原 LLM 配置（DB + 运行时单例，环境保护）", True)
 
 
 # ============================================================================
