@@ -18,6 +18,11 @@ RUN apt-get update \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && mkdir -p /app/data \
+    # v3.4.5（缺陷 A 防复发）：requirements.txt 里早已声明 langgraph-checkpoint-postgres
+    # 与 psycopg[binary,pool]，但某次构建静默未安装这两个包——镜像直到运行时才暴露为
+    # 「PostgresSaver 初始化失败 → 检查点降级 memory」，durable execution 全程是假的。
+    # 构建期硬校验：缺包直接让构建失败，绝不允许带着坏镜像上线。
+    && python -c "import langgraph.checkpoint.postgres, psycopg_pool; print('[build] checkpoint deps ok')" \
     # 清理编译产物减小镜像
     && apt-get purge -y gcc make \
     && apt-get autoremove -y \
