@@ -1476,26 +1476,44 @@ class Orchestrator:
                     supplement_gaps.append({"name": name[:80], "reason": f"review_supplement: {name[:80]}"})
             if not supplement_gaps:
                 supplement_gaps = [{"name": "补充审核发现的覆盖缺口", "reason": "review_supplement"}]
-            supplement_cases = await gen_agent.generate(
-                srr,
-                enable_multi_type=(state.get("channel_config", {}) or {}).get(
-                    "enable_multi_type_generation", True
-                ),
-                impact_guidance=(state.get("impact_result", {}) or {}).get(
-                    "generation_guidance", ""
-                ) or "",
-                functional_points=functional_points,
-                coverage_gaps=supplement_gaps,
-            )
-            merged_cases = gen_agent.merge_regression_cases(reviewed_cases, supplement_cases)
-            report, reviewed_cases = await review_agent.review(
-                srr, merged_cases, functional_points=functional_points
-            )
-            supplement_iteration = 1
-            # v3.1.3: 二次 review 后仍建议补生成 → 标记已达上限（补生成最多 1 次），
-            # 避免前端把 should_supplement=True 误解为"还会再补"
-            if report.get("should_supplement"):
+            # v3.4.5（缺陷 B）：补生成是**增强步骤**，失败必须降级而非击穿。
+            #   实证 3/3：主用例集已完整生成（27 / 11 / 9 条），仅因补生成这一次
+            #   LLM 调用超时，run_pipeline 就整条抛异常——已生成用例全部丢弃、
+            #   0 落库，用户拿到的结果是「跑了十几分钟、额度烧掉、零产出」。
+            #   正确语义：保留首次 review 的主用例集继续走审核与入库，
+            #   并把 supplement_failed 如实透出（覆盖率缺口不再被填补）。
+            try:
+                supplement_cases = await gen_agent.generate(
+                    srr,
+                    enable_multi_type=(state.get("channel_config", {}) or {}).get(
+                        "enable_multi_type_generation", True
+                    ),
+                    impact_guidance=(state.get("impact_result", {}) or {}).get(
+                        "generation_guidance", ""
+                    ) or "",
+                    functional_points=functional_points,
+                    coverage_gaps=supplement_gaps,
+                )
+                merged_cases = gen_agent.merge_regression_cases(reviewed_cases, supplement_cases)
+                report, reviewed_cases = await review_agent.review(
+                    srr, merged_cases, functional_points=functional_points
+                )
+                supplement_iteration = 1
+                # v3.1.3: 二次 review 后仍建议补生成 → 标记已达上限（补生成最多 1 次），
+                # 避免前端把 should_supplement=True 误解为"还会再补"
+                if report.get("should_supplement"):
+                    report["supplement_exhausted"] = True
+            except Exception as e:  # noqa: BLE001
+                supplement_iteration = 1
+                report["supplement_failed"] = True
+                report["supplement_error"] = str(e)[:300]
                 report["supplement_exhausted"] = True
+                _degraded.append("supplement_failed")
+                logger.error(
+                    "[Orchestrator] ⚠️ 补生成失败，保留主用例集 {} 条继续走审核/入库"
+                    "（覆盖率缺口未填补，done 事件带 supplement_failed）: {}",
+                    len(reviewed_cases), str(e)[:200],
+                )
 
         # Decide BEFORE any write, then re-evaluate inside persist_to_kb.
         if report.get("review_degraded"):

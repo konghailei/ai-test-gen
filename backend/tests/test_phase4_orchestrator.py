@@ -870,6 +870,69 @@ async def test_review_supplement_loop(result: TestResult):
 
 
 # ============================================================================
+# 测试 10b: 补生成失败不得击穿流水线（缺陷 B 防回归）
+# ============================================================================
+
+
+async def test_review_supplement_failure_keeps_cases(result: TestResult):
+    """补生成是增强步骤：LLM 失败时保留主用例集继续审核/入库，不得整条抛异常。
+
+    缺陷形态（实证 3/3）：主用例集已完整生成（27/11/9 条），仅因补生成这一次
+    LLM 调用超时，run_pipeline 就整条抛异常 → 已生成用例全部丢弃、0 落库，
+    用户拿到「跑了十几分钟、额度烧掉、零产出」。
+    """
+    print("\n[测试 10b] 补生成失败不得击穿流水线")
+    from app.agents.gen_agent import gen_agent
+    from app.agents.review_agent import review_agent
+
+    first_report = {
+        **REVIEW_REPORT,
+        "should_supplement": True,
+        "supplement_hints": ["验证码错误分支"],
+    }
+    reviewed_cases = [{**GEN_CASES[0], "confidence": 0.8}]
+    review_mock = AsyncMock(side_effect=[(first_report, reviewed_cases)])
+    # 补生成直接炸——模拟所有 LLM 供应商不可用
+    gen_mock = AsyncMock(side_effect=RuntimeError("所有 LLM 提供商均不可用（已尝试 2 家，耗时 240s）"))
+    persist_mock = AsyncMock(return_value={"auto_approved": 1})
+    originals = (review_agent.review, gen_agent.generate, review_agent.persist_to_kb)
+    review_agent.review = review_mock
+    gen_agent.generate = gen_mock
+    review_agent.persist_to_kb = persist_mock
+    try:
+        orch = Orchestrator()
+        state: PipelineState = {
+            "srr": SRR_P2_FAST,
+            "test_cases": reviewed_cases,
+            "req_id": "REQ-2024-001",
+            "channel_config": {"enable_multi_type_generation": True},
+            "impact_result": {"generation_guidance": ""},
+            "functional_points": [],
+            "supplement_iteration": 0,
+        }
+        raised = None
+        try:
+            update = await orch._review_node(state)
+        except Exception as e:  # noqa: BLE001
+            raised = e
+    finally:
+        review_agent.review, gen_agent.generate, review_agent.persist_to_kb = originals
+
+    result.assert_eq("补生成失败不应抛出（不击穿流水线）", raised, None)
+    if raised is not None:
+        return
+    result.assert_eq("补生成失败后仍保留主用例集", update["reviewed_cases"], reviewed_cases)
+    result.assert_eq("补生成轮次仍记为 1（不重试）", update["supplement_iteration"], 1)
+    result.assert_true("报告标记 supplement_failed",
+                       update["review_result"].get("supplement_failed") is True)
+    result.assert_true("报告标记 supplement_exhausted（前端不再期待补生成）",
+                       update["review_result"].get("supplement_exhausted") is True)
+    result.assert_true("降级标记含 supplement_failed",
+                       "supplement_failed" in (update.get("degraded_flags") or []))
+    result.assert_eq("主用例集仍走知识库回流", persist_mock.await_count, 1)
+
+
+# ============================================================================
 # 测试 12: 发布门禁 fail-closed（docs/15 §4.1 / P0-2）
 # ============================================================================
 
@@ -1085,6 +1148,7 @@ async def async_main(result: TestResult):
     await test_pipeline_clarify_loop(result)
     await test_pipeline_force_pass(result)
     await test_review_supplement_loop(result)
+    await test_review_supplement_failure_keeps_cases(result)
     await test_publication_gate_fail_closed(result)
     await test_pipeline_error(result)
     await test_progress_monotonic(result)
