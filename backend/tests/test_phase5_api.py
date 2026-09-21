@@ -455,6 +455,40 @@ def test_settings(client: TestClient) -> None:
         check("更新后 provider=deepseek", primary.get("provider") == "deepseek")
         check("Key 已脱敏", "***" in primary.get("api_key", ""))
 
+        # 5.4b 主供应商以请求体 is_primary 为准（E3 回归：非首项设为主也必须生效）
+        #   旧实现用 `idx == 0` 判定，前端「设为主供应商」只改布尔值、不改数组顺序，
+        #   导致该按钮永远失效。此用例即该缺陷的防回归闸门。
+        resp = client.put("/api/settings/llm", json={
+            "providers": [
+                {"provider": "provider_a", "api_key": "sk-aaa1234567890", "is_primary": False},
+                {"provider": "provider_b", "api_key": "sk-bbb1234567890", "is_primary": True},
+                {"provider": "provider_c", "api_key": "sk-ccc1234567890", "is_primary": False},
+            ]
+        })
+        check("PUT 非首项 is_primary=true 返回 200", resp.status_code == 200)
+        data = resp.json().get("data", {})
+        providers = data.get("providers", [])
+        primaries = [p for p in providers if p.get("is_primary")]
+        check("有且仅有一个主供应商", len(primaries) == 1)
+        check("主供应商是请求体标记的那一项（provider_b）",
+              len(primaries) == 1 and primaries[0].get("provider") == "provider_b")
+        check("非标记项未被置为主供应商",
+              all(p.get("provider") != "provider_a" for p in primaries))
+
+        # 5.4c 无人提交 is_primary 时回退第一项（归一化兜底）
+        resp = client.put("/api/settings/llm", json={
+            "providers": [
+                {"provider": "provider_x", "api_key": "sk-xxx1234567890"},
+                {"provider": "provider_y", "api_key": "sk-yyy1234567890"},
+            ]
+        })
+        check("PUT 无 is_primary 返回 200", resp.status_code == 200)
+        data = resp.json().get("data", {})
+        providers = data.get("providers", [])
+        primaries = [p for p in providers if p.get("is_primary")]
+        check("无标记时回退第一项为主供应商",
+              len(primaries) == 1 and primaries[0].get("provider") == "provider_x")
+
         # 5.5 测试连通性 - mock litellm.acompletion
         with patch("litellm.acompletion", new_callable=AsyncMock) as mock_completion:
             mock_completion.return_value = MagicMock(

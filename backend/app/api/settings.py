@@ -384,6 +384,24 @@ async def update_llm_config(
     await session.execute(delete(LLMConfigModel))
 
     # 2. 写入新配置
+    # v3.4.5（自审补漏 E3）：主供应商**以请求体显式提交的 is_primary 为准**，
+    # 不再用「列表第一项」隐式判定。
+    #   原因：前端「设为主供应商」只改布尔值、不改数组顺序（Settings.tsx:setPrimary），
+    #   旧的 `idx == 0` 判据会让该按钮永远失效——保存后重新打开，主供应商还是原来那家。
+    #   归一化：多个 is_primary=true 时取第一个并静默收敛；一个都没有时回退到第一项。
+    marked = [i for i, it in enumerate(req.providers) if it.is_primary]
+    if len(marked) > 1:
+        logger.warning(
+            "[API/settings] 提交了 {} 个 is_primary=true，归一化取第一个（{}）",
+            len(marked), (req.providers[marked[0]].provider or "").strip() or "custom",
+        )
+    elif not marked:
+        logger.info(
+            "[API/settings] 未提交任何 is_primary=true，回退第一项为主供应商（{}）",
+            (req.providers[0].provider or "").strip() or "custom",
+        )
+    primary_idx = marked[0] if marked else 0
+
     new_records: list[LLMConfigModel] = []
 
     for idx, item in enumerate(req.providers):
@@ -418,7 +436,8 @@ async def update_llm_config(
             api_key=encrypted_key,
             base_url=base_url,
             model=model,
-            is_primary=(idx == 0),  # 列表第一项为主供应商
+            # v3.4.5（E3）：以请求体提交的 is_primary 为准，而非下标 0
+            is_primary=(idx == primary_idx),
             enable_thinking=item.enable_thinking or False,
             thinking_params=(item.thinking_params or "").strip(),
         )
@@ -447,9 +466,11 @@ async def update_llm_config(
     rows = result.scalars().all()
     providers = [_build_item(r) for r in rows]
 
+    # v3.4.5（E3）：主供应商是排查故障转移方向的第一个抓手，必须显式留痕
+    primary_rec = next((r for r in new_records if r.is_primary), None)
     logger.info(
-        "[API/settings] LLM 配置已更新: 共 {} 个供应商",
-        len(providers),
+        "[API/settings] LLM 配置已更新: 共 {} 个供应商, 主供应商={}",
+        len(providers), primary_rec.provider if primary_rec else "无",
     )
 
     data = LLMConfigResponse(
