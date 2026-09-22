@@ -156,6 +156,9 @@ class PipelineState(TypedDict, total=False):
     resume: bool
     resume_checkpoint: dict
     _last_node: str
+    # v3.4.5（缺陷 E）：跨通道/跨子轮语义去重的留痕（generate 节点产出，
+    # done 事件消费）。未声明会被 LangGraph 静默过滤 → 前端永远看不到。
+    semantic_dedup_removed: list
 
     # 控制流
     clarify_iteration: int
@@ -1252,6 +1255,30 @@ class Orchestrator:
                     for r in dedup_removed[:3]
                 ),
             )
+        # v3.4.5（缺陷 E，对称补漏）：3-gram 只抓得住"表面像"的重复，跨通道**语义改写**
+        #   （integration 重述 FP 分片场景）实测 3-gram 0/10 命中——补一道整例 JSON
+        #   embedding 语义去重（阈值 0.92 + 数字护栏，定标命中 8/10 误删 0）。
+        #   主汇总点与补生成合并点（review 节点）两处对称应用。
+        from app.utils.case_dedup import dedup_semantic
+        try:
+            from app.db.milvus_store import vector_store as _vs_gen
+            _embed_gen = _vs_gen.embed_texts
+        except Exception:  # noqa: BLE001
+            _embed_gen = None
+        # bge 推理是同步 CPU 调用，按 GenAgent 先例用 to_thread 包装（避免阻塞事件循环）
+        cases, semantic_removed = await asyncio.to_thread(
+            dedup_semantic, cases, embed_func=_embed_gen
+        )
+        if semantic_removed:
+            logger.info(
+                "[Orchestrator] 跨通道语义去重: 去掉 {} 条（保留 {} 条）。示例: {}",
+                len(semantic_removed), len(cases),
+                "; ".join(
+                    f"{r['removed_title'][:24]} ≈ {r['kept_title'][:24]}（{r['reason']}）"
+                    for r in semantic_removed[:3]
+                ),
+            )
+            state["semantic_dedup_removed"] = semantic_removed
         # v3.4（docs/15 §4.1 / P0-2）：合同校验**只标记不中断**。
         # 空集/畸形用例必须走完 review → done，由发布策略判 blocked / awaiting_human_review；
         # 在此抛异常会让前端连 done 事件都拿不到（"0 用例不得 completed"是**终态**要求，
@@ -1495,9 +1522,39 @@ class Orchestrator:
                     coverage_gaps=supplement_gaps,
                 )
                 merged_cases = gen_agent.merge_regression_cases(reviewed_cases, supplement_cases)
+                # v3.4.5（缺陷 E）：补生成合并后必须再过一次**语义级**近重复去重。
+                #   实证：09-16 批次 21 条里 10 条跨通道重复（47.6%），根因是
+                #   补生成/跨通道场景改写后的标题 3-gram 相似度全部 < 0.48
+                #   （_generate_node 1245 行的批内去重阈值 0.55，命中 0/10），
+                #   只有整例 JSON embedding 抓得住（重复对 0.88~0.98）。
+                #   阈值 0.92 + 数字护栏：定标命中 8/10、误删 0；漏的留给人工审核。
+                #   失败语义：embedding 环节抖动 → 降级 3-gram，不击穿。
+                from app.utils.case_dedup import dedup_semantic
+                try:
+                    from app.db.milvus_store import vector_store as _vs
+                    _embed = _vs.embed_texts
+                except Exception:  # noqa: BLE001
+                    _embed = None
+                # bge 推理是同步 CPU 调用，用 to_thread 包装（与 GenAgent 同一先例）
+                merged_cases, _sem_removed = await asyncio.to_thread(
+                    dedup_semantic, merged_cases, embed_func=_embed
+                )
+                if _sem_removed:
+                    logger.info(
+                        "[Orchestrator] 跨子轮语义去重: 去掉 {} 条（保留 {} 条）。示例: {}",
+                        len(_sem_removed), len(merged_cases),
+                        "; ".join(
+                            f"{r['removed_title'][:24]} ≈ {r['kept_title'][:24]}（{r['reason']}）"
+                            for r in _sem_removed[:3]
+                        ),
+                    )
                 report, reviewed_cases = await review_agent.review(
                     srr, merged_cases, functional_points=functional_points
                 )
+                # v3.4.5（缺陷 E）注意顺序：必须写在 review() **之后**——review 返回
+                # 全新 report，先写后 review 会被整体覆盖（标记到不了 done 事件）。
+                if _sem_removed:
+                    report["semantic_dedup_removed"] = _sem_removed
                 supplement_iteration = 1
                 # v3.1.3: 二次 review 后仍建议补生成 → 标记已达上限（补生成最多 1 次），
                 # 避免前端把 should_supplement=True 误解为"还会再补"
@@ -2049,6 +2106,7 @@ class Orchestrator:
                 publication=final_state.get("publication", {}),
                 failed_subtasks=final_state.get("failed_subtasks", []),
                 dedup_removed=final_state.get("dedup_removed", []),
+                semantic_dedup_removed=final_state.get("semantic_dedup_removed", []),
                 # v3.4（docs/15 §4.10）：节点级 span（trace = 任务 → 节点 → LLM 调用）
                 node_spans=_node_spans,
             )

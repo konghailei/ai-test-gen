@@ -122,6 +122,140 @@ def is_near_duplicate(a: dict, b: dict) -> tuple[bool, str]:
     return False, ""
 
 
+# ============================================================================
+# 跨子轮语义去重（缺陷 E，2026-09-22）
+# ============================================================================
+# 背景：四级去重与批内 3-gram 去重都在各自子轮/通道内生效，但**补生成合并**
+# （merge_regression_cases）与跨通道改写（integration 通道重述 FP 分片场景）
+# 产出的重复，标题表面相似度天然低——09-16 批次实测 10 对已知重复的
+# 3-gram 相似度全部 < 0.48（阈值 0.55，命中 0/10），只能靠语义向量抓。
+#
+# 阈值定标（09-16 真实批次 21 条，系统口径 bge-large-zh + 整例 JSON）：
+#   已知重复 10 对：0.8839 ~ 0.9787
+#   必须保留 6 对：0.8393 ~ 0.9076（其中 0.9076 = 4/5边界 vs 第6次保持，
+#                  数字护栏可救；0.8961 = 登录成功 vs 自动解锁，真不同场景）
+#   → 取 0.92：命中 8/10，叠加数字护栏后误删 0；
+#     漏掉的 2 对（0.8839/0.8927）留在审核环节人工把关
+#     （与既有取舍一致：宁可不报，不误删）。
+SEMANTIC_SIM_THRESHOLD = 0.92
+
+
+def semantic_near_duplicate(
+    a: dict, b: dict, sim: float | None = None
+) -> tuple[bool, str]:
+    """语义级近重复判定（阈值 0.92 + 数字护栏）。
+
+    Args:
+        a, b: 两条用例 dict。
+        sim: 两例整例 JSON embedding 的余弦相似度（0~1）。None 时视为无信号，
+             直接判不重复（调用方拿不到 embedding 时安全兜底）。
+
+    判定逻辑：
+        1. 数字集合不同 → 不重复（与 is_near_duplicate 同一护栏：不同边界值
+           不是同一场景，即使向量说很像）。
+        2. sim < 0.92 → 不重复。
+        3. 其余 → 重复（理由带相似度值，写入去重留痕）。
+    """
+    if sim is None:
+        return False, ""
+    na, nb = _numbers(a.get("title")), _numbers(b.get("title"))
+    if na != nb:
+        return False, ""
+    if sim >= SEMANTIC_SIM_THRESHOLD:
+        return True, f"语义相似度={sim:.4f}"
+    return False, ""
+
+
+def dedup_semantic(
+    cases: list[dict],
+    embed_func: "callable | None" = None,
+    threshold: float | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """跨子轮语义去重（persist 前的安全网）。
+
+    与 dedup_near_duplicates 同构：质量高者优先成为代表，被去重条目留痕
+    （removed/kept/reason），输出保持原输入顺序。区别在判定信号——
+    用整例 JSON embedding 余弦（阈值 0.92）替代标题 3-gram。
+
+    Args:
+        cases: 待去重用例列表。
+        embed_func: 文本→向量的函数（list[str] → list[vector]），
+                    通常传 vector_store.embed_texts。None 时退化为纯
+                    3-gram 判定（等价 dedup_near_duplicates），保证无
+                    embedding 环境下行为安全。
+        threshold: 覆盖默认阈值（定标/校准用）。
+
+    Returns:
+        (保留的用例列表, 被去掉的记录列表)
+    """
+    thr = threshold if threshold is not None else SEMANTIC_SIM_THRESHOLD
+    indexed = [(i, c) for i, c in enumerate(cases or []) if isinstance(c, dict)]
+    if not indexed:
+        return list(cases or []), []
+    if embed_func is None:
+        # 无 embedding 信号 → 退化为既有 3-gram 去重（安全兜底，不丢功能）
+        return dedup_near_duplicates(cases)
+
+    import json as _json
+    from math import sqrt
+
+    # 代表选择排序：与 quality_rank 不同，**完整性优先于置信度**。
+    # 定标实证（09-16 批次）：integration 改写版置信度常比 FP 分片版高
+    # 0.002~0.005（LLM 噪声级），但步骤/断言更少——按 quality_rank 会留下
+    # 改写版顶掉更完整的原版。代表选择要的是"最完整的留下"，
+    # 置信度只当末位决胜。
+    def _rep_rank(case: dict) -> tuple:
+        return (
+            len(case.get("covered_point_ids") or []),
+            len(case.get("steps") or []),
+            len(case.get("assertions") or []),
+            float(case.get("confidence") or 0.0),
+        )
+
+    order = sorted(indexed, key=lambda pair: (_rep_rank(pair[1]), -pair[0]), reverse=True)
+    texts = [_json.dumps(c, ensure_ascii=False) for _, c in indexed]
+    try:
+        vectors = embed_func(texts)
+    except Exception:  # noqa: BLE001
+        # embedding 失败 → 降级为 3-gram（不能因为向量化抖动击穿去重环节）
+        return dedup_near_duplicates(cases)
+
+    # 归一化余弦（embed_texts 产出可能未归一）
+    def _norm_cos(va: list[float], vb: list[float]) -> float:
+        na_ = sqrt(sum(x * x for x in va)) or 1.0
+        nb_ = sqrt(sum(x * x for x in vb)) or 1.0
+        return sum(x * y for x, y in zip(va, vb)) / (na_ * nb_)
+
+    vec_by_id = {i: v for (i, _), v in zip(indexed, vectors)}
+    kept: list[dict] = []
+    kept_idx: list[int] = []
+    removed: list[dict] = []
+    for i, case in order:
+        dup_of = None
+        for j in kept_idx:
+            sim = _norm_cos(vec_by_id[i], vec_by_id[j])
+            dup, reason = semantic_near_duplicate(case, cases[j], sim=sim)
+            if dup:
+                dup_of = (cases[j], reason)
+                break
+        if dup_of is None:
+            kept.append(case)
+            kept_idx.append(i)
+        else:
+            rep, reason = dup_of
+            removed.append({
+                "removed": case.get("id") or case.get("title", ""),
+                "removed_title": str(case.get("title", ""))[:120],
+                "kept": rep.get("id") or rep.get("title", ""),
+                "kept_title": str(rep.get("title", ""))[:120],
+                "reason": reason,
+            })
+    # 输出保持原输入顺序
+    kept_ids = {id(c) for c in kept}
+    ordered = [c for c in cases if isinstance(c, dict) and id(c) in kept_ids]
+    return ordered, removed
+
+
 def dedup_near_duplicates(cases: list[dict]) -> tuple[list[dict], list[dict]]:
     """批内近重复去重。
 

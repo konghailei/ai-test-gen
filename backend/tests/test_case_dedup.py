@@ -119,3 +119,160 @@ def test_identical_title_similarity_is_one():
     a = _case("TC-1", "完全一样的标题")
     b = _case("TC-2", "完全一样的标题")
     assert title_similarity(a, b) == 1.0
+
+
+# ============================================================================
+# 跨子轮语义去重（缺陷 E，2026-09-22）
+# 以下用例用**假 embedding 函数**模拟 bge 行为（离线 CI 可跑，不依赖模型）。
+# 阈值语义（真实定标见 case_dedup.py 头注释）：
+#   ≥0.92 判重复（数字护栏先短路）；<0.92 保留。
+# ============================================================================
+
+def _scripted_embed(group_of: dict[str, str]):
+    """构造**确定性**假 embedding（离线 CI 可跑，不依赖 bge 模型）。
+
+    group_of: {case_id: 组名}——同组的用例走同一基向量（余弦 1.0，代表
+    "同一场景的改写"，必被判重复）；不同组/未列出的用例各占一条独立基向量
+    （余弦 0，必不重复）。
+
+    ⚠️ 刻意**不用 hash()**：Python 每个进程的 hash 种子随机，
+    `hash(x) % N` 跨运行会碰撞，导致"不同组"意外共线、测试时好时坏。
+    """
+    groups = sorted(set(group_of.values()))
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        import json as _json
+        out = []
+        for t in texts:
+            cid = _json.loads(t)["id"]
+            v = [0.0] * (len(groups) + 1)
+            g = group_of.get(cid)
+            v[groups.index(g) if g in groups else len(groups)] = 1.0
+            out.append(v)
+        return out
+
+    return embed
+
+
+def _embed_with_cosine(target: float, cid_a: str, cid_b: str):
+    """两个用例余弦恰为 target 的假 embedding（用于阈值边界用例）。"""
+    import json as _json
+    import math
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        table = {
+            cid_a: [1.0, 0.0],
+            cid_b: [target, math.sqrt(max(0.0, 1 - target * target))],
+        }
+        return [table[_json.loads(t)["id"]] for t in texts]
+
+    return embed
+
+
+def test_semantic_dedup_merges_cross_channel_rewrite():
+    """跨通道语义改写（3-gram 抓不住）必须被 embedding 命中。"""
+    from app.utils.case_dedup import dedup_semantic
+
+    a = _case("TC-FP-1", "连续5次密码错误触发账号锁定并提示锁定消息",
+              steps=("连续输入5次错误密码", "第5次后检查锁定提示"))
+    b = _case("TC-INT-1", "连续登录失败5次触发账号锁定并提示锁定消息",
+              steps=("连续登录失败5次", "验证账号被锁定并提示"))
+    # 该对是定标里的"跨通道改写"形态：3-gram 抓不住，必须靠语义
+    assert not is_near_duplicate(a, b)[0]
+    embed = _scripted_embed({"TC-FP-1": "lock5", "TC-INT-1": "lock5"})
+    kept, removed = dedup_semantic([a, b], embed_func=embed)
+    assert len(kept) == 1 and len(removed) == 1
+    assert "语义相似度" in removed[0]["reason"]
+
+
+def test_semantic_dedup_number_guardrail_protects_boundaries():
+    """数字集合不同 → 即使向量说像也必须保留（不同边界值不是重复）。"""
+    from app.utils.case_dedup import dedup_semantic
+
+    a = _case("TC-45", "连续失败4次不锁定第5次锁定验证失败次数边界")
+    b = _case("TC-6", "锁定期间第6次失败计数保持5不增加")
+    embed = _scripted_embed({"TC-45": "same", "TC-6": "same"})  # 向量说像（余弦 1.0）
+    kept, removed = dedup_semantic([a, b], embed_func=embed)
+    assert len(kept) == 2 and removed == []
+
+
+def test_semantic_dedup_keeps_more_complete_case_as_representative():
+    """簇代表选择：完整性（要点数/步骤/断言）优先于置信度。
+
+    定标实证：integration 改写版置信度噪声级高 0.005 但步骤更少，
+    必须留下更完整的 FP 分片版。
+    """
+    from app.utils.case_dedup import dedup_semantic
+
+    fp_full = _case("TC-FP", "锁定期间正确凭证登录被拒绝并提示剩余锁定时间",
+                    steps=("锁定账号", "用正确密码登录", "验证拒绝与剩余时间提示"),
+                    conf=0.947, covered_point_ids=["alternate_flow.2"])
+    int_rewrite = _case("TC-INT", "锁定期间尝试登录被拒绝并提示剩余锁定时间",
+                        steps=("锁定账号", "尝试登录验证被拒"),
+                        conf=0.951, covered_point_ids=["alternate_flow.2"])
+    embed = _scripted_embed({"TC-FP": "g1", "TC-INT": "g1"})
+    kept, removed = dedup_semantic([int_rewrite, fp_full], embed_func=embed)
+    assert [c["id"] for c in kept] == ["TC-FP"], "必须保留更完整的 FP 分片版"
+    assert removed[0]["removed"] == "TC-INT"
+
+
+def test_semantic_dedup_degrades_to_3gram_without_embed():
+    """embed_func=None → 退化为 3-gram 去重（不丢安全网）。"""
+    from app.utils.case_dedup import dedup_semantic
+
+    a = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间")
+    b = _case("TC-2", "锁定期间尝试登录被拒绝并提示剩余锁定时间")
+    kept, removed = dedup_semantic([a, b], embed_func=None)
+    assert len(kept) == 1 and len(removed) == 1  # 3-gram 能抓表面像的
+    c = _case("TC-3", "登录成功跳转首页并展示用户名")
+    kept2, _ = dedup_semantic([a, c], embed_func=None)
+    assert len(kept2) == 2
+
+
+def test_semantic_dedup_degrades_on_embed_failure():
+    """embedding 抛异常 → 降级 3-gram，不击穿去重环节。"""
+    from app.utils.case_dedup import dedup_semantic
+
+    def boom(texts):
+        raise RuntimeError("embedding 服务抖动")
+
+    a = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间")
+    b = _case("TC-2", "锁定期间尝试登录被拒绝并提示剩余锁定时间")
+    kept, removed = dedup_semantic([a, b], embed_func=boom)
+    assert len(kept) == 1  # 降级后 3-gram 仍工作
+
+
+def test_semantic_dedup_below_threshold_keeps_both():
+    """相似度低于 0.92 → 保留（宁可不报不误删，漏的交给人工审核）。"""
+    from app.utils.case_dedup import dedup_semantic
+
+    a = _case("TC-A", "统一错误提示防止用户名枚举")
+    b = _case("TC-B", "用户名不存在与密码错误提示一致不泄露账号存在性")
+    # 余弦恰为 0.89（低于阈值 0.92）→ 必须两条都保留
+    embed = _embed_with_cosine(0.89, "TC-A", "TC-B")
+    kept, removed = dedup_semantic([a, b], embed_func=embed)
+    assert len(kept) == 2 and removed == []
+
+
+def test_semantic_dedup_above_threshold_is_merged():
+    """余弦高于阈值 0.92 → 判重复。（不用"恰等于"，避浮点边界抖动）"""
+    from app.utils.case_dedup import dedup_semantic
+
+    a = _case("TC-A", "锁定到期自动解锁并清除失败计数")
+    b = _case("TC-B", "锁定期满自动解锁且失败次数重置")
+    embed = _embed_with_cosine(0.93, "TC-A", "TC-B")
+    kept, removed = dedup_semantic([a, b], embed_func=embed)
+    assert len(kept) == 1 and len(removed) == 1
+
+
+def test_semantic_dedup_result_keeps_input_order():
+    """输出保持原输入顺序（前端/持久化对顺序有隐含依赖）。"""
+    from app.utils.case_dedup import dedup_semantic
+
+    a = _case("TC-A", "锁定期间尝试登录提示剩余锁定时间")
+    b = _case("TC-B", "登录成功跳转首页并展示用户名")
+    c = _case("TC-C", "锁定期间尝试登录被拒绝并提示剩余锁定时间")
+    embed = _scripted_embed({"TC-A": "g1", "TC-C": "g1", "TC-B": "g2"})
+    kept, removed = dedup_semantic([a, b, c], embed_func=embed)
+    assert [x["id"] for x in kept] == ["TC-A", "TC-B"]  # 原顺序
+    assert len(removed) == 1
