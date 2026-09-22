@@ -348,6 +348,22 @@ def _build_coverage_checklist(srr: dict, functional_points: list[dict]) -> str:
         items.append(f"### 跨 FP 共享业务规则：{len(top_shared)} 条")
         _bullets(top_shared)
 
+    # v3.4.5（缺陷 D）：总 SRR 的 5 类扩展要点透出到清单——collect_points 已把它们
+    # 纳入覆盖分母，清单若不透出，LLM 既看不到要点 ID 也无从标注，分母只会
+    # 凭空变大、永远"未覆盖"。
+    _EXT_SECTION = (
+        ("non_functional", "非功能性要求（non_functional）"),
+        ("api", "接口定义（api_definitions）"),
+        ("role", "用户角色与权限（user_roles）"),
+        ("dependency", "外部依赖（dependencies）"),
+        ("ui_rule", "界面/交互规则（ui_rules）"),
+    )
+    for _ptype, _label in _EXT_SECTION:
+        _ext = [p for p in points if p["ptype"] == _ptype and not p["fp_id"]]
+        if _ext:
+            items.append(f"### 总 SRR {_label}：{len(_ext)} 条")
+            _bullets(_ext)
+
     # 各功能点的覆盖要点（按 fp_id 分组，保持首次出现顺序）
     fp_order: list[str] = []
     fp_groups: dict[str, list[dict]] = {}
@@ -379,6 +395,12 @@ def _build_coverage_checklist(srr: dict, functional_points: list[dict]) -> str:
         if g_data:
             items.append(f"  数据约束：{len(g_data)} 条")
             _bullets(g_data)
+        # v3.4.5（缺陷 D）：FP 子 SRR 的 5 类扩展要点同样透出（带 fp 前缀 ID）
+        for _ptype, _label in _EXT_SECTION:
+            _ext = [p for p in group if p["ptype"] == _ptype]
+            if _ext:
+                items.append(f"  {_label}：{len(_ext)} 条")
+                _bullets(_ext)
 
     # v2.48: boundary_conditions 已合并到 business_rules / alternate_flows，不再单独列出
     # v2.48: acceptance_criteria 已合并到 business_rules（type=validation），不再单独列出

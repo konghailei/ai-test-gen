@@ -14,12 +14,17 @@ import math
 import re
 
 # 用例文本中的要点 ID（方括号形式为权威格式）
+# v3.4.5（缺陷 D）：白名单加入 5 类扩展要点类型——collect_points 已把它们纳入
+# 分母，提取正则若不认这些 ID，用例标注了也提取不出来 → 恒判"未覆盖" →
+# 假触发补生成（打标记必须到达消费方）。
+# 注意 non_functional 有两种 ID 形态：dict 型是 `non_functional.{key}`（词尾），
+# list 型是 `non_functional.{i}`（数字尾）→ 用 (?:\.[a-z_]+|\.\d+)? 兼容两态。
 _POINT_ID_RE = re.compile(
-    r"\[((?:[^\[\]]+?\.)?(?:happy_path|alt_flow|alternate_flow|rule|data|precondition|shared_rule)\.\d+)\]"
+    r"\[((?:[^\[\]]+?\.)?(?:happy_path|alt_flow|alternate_flow|rule|data|precondition|shared_rule|(?:non_functional(?:\.[a-z_]+|\.\d+)?)|api|role|dependency|ui_rule)(?:\.\d+)?)\]"
 )
 # 无方括号的兜底识别（如 notes 中写成 "fp_x.rule.2"）
 _BARE_POINT_ID_RE = re.compile(
-    r"(?<![\w\-\[.])((?:[\w\-]+\.)?(?:happy_path|alt_flow|alternate_flow|rule|data|precondition|shared_rule)\.\d+)(?![\w\-\].])"
+    r"(?<![\w\-\[.])((?:[\w\-]+\.)?(?:happy_path|alt_flow|alternate_flow|rule|data|precondition|shared_rule|(?:non_functional(?:\.[a-z_]+|\.\d+)?)|api|role|dependency|ui_rule)(?:\.\d+)?)(?![\w\-\].])"
 )
 
 _TOP_LEVEL_TYPES = ("happy_path", "alternate_flow", "precondition", "shared_rule")
@@ -52,6 +57,71 @@ def _fp_priority(fp: dict, srr: dict) -> str:
         req = fp_srr.get("requirement", {}) if isinstance(fp_srr.get("requirement"), dict) else {}
         prio = req.get("priority", "") or ""
     return prio or _top_priority(srr)
+
+
+def _add_extended_points(src: dict, add, prio: str, fp_id: str = "", fp_name: str = "") -> None:
+    """抽取「非功能 / 接口 / 角色 / 依赖 / UI 规则」5 类要点（缺陷 D）。
+
+    这 5 类字段此前**随完整 SRR 注入 prompt，却不参与任何覆盖度量**：
+    LLM 为其生成了用例 → 不计分；完全没生成 → 不告警、不触发补生成、
+    ``degraded_flags`` 不亮。结果是覆盖率和告警系统对它们完全失明。
+
+    注意：**只纳入有内容的项**。``non_functional`` 是固定 4 键的 dict，
+    未填写的维度是空串——把它们也算进分母会凭空造出「未覆盖」，
+    那不是真实缺口，只是需求没写。同理空列表直接跳过。
+    """
+    prefix = f"{fp_id}." if fp_id else ""
+
+    nf = src.get("non_functional")
+    if isinstance(nf, dict):
+        for key, val in nf.items():
+            text = str(val or "").strip()
+            if text:
+                add(f"{prefix}non_functional.{key}", "non_functional",
+                    f"{key}: {text}", prio, fp_id, fp_name)
+    elif isinstance(nf, list):
+        for i, val in enumerate(nf, 1):
+            text = str(val or "").strip()
+            if text:
+                add(f"{prefix}non_functional.{i}", "non_functional", text, prio, fp_id, fp_name)
+
+    for i, api in enumerate(src.get("api_definitions") or [], 1):
+        if isinstance(api, dict):
+            name = api.get("name") or api.get("path") or api.get("endpoint") or f"api_{i}"
+            desc = f"{api.get('method', '')} {name}".strip()
+        else:
+            desc = str(api)
+        if desc.strip():
+            add(f"{prefix}api.{i}", "api", desc, prio, fp_id, fp_name)
+
+    for i, role in enumerate(src.get("user_roles") or [], 1):
+        if isinstance(role, dict):
+            desc = str(role.get("role") or role.get("name") or "")
+            perms = role.get("permissions") or []
+            if perms:
+                desc = f"{desc}: {'、'.join(str(p) for p in perms)}"
+        else:
+            desc = str(role)
+        if desc.strip():
+            add(f"{prefix}role.{i}", "role", desc, prio, fp_id, fp_name)
+
+    for i, dep in enumerate(src.get("dependencies") or [], 1):
+        if isinstance(dep, dict):
+            desc = str(dep.get("name") or dep.get("target") or dep.get("description") or f"dependency_{i}")
+        else:
+            desc = str(dep)
+        if desc.strip():
+            add(f"{prefix}dependency.{i}", "dependency", desc, prio, fp_id, fp_name)
+
+    for i, ui in enumerate(src.get("ui_rules") or [], 1):
+        if isinstance(ui, dict):
+            desc = "；".join(
+                str(ui.get(k)) for k in ("element", "behavior", "trigger") if ui.get(k)
+            )
+        else:
+            desc = str(ui)
+        if desc.strip():
+            add(f"{prefix}ui_rule.{i}", "ui_rule", desc, prio, fp_id, fp_name)
 
 
 def collect_points(
@@ -104,6 +174,9 @@ def collect_points(
         desc = r.get("rule", r.get("description", "")) if isinstance(r, dict) else r
         _add(f"shared_rule.{i}", "shared_rule", desc, top_prio)
 
+    # v3.4.5（缺陷 D）：非功能/接口/角色/依赖/UI 规则——此前注入 prompt 但不计分
+    _add_extended_points(srr, _add, top_prio)
+
     for fp in functional_points or []:
         fp_id = fp.get("id", "")
         fp_name = fp.get("name", fp_id)
@@ -129,6 +202,8 @@ def collect_points(
             else:
                 field, desc = "", d
             _add(f"{fp_id}.data.{i}", "data", desc, prio, fp_id, fp_name, field=field)
+        # v3.4.5（缺陷 D）：FP 子 SRR 的 5 类扩展要点
+        _add_extended_points(fp_srr, _add, prio, fp_id, fp_name)
 
     if not include_preconditions:
         points = [p for p in points if p["ptype"] != "precondition"]
@@ -450,7 +525,11 @@ def calc_point_coverage(srr: dict, functional_points: list[dict], cases: list[di
     prio_rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
     uncovered.sort(key=lambda p: prio_rank.get(p.get("priority", ""), 9))
 
-    stats = {"happy_path": 0, "alt_flow": 0, "rule": 0, "data": 0, "shared_rule": 0}
+    # v3.4.5（缺陷 D）：新增 5 类，便于观测分母构成变化
+    stats = {
+        "happy_path": 0, "alt_flow": 0, "rule": 0, "data": 0, "shared_rule": 0,
+        "non_functional": 0, "api": 0, "role": 0, "dependency": 0, "ui_rule": 0,
+    }
     for p in points:
         key = "alt_flow" if p["ptype"] == "alternate_flow" else p["ptype"]
         if key in stats:
