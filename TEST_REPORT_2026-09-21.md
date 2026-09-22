@@ -17,8 +17,10 @@
 > **后续追加**：本轮共定位 5 个系统自身缺陷，其中三个已修复并推送——
 > **E3**（主供应商保存失效，`08a0358`）、**E2**（僵尸供应商残留，`60972d1`）、
 > **B**（补生成击穿流水线，`7db82c9`）。
-> 仍待修：**A**（检查点缺依赖，P0）、**C**（finalize UnboundLocalError）、**D**（覆盖维度缩水）、
-> **E**（跨子轮重复）。详见第 4 节。
+> 09-22 补修：**C**（finalize UnboundLocalError，`f978a06`）、**D**（覆盖维度缩水，`3414830`）。
+> **A**（检查点缺依赖，P0）经历「修复→复发→根治」：`88d4378` 止血后容器重建即复发，
+> 09-22 已补装并验证探针 6/6，base 镜像重建根治中（详见第 4 节缺陷 A）。
+> 仍待修：**E**（跨子轮重复）。详见第 4 节。
 
 **本轮最重要的两个发现**（都与 LLM 供应商无关，是系统自身问题）：
 
@@ -284,15 +286,41 @@ PG 实证：`select count(*) from test_cases where created_at > '2026-09-21 03:5
 
 ## 4. 缺陷清单（按优先级）
 
-### A. 检查点后端缺依赖 → 静默降级内存（P0，本轮实证）
+### A. 检查点后端缺依赖 → 静默降级内存（P0，本轮实证 → 修复复发 → **运行时已恢复，根治中**）
 
-- 现象：`_probe_checkpoint_saver.py` 4/6 断言失败，PG 检查点 0 行，实际后端 `InMemorySaver`
-- 根因：`No module named 'langgraph.checkpoint.postgres'`
-- 影响：durable execution / 断点续跑 / 进程重启后可审计性全部不成立；docs/15 P0-2 未闭环
-- **修复与代价**：
-  1. 在依赖里补 `langgraph-checkpoint-postgres`（同时确认 `psycopg_pool` 存在，两者都要）
-  2. 镜像重建后重跑 `_probe_checkpoint_saver.py`，预期 6/6
-  3. **根治还要一步**：`_ensure_checkpoint_backend` 的降级目前只是「可见」（日志 + degraded_flag），高风险场景应 fail-closed——至少让生成链路在 `checkpoint_backend_degraded=true` 时不再声称支持断点续跑。**代价**：PG 不可用时生成会直接拒绝启动，而不是带病运行
+> **状态：止血 09-22 已完成并实测（探针 6/6，AsyncPostgresSaver，检查点已落 PG）；base 镜像重建根治进行中。**
+
+**修复史（完整链条，含一次复发）**：
+
+1. **09-21 `88d4378`（止血 + 防复发半成品）**：容器内 pip install 补装 + Dockerfile.base 加构建期校验
+   （`python -c "import langgraph.checkpoint.postgres, psycopg_pool"`，缺包即构建失败）。
+   当时验证探针 6/6——但验证的是**运行时状态**，不是「镜像重建后仍 6/6」。
+2. **09-22 08:22 容器重建 → 复发**：`docker compose up -d --build` 只重建应用层镜像（秒级，FROM 老基础镜像），
+   运行时补装被抹掉。实测：`langgraph.checkpoint.postgres` MISSING、探针回落 2/4 失败。
+   **两个真根因**：
+   - **基础镜像从未重建**：`ai-test-gen-base` 构建于 **2026-07-13**，而依赖是 **09-16**（`839248a`）才加入
+     requirements.txt 的——不是 88d4378 猜的「构建缓存命中旧层」，是 base 镜像整体落后两个月的依赖。
+   - **日常部署命令不覆盖依赖层**：`docker-compose.yml` 顶部注释推荐的日常命令 `up -d --build` 只走
+     `backend/Dockerfile`（只 COPY 代码），依赖装在 `docker-compose.base.yml` 的 base 服务里，**日常链路永远不装新依赖**。
+3. **09-22 止血（本次）**：容器内补装 `langgraph-checkpoint-postgres==2.0.16` + `psycopg[binary,pool]==3.3.5`
+   （版本按 requirements.txt 锁定），重跑探针 **6/6 全过**，后端类型确认为 AsyncPostgresSaver。
+   依赖漂移全量扫描：requirements.txt 25 项声明中仅缺这 2 项，无其他漂移。
+4. **根治（进行中）**：重建 base 镜像（`docker-compose -f docker-compose.base.yml build base`，15-25 分钟），
+   88d4378 加的构建期校验会首次真正执行——缺包即构建失败，保证新 base 镜像自带完整依赖。
+   **遗留动作（base 构建完成后）**：
+   - 重建应用层镜像并重启（`docker-compose up -d --build`）——让容器用新 base；
+   - 验证：`python -c "import langgraph.checkpoint.postgres, psycopg_pool"` + 探针 6/6。
+
+**遗留风险（修复后仍存在，需单独立项）**：
+- **能力降级未 fail-closed**：`_ensure_checkpoint_backend` 的降级只「可见」（ERROR 日志 + degraded_flag），
+  高风险场景应 fail-closed——至少让生成链路在 `checkpoint_backend_degraded=true` 时不再声称支持断点续跑。
+  **代价**：PG 不可用时生成会直接拒绝启动，而不是带病运行。
+
+**部署纪律（新增，防止第三次复发）**：
+- **改 requirements.txt ≠ 完成**。必须配套执行：`docker-compose -f docker-compose.base.yml build base` →
+  `docker-compose up -d --build`。日常 `up -d --build` **不会**把新依赖装进镜像。
+- **镜像依赖漂移应纳入机制层探针**：把「requirements.txt 声明 vs 容器实装」全量比对做成探针
+  （本次手扫 25 项仅缺 2 项——扫描脚本已验证可行，可直接固化）。
 
 ### B. 补生成异常击穿整条流水线（P0，本轮实证 3/3 → **已修复**）
 
