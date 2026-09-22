@@ -47,6 +47,7 @@ PROBES = [
     "_probe_durable.py",         # 断点续跑 + 输入指纹
     "_probe_revision_lock.py",   # 需求编辑乐观锁
     "_probe_checkpoint_saver.py",  # PostgresSaver 落 PG
+    "_probe_dependency_drift.py",  # 镜像依赖 vs requirements.txt 全量比对（缺陷 A 复发教训）
     "_probe_selfheal.py",        # 任务自愈
     "_probe_evidence_claims.py",  # claims 协议 + 证据链 + answer_status 隔离 + 节点 span
 ]
