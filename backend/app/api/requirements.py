@@ -1495,6 +1495,9 @@ async def finalize_requirement(
 
     logger.info("[API/requirements] 最终 SRR 生成: req_id={}, kb_augments={}", req_id, len(kb_augments))
 
+    # v3.4.5（缺陷 C）：先置 None，保证 parse 抛异常时下方 `if finalize_result.fps`
+    # 走得到「无 FP 可更新」分支，而不是 UnboundLocalError → 全局 500。
+    finalize_result = None
     try:
         finalize_result = await req_agent.parse(
             raw_requirement=enhanced_raw,
@@ -1536,7 +1539,8 @@ async def finalize_requirement(
     record.title = final_data.get("requirement", {}).get("title", record.title)
 
     # v2.8.52: 同步更新 FP（原 finalize 不更新 FP，导致 SRR 新 / FP 旧）
-    if finalize_result.fps:
+    # v3.4.5（缺陷 C）：finalize_result 可能为 None（parse 失败降级），必须判空
+    if finalize_result and finalize_result.fps:
         try:
             # v3.4：savepoint 隔离——FP 同名冲突（uq_fp_req_name）只回滚嵌套事务，
             # 外层的 status=pending_review / SRR 保存照常提交

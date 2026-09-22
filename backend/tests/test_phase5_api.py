@@ -250,6 +250,49 @@ def test_requirements(client: TestClient) -> None:
     check("upload 返回 analyzing 状态", data.get("status") == "analyzing")
     if data.get("req_id"):
         DYNAMIC_REQ_IDS.append(data["req_id"])
+        _c_req_id = data["req_id"]
+    else:
+        _c_req_id = ""
+
+    # 2.6b finalize 在 LLM 失败时应降级为 200，不得 500（缺陷 C 防回归）
+    #   缺陷形态：`req_agent.parse` 抛异常 → finalize_result 从未赋值 →
+    #   下方 `if finalize_result.fps` 抛 UnboundLocalError → 全局异常返回 500，
+    #   前端无从区分「需求有问题」和「供应商挂了」。
+    #   注意：req_agent 是**函数内部 import**（requirements.py:1469），
+    #   故 patch 单例对象的方法，而非模块命名空间。
+    if _c_req_id:
+        # finalize 需要已有 SRR 才能走降级分支（无 SRR 会先被前置校验挡下 400）。
+        # 用 asyncpg 独立连接：SQLAlchemy 的 async_session 绑在 TestClient 的
+        # 事件循环上，在外层 asyncio.run 里用会报 "attached to a different loop"。
+        async def _seed_srr(rid: str) -> None:
+            import asyncpg as _asyncpg
+            from app.config import settings as _st
+            dsn = _st.pg_async_url.replace("postgresql+asyncpg", "postgresql")
+            conn = await _asyncpg.connect(dsn)
+            try:
+                # finalize 只接受 draft 状态（upload 出来是 analyzing），一并置位
+                await conn.execute(
+                    "UPDATE requirements SET srr_json = $1::json, status = 'draft' WHERE id = $2",
+                    json.dumps(TEST_SRR), rid,
+                )
+                # upload 时 mock 了后台分析协程，任务记录仍停在 running，
+                # 会被 finalize 的并发互斥挡成 409——先清掉
+                await conn.execute(
+                    "DELETE FROM analysis_tasks WHERE req_id = $1 AND status IN ('running','pending')",
+                    rid,
+                )
+            finally:
+                await conn.close()
+
+        asyncio.run(_seed_srr(_c_req_id))
+        with patch("app.agents.req_agent.req_agent.parse", new_callable=AsyncMock) as _mp:
+            _mp.side_effect = RuntimeError("所有 LLM 提供商均不可用（已尝试 2 家，耗时 240s）")
+            resp = client.post(f"/api/requirements/{_c_req_id}/finalize")
+        check("finalize 在 LLM 失败时返回 200（降级，不得 500）",
+              resp.status_code == 200, f"status={resp.status_code} body={resp.text[:160]}")
+        c_srr = (resp.json().get("data") or {}).get("srr") or {}
+        check("降级后 SRR 标记 _finalize_degraded",
+              c_srr.get("_finalize_degraded") is True)
 
     # 2.7 获取澄清问题（读 DB 中的澄清状态，不实时调用 agent）
     resp = client.get(f"/api/requirements/{TEST_REQ_ID}/clarify/questions")
