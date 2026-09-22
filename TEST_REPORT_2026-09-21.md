@@ -311,12 +311,19 @@ PG 实证：`select count(*) from test_cases where created_at > '2026-09-21 03:5
 - 修复：失败分支先给 `finalize_result` 赋默认值再进异常处理，返回结构化 4xx/5xx
 - 代价：无副作用，纯健壮性修复
 
-### D. 覆盖口径维度缩水（P1，本轮实测复现）
+### D. 覆盖口径维度缩水（P1，本轮实测复现 → **已修复 2026-09-22**）
+
+> **状态：已修复并推送**，commit `3414830`。
+> 回归：unit 117/1 + phase2 74 + phase3 91 + phase4 158 + phase5 112 + phase6 141 全绿；
+> 桩测 5/5（提取白名单 / 标注后可判已覆盖 / 总 SRR 清单透出 / FP 子 SRR 清单透出 / 空扩展字段无回归）。
 
 - 现象：兜底通道下 `要点总数=8`、历史批次 `total=7`，`non_functional` / `api_definitions` / `user_roles` / `dependencies` / `ui_rules` 等 10 个字段既不计分也不告警，而 prompt 里又完整注入了这些字段
 - 结果：**LLM 为其生成了用例不计分；完全没生成也不告警、不触发补生成、`degraded_flags` 不亮**（docs/13 §4.4 R2 的不对称性）
-- **修复与代价**：按 docs/13 §4.4 建议 1 + 2——标注率不足时返回 `rate: None` + `unreliable: true` 并把全部要点列为「覆盖未知」；再把 `non_functional` 等纳入 `collect_points`。
-  **代价**：覆盖率数值会明显下降（分母变大），历史口径不可比，需要一次性重新标定基线
+- **修复内容（三处联动，缺一不可——"打标记必须到达消费方"）**：
+  1. `utils/coverage.py::_add_extended_points`：5 类扩展字段纳入 `collect_points` 分母（总 SRR + FP 子 SRR 两级；空串/空列表不掺分母，`non_functional` dict 型按维度拆分）；
+  2. **标注提取白名单同步扩展**：`_POINT_ID_RE`/`_BARE_POINT_ID_RE` 加入 5 类新 ID（含 `non_functional.{key}` 词尾形态兼容）——实测发现若只改 ①，用例标注了也提取不出来 → 恒判"未覆盖" → 假触发补生成，比不修更糟；
+  3. `prompts/gen_agent.py::_build_coverage_checklist`：总 SRR 与 FP 段落透出 5 类扩展要点（LLM 看不到要点 ID 就无从标注，分母只会凭空变大）。
+- **代价**：覆盖率数值会明显下降（分母变大），历史口径不可比，需要一次性重新标定基线（`stats` 已带 5 类新键可观测分母构成）。
 
 ### E2. 供应商配置热重载只增不删 → 僵尸供应商参与故障转移（P1，本轮实证）
 
