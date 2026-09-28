@@ -172,7 +172,20 @@ LangGraph 官方要求用持久化 checkpointer 保存 thread 状态，并以同
   现由 `run_pipeline` 入口注入 `initial_state["degraded_flags"]`（经 `initial_degraded_flags()` 纯函数），
   逐级透传到 done 事件；因 `decide_publication` 会消费 `degraded_flags`，降级项自动进入 `human_review`，不会被自动核准。
   详见 `KNOWN-ISSUES.md §四 N-4`。
-- **未做**：降级仍保留 `MemorySaver` 兜底（未改为直接抛错硬失败），以兼容单机/演示环境；是否升级待拍板。
+- **已升级为硬失败（2026-09-28 大哥拍板「改成硬失败，不允许质量不佳的内容漏过去」）**：
+  `_ensure_checkpoint_backend()` 在配置 `postgres` 却初始化失败时，**直接抛 `CheckpointBackendError`，
+  不再静默降级为 `MemorySaver`**。降级属于"部署前置条件未满足"，应在入口拒绝而非带伤产出；
+  只有**显式**配置 `PIPELINE_CHECKPOINT_BACKEND=memory`（单机/演示的主动选择）才允许走内存检查点。
+  该异常在 `run_pipeline` 的 `try` 内抛出 → 转为 `error` 事件（`reason=checkpoint_backend_unavailable`、
+  `rejected_at=entry`），**不击穿成 500**；且属"确定性拒绝"，**不推 DLQ**（重试必然再次失败）。
+  详见 `KNOWN-ISSUES.md §四 N-6`。
+- **生成入口加降级输入 fail-closed 门禁**：`run_pipeline` 启动前用 `_srr_is_fp_degraded(srr_json)`
+  检查 SRR 上的 `_fp_extract_degraded` / `_finalize_degraded`，命中即抛 `DegradedInputError`
+  （`reason=degraded_srr_rejected`）。理由：降级 SRR 此前只在 done 事件透出 `degraded_flags`，
+  产物仍会落入 PG（仅拦 Milvus），**人工点一次 approve 就能把降级内容变成权威知识**；
+  门禁把它挡在产生副作用之前（不启动流水线 ⇒ 无用例产物 ⇒ 不可能被 approve）。
+  同上：抛在 `try` 内 → 转 `error` 事件（终态可见）；故意拒绝不推 DLQ。
+  详见 `KNOWN-ISSUES.md §四 N-6`。
 
 ---
 

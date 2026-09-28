@@ -358,7 +358,14 @@ else:
 `fp_load_failed`、`fp_generate_failed`、`batch_generate_failed`、`integration_generate_failed`、`consistency_db_failed`、`impact_unconfirmed`、`supplement_failed`、`review_llm_failed`、`kb_publication_incomplete`，
 以及流水线入口注入的 **`checkpoint_backend_degraded`（v3.4.6）**——检查点后端非 postgres（`MemorySaver`）时置位，表示**重启后断点不可恢复**，由 `run_pipeline` 入口注入初始 state 后逐级透传（该标记此前**零消费方**，docstring 的「done 事件可见」是假承诺，见 `KNOWN-ISSUES.md §四 N-4`）。
 
+**⚠️ v3.4.6 起入口改为 fail-closed（`KNOWN-ISSUES.md §四 N-6`）**：以下两种"降级"不再产出用例，而是在流水线入口**直接拒绝**并 yield `error` 事件（终态可见、不阻断成 500）：
+- **降级 SRR**（`_fp_extract_degraded` / `_finalize_degraded`）→ `reason=degraded_srr_rejected`；
+- **检查点后端 postgres 初始化失败**（不再静默降级 memory）→ `reason=checkpoint_backend_unavailable`。
+
+两者 `rejected_at` 均为 `entry`，且属**确定性拒绝**（重试必然再失败），**不推 DLQ**；错误文案原样透传（即给用户的修复指引）。因此这两种情况下 `done` 事件不会产生，上述 `degraded_flags` 中对应项也不会出现。
+
 **异常路径**：`run_pipeline` 捕获异常 → `final_state["error"]` 写入 → `dlq.push(task_type="pipeline", payload={req_id, channel, stage})` → yield `error` 事件。
+> 例外：v3.4.6 起的入口门禁拒绝（上述 `degraded_srr_rejected` / `checkpoint_backend_unavailable`）**不推 DLQ**——故意拒绝 ≠ 意外故障，推 DLQ 只会让运维反复重试一个不可能成功的任务。
 > v3.1.3 修复过一个隐蔽缺陷：`_producer` 曾静默吞掉 `astream` 异常，导致用户看到"流水线完成"但 0 用例且无 error 事件、DLQ 无记录。现在异常对象会经队列传给消费循环统一处理。
 
 ---

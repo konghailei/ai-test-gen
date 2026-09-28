@@ -424,8 +424,9 @@
 - **守卫断言**（`test_phase4_orchestrator.py::test_initial_degraded_flags`，5 条）：
   未降级不注入 / 降级注入正确 flag / done 事件真的带出来 / 进入 publication.reasons /
   `decision != auto_approve`。**覆盖"写了 → 到达消费方"的完整链路**，而非只断言变量被赋值。
-- **遗留**：当前仍是「降级 + 透出」，未改为**直接抛错 fail-closed**——保留 memory 降级
-  是为让单机/演示环境可用。是否升级为硬失败待拍板（见下方"待确认"）。
+- **后续升级（2026-09-28 大哥拍板「改成硬失败」）**：本条的「降级 + 透出」已进一步升级为
+  **入口 fail-closed 硬失败**——配置 postgres 却初始化失败时直接抛 `CheckpointBackendError`，
+  不再降级 memory。详见 §四 **N-6**（该条同时覆盖"降级 SRR 入口门禁"）。
 
 ### 🔴 N-5 FP 提取失败静默降级为 0 个功能点，任务仍 completed —— 已修复
 
@@ -463,6 +464,48 @@
   已有更具体 `degraded_reason` 时不被空文案覆盖。
 - **口径说明**：`req_agent.refine_srr()`（:97-229）内也调用了 `_fp_extract_from_raw`，
   但该路径**全库无调用方（死代码）**，标记随 `srr` 自然带上，未额外接透出。
+
+### 🔴 N-6 降级输入未硬门禁：降级 SRR 仍会产出用例，且可被人工 approve 变权威知识 —— 已修复（硬失败）
+
+- **位置**：`backend/app/core/orchestrator.py`（`_srr_is_fp_degraded` / `DegradedInputError` /
+  `CheckpointBackendError` / `run_pipeline` 入口与 `except` 分流）；
+  `backend/app/core/requirement_tasks.py`（FP 降级标记落库补漏）
+- **背景**：N-4 / N-5 的修复让「检查点降级」「FP 提取降级」都变成了**可见**（done 事件
+  `degraded_flags`、任务 `result_json`、发布决策 `reasons`）。但可见 ≠ 阻断：
+  1. 降级产物仍会**落入 PG**（`decide_publication` 只拦 Milvus）；
+  2. 发布决策返回 `human_review`，报告中心标记「待人工审核」——**人工点一次 approve，
+     降级内容就变成权威知识**（Milvus）；
+  3. 更根本的是：降级 SRR（FP 提取失败 / 最终 SRR 重生成失败）产出用例的**全部前提不成立**，
+     这些用例不该被生成出来，而不是"生成后再拦"。
+- **拍板**：2026-09-28 大哥明确「**改成硬失败，不允许质量不佳的内容漏过去**」——
+  将 N-4/N-5 的"降级+透出"升级为**入口 fail-closed 门禁**。
+- **修复**：
+  1. **生成入口降级输入门禁**：新增纯函数 `_srr_is_fp_degraded(srr) -> (bool, str)`，
+     读取 SRR 上 `_fp_extract_degraded`（缺陷 B 落库标记）与 `_finalize_degraded`（最终 SRR
+     重生成失败），任一命中即触发。`run_pipeline` 在启动前判定，命中则抛 `DegradedInputError`。
+     门禁放在**产生副作用之前**：不启动流水线 ⇒ 无用例产物 ⇒ 不可能被 approve。
+  2. **检查点后端硬失败**：`_ensure_checkpoint_backend()` 配置 `postgres` 却初始化失败时
+     抛 `CheckpointBackendError`，**不再静默降级 memory**；仅**显式**配置 `=memory` 才走内存。
+  3. **fail-closed 落成终态而非裸异常**：上述两个异常都在 `run_pipeline` 的 `try` **内**抛出，
+     由既有 `except` 捕获并转为 `error` 事件（终态可见），不向上击穿成 500。
+     事件带 `reason`（`degraded_srr_rejected` / `checkpoint_backend_unavailable`）与
+     `rejected_at="entry"`，前端可精确判定并给出修复引导；错误文案**原样透传**（不被"流水线异常:"
+     前缀污染），因为它本身就是给用户的修复指引。
+  4. **故意拒绝 ≠ 意外故障**：门禁拒绝是**确定性**前置条件不满足（重试必然再次失败），
+     **不推 DLQ**（否则运维会反复重试一个不可能成功的任务）；仅 `pipeline_error` 走既有 DLQ 兜底。
+  5. **落库补漏（关键前提）**：生成侧门禁读的是 `Requirement.srr_json`，而 `_run_requirement_analysis`
+     出口的 `srr_json_data = dict(multi_augmented)`（ClarifyAgent 返回**新字典**时）会丢掉
+     ReqAgent 打在原始 `srr` 上的 `_fp_extract_degraded`。故在落库前**显式补写**标记到
+     `srr_json_data`——否则生成侧门禁永远判不出降级（这条链路断裂过，是本条修复的关键一环）。
+- **守卫断言**（`test_phase4_orchestrator.py`，共 23 条）：
+  - `test_srr_is_fp_degraded`（纯逻辑，11 条）：干净 SRR 不触发 / None 与非 dict 不抛异常 /
+    两个来源各自触发 / 双来源文案并列 / **显式假值不触发**（防误判堵死主路径）；
+  - `test_gate_reject_degraded_srr`（6 条）：error 事件 + `reason`/`rejected_at` 精确 +
+    文案含修复指引（"重新分析"）+ **无 done 事件** + **不推 DLQ**；
+  - `test_gate_reject_checkpoint_backend`（6 条）：注入 `CheckpointBackendError` →
+    error 事件 + `reason=checkpoint_backend_unavailable` + 无 done + 不推 DLQ。
+- **副作用边界二次校验**：`persist_to_kb` 在 `decision == "blocked"` 时不写库（权威库硬门禁），
+  与本条入口门禁形成"产生端 + 写入端"双重把关。
 
 ---
 
