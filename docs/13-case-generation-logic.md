@@ -354,7 +354,9 @@ else:
 
 `done` 事件携带：`srr`、`cases`、`review_report`、`clarify_result`、`gate_result`、`impact_result`、`kb_flowback`、`fp_coverage`、`point_coverage`、`consistency_check`、`test_design`、`regression_reuse_summary`、`degraded_flags`、`manual_action_required`、`supplement_iteration`、`duration_ms`。
 
-**`degraded_flags`（v3.1.3）** 是跨节点累积的降级信号，目前有：`fp_load_failed`、`consistency_db_failed`。前端据此提示"功能点定向生成/一致性对比不可用"。
+**`degraded_flags`（v3.1.3）** 是跨节点累积的降级信号，前端据此提示"功能点定向生成/一致性对比不可用"。当前标记：
+`fp_load_failed`、`fp_generate_failed`、`batch_generate_failed`、`integration_generate_failed`、`consistency_db_failed`、`impact_unconfirmed`、`supplement_failed`、`review_llm_failed`、`kb_publication_incomplete`，
+以及流水线入口注入的 **`checkpoint_backend_degraded`（v3.4.6）**——检查点后端非 postgres（`MemorySaver`）时置位，表示**重启后断点不可恢复**，由 `run_pipeline` 入口注入初始 state 后逐级透传（该标记此前**零消费方**，docstring 的「done 事件可见」是假承诺，见 `KNOWN-ISSUES.md §四 N-4`）。
 
 **异常路径**：`run_pipeline` 捕获异常 → `final_state["error"]` 写入 → `dlq.push(task_type="pipeline", payload={req_id, channel, stage})` → yield `error` 事件。
 > v3.1.3 修复过一个隐蔽缺陷：`_producer` 曾静默吞掉 `astream` 异常，导致用户看到"流水线完成"但 0 用例且无 error 事件、DLQ 无记录。现在异常对象会经队列传给消费循环统一处理。

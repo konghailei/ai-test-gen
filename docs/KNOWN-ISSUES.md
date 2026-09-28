@@ -400,6 +400,70 @@
 - **附注**：连接类失败（不可达 / 超时）仍按既有设计累计 3 次后禁用（`PROVIDER_FAILURE_THRESHOLD`）——
   这是合理的（给偶发抖动留机会），且已受总预算保护，不会悬挂。
 
+### 🔴 N-4 检查点后端降级标记零消费方（docstring 承诺的「done 事件可见」是假承诺）—— 已修复
+
+- **位置**：`backend/app/core/orchestrator.py`（`_ensure_checkpoint_backend` :364-404、`run_pipeline` 入口）
+- **问题**：`_ensure_checkpoint_backend()` 在 `AsyncPostgresSaver` 初始化失败时置
+  `self._checkpoint_backend_degraded = True`，其 docstring 明确承诺
+  *「memory：…（日志 + `_checkpoint_backend_degraded` → done 事件的 degraded_flags 可见），绝不静默」*。
+  **但该标记全库只有定义（:300）与赋值（:397）两处、零个读取方**——docstring 描述的行为
+  从未存在。后果：检查点静默退化为 `MemorySaver`（进程重启即丢断点、断点续跑失效），
+  运维在 done 事件、任务详情、发布决策里**全部看不到任何痕迹**。
+- **触发条件**：`PIPELINE_CHECKPOINT_BACKEND=postgres`（默认）且 PG 连接/建表失败时——
+  与 §I「依赖漂移」是同一治理面，属"降级发生了但不可观测"。
+- **修复**：
+  1. 新增模块级纯函数 `initial_degraded_flags(checkpoint_backend_degraded) -> list[str]`
+     （与 `make_sse_event` 同层，便于确定性单测）；
+  2. `run_pipeline` 入口把它注入 `initial_state["degraded_flags"]`，之后各节点沿用既有
+     `list(state.get("degraded_flags", []) or []) + append` 形态逐级透传到 done 事件；
+  3. 入口追加 `logger.warning`（运维可见）；
+  4. 因 `publication_policy.decide_publication` 会把 `degraded_flags` 并入 `reasons`，
+     降级项自动进入 `human_review`，**不会被自动核准**（fail-closed 语义顺带成立）。
+- **关键前提**：`degraded_flags` 必须在 `PipelineState` 显式声明（已在 :140），
+  否则 LangGraph 静默过滤未声明字段，入口注入的标记会被丢弃（同类已踩 5 例）。
+- **守卫断言**（`test_phase4_orchestrator.py::test_initial_degraded_flags`，5 条）：
+  未降级不注入 / 降级注入正确 flag / done 事件真的带出来 / 进入 publication.reasons /
+  `decision != auto_approve`。**覆盖"写了 → 到达消费方"的完整链路**，而非只断言变量被赋值。
+- **遗留**：当前仍是「降级 + 透出」，未改为**直接抛错 fail-closed**——保留 memory 降级
+  是为让单机/演示环境可用。是否升级为硬失败待拍板（见下方"待确认"）。
+
+### 🔴 N-5 FP 提取失败静默降级为 0 个功能点，任务仍 completed —— 已修复
+
+- **位置**：`backend/app/agents/req_agent.py::_fp_extract_from_raw` :841-1086；
+  `backend/app/core/requirement_tasks.py`（三入口）；`backend/app/api/requirements.py`（finalize）
+- **问题**：FP 一体式提取的 LLM 调用失败时（首响应超时 / 返回类型异常），原实现仅
+  `logger.warning` 后 `return [], [], None`。调用方日志写「FP 提取完成: 0 个功能点」，
+  任务照常 `completed`。**用户可见面只有一个干净的「0 功能点」，没有任何失败证据**，
+  无法区分「需求本身确实没有功能点」与「LLM 挂了」；而 0 FP 会让 FP 分片生成通道
+  整体退化为全量兜底（覆盖率分母缩水）。
+  这正是 `docs/16` 审计报告 **A2 条目**（「FP 提取为空无降级标记」，状态曾为"待实现"）的落地；
+  2026-09-28 的真实端到端验收再次实测复现（日志：`[LLM] 首响应超时: provider=日日新…`）。
+- **修复**：
+  1. `_fp_extract_from_raw` 内新增 `_mark_degraded(reason)`：失败时把
+     `_fp_extract_degraded` / `_fp_extract_error` 打在**传入的 SRR 字典**上。
+     ⚠️ 必须打在 SRR（任务私有对象）而非 `self.xxx` 实例属性——`req_agent` 是全局单例，
+     实例属性会跨任务并发污染。
+  2. 覆盖**两个失败出口**：`except` 分支（LLM 异常）与 `if not isinstance(result, dict)`
+     分支（LLM 返回 null/字符串），不能只改其一。
+  3. 读取必须在**调用点**用局部变量捕获，不能在出口读 `srr_json_data`——
+     主入口出口的 `srr_json_data` 可能已被替换为 ClarifyAgent 的 `augmented_srr`
+     （一个**新字典**，不带 ReqAgent 打的标记）；`_run_clarify_reparse` 原先还**漏传 `srr=`**
+     （默认 None），标记根本打不到任何地方，一并补上。
+  4. 三入口（`_run_requirement_analysis` / `_run_clarify_reparse` / `_run_regenerate_reparse`）
+     与 finalize 共 **4 个出口** 透出 `fp_extract_degraded` / `fp_extract_error` + `degraded` / `degraded_reason`。
+  5. **失败路径对称透出**：三个入口的 `except` 分支原本整体不写（或部分不写）`result_json`，
+     任务 `failed` 时标记被整个丢掉——首版实现正犯了这个"只覆盖 happy path"的错，
+     补上后收敛为**单一助手 `_apply_fp_extract_degrade()`**（6 处调用点共用），
+     使"漏改 except"从 6 段相似代码的人工比对，变成对同一函数调用完整性的检查。
+  6. 三处 `fp_extract_degraded` 初始化移到 `try` **之外**——否则任务整体失败走 `except` 时
+     引用未定义变量会抛 `NameError`，把「LLM 不可用」变成「代码崩溃」。
+- **守卫断言**（`test_phase2_html_upload.py::test_fp_extract_degrade`，9 条，**注入异常验证**，
+  不等自然发生）：注入 `TimeoutError` → 返回空 FP 不抛异常 / SRR 打上标记 / 携带真实原因 /
+  completed 路径透出 / 失败路径透出 / 文案点明「不是需求没有功能点」/ 未降级不写标记（防假降级）/
+  已有更具体 `degraded_reason` 时不被空文案覆盖。
+- **口径说明**：`req_agent.refine_srr()`（:97-229）内也调用了 `_fp_extract_from_raw`，
+  但该路径**全库无调用方（死代码）**，标记随 `srr` 自然带上，未额外接透出。
+
 ---
 
 ## 五、真实生成链路的观察（2026-09-17）

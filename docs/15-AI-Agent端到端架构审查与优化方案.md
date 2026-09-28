@@ -162,6 +162,18 @@ LangGraph 官方要求用持久化 checkpointer 保存 thread 状态，并以同
 
 **验收**：在完成 2 个 FP 后杀进程，重启续跑不再调用已完成 FP，且旧 revision checkpoint 被拒绝。
 
+### 修复记录（v3.4.6，2026-09-28）
+
+- 5 个 checkpoint 字段（`task_id`/`resume`/`resume_checkpoint`/`_fp_subtasks`/`_fp_groups`）已显式加入 `PipelineState`（此前未声明 → 被 LangGraph 静默过滤，`state.get()` 恒空，**断点续跑从未真正生效**）；
+- 已接入 `AsyncPostgresSaver`，`thread_id = task_id`，`setup()` 幂等建表；
+- **本轮补上降级可观测性的最后一环**：`_ensure_checkpoint_backend()` 在 PostgresSaver 初始化失败时会置 `_checkpoint_backend_degraded`，但其 docstring 承诺的
+  *「memory：…（日志 + `_checkpoint_backend_degraded` → done 事件的 degraded_flags 可见），绝不静默」*
+  **此前是假承诺**——该标记全库零消费方，检查点静默退化、运维无感知。
+  现由 `run_pipeline` 入口注入 `initial_state["degraded_flags"]`（经 `initial_degraded_flags()` 纯函数），
+  逐级透传到 done 事件；因 `decide_publication` 会消费 `degraded_flags`，降级项自动进入 `human_review`，不会被自动核准。
+  详见 `KNOWN-ISSUES.md §四 N-4`。
+- **未做**：降级仍保留 `MemorySaver` 兜底（未改为直接抛错硬失败），以兼容单机/演示环境；是否升级待拍板。
+
 ---
 
 ## 4.3 P0：并发互斥与 SSE 隔离存在竞态
