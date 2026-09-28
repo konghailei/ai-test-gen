@@ -1594,10 +1594,31 @@ async def finalize_requirement(
 
     logger.info("[API/requirements] KB 确认完成: req_id={}, title={}", req_id, record.title)
 
+    # v3.4.6（缺陷 B）：FP 提取失败降级透出（与其他需求侧入口对称）。
+    # finalize 内 `_fp_extract_from_raw` 失败时只置 SRR 上的标记，
+    # 若不透出，前端看到「0 FP」仍无法区分「需求无功能点」与「LLM 挂了」。
+    # 与 requirement_tasks 共用同一标记读取/写入口径（_fp_extract_degraded /
+    # _fp_extract_error），避免两侧字段名不一致导致前端漏渲染。
+    resp_data: dict = {"req_id": req_id, "status": "pending_review", "srr": final_data}
+    _has_fp_degrade = bool(final_data.get("_fp_extract_degraded"))
+    _has_finalize_degrade = bool(final_data.get("_finalize_degraded"))
+    if _has_fp_degrade or _has_finalize_degrade:
+        _fp_err = str(final_data.get("_fp_extract_error", "") or "")
+        resp_data["degraded"] = True
+        resp_data["degraded_reason"] = (
+            final_data.get("_finalize_error")
+            or "功能点提取失败（LLM 不可用或返回异常），本次为 0 个功能点"
+               "——这不是「需求没有功能点」，请检查 LLM 供应商配置后重新分析"
+               + (f"（原因：{_fp_err}）" if _fp_err else "")
+        )
+        if _has_fp_degrade:
+            resp_data["fp_extract_degraded"] = True
+            resp_data["fp_extract_error"] = _fp_err
+
     return ApiResponse(
         success=True,
         message="KB 已解答全部问题，最终 SRR 已生成，请确认",
-        data={"req_id": req_id, "status": "pending_review", "srr": final_data},
+        data=resp_data,
     )
 
 

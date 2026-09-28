@@ -848,12 +848,27 @@ class ReqAgent:
 
         v2.8.52: 返回元组替代实例属性，消除并发污染。
 
+        v3.4.6（缺陷 B 修复）：FP 提取失败不再静默。
+        反例（2026-09-28 实测）：LLM 首响应超时 → 本函数 except 分支仅 warn 后
+        返回空列表 → 调用方记录「FP 提取完成: 0 个功能点」，任务仍 `completed`。
+        用户无法区分「需求本身确实没有功能点」与「LLM 失败导致一个都没提到」，
+        且 0 FP 会让下游生成通道全部退化（FP 分片路径失效）。
+        修复：失败时在 **SRR 字典**（任务私有对象，非单例实例属性，无并发污染）
+        上打 `_fp_extract_degraded` 标记，由调用方透出到 result_json。
+
         Returns:
             tuple[list[dict], list[dict], dict | None]:
                 (新生成的功能点列表, FP依赖列表, 交互层SRR)
+                失败时返回 ([], [], None)，且在 srr 上置 _fp_extract_degraded=True
         """
         from app.core import prompt_manager as pm
         import json as _json
+
+        def _mark_degraded(reason: str) -> None:
+            """在 SRR 上打 FP 提取降级标记（任务私有，随 result_json 透出）。"""
+            if isinstance(srr, dict):
+                srr["_fp_extract_degraded"] = True
+                srr["_fp_extract_error"] = reason[:300]
 
         req_meta = srr.get("requirement", {})
         modules = req_meta.get("modules", []) or []
@@ -1057,9 +1072,16 @@ class ReqAgent:
                 all_fps = result.get("functional_points", [])
                 new_fps = [f for f in all_fps if not f.get("reuse_existing")]
                 return new_fps, fp_deps, interaction_srr
+            # v3.4.6（缺陷 B）：LLM 返回了非 dict（如 null/字符串）——同样是失败，
+            # 不能静默当成「0 个功能点」。
+            _mark_degraded(f"LLM 返回类型异常: {type(result).__name__}")
+            logger.warning("[ReqAgent] FP 一体式提取返回类型异常: {}", type(result).__name__)
             return [], [], None
-        except Exception:
-            logger.warning("[ReqAgent] FP 一体式提取 LLM 调用失败")
+        except Exception as e:
+            # v3.4.6（缺陷 B）：失败必须显式可辨——打标记 + 带上真实原因（如首响应超时）
+            _err = f"{type(e).__name__}: {str(e)[:200]}"
+            _mark_degraded(_err)
+            logger.warning("[ReqAgent] FP 一体式提取 LLM 调用失败（已置 _fp_extract_degraded）: {}", _err)
             return [], [], None
 
     @staticmethod

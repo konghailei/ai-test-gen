@@ -127,6 +127,72 @@ def _count_clarify_rounds_since_last_regen(clarify_history: list) -> int:
     scope = clarify_history[last_regen_idx + 1:] if last_regen_idx >= 0 else clarify_history
     return sum(1 for h in scope if isinstance(h, dict) and h.get("action") == "clarify")
 
+def _read_fp_extract_degrade(src: dict | None) -> tuple[bool, str]:
+    """读取 FP 提取降级标记（v3.4.6 / 缺陷 B）。
+
+    标记由 `ReqAgent._fp_extract_from_raw` 打在**传入的 SRR 字典**上
+    （`_fp_extract_degraded` / `_fp_extract_error`）。
+
+    ⚠️ 为什么要在调用点立即捕获、而不是在出口读 srr_json_data：
+    主入口出口的 `srr_json_data` 可能已被替换为 ClarifyAgent 的
+    `augmented_srr`（一个**新字典**），其上不会带 ReqAgent 打的标记；
+    同理 `final_data = dict(final_srr)` 是浅拷贝，标记虽能带上但语义脆弱。
+    在调用点用局部变量捕获，是唯一不会被中间层覆盖的做法。
+
+    Returns:
+        (是否降级, 失败原因)
+    """
+    if not isinstance(src, dict):
+        return False, ""
+    return bool(src.get("_fp_extract_degraded")), str(src.get("_fp_extract_error", "") or "")
+
+
+_FP_DEGRADE_REASON_OK = (
+    "功能点提取失败（LLM 不可用或返回异常），本次为 0 个功能点"
+    "——这不是「需求没有功能点」，请检查 LLM 供应商配置后重新分析"
+)
+_FP_DEGRADE_REASON_FAILED = (
+    "功能点提取失败（LLM 不可用或返回异常），本次任务失败可能与之相关"
+)
+
+
+def _apply_fp_extract_degrade(
+    target: dict,
+    degraded: bool,
+    error: str,
+    *,
+    reason: str = _FP_DEGRADE_REASON_OK,
+    overwrite: bool = False,
+) -> bool:
+    """把 FP 提取降级标记写入结果字典（v3.4.6 / 缺陷 B 的统一出口）。
+
+    ⚠️ 为什么必须抽成单一函数（而不是 6 处各写一遍）：
+    本标记需要在 **3 个入口 × 2 条路径（completed / failed）共 6 处**透出。
+    首版实现只覆盖了 completed 路径，两个 reparse 入口的 `except` 分支整体漏写
+    ——项目里同类事故已发生多次（「打标记类补丁只覆盖 happy path」）。
+    收敛到同一函数后，「失败路径漏标」变成对**同一函数调用完整性**的检查，
+    而不是对 6 段相似代码的人工逐段比对；也让守卫断言有唯一落点。
+
+    Args:
+        target: 承载标记的字典（result_json / resp_data）
+        degraded: 是否降级
+        error: 失败原因（可为空）
+        reason: degraded_reason 文案前缀
+        overwrite: 若已有 degraded 标记是否覆盖其 reason（默认保留更早、更具体的原因）
+
+    Returns:
+        是否实际写入了标记
+    """
+    if not degraded or not isinstance(target, dict):
+        return False
+    target["fp_extract_degraded"] = True
+    target["fp_extract_error"] = error
+    if overwrite or not target.get("degraded"):
+        target["degraded"] = True
+        target["degraded_reason"] = reason + (f"（原因：{error}）" if error else "")
+    return True
+
+
 def _merge_interaction_srr(base_srr: dict, interaction_srr: dict) -> dict:
     """将 interaction_srr 选择性合并到 base_srr 的 cross_fp_interactions 嵌套结构（符合 SSOT 原则）。
 
@@ -999,6 +1065,11 @@ async def _run_requirement_analysis(
 
     # docs/17：HTML 原型解析降级标记（phase 0 收集，随 SRR 落库透出）
     proto_flags_all: list[str] = []
+    # v3.4.6（缺陷 B）：FP 提取降级标记。必须在 try 外初始化——
+    # 否则任务整体失败走 except 分支时引用未定义变量会抛 NameError，
+    # 把「LLM 不可用」变成「代码崩溃」（失败路径覆盖的典型坑）。
+    fp_extract_degraded: bool = False
+    fp_extract_error: str = ""
 
     try:
         # ===== phase 0: upload（文件解析）=====
@@ -1084,6 +1155,15 @@ async def _run_requirement_analysis(
         captured_fps = parse_result.fps
         captured_fp_deps = parse_result.fp_deps
         captured_interaction_srr = parse_result.interaction_srr
+        # v3.4.6（缺陷 B）：在调用点立即捕获 FP 提取降级标记。
+        # 不能等到出口读 srr_json_data——中间可能被 ClarifyAgent 的 augmented_srr
+        # （新字典）替换，标记会丢失。此处捕获后随 result_json 透出。
+        fp_extract_degraded, fp_extract_error = _read_fp_extract_degrade(srr)
+        if fp_extract_degraded:
+            logger.warning(
+                "[Task] ⚠️ FP 提取降级（LLM 不可用/返回异常），本次 0 功能点: req_id={}, err={}",
+                req_id, fp_extract_error[:200],
+            )
 
         if await _is_cancelled():
             logger.info("[Task] 任务已取消，提前退出: task_id={}", task_id)
@@ -1261,6 +1341,11 @@ async def _run_requirement_analysis(
                 final_srr_data.pop("_clarify_state", None)
                 final_srr_data.pop("_field_sources", None)
                 srr_json_data = final_srr_data
+                # v3.4.6（缺陷 B）：本段是第二次 parse，FP 标记在新 SRR 上——
+                # 若本次才失败，需覆盖首次的结果（以最新一次为准）。
+                if regen_result.srr.get("_fp_extract_degraded"):
+                    fp_extract_degraded = True
+                    fp_extract_error = str(regen_result.srr.get("_fp_extract_error", "") or "")
             except Exception as e:
                 # v2.18: 降级时保留第一次解析结果，但记录降级原因供前端展示警告
                 degrade_err = str(e)[:300]
@@ -1350,6 +1435,15 @@ async def _run_requirement_analysis(
                     "HTML 原型解析降级（" + "、".join(proto_flags_all)
                     + "），原型语义可能不完整，请人工核对相关要点"
                 )
+        # v3.4.6（缺陷 B）：FP 提取失败降级透出。
+        # 反例（2026-09-28 实测）：LLM 首响应超时 → FP 提取返回 0 个 →
+        # result_json 里只有「0 个功能点」这个结果值，**没有任何失败证据**，
+        # 任务仍 completed。用户无法区分「需求确实没有功能点」与「LLM 挂了」。
+        # 修复：把 _fp_extract_from_raw 打在 SRR 上的标记透出为结构化字段，
+        # 并置 degraded（0 FP 会让 FP 分片通道全部退化，必须可见）。
+        # 统一走 _apply_fp_extract_degrade（同一函数也用于两条失败路径，
+        # 避免 6 处相似代码里漏改 except——参见该函数 docstring）。
+        _apply_fp_extract_degrade(result, fp_extract_degraded, fp_extract_error)
         # 甲1: 质量门禁警告传递给前端
         if quality_warning:
             result["quality_warning"] = quality_warning
@@ -1377,6 +1471,15 @@ async def _run_requirement_analysis(
                 "HTML 原型解析降级（" + "、".join(proto_flags_all)
                 + "），原型语义可能不完整，请人工核对相关要点"
             )
+        # v3.4.6（缺陷 B）：失败路径同样透出 FP 提取降级标记。
+        # 纪律：打标记类补丁只覆盖 happy path 是头号 bug——任务 failed 时若
+        # 根因包含「FP 提取失败」，必须在 result_json 里留下证据，否则用户
+        # 只看到与根因无关的报错，等于标记从未到达消费方。
+        # 失败路径覆盖：降级原因优先保留既有 degraded_reason，FP 证据独立成字段。
+        _apply_fp_extract_degrade(
+            failed_result, fp_extract_degraded, fp_extract_error,
+            reason=_FP_DEGRADE_REASON_FAILED,
+        )
         await _update_task(
             task_id, status="failed", phase="", error=err_msg,
             message="分析失败: " + err_msg[:200], completed_at=datetime.now(timezone.utc),
@@ -1416,6 +1519,9 @@ async def _run_clarify_reparse(
     # P3-6: 后台协程设置任务环境上下文，LLM 日志自动关联 task/req
     from app.core.task_context import set_task_context
     set_task_context(task_id=task_id, req_id=req_id)
+    # v3.4.6（缺陷 B）：必须在 try 外初始化——except 分支要引用，否则 NameError。
+    fp_extract_degraded: bool = False
+    fp_extract_error: str = ""
     try:
         await _update_task(task_id, status="running", phase="parse", progress=20,
                            message="正在调用 LLM 重新生成 SRR...")
@@ -1440,6 +1546,8 @@ async def _run_clarify_reparse(
 
         # v2.8.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
         # v1.6: 使用 original_raw（原始需求文本）进行 FP 提取，而非 enhanced_raw。
+        # v3.4.6（缺陷 B）：显式传 srr=final_srr，让 _fp_extract_from_raw 能把
+        # 降级标记打在本次任务的 SRR 上（原先漏传，失败无从察觉）。
         if original_raw:
             try:
                 captured_fps, captured_fp_deps, captured_interaction_srr = await req_agent._fp_extract_from_raw(
@@ -1447,15 +1555,23 @@ async def _run_clarify_reparse(
                     srr=final_srr,
                 )
                 logger.info("[Task/Clarify] FP 重提取完成（基于原始文本）: {} 个", len(captured_fps))
+                fp_extract_degraded, fp_extract_error = _read_fp_extract_degrade(final_srr)
             except Exception as fp_e:
                 logger.warning("[Task/Clarify] FP 重提取失败（降级使用 enhanced_raw 结果）: {}", str(fp_e)[:200])
                 captured_fps = clarify_result.fps
                 captured_fp_deps = clarify_result.fp_deps
                 captured_interaction_srr = clarify_result.interaction_srr
+                fp_extract_degraded = True
+                fp_extract_error = f"{type(fp_e).__name__}: {str(fp_e)[:200]}"
         else:
             captured_fps = clarify_result.fps
             captured_fp_deps = clarify_result.fp_deps
             captured_interaction_srr = clarify_result.interaction_srr
+        if fp_extract_degraded:
+            logger.warning(
+                "[Task/Clarify] ⚠️ FP 提取降级（本次 0 功能点，非「需求无功能点」）: req_id={}, err={}",
+                req_id, fp_extract_error[:200],
+            )
 
         await _update_task(task_id, phase="parse", progress=60,
                            message="SRR 生成完成，正在保存功能点...")
@@ -1744,6 +1860,9 @@ async def _run_clarify_reparse(
             recheck_result_json["new_questions"] = len(recheck_questions)
         if recheck_quality_warning:
             recheck_result_json["quality_warning"] = recheck_quality_warning
+        # v3.4.6（缺陷 B）：FP 提取失败降级透出（与 _run_requirement_analysis 对称）。
+        # 本入口在 original_raw 存在时重跑 _fp_extract_from_raw，同样可能失败静默。
+        _apply_fp_extract_degrade(recheck_result_json, fp_extract_degraded, fp_extract_error)
         await _update_task(
             task_id, status="completed", phase="done", progress=100,
             message=recheck_done_msg,
@@ -1755,10 +1874,19 @@ async def _run_clarify_reparse(
     except Exception as e:
         err_msg = str(e)[:500]
         logger.error("[Task/Clarify] 澄清重生成失败: task_id={}, req_id={}, error={}", task_id, req_id, err_msg)
+        # v3.4.6（缺陷 B）：失败路径同样透出 FP 提取降级标记。
+        # 纪律：打标记类补丁只覆盖 happy path 是头号 bug——本入口原先 except
+        # 分支完全不写 result_json，任务 failed 时 FP 降级证据被整个丢掉。
+        recheck_failed_result: dict = {}
+        _apply_fp_extract_degrade(
+            recheck_failed_result, fp_extract_degraded, fp_extract_error,
+            reason=_FP_DEGRADE_REASON_FAILED,
+        )
         await _update_task(
             task_id, status="failed", error=err_msg,
             message="澄清重生成失败: " + err_msg[:200],
             completed_at=datetime.now(timezone.utc),
+            result_json=recheck_failed_result or None,
         )
         # 失败时将需求状态恢复为原始状态（v2.8.52: 不再无条件降级为 draft）
         try:
@@ -1802,6 +1930,9 @@ async def _run_regenerate_reparse(
         原始 raw_text 保持不变，补充文件内容独立存储，前端可分别查看。
     """
     from sqlalchemy import update as sa_update, delete as sa_delete
+    # v3.4.6（缺陷 B）：必须在 try 外初始化——except 分支要引用，否则 NameError。
+    fp_extract_degraded: bool = False
+    fp_extract_error: str = ""
     try:
         await _update_task(task_id, status="running", phase="parse", progress=20,
                            message="正在调用 LLM 重新解析需求...")
@@ -1824,6 +1955,7 @@ async def _run_regenerate_reparse(
             final_srr["_clarify_degraded"] = True
 
         # v2.8.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
+        # v3.4.6（缺陷 B）：捕获 FP 提取降级标记（在调用点捕获，避免中间层覆盖）。
         captured_fps: list = []
         captured_fp_deps: list = []
         captured_interaction_srr = None
@@ -1834,6 +1966,12 @@ async def _run_regenerate_reparse(
                     srr=final_srr,
                 )
                 logger.info("[Task/Regenerate] FP 提取完成（基于原始文本）: {} 个", len(captured_fps))
+                fp_extract_degraded, fp_extract_error = _read_fp_extract_degrade(final_srr)
+                if fp_extract_degraded:
+                    logger.warning(
+                        "[Task/Regenerate] ⚠️ FP 提取降级（本次 0 功能点，非「需求无功能点」）: req_id={}, err={}",
+                        req_id, fp_extract_error[:200],
+                    )
             except Exception as fp_e:
                 logger.warning("[Task/Regenerate] FP 提取失败（降级使用 parse 结果）: {}", str(fp_e)[:200])
                 captured_fps = regen_result.fps
@@ -2157,6 +2295,8 @@ async def _run_regenerate_reparse(
         }
         if regen_quality_warning:
             regen_result_json["quality_warning"] = regen_quality_warning
+        # v3.4.6（缺陷 B）：FP 提取失败降级透出（与 _run_requirement_analysis 对称）。
+        _apply_fp_extract_degrade(regen_result_json, fp_extract_degraded, fp_extract_error)
         await _update_task(
             task_id, status="completed", phase="done", progress=100,
             message=f"需求分析已重新生成，进入{status_desc}",
@@ -2168,10 +2308,17 @@ async def _run_regenerate_reparse(
     except Exception as e:
         err_msg = str(e)[:500]
         logger.error("[Task/Regenerate] 重新生成失败: task_id={}, req_id={}, error={}", task_id, req_id, err_msg)
+        # v3.4.6（缺陷 B）：失败路径同样透出 FP 提取降级标记（与另外两个入口对称）。
+        regen_failed_result: dict = {}
+        _apply_fp_extract_degrade(
+            regen_failed_result, fp_extract_degraded, fp_extract_error,
+            reason=_FP_DEGRADE_REASON_FAILED,
+        )
         await _update_task(
             task_id, status="failed", error=err_msg,
             message="重新生成失败: " + err_msg[:200],
             completed_at=datetime.now(timezone.utc),
+            result_json=regen_failed_result or None,
         )
         # 失败时回退到原始状态（v2.8.52: 不再无条件升级为 pending_review）
         try:
