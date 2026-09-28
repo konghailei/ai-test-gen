@@ -48,14 +48,63 @@ _INPUT_ROLE = {
 }
 
 # 语义树中需要提取的约束属性
+#
+# 注意（2026-09-28 docs/17 §6.3 实测）：本常量曾被写成「孤儿定义」——
+# 只有定义、无任何消费方。真正生效的是 _constraint_flags() 里的硬编码清单，
+# 而那份清单漏了 `step`（number 输入步长，等价类/边界值用例的依据），
+# 导致 `<input type="number" step="0.01">` 的约束静默丢失。
+# 现改为：本常量即**唯一事实来源**，_constraint_flags 直接消费它。
 _CONSTRAINT_ATTRS = (
     "required", "disabled", "readonly", "checked", "multiple",
     "maxlength", "minlength", "pattern", "min", "max", "step",
     "type", "placeholder", "accept",
 )
 
+# 布尔型约束属性（存在性即语义，渲染为 [attr]）
+_BOOLEAN_CONSTRAINT_ATTRS = ("required", "readonly", "disabled", "multiple")
+
+# 键值型约束属性（渲染为 [attr=value]）
+_VALUE_CONSTRAINT_ATTRS = (
+    "maxlength", "minlength", "pattern", "min", "max", "step",
+)
+
+# 需要标注 [type=...] 的输入类型（对测试有区分意义）
+_TYPE_FLAG_VALUES = ("password", "email", "tel", "number", "date")
+
 # 优先属性取名路径
 _ARIA_LABEL_ATTRS = ("aria-label", "title")
+
+# 非文本节点类型：参与 `find_all(string=True)` 但不代表容器「自带文本」。
+# Comment 是 NavigableString 子类，Axure/墨刀 导出件几乎每层容器都带注释，
+# 若不排除会把匿名容器误判为具名容器（详见 _is_anonymous_container 注释）。
+def _init_non_text_node_types() -> tuple[type, ...]:
+    """惰性导入 bs4 的非文本节点类型（Comment/CData/Declaration 等）。
+
+    bs4 未安装时返回空元组——解析入口本就会因 ImportError 明确报错，
+    此处不应提前抛错影响模块导入（对齐降级哲学）。
+    """
+    try:
+        from bs4 import Comment, CData, Declaration, Doctype, ProcessingInstruction
+    except Exception:  # noqa: BLE001
+        return ()
+    return (Comment, CData, Declaration, Doctype, ProcessingInstruction)
+
+
+_NON_TEXT_NODE_TYPES: tuple[type, ...] = _init_non_text_node_types()
+
+
+def _has_data_attr(el: Any) -> bool:
+    """容器是否带 data-* 属性（方案 §4.2.4 的保留例外）。
+
+    原实现写作 `el.get("data-*")`——这是**字面 key**（HTML 中并不存在名为
+    "data-*" 的属性），恒返回 None，导致该保留例外成为死代码。
+    正确做法是按属性名前缀匹配。
+    """
+    try:
+        return any(str(k).lower().startswith("data-") for k in el.attrs)
+    except Exception:  # noqa: BLE001
+        return False
+
 
 
 class _ProtoStats:
@@ -249,13 +298,21 @@ class _TreeBuilder:
     def _is_anonymous_container(self, el: Any) -> bool:
         """无名、无角色、无语义属性的布局容器 → 压平（children 上提）。"""
         if el.name in ("div", "span", "main", "section", "header", "footer", "nav", "article"):
-            if any(el.get(a) for a in _ARIA_LABEL_ATTRS) or el.get("role") or el.get("data-*"):
+            if any(el.get(a) for a in _ARIA_LABEL_ATTRS) or el.get("role") or _has_data_attr(el):
                 return False
             if el.get("class") and _has_semantic_class(el):
                 return False
-            # 有直接文本内容则视为有名
+            # 有直接文本内容则视为有名。
+            # 必须排除 Comment 等非文本节点——BS4 的 Comment 是 NavigableString
+            # 子类，会被 `find_all(string=True)` 捞出，从而被误当「容器自带文本」。
+            # 反例（2026-09-28 docs/17 §6.3 实测）：真实 Axure/墨刀 导出件几乎每层
+            # 容器都带注释（`<!-- 容器 1 -->`），原实现据此把匿名容器判为「具名」
+            # → 不压平 → 每层输出一个含**整个子树文本**的 generic 巨行且继续递归
+            # → 30 层嵌套产生 30 行完全相同的巨行，把真实字段行挤到树底、
+            # 吃掉 MAX_OUTPUT_CHARS 字符预算（噪声挤掉信号）。
             own_text = "".join(
                 t for t in el.find_all(string=True, recursive=False)
+                if not isinstance(t, _NON_TEXT_NODE_TYPES)
             ) if hasattr(el, "find_all") else ""
             if _clean_text(own_text):
                 return False
@@ -433,19 +490,25 @@ class _TreeBuilder:
     # ---- 属性 flag ----
 
     def _constraint_flags(self, el: Any) -> list[str]:
+        """字段约束属性 → 语义树 flag（按 _CONSTRAINT_ATTRS 单一事实来源）。
+
+        修复（2026-09-28 §6.3 实测）：原实现硬编码属性清单且漏了 `step`，
+        同时 _CONSTRAINT_ATTRS 是无人消费的孤儿定义。现两处合一，
+        由 _BOOLEAN/_VALUE_CONSTRAINT_ATTRS 驱动，杜绝再次漂移。
+        """
         flags: list[str] = []
-        for attr in ("required", "readonly", "disabled", "multiple"):
+        for attr in _BOOLEAN_CONSTRAINT_ATTRS:
             if el.has_attr(attr):
                 flags.append(f"[{attr}]")
         accept = el.get("accept")
         if accept:
             flags.append(f"[accept={accept}]")
-        for attr in ("maxlength", "minlength", "pattern", "min", "max"):
+        for attr in _VALUE_CONSTRAINT_ATTRS:
             val = el.get(attr)
             if val not in (None, ""):
                 flags.append(f"[{attr}={val}]")
         itype = el.get("type")
-        if itype and itype.lower() in ("password", "email", "tel", "number", "date"):
+        if itype and itype.lower() in _TYPE_FLAG_VALUES:
             flags.append(f"[type={itype.lower()}]")
         ph = _clean_text(el.get("placeholder"))
         if ph:
