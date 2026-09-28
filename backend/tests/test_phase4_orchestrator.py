@@ -28,9 +28,11 @@ from app.core.orchestrator import (
     Orchestrator,
     PipelineState,
     STAGE_PROGRESS,
+    initial_degraded_flags,
     make_sse_event,
     orchestrator,
 )
+from app.core.publication_policy import decide_publication
 
 
 # ============================================================================
@@ -502,6 +504,57 @@ def test_route_functions(result: TestResult):
     # _route_after_gate：未通过 & iteration >= MAX → impact（兜底）
     state_max: PipelineState = {"gate_result": {"passed": False, "forced_pass": False}, "clarify_iteration": 3}
     result.assert_eq("未通过(第3轮) → impact(兜底)", orch._route_after_gate(state_max), "impact")
+
+
+# ============================================================================
+# 测试 3b: 检查点后端降级的到达性（v3.4.6 / 缺陷 A）
+# ============================================================================
+
+
+def test_initial_degraded_flags(result: TestResult):
+    """`checkpoint_backend_degraded` 必须能到达消费方（done 事件 / 发布决策）。
+
+    反例（2026-09-28 审计实证）：`_ensure_checkpoint_backend` 在 PostgresSaver
+    初始化失败时置 `self._checkpoint_backend_degraded = True`，但该标记全库只有
+    定义与赋值、**零消费方** —— docstring 承诺的「done 事件 degraded_flags 可见」
+    是假承诺，检查点静默退化为 memory（重启即丢断点）而运维无感知。
+
+    四条断言对应四个必经环节，缺一即回到"写了但到不了"：
+      ① 未降级 → 不注入（不能凭空造标记）；
+      ② 降级 → 注入正确 flag；
+      ③ done 事件真的带出来（make_sse_event 透传）；
+      ④ 发布决策把它算进 reasons（降级必须进人工审核，不得自动核准）。
+    """
+    print("\n[测试 3b] 检查点降级标记的到达性（缺陷 A）")
+
+    # ① 未降级不注入
+    result.assert_eq("未降级 → 无标记", initial_degraded_flags(False), [])
+    # ② 降级注入正确 flag
+    result.assert_eq("降级 → checkpoint_backend_degraded",
+                     initial_degraded_flags(True), ["checkpoint_backend_degraded"])
+
+    # ③ 标记能在 done 事件透出（模拟入口注入 → 各节点 append → done 构造）
+    flags = initial_degraded_flags(True)
+    flags = list(flags) + ["fp_load_failed"]  # 节点沿用既有 append 形态
+    done = make_sse_event("done", "流水线完成", degraded_flags=flags)
+    result.assert_true("done 事件携带 checkpoint_backend_degraded",
+                       "checkpoint_backend_degraded" in (done.get("degraded_flags") or []),
+                       f"got={done.get('degraded_flags')}")
+
+    # ④ 发布决策消费：降级 → 非 auto_approve（fail-closed，必须人工审核）
+    pub = decide_publication(
+        {"review_status": "complete", "total_cases": 1, "issues": [],
+         "point_coverage": {"coverage_status": "mapped", "mapping_based": True,
+                            "coverage_rate": 1.0}},
+        [{"id": "TC-1"}],
+        gate_result={"passed": True, "forced_pass": False},
+        degraded_flags=["checkpoint_backend_degraded"],
+    )
+    result.assert_true("降级进入 publication.reasons",
+                       "checkpoint_backend_degraded" in (pub.get("reasons") or []),
+                       f"reasons={pub.get('reasons')}")
+    result.assert_true("降级 → 不允许自动核准",
+                       pub.get("decision") != "auto_approve", f"decision={pub.get('decision')}")
 
 
 # ============================================================================
@@ -1165,6 +1218,7 @@ def main():
     test_clarify_loop_guard(result)
     test_make_sse_event(result)
     test_route_functions(result)
+    test_initial_degraded_flags(result)
     test_apply_clarify_answers(result)
     test_generation_logic(result)
 

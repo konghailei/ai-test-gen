@@ -296,6 +296,82 @@ async def test_degraded_paths(client: httpx.AsyncClient) -> None:
         _check("纯壳原型上传被接受（用于降级链路验证）", False, f"HTTP {resp.status_code}")
 
 
+async def test_fp_extract_degrade(result: httpx.AsyncClient) -> None:
+    """用例5：FP 提取失败的降级透出（v3.4.6 / 缺陷 B，注入异常验证）。
+
+    反例（2026-09-28 实测）：LLM 首响应超时 → `_fp_extract_from_raw` except 分支
+    仅 warn 后返回空列表 → 调用方记录「FP 提取完成: 0 个功能点」→ 任务仍
+    `completed`。用户看到的就是一个干净的「0 功能点」，**没有任何失败证据**，
+    无法区分「需求确实没有功能点」与「LLM 挂了」；而 0 FP 会让 FP 分片生成通道
+    整体退化。
+
+    纪律：失败路径必须用**注入异常**验证，不能等它自然发生
+    （自然发生依赖外部 LLM 抖动，回归会随机红/绿）。
+    """
+    print("\n[用例5] FP 提取降级（注入异常，覆盖 completed / failed 两条终态）")
+
+    # ── 5a. 单元级：注入 LLM 异常 → SRR 上出现标记 ──
+    from app.agents.req_agent import req_agent
+    from app.core.requirement_tasks import (
+        _apply_fp_extract_degrade, _read_fp_extract_degrade,
+    )
+
+    srr_probe: dict = {"requirement": {"title": "t", "product_id": "P", "modules": []}}
+    orig_call = req_agent._llm.call_json
+
+    async def _boom(*a, **kw):
+        raise TimeoutError("首响应超时: provider=xxx, 180s 内无任何响应")
+
+    req_agent._llm.call_json = _boom
+    try:
+        fps, deps, inter = await req_agent._fp_extract_from_raw(
+            raw_text="商品管理：新增/编辑/删除", srr=srr_probe, product_name="P",
+        )
+    finally:
+        req_agent._llm.call_json = orig_call
+
+    _check("注入超时 → 返回空 FP（不抛异常，不阻断主流程）",
+           fps == [] and inter is None, f"fps={fps}")
+    degraded, err = _read_fp_extract_degrade(srr_probe)
+    _check("注入超时 → SRR 打上 _fp_extract_degraded（强断言：确定性行为）",
+           degraded is True, f"srr_keys={sorted(srr_probe)[:12]}")
+    _check("标记携带真实原因（TimeoutError 可追溯）",
+           "TimeoutError" in err or "超时" in err, f"err={err}")
+
+    # ── 5b. 完成路径透出（模拟 _run_requirement_analysis 出口） ──
+    ok_result: dict = {"req_id": "REQ-X", "status": "completed"}
+    _apply_fp_extract_degrade(ok_result, degraded, err)
+    _check("completed 路径：result_json.fp_extract_degraded=True",
+           ok_result.get("fp_extract_degraded") is True)
+    _check("completed 路径：置 degraded 且文案点明「不是需求没有功能点」",
+           bool(ok_result.get("degraded"))
+           and "不是「需求没有功能点」" in str(ok_result.get("degraded_reason")),
+           f"reason={str(ok_result.get('degraded_reason'))[:80]}")
+
+    # ── 5c. 失败路径透出（关键：首版实现漏了 except 分支，正是本缺陷的形态） ──
+    from app.core.requirement_tasks import _FP_DEGRADE_REASON_FAILED
+    failed_result: dict = {}
+    _apply_fp_extract_degrade(failed_result, degraded, err, reason=_FP_DEGRADE_REASON_FAILED)
+    _check("failed 路径：result_json.fp_extract_degraded=True（失败路径同样透出）",
+           failed_result.get("fp_extract_degraded") is True,
+           f"failed_result={failed_result}")
+    _check("failed 路径：reason 说明「任务失败可能与之相关」",
+           "任务失败可能与之相关" in str(failed_result.get("degraded_reason")),
+           str(failed_result.get("degraded_reason"))[:80])
+
+    # ── 5d. 不降级时**不得**写入任何标记（防误报，对称性检查） ──
+    clean: dict = {}
+    wrote = _apply_fp_extract_degrade(clean, False, "")
+    _check("未降级 → 不写标记（不产生假降级）",
+           wrote is False and not clean, f"got={clean}")
+    # ── 5e. 已有更具体降级原因时不被空文案覆盖（保留最早根因） ──
+    preset: dict = {"degraded": True, "degraded_reason": "HTML 原型解析降级"}
+    _apply_fp_extract_degrade(preset, True, "TimeoutError: x")
+    _check("已有 degraded_reason 时保留更早的具体原因",
+           preset.get("degraded_reason") == "HTML 原型解析降级",
+           f"got={preset.get('degraded_reason')}")
+
+
 async def _login_headers(client: httpx.AsyncClient) -> dict[str, str]:
     """走登录接口取 Bearer Token（与 scripts/run_test_plan.py 同一方式）。
 
@@ -326,6 +402,7 @@ async def main_async(only: list[int] | None = None) -> None:
         (2, "用例2 混传", test_mixed_upload),
         (3, "用例3 恶意原型", test_malicious_proto),
         (4, "用例4 降级路径", test_degraded_paths),
+        (5, "用例5 FP 提取降级透出", test_fp_extract_degrade),
     ]
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=90.0) as client:
         headers = await _login_headers(client)
