@@ -24,10 +24,13 @@ backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 
 from app.core.orchestrator import (
+    CheckpointBackendError,
     ClarifyLoopGuard,
+    DegradedInputError,
     Orchestrator,
     PipelineState,
     STAGE_PROGRESS,
+    _srr_is_fp_degraded,
     initial_degraded_flags,
     make_sse_event,
     orchestrator,
@@ -558,6 +561,61 @@ def test_initial_degraded_flags(result: TestResult):
 
 
 # ============================================================================
+# 测试 3c: 降级输入前置门禁（v3.4.6 硬失败 / 大哥拍板）
+# ============================================================================
+
+
+def test_srr_is_fp_degraded(result: TestResult):
+    """`_srr_is_fp_degraded` 纯逻辑：两个来源 + 假降级防护。
+
+    该函数是生成侧 fail-closed 门禁的**唯一判定入口**。判定错了会两向出事：
+      - 漏判（该拦不拦）→ 降级 SRR 产出的用例进入自动发布流程；
+      - 误判（不该拦乱拦）→ 正常需求无法生成（比降级更糟，直接堵死主路径）。
+    故必须有「未降级 → 不触发」的反向断言，防止条件写反或默认 True。
+    """
+    print("\n[测试 3c] 降级输入判定（_srr_is_fp_degraded）")
+
+    # ① 干净 SRR → 不触发（假降级防护，防判定条件写反 / 默认值错误）
+    ok, detail = _srr_is_fp_degraded({"requirement": {"title": "正常需求"}})
+    result.assert_true("干净 SRR 不触发门禁", not ok, f"detail={detail}")
+    result.assert_eq("干净 SRR 无原因文案", detail, "")
+
+    # ② 非 dict 输入（None / 字符串）→ 不触发，且不得抛异常
+    ok_none, _ = _srr_is_fp_degraded(None)
+    ok_str, _ = _srr_is_fp_degraded("not-a-dict")
+    result.assert_true("None 输入不触发且不抛异常", not ok_none)
+    result.assert_true("非 dict 输入不触发且不抛异常", not ok_str)
+
+    # ③ 来源一：_fp_extract_degraded（需求侧 ReqAgent 落库标记）
+    ok_fp, detail_fp = _srr_is_fp_degraded(
+        {"_fp_extract_degraded": True, "_fp_extract_error": "TimeoutError: LLM 超时"}
+    )
+    result.assert_true("_fp_extract_degraded → 触发门禁", ok_fp)
+    result.assert_true("原因文案含来源标记", "_fp_extract_degraded" in detail_fp, detail_fp)
+    result.assert_true("原因文案含底层错误", "TimeoutError" in detail_fp, detail_fp)
+
+    # ④ 来源二：_finalize_degraded（最终 SRR 重生成失败、降级沿用首次解析）
+    ok_fin, detail_fin = _srr_is_fp_degraded(
+        {"_finalize_degraded": True, "_finalize_error": "ValueError: 字段缺失"}
+    )
+    result.assert_true("_finalize_degraded → 触发门禁", ok_fin)
+    result.assert_true("原因文案含来源标记", "_finalize_degraded" in detail_fin, detail_fin)
+
+    # ⑤ 双来源同时命中 → 两个都出现在文案里（便于定位是哪条链路降级）
+    ok_both, detail_both = _srr_is_fp_degraded(
+        {"_fp_extract_degraded": True, "_finalize_degraded": True}
+    )
+    result.assert_true("双来源同时触发", ok_both)
+    result.assert_true("文案列出两个来源",
+                       "_fp_extract_degraded" in detail_both and "_finalize_degraded" in detail_both,
+                       detail_both)
+
+    # ⑥ 显式假值（False / 0 / ""）→ 不触发（防止把 falsy 当降级）
+    ok_false, _ = _srr_is_fp_degraded({"_fp_extract_degraded": False, "_finalize_degraded": 0})
+    result.assert_true("显式假值不触发", not ok_false)
+
+
+# ============================================================================
 # 测试 4: _apply_clarify_answers + _set_nested_value
 # ============================================================================
 
@@ -1077,6 +1135,105 @@ async def test_pipeline_error(result: TestResult):
 # ============================================================================
 
 
+async def test_gate_reject_degraded_srr(result: TestResult):
+    """降级 SRR → 入口门禁拒绝（fail-closed）：error 事件 + 无 done + 不推 DLQ。
+
+    大哥拍板「改成硬失败，不允许质量不佳的内容漏过去」（2026-09-28）。
+    此前降级 SRR 只在 done 事件透出 degraded_flags，产物仍落入 PG（仅拦 Milvus），
+    人工点一次 approve 即可把降级内容变成权威知识 —— 门禁把它挡在**产生副作用之前**。
+
+    四条断言对应门禁的四个可观测面：
+      ① 产出 error 事件（终态可见，非裸 500）；
+      ② error 事件的 reason=degraded_srr_rejected / rejected_at=entry（前端可精确判定）；
+      ③ 不产出 done 事件（没有产物 ⇒ 不可能被 approve ⇒ 权威库不被污染）；
+      ④ 门禁拒绝**不推 DLQ**（故意拒绝 ≠ 意外故障，重试必然再次失败）。
+    """
+    print("\n[测试 13] 降级 SRR 入口门禁（硬失败）")
+
+    # 构造带降级标记的 SRR（需求侧 ReqAgent 落库标记形态）
+    degraded_srr = copy.deepcopy(SRR_P2_FAST)
+    degraded_srr["_fp_extract_degraded"] = True
+    degraded_srr["_fp_extract_error"] = "TimeoutError: LLM provider unavailable"
+
+    dlq_push_calls: list[dict] = []
+
+    def _fake_push(*args, **kwargs):
+        dlq_push_calls.append({"args": args, "kwargs": kwargs})
+        return True
+
+    import app.core.dlq as _dlq_mod
+    _orig_push = _dlq_mod.dlq.push
+    _dlq_mod.dlq.push = _fake_push
+    try:
+        events = []
+        with AgentMocks():
+            async for event in orchestrator.run_pipeline("用户登录", srr_json=degraded_srr):
+                events.append(event)
+    finally:
+        _dlq_mod.dlq.push = _orig_push
+
+    # ① error 事件存在
+    result.assert_true("含 error 事件", any(e["stage"] == "error" for e in events))
+    # ② reason / rejected_at 精确
+    err = next((e for e in events if e["stage"] == "error"), {})
+    result.assert_eq("reason=degraded_srr_rejected", err.get("reason"), "degraded_srr_rejected")
+    result.assert_eq("rejected_at=entry", err.get("rejected_at"), "entry")
+    # 错误文案不得被「流水线异常:」前缀污染（需给用户可执行的修复指引）
+    result.assert_true("错误文案含修复指引（重新分析）",
+                       "重新分析" in str(err.get("message", "")),
+                       str(err.get("message", ""))[:120])
+    # ③ 无 done 事件
+    result.assert_true("无 done 事件（不产生产物）", not any(e["stage"] == "done" for e in events))
+    # ④ 门禁拒绝不推 DLQ
+    result.assert_eq("门禁拒绝不推 DLQ", len(dlq_push_calls), 0)
+
+
+async def test_gate_reject_checkpoint_backend(result: TestResult):
+    """检查点后端初始化失败 → fail-closed：error 事件 + reason=checkpoint_backend_unavailable。
+
+    对应 `_ensure_checkpoint_backend()` 的 v3.4.6 硬失败改造：
+    配置 postgres 却初始化失败时不再静默降级为 memory（重启即丢断点），
+    而是在 try 内抛 CheckpointBackendError → 转为 error 事件（终态可见，不击穿 500）。
+    """
+    print("\n[测试 14] 检查点后端不可用门禁（硬失败）")
+
+    dlq_push_calls: list[dict] = []
+
+    def _fake_push(*args, **kwargs):
+        dlq_push_calls.append({"args": args, "kwargs": kwargs})
+        return True
+
+    # 注入：让 _ensure_checkpoint_backend 抛 CheckpointBackendError
+    async def _raise_cb_err():
+        raise CheckpointBackendError("模拟：PostgresSaver 初始化失败")
+
+    import app.core.dlq as _dlq_mod
+    _orig_push = _dlq_mod.dlq.push
+    _orig_ensure = orchestrator._ensure_checkpoint_backend
+    _orig_checkpointer = orchestrator._checkpointer
+    _dlq_mod.dlq.push = _fake_push
+    orchestrator._ensure_checkpoint_backend = _raise_cb_err
+    # 确保走初始化分支（否则 _checkpointer 非空会直接 return）
+    orchestrator._checkpointer = None
+    try:
+        events = []
+        with AgentMocks():
+            async for event in orchestrator.run_pipeline("用户登录", srr_json=SRR_P2_FAST):
+                events.append(event)
+    finally:
+        _dlq_mod.dlq.push = _orig_push
+        orchestrator._ensure_checkpoint_backend = _orig_ensure
+        orchestrator._checkpointer = _orig_checkpointer
+
+    err = next((e for e in events if e["stage"] == "error"), {})
+    result.assert_true("含 error 事件", bool(err))
+    result.assert_eq("reason=checkpoint_backend_unavailable",
+                     err.get("reason"), "checkpoint_backend_unavailable")
+    result.assert_eq("rejected_at=entry", err.get("rejected_at"), "entry")
+    result.assert_true("无 done 事件", not any(e["stage"] == "done" for e in events))
+    result.assert_eq("门禁拒绝不推 DLQ", len(dlq_push_calls), 0)
+
+
 async def test_progress_monotonic(result: TestResult):
     """测试 SSE 事件 progress 大致单调递增（允许相同值）。"""
     print("\n[测试 11] progress 单调递增")
@@ -1204,6 +1361,8 @@ async def async_main(result: TestResult):
     await test_review_supplement_failure_keeps_cases(result)
     await test_publication_gate_fail_closed(result)
     await test_pipeline_error(result)
+    await test_gate_reject_degraded_srr(result)
+    await test_gate_reject_checkpoint_backend(result)
     await test_progress_monotonic(result)
 
 
@@ -1219,6 +1378,7 @@ def main():
     test_make_sse_event(result)
     test_route_functions(result)
     test_initial_degraded_flags(result)
+    test_srr_is_fp_degraded(result)
     test_apply_clarify_answers(result)
     test_generation_logic(result)
 
