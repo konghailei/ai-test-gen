@@ -119,6 +119,10 @@ install_*.env
 /test_*.py
 /verify_*.py
 /_*.py
+# 根目录一次性批处理/进程文件与本地 token（Windows 侧验证脚手架）
+/_*.cmd
+/_*.pid
+/_aitg_token.txt
 # backend 下的一次性诊断/验证脚本、临时产物与 e2e 验证目录（不入库）
 backend/_*.py
 backend/verify_*.py
