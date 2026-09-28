@@ -240,6 +240,75 @@ def initial_degraded_flags(checkpoint_backend_degraded: bool) -> list[str]:
     return ["checkpoint_backend_degraded"]
 
 
+def _srr_is_fp_degraded(srr: dict | None) -> tuple[bool, str]:
+    """检测 SRR 上的功能点提取降级标记（生成前置 fail-closed 门禁用）。
+
+    读取两个来源，任一命中即视为降级：
+      - `_fp_extract_degraded`（需求侧 ReqAgent 落库标记，v3.4.6 / 缺陷 B）
+      - `_finalize_degraded`（最终 SRR 重生成失败、降级沿用首次解析结果）
+
+    ⚠️ 为什么生成阶段要拦这个：
+    `Requirement.srr_json` 是生成流水线的**唯一输入**（`_parse_node` 直接消费）。
+    若该 SRR 是在「功能点提取失败（LLM 不可用）」或「最终 SRR 重生成失败」的条件下
+    产出的，那么基于它生成的全部用例都建立在**不完整/未校验的需求**之上。
+    此类内容同样属于「质量不佳」，不应产出可被自动核准的用例。
+
+    Returns:
+        (是否降级, 原因文案)
+    """
+    if not isinstance(srr, dict):
+        return False, ""
+    fp_flag = bool(srr.get("_fp_extract_degraded"))
+    fin_flag = bool(srr.get("_finalize_degraded"))
+    if not (fp_flag or fin_flag):
+        return False, ""
+    reason = str(
+        srr.get("_fp_extract_error") or srr.get("_finalize_error") or ""
+    ).strip()[:200]
+    which = []
+    if fp_flag:
+        which.append("_fp_extract_degraded")
+    if fin_flag:
+        which.append("_finalize_degraded")
+    detail = "需求侧降级标记=" + "+".join(which)
+    if reason:
+        detail += f"（原因：{reason}）"
+    return True, detail
+
+
+class DegradedInputError(RuntimeError):
+    """生成前置门禁：SRR 带降级标记，拒绝启动流水线（fail-closed）。
+
+    设计依据（2026-09-28 大哥拍板「改成硬失败，不允许质量不佳的内容漏过去」）：
+    - 降级 SRR 产出的用例不得进入自动发布流程；此前只在 done 事件里透出
+      `degraded_flags`，产物仍会落到 PG（仅拦 Milvus），且报告中心标记为
+      「待人工审核」——**人工点一下 approve 就能把降级内容变成权威知识**。
+    - 改为入口硬失败后，降级根本不会产生用例产物，从源头杜绝。
+
+    继承 `RuntimeError` 而非 `Exception`：便于调用方与既有 `except Exception`
+    兼容，同时语义上是"运行条件不满足"而非编程错误。
+
+    ⚠️ 异常由 `run_pipeline` 内部捕获并转为 `error` 事件（**终态可见**），
+    不会向上击穿成 500 —— fail-closed 要落成终态，不是裸异常。
+    """
+
+
+class CheckpointBackendError(RuntimeError):
+    """检查点后端（postgres）初始化失败 —— 拒绝启动流水线（fail-closed）。
+
+    设计依据（2026-09-28 大哥拍板「改成硬失败」）：
+    默认配置 `PIPELINE_CHECKPOINT_BACKEND=postgres` 下，若 PostgresSaver
+    初始化失败（PG 不可达 / 无权限 / 建表失败），此前会静默降级为 MemorySaver：
+    流水线照常跑完并产出一批用例，而"重启后断点不可恢复"这一事实仅存于日志。
+    降级属于**部署前置条件未满足**，应在入口拒绝，而不是带伤产出。
+
+    与「显式配置 memory」的区别：显式 `=memory` 是用户主动选择，照常运行；
+    声明 `=postgres` 却连不上则是异常，必须修好再跑。
+
+    继承 `RuntimeError`，由 `run_pipeline` 捕获并转为 `error` 事件。
+    """
+
+
 # ============================================================================
 # ClarifyLoopGuard（doc-03 §6.7 第 1019-1048 行）
 # ============================================================================
@@ -395,9 +464,25 @@ class Orchestrator:
         - postgres（默认）：AsyncPostgresSaver + psycopg 连接池（autocommit），
           `setup()` 幂等建 checkpoints/checkpoint_blobs/checkpoint_writes 三张表；
           thread_id = task_id —— 进程重启后任务级状态仍可审计与恢复（durable execution）；
-        - memory：单进程内存（老行为），仅作为 PG 不可用时的**显式降级**
-          （日志 + `_checkpoint_backend_degraded` → done 事件的 degraded_flags 可见），
-          绝不静默。
+        - memory：进程内内存 saver，**必须在 settings 中显式声明才允许使用**
+          （`PIPELINE_CHECKPOINT_BACKEND=memory`，供单机开发 / 无 PG 演示场景）。
+
+        ⚠️ v3.4.6 起改为 **fail-closed**（2026-09-28 大哥拍板「改成硬失败」）：
+        当配置为 postgres（默认）却初始化失败时，**直接抛 `CheckpointBackendError`，
+        不再静默降级为 memory**。原因：
+          - 静默降级到 memory 意味着"重启后断点不可恢复、durable execution 失效"，
+            而流水线会照常产出一批看似正常的用例 —— 降级产物会带着
+            「断点不可恢复」这一事实流入知识库，且此前只有日志/一个标记能察觉；
+          - 检查点降级属于**部署前置条件未满足**，应当在入口就拒绝启动，
+            而不是带着降级状态跑完全程。
+
+        与「显式配置 memory」的区别（这个边界很重要）：
+          - 显式声明 `=memory` → 用户的主动选择，照常运行（不抛错）；
+          - 声明 `=postgres` 但连不上 → **异常**，必须修好 PG 再跑。
+        绝对允许 memory 静默顶替 postgres，等于让"数据库挂了"伪装成"一切正常"。
+
+        Raises:
+            CheckpointBackendError: 配置 postgres 但初始化失败（含 DSN 为空）
         """
         if self._checkpointer is not None:
             return
@@ -422,13 +507,25 @@ class Orchestrator:
                 logger.info("[Orchestrator] 检查点后端 = postgres（thread_id=task_id，表已就绪）")
                 return
             except Exception as e:
+                # v3.4.6 fail-closed：配置为 postgres 却初始化失败 → 拒绝启动，
+                # 不再静默降级为 memory（见本方法 docstring）。
                 self._checkpoint_backend_degraded = True
                 logger.error(
-                    "[Orchestrator] ⚠️ PostgresSaver 初始化失败，检查点降级为 memory"
-                    "（本次部署的 done 事件会带 checkpoint_backend_degraded）: {}",
+                    "[Orchestrator] ⛔ PostgresSaver 初始化失败，拒绝启动流水线"
+                    "（fail-closed，不再降级为 memory）: {}",
                     str(e)[:200],
                 )
+                raise CheckpointBackendError(
+                    "检查点后端（postgres）初始化失败，已拒绝启动用例生成流水线"
+                    "（fail-closed）。当前配置要求断点可恢复（durable execution），"
+                    "不允许静默降级为内存检查点——那会让重启后的断点静默失效。"
+                    f"请修复 PG 连接/建表后重试；若确需内存检查点请在配置中"
+                    f"显式设置 PIPELINE_CHECKPOINT_BACKEND=memory。原因：{str(e)[:200]}"
+                ) from e
         from langgraph.checkpoint.memory import MemorySaver
+        logger.warning(
+            "[Orchestrator] 检查点后端 = memory（显式配置；重启后断点不可恢复）"
+        )
         self._checkpointer = MemorySaver()
 
     def _get_graph(self):
@@ -1892,9 +1989,13 @@ class Orchestrator:
         # 进程内常驻无害——同名任务再次运行会被下一次 set 覆盖。
         set_task_context(task_id=task_id or "", req_id=existing_req_id or "")
 
-        # v3.4（docs/15 §4.2）：检查点后端就绪 → 惰性编译图（带 checkpointer）
-        await self._ensure_checkpoint_backend()
-        graph = self._get_graph()
+        # v3.4（docs/15 §4.2）：图惰性编译依赖检查点后端已就绪，故后端初始化
+        # 必须在建图之前完成。但**不得放在 try 之外**——`_ensure_checkpoint_backend`
+        # v3.4.6 起对 postgres 初始化失败改为抛 `CheckpointBackendError`，
+        # 若在 try 之外抛出会击穿成 500（违背「fail-closed 落成终态」）。
+        # 因此下面把「后端初始化 + 建图 + 前置门禁 + 初始 state」整体移入 try。
+        graph = None
+
         # v3.4.6（缺陷 A 修复）：检查点后端降级必须**到达消费方**。
         # 反例（2026-09-28 实测）：_ensure_checkpoint_backend 在 PG 初始化失败时置
         # self._checkpoint_backend_degraded = True，但该标记**全库只有定义与赋值、
@@ -1903,6 +2004,10 @@ class Orchestrator:
         # 修复：在流水线入口把它注入初始 state 的 degraded_flags，之后各节点
         # 沿用「list(state.get("degraded_flags")) + append」的既有形态逐级透传到
         # done 事件与 publication 决策（降级必须进人工审核，不得自动核准）。
+        # ⚠️ v3.4.6 补充（大哥拍板硬失败）：postgres 初始化失败时
+        # `_ensure_checkpoint_backend()` 现已直接抛 `CheckpointBackendError`
+        # （见其 docstring），故 `initial_degraded` 仅在**显式配置 memory** 等
+        # 情况下非空；该注入链保留为通用兜底，确保"降级启动"永远可见。
         initial_degraded: list[str] = initial_degraded_flags(
             getattr(self, "_checkpoint_backend_degraded", False)
         )
@@ -1961,6 +2066,32 @@ class Orchestrator:
         )
 
         try:
+            # v3.4.6（缺陷 A 硬失败）：检查点后端初始化。postgres 配置下失败会抛
+            # `CheckpointBackendError`，在 try 内 → 转为 error 事件（终态可见）。
+            await self._ensure_checkpoint_backend()
+            graph = self._get_graph()
+
+            # v3.4.6（fail-closed 前置门禁）：输入 SRR 带降级标记 → 拒绝生成。
+            # 大哥拍板「改成硬失败，不允许质量不佳的内容漏过去」（2026-09-28）。
+            # 背景：降级 SRR 此前只在 done 事件透出 degraded_flags，产物仍落入 PG
+            # （仅拦 Milvus），人工点一次 approve 即可把降级内容变成权威知识。
+            # 前置门禁把问题挡在**产生副作用之前**：不启动流水线 ⇒ 无用例产物 ⇒
+            # 不可能被 approve ⇒ 权威库不被污染。
+            # 放在 try 内（而非函数开头）是为了让失败落成**终态**：本函数末尾的
+            # except 会把它转为 error 事件 + DLQ 记录，不击穿成 500。
+            _degraded_input, _degraded_detail = _srr_is_fp_degraded(srr_json)
+            if _degraded_input:
+                logger.error(
+                    "[Orchestrator] ⛔ 生成前置门禁：SRR 带降级标记，拒绝启动流水线 "
+                    "(fail-closed)。req_id={}, task_id={}, {}",
+                    existing_req_id, task_id, _degraded_detail,
+                )
+                raise DegradedInputError(
+                    "需求 SRR 处于降级状态，已拒绝生成用例（fail-closed）。"
+                    "基于降级需求产出的用例质量不可保证，不会被发布。"
+                    f"请先在「需求管理」中重新分析该需求以修复降级。{_degraded_detail}"
+                )
+
             # v3.1.3: 追踪最后完成的节点——final_state 为本地 dict（非 LangGraph state 通道），
             # 写入 _last_node 不会被 StateGraph 过滤；异常写 DLQ 时用于定位失败节点
             # v3.1.3 事件队列：把 LangGraph 的节点完成事件与 _gen_node 内部的细粒度
@@ -2178,28 +2309,46 @@ class Orchestrator:
             # final_state 为本地 dict，供 error 事件与 DLQ 统一读取
             final_state["error"] = str(e)[:200]
 
-            # L4 数据层防护：主流水线异常写入 DLQ，支持事后审计与手动重试
-            # 对应 docs/00 §2 L4 防护承诺，闭合 orchestrator 主流水线死信兜底
-            try:
-                from app.core.dlq import dlq
-                dlq.push(
-                    task_type="pipeline",
-                    payload={
-                        "req_id": final_state.get("req_id", ""),
-                        "stage": final_state.get("_last_node", "unknown"),
-                    },
-                    error=str(e)[:2000],
-                    max_retries=3,
-                )
-            except Exception as dlq_e:
-                logger.warning(
-                    "[Orchestrator] DLQ 写入失败（不阻断）: {}", str(dlq_e)[:120]
-                )
+            # v3.4.6（fail-closed 前置门禁）：**故意拒绝**与**意外故障**要分流。
+            # 降级输入被拒 / 检查点后端未就绪，都是**确定性的前置条件不满足**
+            # （重试必然再次失败），推入 DLQ 只会让运维反复重试一个不可能成功的
+            # 任务；且错误文案需要原样传达给用户（指明修复动作），不该被
+            # "流水线异常:"前缀污染。
+            if isinstance(e, DegradedInputError):
+                _reject_reason, _reject_at = "degraded_srr_rejected", "entry"
+            elif isinstance(e, CheckpointBackendError):
+                _reject_reason, _reject_at = "checkpoint_backend_unavailable", "entry"
+            else:
+                _reject_reason, _reject_at = "pipeline_error", ""
+            _is_gate_reject = bool(_reject_reason != "pipeline_error")
+
+            if not _is_gate_reject:
+                # L4 数据层防护：主流水线异常写入 DLQ，支持事后审计与手动重试
+                # 对应 docs/00 §2 L4 防护承诺，闭合 orchestrator 主流水线死信兜底
+                try:
+                    from app.core.dlq import dlq
+                    dlq.push(
+                        task_type="pipeline",
+                        payload={
+                            "req_id": final_state.get("req_id", ""),
+                            "stage": final_state.get("_last_node", "unknown"),
+                        },
+                        error=str(e)[:2000],
+                        max_retries=3,
+                    )
+                except Exception as dlq_e:
+                    logger.warning(
+                        "[Orchestrator] DLQ 写入失败（不阻断）: {}", str(dlq_e)[:120]
+                    )
 
             yield make_sse_event(
                 "error",
-                f"流水线异常: {str(e)[:200]}",
+                str(e)[:400] if _is_gate_reject else f"流水线异常: {str(e)[:200]}",
                 req_id=final_state.get("req_id", ""),
+                # 前端可据 reason 精确判定并给出对应引导
+                # （degraded_srr_rejected → 重新分析需求；checkpoint_backend_unavailable → 检查 PG）
+                reason=_reject_reason,
+                rejected_at=_reject_at,
             )
 
 

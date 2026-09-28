@@ -1368,6 +1368,22 @@ async def _run_requirement_analysis(
         if proto_flags_all:
             srr_json_data["_proto_degraded_flags"] = proto_flags_all
 
+        # v3.4.6（缺陷 B 补漏）：FP 提取降级标记**随 SRR 落库**（下称"落库标记"）。
+        # 为什么必须落库、不能只透出 result_json：
+        #   ① 生成阶段（流水线 `_parse_node`）读的是 `Requirement.srr_json`，
+        #      **不读**分析任务的 `result_json` —— 只透出后者时，生成侧降级门禁
+        #      完全无从判定（这正是 2026-09-28 审计发现的断裂点）；
+        #   ② `srr_json` 是需求的权威内容（会被导出、被下游消费），而降级事实
+        #      目前只存在于一次性的任务 result_json 里，离开详情页即不可见。
+        # ⚠️ 为什么必须在此处**重新补写**（而非依赖上面已有的标记）：
+        #   第 1277 行 `srr_json_data = dict(multi_augmented)` —— 当 ClarifyAgent
+        #   返回 `augmented_srr`（一个**新字典**）时，ReqAgent 打在原始 `srr` 上的
+        #   `_fp_extract_degraded` **不会**进入落库字典。调用点捕获（result_json
+        #   透出）与落库标记是**两个独立的到达性问题**，必须分别保证。
+        if fp_extract_degraded:
+            srr_json_data["_fp_extract_degraded"] = True
+            srr_json_data["_fp_extract_error"] = fp_extract_error
+
         # v2.18: FP 保存失败不再静默——中断流水线，标记任务失败（FP 是核心产物，0 FP 会导致后续流程全部失效）
         if await _is_cancelled():
             logger.info("[Task] 任务已取消（持久化前），提前退出: task_id={}", task_id)
