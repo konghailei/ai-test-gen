@@ -38,12 +38,52 @@ class TestRoleMapping:
         assert '- heading "用户登录" [level=1]' in text
 
     def test_textbox_with_constraints(self):
+
         html = """
         <label for="phone">手机号</label>
         <input id="phone" type="tel" required maxlength="11" pattern="^1[3-9]\\d{9}$">
         """
         text, *_ = _sync(html)
         assert 'textbox "手机号" [required] [maxlength=11] [pattern=^1[3-9]\\d{9}$] [type=tel]' in text
+
+    def test_number_step_constraint(self):
+        """[step=] 必须被提取（2026-09-28 修复：原硬编码清单漏 step）。
+
+        step 是数值等价类/边界值用例的直接依据：
+        `<input type="number" min="0.01" max="999999.99" step="0.01">`
+        → 语义树须输出 [min=0.01] [max=999999.99] [step=0.01]。
+        """
+        html = '<label for="p">售价</label><input id="p" type="number" required min="0.01" max="999999.99" step="0.01">'
+        text, *_ = _sync(html)
+        assert "[step=0.01]" in text, text
+        assert "[min=0.01]" in text and "[max=999999.99]" in text
+        assert "[type=number]" in text
+
+    def test_constraint_attrs_is_single_source_of_truth(self):
+        """_CONSTRAINT_ATTRS 不得再是孤儿定义（回归守卫）。
+
+        曾出现的缺陷形态：常量里定义了 `step` 但**无任何消费方**，真正生效的
+        硬编码清单漏了 `step` → 约束静默丢失，且改常量毫无效果（假配置）。
+
+        判定口径：不看函数体是否出现属性名字面量（修复后已收敛到常量），
+        而是直接验证**行为**——每个声明的约束属性都能真的产出 flag。
+        """
+        assert "step" in m._CONSTRAINT_ATTRS
+        # 常量必须被 _constraint_flags 真实消费（驱动分组常量非空）
+        assert m._BOOLEAN_CONSTRAINT_ATTRS, "_BOOLEAN_CONSTRAINT_ATTRS 为空"
+        assert "step" in m._VALUE_CONSTRAINT_ATTRS
+
+        # 行为验证：_VALUE_CONSTRAINT_ATTRS 中每个属性都能产出 flag
+        # （证明常量是事实来源，改它即生效）
+        el_html = "".join(
+            f'<input type="text" {a}="{v}" >'
+            for a, v in (("maxlength", "10"), ("minlength", "2"),
+                         ("pattern", "^a$"), ("min", "1"), ("max", "9"),
+                         ("step", "0.01"))
+        )
+        text, *_ = _sync(f'<label for="x">字段</label>{el_html}')
+        for a in m._VALUE_CONSTRAINT_ATTRS:
+            assert f"[{a}=" in text, f"{a} 在 _VALUE_CONSTRAINT_ATTRS 中但未产出 flag"
 
     def test_checkbox_checked(self):
         html = """
@@ -205,6 +245,58 @@ class TestNormalization:
         html = "<div>说明文字</div>"
         text, *_ = _sync(html)
         assert 'generic "说明文字"' in text
+
+    # ---- 注释不应当作「容器自带文本」（2026-09-28 §6.3 实测发现）----
+    # 反例：真实 Axure/墨刀 导出件几乎每层容器都带注释。
+    # 原实现把 Comment 节点算进 own_text → 匿名容器被判为「具名」→ 不压平
+    # → 每层都输出一个包含**整个子树文本**的 generic 巨行（且继续递归，重复输出）
+    # → 30 层嵌套产生 30 行完全相同的巨行，把真实字段行挤到树底、吃掉字符预算。
+
+    def test_comment_only_div_is_flattened(self):
+        """仅含注释的匿名容器必须压平（注释不是文本内容）。"""
+        html = '<div><!-- 区域说明 --><h1>标题</h1></div>'
+        text, *_ = _sync(html)
+        assert '- heading "标题" [level=1]' in text
+        # 压平后不应产生把子树文本聚合起来的 generic 巨行
+        assert 'generic "标题"' not in text
+
+    def test_comment_does_not_expand_node_count(self):
+        """带注释与不带注释的同构文档，节点数必须一致（注释不参与语义）。"""
+        inner = '<h1>标题</h1><input id="a" required maxlength="10">'
+        with_cmt = f"<body><div><!-- 注释 -->{inner}</div></body>"
+        without_cmt = f"<body><div>{inner}</div></body>"
+        _t1, _i1, s1, _f1 = _sync(with_cmt)
+        _t2, _i2, s2, _f2 = _sync(without_cmt)
+        assert s1["nodes"] == s2["nodes"], f"注释导致节点膨胀: {s1} vs {s2}"
+
+    def test_deep_nested_comments_no_duplicate_lines(self):
+        """深层嵌套 + 每层注释：不得出现重复的聚合巨行。"""
+        body = '<h1>登录</h1><input id="p" required maxlength="11">'
+        for i in range(15):
+            body = f'<div id="u{i}"><!-- 容器{i} -->{body}</div>'
+        text, *_ = _sync(f"<body>{body}</body>")
+        lines = [l for l in text.splitlines() if l.strip()]
+        # 同一行内容重复出现即为回归（噪声）
+        assert len(lines) == len(set(lines)), f"出现重复聚合行: {lines[:5]}"
+        assert 'textbox "(未命名字段)"' in text or 'textbox' in text
+
+    def test_container_with_data_attr_kept(self):
+        """方案 §4.2.4 保留例外：容器带 data-* 属性时不压平。
+
+        原实现用 `el.get("data-*")`——这是字面 key，不是通配，
+        恒返回 None → 该保留例外是死代码（从未生效）。
+        断言用「节点数」判定，避免只断言子节点存在（那样改前改后都通过，测不出问题）：
+        带 data-* 的容器应作为独立 generic 节点输出，节点数比压平多 1。
+        """
+        kept = '<div data-role="toolbar"><button>确定</button></div>'
+        flat = '<div><button>确定</button></div>'
+        _t1, _i1, s_kept, _f1 = _sync(kept)
+        _t2, _i2, s_flat, _f2 = _sync(flat)
+        assert 'button "确定"' in _t1
+        assert s_kept["nodes"] == s_flat["nodes"] + 1, (
+            f"data-* 保留例外未生效: kept={s_kept} flat={s_flat}")
+
+
 
 
 # ============================================================================

@@ -369,10 +369,41 @@ async def extract_html_prototype(
 
 ### 6.3 真实端到端验收（回归之外必做）
 
-`docker exec -i ai-test-gen-api python - < _e2e_html_proto.py`（gitignored 临时脚本，单进程一次 `asyncio.run`）：
+`docker exec -i ai-test-gen-api python - < _verify_proto_e2e.py`（gitignored 临时脚本，单进程一次 `asyncio.run`）：
 
-- 用**真实产品原型**（Axure/墨刀导出 HTML）上传 → 人工核验语义树可读性、ui_rules 合理性、字段约束进 FP；
+- 用**真实产品原型**上传 → 人工核验语义树可读性、ui_rules 合理性、字段约束进 FP；
 - 验收断言检查 **done 事件本身**（不只看 HTTP 200）。
+
+**验收夹具说明（2026-09-28）**：仓库内无 Axure/墨刀 导出件，故**自构造**一份真实感原型
+`_e2e_tmp/proto_goods_admin.html`（8.0KB，商品管理后台页面）。构造时刻意对齐真实导出件特征：
+嵌套 `div` 堆叠 + **每层 HTML 注释** + 表单全类型约束 + 表格 + `dialog` + JS 联动（静态盲区）。
+覆盖清单：`required` / `maxlength` / `minlength` / `pattern` / `min` / `max` / `step` /
+`multiple` / `accept` / `checked`；角色覆盖 `textbox` / `combobox` / `radio` / `checkbox` /
+`fileupload` / `button` / `link` / `dialog` / `heading` / `listitem`。
+
+**验收结论（§6.3 已完成 · 实测 27 PASS / 0 FAIL / 1 WARN）**：
+
+| 验收维度 | 实测结果 |
+|---|---|
+| 语义树可读性 | **19/19** 项通过（7 类约束属性 + 7 类语义角色 + 边界标记 + 语义树区块 + 表格 Markdown + `script`/`style` 剥离） |
+| 字段约束进 SRR | **PASS**——`ui_rules` 非空，SRR 吸收约束线索（命中「必填」） |
+| 字段约束进上下文（确定性） | **PASS**——`[maxlength=` / `[pattern=` / `[step=` 均在 `raw_text` |
+| 字段约束进 FP | **WARN**——FP=0，根因是外部 LLM 首响应超时（见下），非本方案缺陷；已改软断言 + 确定性替代断言 |
+| done 事件本身 | **PASS**——任务 `completed`、完整原型**无**降级标记误报、`result_json` 含 `req_id` |
+| 原型类澄清问题 | **PASS**——`prototype.dynamic_behavior`（静态盲区）+ `prototype.delete_confirm`（删除二次确认）均确定性命中（14 条 questions 中 2 条原型类） |
+
+**关于 FP=0 的如实说明**：日志实证 `[LLM] 首响应超时: provider=日日新:sensenova-6.8-flash-lite,
+180s 内无任何响应` → `[ReqAgent] FP 一体式提取 LLM 调用失败` → `FP 提取完成: 0 个功能点`，任务仍
+`completed`。该超时在 7-8 月历史日志中反复出现，属**既有环境问题**（`KNOWN-ISSUES.md A2` 范畴：
+FP 提取失败静默降级为 0）。FP 由需求阶段 ReqAgent **LLM 一体式提取**产出，其成功率依赖外部提供商，
+**不是 docs/17 链路的确定性行为**，故断言口径改为「软断言 + 确定性替代断言」，避免回归随模型波动假红。
+→ **另记一条待办**：FP 提取失败时应显式降级透出（当前静默为 0 且任务 completed，用户无从判断）。
+
+**本次验收的额外收获——挖出 2 个真实缺陷（#6 注释致容器误判、#7 data-*/step 失效）**，
+详见 §11.2。二者均为「单测夹具不具代表性」导致的长期潜伏缺陷：单测样例是**扁平 + 无注释**
+的干净 HTML，而真实导出件是**深嵌套 + 每层注释**，结构差异使缺陷从未被暴露。
+→ **纪律：验收夹具必须对齐真实产物的结构特征，而不是对齐"能跑通"的最小样例。**
+
 
 ### 6.4 基线影响
 
@@ -456,6 +487,9 @@ M1–M3 已全部落地，并修复了三处「设计与实现不一致」，全
 | 3 | `_probe_dependency_drift.py` 对 `lxml==5.*` 恒判「版本不符」——**守门探针误报即门禁失灵** | 用 `got != ver` 精确串比，把说明符 `5.*` 当字面版本 | 改按 PEP 440 判定（优先 `packaging.SpecifierSet`，缺库时退化支持 `N.*` 前缀通配）；声明解析总数 27 → 29（原先漏解析范围声明） |
 | 4 | **失败路径丢失降级标记**（2026-09-28 回归实测发现）：纯壳原型 → 标记正确算出 → LLM 报「requirement.title 缺失」→ 任务 failed，但失败分支不写 `result_json`（落库 `{}`）→ 用户只看到与根因无关的「title 缺失」 | 完成分支写了透出、`except` 分支漏了——**只覆盖 happy path** 的典型形态 | `except` 分支补写 `proto_degraded_flags` + `degraded/degraded_reason`（`proto_flags_all` 定义在 `try` 外，作用域安全）。修复前后同一场景：`result_json={}` → `{"proto_degraded_flags":["proto_no_semantics"],"degraded":true,...}` |
 | 5 | **§4.4.2「静态盲区必发问」从未生效**（2026-09-28 实测发现）：`_detect_prototype_gaps` 的产出只作为 `ambiguities` **透传给 LLM 当线索**，没有任何确定性到达 questions 的路径 → 实测 **23 个原型相关任务、原型类澄清问题命中 0 次**（其中多条有 9-12 条 questions，说明澄清流程本身正常，是原型问题从未被发出）。文档 §4.4.2 承诺的「必发问」是**假承诺** | 三层原因叠加：① `_fallback_gap_queries`（v3.1.6 规则兜底）只读 `completeness` 的 missing 列表、**不读 `ambiguities`**——而 PRD 专项检测会**同时**塞进 `completeness["important_missing"]`，所以 PRD 缺口有兜底、原型缺口没有；② 提示词 `clarify_agent.py` 里 `原型`/`prototype` 出现 **0 次**，LLM 无从主动生成；③ 三个 `prototype_*` type 全库**只有定义、无消费方** | 新增 `ClarifyAgent._prototype_gap_questions()`（规则层缺口 → 澄清问题，结构对齐 ⑧d 的 `SGxxx` 模板）+ ⑧e 注入点（与 ⑧d 同构）。设计依据：⑧d「结构缺口驱动澄清」已确立「规则缺口是确定性的，直接 extend 进 questions」的先例；原型问题同属纯正则检测（实测 **5/5、10/10 一致**），且与 conflict 类同理——KB 无法回答「你们这页面有没有 JS 联动」。上限沿用规则层 `results[:3]`（R7），叠加 `MAX_CLARIFY_ITERATIONS` 总量约束，不引入无界风险 |
+| 6 | **注释导致匿名容器误判 → 语义树被噪声淹没**（2026-09-28 §6.3 真实原型实测发现）：BS4 的 `Comment` 是 `NavigableString` 子类，会被 `find_all(string=True)` 捞出，于是 `_is_anonymous_container` 的「容器自带文本」判定把**注释当成了内容** → 匿名容器被判为「具名」→ 不压平 → 每层输出一个含**整个子树文本**的 `generic` 巨行**且继续递归**（同一段文本重复输出）。实测 30 层嵌套：**30 行完全相同的巨行**把真实字段行挤到第 31-32 行；节点数随层数线性膨胀（30 层 **5.3x**）。真实 Axure/墨刀 导出件几乎**每层容器都带注释**，故该缺陷在真实原型上必然触发；而单测样例全是不带注释的干净 HTML，**从未覆盖** | ① 「自带文本」判定未排除非文本节点；② 真实导出件结构（深嵌套 + 每层注释）与单测样例结构（扁平 + 无注释）差异过大，**测试夹具不具代表性** | `_is_anonymous_container` 的 `own_text` 拼接改为过滤 `_NON_TEXT_NODE_TYPES`（bs4 的 Comment/CData/Declaration/Doctype/ProcessingInstruction，惰性导入 + 未装 bs4 时退化空元组）。修复后 30 层嵌套膨胀倍数 **5.3x → 1.0x**，带/不带注释产出**逐字节一致**，字段行回到树顶 |
+| 7 | **§4.2.4「data-* 保留例外」是死代码 + `step` 约束静默丢失**（2026-09-28 §6.3 实测发现）：① 保留例外写作 `el.get("data-*")`——这是**字面 key**（HTML 中不存在名为 `data-*` 的属性），恒返回 `None`，故「容器带 data-* 时不压平」**从未生效**；② `_CONSTRAINT_ATTRS` 常量里声明了 `step`，但**无任何消费方**（孤儿定义），真正生效的是 `_constraint_flags` 内的硬编码清单，而那份清单**漏了 `step`** → `<input type="number" step="0.01">` 的步长约束**静默丢失**（step 是数值等价类/边界值用例的直接依据） | 两处同源：「声明的配置」与「实际生效的代码」各写一份，且无人校验二者一致（假配置 / 孤儿定义） | ① 新增 `_has_data_attr(el)` 按属性名**前缀**匹配 `data-`；② `_constraint_flags` 改为消费常量分组（`_BOOLEAN_CONSTRAINT_ATTRS` / `_VALUE_CONSTRAINT_ATTRS` / `_TYPE_FLAG_VALUES`），使 `_CONSTRAINT_ATTRS` 成为**唯一事实来源**；③ 新增行为型守卫单测（`_VALUE_CONSTRAINT_ATTRS` 中每个属性都必须真的产出 flag），防止再次退化为孤儿定义 |
+
 
 ### 11.2.1 回归用例的断言口径修正（同日）
 
