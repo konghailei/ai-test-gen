@@ -212,6 +212,34 @@ def make_sse_event(stage: str, message: str, **extra: Any) -> dict:
     return event
 
 
+def initial_degraded_flags(checkpoint_backend_degraded: bool) -> list[str]:
+    """流水线启动时的降级标记（v3.4.6 / 缺陷 A 修复）。
+
+    ⚠️ 为什么需要这个函数：
+    `_ensure_checkpoint_backend()` 在 PostgresSaver 初始化失败时置
+    `self._checkpoint_backend_degraded = True`，但该标记**全库只有定义与赋值、
+    零消费方**（2026-09-28 审计实证）——docstring 承诺的
+    「done 事件的 degraded_flags 可见」是假承诺，检查点静默退化为 memory
+    （重启即丢断点），运维完全无感知。
+
+    修复方式：在流水线入口把标记转为初始 state 的 `degraded_flags`，
+    之后各节点沿用「list(state.get("degraded_flags")) + append」的既有形态
+    逐级透传到 done 事件与 publication 决策。
+
+    ⚠️ `degraded_flags` **必须**在 PipelineState 中显式声明，否则 LangGraph
+    会静默过滤未声明字段（累计已踩 5 例），入口注入的标记会被丢弃。
+
+    Args:
+        checkpoint_backend_degraded: Orchestrator 实例上的降级标记
+
+    Returns:
+        初始 degraded_flags 列表（未降级时为空列表）
+    """
+    if not checkpoint_backend_degraded:
+        return []
+    return ["checkpoint_backend_degraded"]
+
+
 # ============================================================================
 # ClarifyLoopGuard（doc-03 §6.7 第 1019-1048 行）
 # ============================================================================
@@ -1867,6 +1895,17 @@ class Orchestrator:
         # v3.4（docs/15 §4.2）：检查点后端就绪 → 惰性编译图（带 checkpointer）
         await self._ensure_checkpoint_backend()
         graph = self._get_graph()
+        # v3.4.6（缺陷 A 修复）：检查点后端降级必须**到达消费方**。
+        # 反例（2026-09-28 实测）：_ensure_checkpoint_backend 在 PG 初始化失败时置
+        # self._checkpoint_backend_degraded = True，但该标记**全库只有定义与赋值、
+        # 零消费方**——文档承诺的「done 事件 degraded_flags 可见」是假承诺。
+        # 后果：检查点静默退化为 memory（重启即丢断点），运维完全无感知。
+        # 修复：在流水线入口把它注入初始 state 的 degraded_flags，之后各节点
+        # 沿用「list(state.get("degraded_flags")) + append」的既有形态逐级透传到
+        # done 事件与 publication 决策（降级必须进人工审核，不得自动核准）。
+        initial_degraded: list[str] = initial_degraded_flags(
+            getattr(self, "_checkpoint_backend_degraded", False)
+        )
         initial_state: PipelineState = {
             "raw_requirement": raw_requirement,
             "srr_json": srr_json,
@@ -1879,7 +1918,15 @@ class Orchestrator:
             "task_id": task_id,
             "resume": resume,
             "resume_checkpoint": resume_checkpoint,
+            # ⚠️ 必须显式声明 degraded_flags（PipelineState 已声明），
+            # 否则 LangGraph 静默过滤 → 入口注入的标记丢失。
+            "degraded_flags": initial_degraded,
         }
+        if initial_degraded:
+            logger.warning(
+                "[Orchestrator] ⚠️ 流水线以降级标记启动（检查点后端非 postgres，"
+                "重启后断点不可恢复）: {}", initial_degraded,
+            )
 
         # 节点名 → SSE stage 映射
         node_to_stage = {
