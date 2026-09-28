@@ -24,6 +24,7 @@ RUN_INTEGRATION = os.environ.get("AITG_RUN_INTEGRATION") == "1"
 # 脚本式用例：自带 main()，用 python 直接跑；且都需要真实服务
 SCRIPT_SUITES = [
     "test_phase2_core.py",
+    "test_phase2_html_upload.py",
     "test_phase3_agents.py",
     "test_phase4_orchestrator.py",
     "test_phase5_api.py",

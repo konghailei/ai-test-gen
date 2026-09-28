@@ -74,8 +74,18 @@ run_test_plan.py 产出证据包
 | `_probe_checkpoint_saver.py` | 检查点落 PG（thread_id=task_id）；同线程重入 | 6 |
 | `_probe_selfheal.py` | API 重启后自动续跑；指纹不一致跳过 | 6 |
 | `_probe_evidence_claims.py` | claims 解析/校验/降级；证据链经 Pydantic 往返存活；failed 问答不得纠错归档；节点 span 归属 | 13 |
+| `_probe_html_proto.py`（docs/17） | HTML 原型语义树机制不变量：安全剥离（script/on*/危险协议）、归一化压平、预算截断、降级标记四态、label 六级关联 | 由 unit 覆盖（见下） |
 
-脚本式回归：phase2-5 共 421 项（机制不变量的历史回归）；unit 层 117 项（CI 同款）。
+脚本式回归：phase2-5 共 421 项（机制不变量的历史回归）+ **`test_phase2_html_upload.py`（docs/17，4 组：HTML 上传→语义树/ui_rules、混传边界标记、恶意原型注入剥离、降级路径注入含 HTTP 全链路透出）**；
+unit 层 125 + **40 项（`test_html_proto_extract.py`，docs/17：角色映射/label 关联/安全剥离/归一化/预算/降级/双入口对称性 3 项/内容校验）**。
+
+> **分组运行（2026-09-28 新增）**：全量 4 组含 LLM 长流程需 20+ 分钟，单进程跑易被宿主回收（实测 12 分钟中断）。
+> 用 `--case N` 拆开跑，如 `--case 4`（最快，纯注入）、`--case 1`、`--case 2,3`。
+> **断言口径**：确定性行为（剥离/标记/结构/降级）强断言；LLM 自由生成项（`ui_rules` 条数、澄清问题文本）用 `soft=True` 只告警。
+
+> **鉴权注记（2026-09-24）**：脚本式用例走 `POST /api/auth/login`（admin/888888）取 token，
+> **不可用 `get_default_token()`**——`APP_SECRET_KEY` 为 API 进程级随机，脚本进程自签的 token
+> 签名密钥与 API 进程不同 → 恒 401（对齐 `scripts/run_test_plan.py` 的既有做法）。
 
 ## 5. L2 流程层结构断言清单（driver 自动执行）
 
@@ -90,6 +100,7 @@ run_test_plan.py 产出证据包
 | 需求分析：解析完成 | 上传后异步任务 completed，SRR.requirement 存在、功能点 ≥ 1 |
 | 需求分析：澄清闭环 | 有问题则回答并重解析完成；无问题则跳过（质量分达标） |
 | 需求分析：确认成功 | 需求状态推进到 confirmed（生成的前置） |
+| 需求分析：HTML 原型（docs/17） | 上传 .html 原型后任务 completed；`【原型：】`边界标记进 raw_text；语义树产出（textbox/button 行存在）；SRR ui_rules 抽取（条数属 LLM 依赖项，软断言）；恶意原型 script/on*/javascript: 均被剥离且用户可见产出未含注入文本；降级标记（proto_tree_truncated/proto_parse_timeout/proto_parse_failed/proto_no_semantics）经 `result_json.proto_degraded_flags` + `degraded`/`degraded_reason` 透出消费 |
 
 ## 6. 运行节奏建议
 
