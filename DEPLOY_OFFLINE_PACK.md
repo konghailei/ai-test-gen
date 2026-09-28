@@ -266,6 +266,21 @@ ai-testgen-offline-pack-update-v1.7.1/
 > **大小：约 5MB**（仅源码，不含镜像和模型）。
 > 内网收到后，deploy.sh 会用已存在的 base 镜像缓存重建应用镜像，只产生新的 COPY 层。
 
+### ⚠️ v3.3.0 依赖变更特别说明（docs/17 HTML 原型支持）
+
+本次更新在 `backend/requirements.txt` 新增了 `beautifulsoup4==4.12.2` 与 `lxml==5.*`
+（用于上传 HTML 原型的语义树解析）。**这次增量更新包不能只发源码**：
+
+- 依赖装在 **base 镜像**（`ai-test-gen-base`），源码包重建应用镜像只 COPY 代码、
+  不会装新依赖——内网若只更新源码，上传 .html 原型将直接运行时 `ImportError`。
+- 正确做法（二选一）：
+  1. **重导 base 镜像**（推荐）：外网 `docker compose -f docker-compose.base.yml build base`
+     → `docker save ai-test-gen-base -o 02-ai-test-gen-base.tar` → 随包传输 → 内网 `docker load`；
+  2. 内网 base 容器内手动 `pip install beautifulsoup4==4.12.2 "lxml>=5,<6"`（应急，不推荐——
+     镜像重建后会丢失，且绕过 Dockerfile 构建期硬校验）。
+- 构建期硬校验已加探针（`import bs4, lxml`），漏装时 base 镜像构建直接失败，不会带病上线。
+- Dockerfile.base 本次有变更，**首次迁移/重导镜像的离线包必须包含最新 `backend/Dockerfile.base`**。
+
 ---
 
 ## 7. 内网：升级 Docker（如需要）

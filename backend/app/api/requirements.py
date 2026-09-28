@@ -177,6 +177,14 @@ def _validate_file_magic(ext: str, raw_bytes: bytes) -> None:
                 status_code=400,
                 detail="文件格式不匹配：扩展名为 .docx 但文件头不是 Office Open XML 格式",
             )
+    elif ext in ("html", "htm"):
+        # HTML 无固定魔数：特征标签校验（实现收敛在 html_proto_extract 单一模块）
+        from app.utils.html_proto_extract import validate_html_content
+        if not validate_html_content(raw_bytes):
+            raise HTTPException(
+                status_code=400,
+                detail="文件格式不匹配：扩展名为 .html 但内容不是有效的 HTML 文件",
+            )
     # .md / .markdown：魔数校验意义不大，靠 UTF-8/GBK 解码校验
 
 
@@ -211,10 +219,10 @@ async def _parse_uploaded_files(files: list[UploadFile], session=None) -> tuple[
         filename = file.filename or ""
         ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
-        if ext not in ("md", "markdown", "docx", "txt"):
+        if ext not in ("md", "markdown", "docx", "txt", "html", "htm"):
             raise HTTPException(
                 status_code=400,
-                detail=f"不支持的文件格式: .{ext}，仅支持 .md / .docx / .txt",
+                detail=f"不支持的文件格式: .{ext}，仅支持 .md / .docx / .txt / .html",
             )
 
         raw_bytes = await file.read()
@@ -252,12 +260,37 @@ async def _parse_uploaded_files(files: list[UploadFile], session=None) -> tuple[
                     status_code=400,
                     detail=f"文件 {filename} 解析失败: {str(e)[:150]}",
                 )
+        elif ext in ("html", "htm"):
+            # docs/17：HTML 原型 → 语义树（与 phase 0 循环共用 build_html_segment，
+            # 标记与文本组装收敛单一实现，避免两入口漂移）
+            try:
+                from app.utils.html_proto_extract import build_html_segment
+                segment, proto_images, _stats, _flags = await build_html_segment(
+                    raw_bytes, filename, session=session,
+                )
+                all_images.extend(proto_images)
+                parts.append(segment)
+                continue
+            except ImportError:
+                raise HTTPException(
+                    status_code=500,
+                    detail="beautifulsoup4 未安装，无法解析 .html 原型文件",
+                )
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"文件 {filename} 解析失败: {str(e)[:150]}",
+                )
 
         if not file_text or not file_text.strip():
             raise HTTPException(status_code=400, detail=f"文件 {filename} 内容为空")
 
         logger.info("[API/requirements] 文件解析完成: filename={}, text_len={}", filename, len(file_text))
         # v2.8.64: 多/单文件合并时增加文档边界标记，让 ClarifyAgent 能识别跨文档矛盾
+        # docs/17: HTML 原型走上方 build_html_segment 分支（自带【原型：】标记并已 continue），
+        # 此处仅处理 md/docx/txt 类来源。
         if len(files) > 1 or filename:
             parts.append(f"【文档：{filename or '未命名'}】\n{file_text}")
         else:
@@ -496,10 +529,10 @@ async def upload_requirement_multi(
     for file in files:
         filename = file.filename or ""
         ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-        if ext not in ("md", "markdown", "docx", "txt"):
+        if ext not in ("md", "markdown", "docx", "txt", "html", "htm"):
             raise HTTPException(
                 status_code=400,
-                detail=f"不支持的文件格式: .{ext}（文件：{filename}），仅支持 .md / .docx / .txt",
+                detail=f"不支持的文件格式: .{ext}（文件：{filename}），仅支持 .md / .docx / .txt / .html",
             )
         raw_bytes = await file.read()
         # v2.8.52: 单文件大小校验

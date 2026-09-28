@@ -1,1 +1,2 @@
 - 内网 v2.1.1 的 docker-compose.offline.yml 已手动更新了 extra_hosts、APP_SECRET_KEY、MASTER_KEY 三处变更，后续更新包可以不再包含此文件
+- v3.3.0（docs/17 HTML 原型）新增依赖 beautifulsoup4/lxml，装在 base 镜像：内网增量更新必须重导 ai-test-gen-base 镜像（docker save/load），不能只发源码包；详见 DEPLOY_OFFLINE_PACK.md「v3.3.0 依赖变更特别说明」

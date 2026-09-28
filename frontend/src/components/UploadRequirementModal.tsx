@@ -663,10 +663,10 @@ export default function UploadRequirementModal({
               {/* 多文件上传 */}
               <div className="mb-4 p-4 rounded-xl transition-colors"
                 style={{ border: `2px dashed ${'var(--border)'}` }}>
-                <label className="label">上传需求文档（支持多选，.md / .docx / .txt）</label>
+                <label className="label">上传需求文档（支持多选，.md / .docx / .txt / .html 原型）</label>
                 <input
                   type="file"
-                  accept=".md,.docx,.txt,.markdown"
+                  accept=".md,.docx,.txt,.markdown,.html,.htm"
                   multiple
                   onChange={e => {
                     const selected = Array.from(e.target.files || [])

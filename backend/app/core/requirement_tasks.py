@@ -997,6 +997,9 @@ async def _run_requirement_analysis(
         except Exception:
             return False
 
+    # docs/17：HTML 原型解析降级标记（phase 0 收集，随 SRR 落库透出）
+    proto_flags_all: list[str] = []
+
     try:
         # ===== phase 0: upload（文件解析）=====
         # v2.24: 文件解析从 API 请求移到协程中，任务记录可提前创建
@@ -1005,6 +1008,7 @@ async def _run_requirement_analysis(
                                message=f"正在解析 {len(file_bytes_list)} 个文件...")
             all_raw_images: list[dict] = []
             merged_parts: list[str] = []
+            proto_stats_all: list[dict] = []
             for filename, raw_bytes in file_bytes_list:
                 ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
                 if ext in ("md", "markdown", "txt"):
@@ -1016,10 +1020,39 @@ async def _run_requirement_analysis(
                         all_raw_images.extend(doc_images)
                     except Exception as e:
                         raise RuntimeError(f"解析 {filename} 失败: {str(e)[:200]}")
+                elif ext in ("html", "htm"):
+                    # docs/17：HTML 原型 → 语义树（与 _parse_uploaded_files 共用
+                    # build_html_segment，标记与文本组装收敛单一实现，对称性由构造保证）
+                    from app.utils.html_proto_extract import build_html_segment
+                    try:
+                        async with async_session() as vis_session:
+                            segment, proto_images, proto_stats, proto_flags = await build_html_segment(
+                                raw_bytes, filename=filename, session=vis_session,
+                            )
+                        all_raw_images.extend(proto_images)
+                        proto_flags_all.extend(proto_flags)
+                        proto_stats_all.append({"file": filename, **proto_stats})
+                    except ImportError:
+                        raise RuntimeError("beautifulsoup4 未安装，无法解析 .html 原型文件")
+                    except Exception as e:
+                        raise RuntimeError(f"解析 {filename} 失败: {str(e)[:200]}")
+                    merged_parts.append(segment)
+                    continue
                 else:
                     text = raw_bytes.decode("utf-8", errors="replace")
+                # 非 HTML 来源：沿用【文档：】边界标记（HTML 分支已 append+continue）
                 merged_parts.append(f"【文档：{filename}】\n{text}")
             combined_raw = "\n\n---\n\n".join(merged_parts)
+
+            # docs/17：原型解析降级标记与统计落库（前端任务详情可展示）
+            if proto_flags_all or proto_stats_all:
+                combined_raw += (
+                    "\n\n# 原型解析统计：" + "; ".join(
+                        f"{s['file']}: {s.get('fields', 0)} 个字段、{s.get('buttons', 0)} 个交互元素、"
+                        f"{s.get('tables', 0)} 个表格、{s.get('images', 0)} 张图片"
+                        for s in proto_stats_all
+                    )
+                )
 
             # 保存 raw_text 和 raw_images 到 Requirement
             async with async_session() as s:
@@ -1246,6 +1279,10 @@ async def _run_requirement_analysis(
         if captured_interaction_srr:
             srr_json_data = _merge_interaction_srr(srr_json_data, captured_interaction_srr)
 
+        # docs/17：原型解析降级标记随 SRR 落库透出（前端可见，不静默）
+        if proto_flags_all:
+            srr_json_data["_proto_degraded_flags"] = proto_flags_all
+
         # v2.18: FP 保存失败不再静默——中断流水线，标记任务失败（FP 是核心产物，0 FP 会导致后续流程全部失效）
         if await _is_cancelled():
             logger.info("[Task] 任务已取消（持久化前），提前退出: task_id={}", task_id)
@@ -1302,6 +1339,17 @@ async def _run_requirement_analysis(
         if srr_json_data.get("_finalize_degraded"):
             result["degraded"] = True
             result["degraded_reason"] = srr_json_data.get("_finalize_error", "最终 SRR 生成失败，已降级使用首次解析结果")
+        # docs/17: 原型解析降级透出（对齐既有 result_json.degraded 契约，前端任务详情可见）
+        # 失败路径不静默：4 类标记（截断/超时/解析失败/无语义）置 degraded + 可见文案；
+        # 同时保留结构化的 proto_degraded_flags 供前端逐条渲染与后续自动化消费。
+        if proto_flags_all:
+            result["proto_degraded_flags"] = proto_flags_all
+            if not result.get("degraded"):
+                result["degraded"] = True
+                result["degraded_reason"] = (
+                    "HTML 原型解析降级（" + "、".join(proto_flags_all)
+                    + "），原型语义可能不完整，请人工核对相关要点"
+                )
         # 甲1: 质量门禁警告传递给前端
         if quality_warning:
             result["quality_warning"] = quality_warning
@@ -1316,9 +1364,23 @@ async def _run_requirement_analysis(
     except Exception as e:
         err_msg = str(e)[:500]
         logger.error("[Task] 需求分析失败: task_id={}, req_id={}, error={}", task_id, req_id, err_msg)
+        # docs/17: 失败路径同样透出原型降级标记。
+        # 反例（2026-09-28 实测）：纯壳原型 → 解析出 proto_no_semantics → LLM 报
+        # "requirement.title 缺失" → 任务 failed，但失败分支原先不写 result_json，
+        # 用户只看到与根因无关的 "title 缺失"，真正的根因标记被丢掉。
+        # 纪律：fail-closed 要落成**终态**而非异常，标记必须到达消费方。
+        failed_result: dict = {}
+        if proto_flags_all:
+            failed_result["proto_degraded_flags"] = proto_flags_all
+            failed_result["degraded"] = True
+            failed_result["degraded_reason"] = (
+                "HTML 原型解析降级（" + "、".join(proto_flags_all)
+                + "），原型语义可能不完整，请人工核对相关要点"
+            )
         await _update_task(
             task_id, status="failed", phase="", error=err_msg,
             message="分析失败: " + err_msg[:200], completed_at=datetime.now(timezone.utc),
+            result_json=failed_result or None,
         )
         # 失败时将 Requirement 标记为 draft（便于用户看到记录）
         try:

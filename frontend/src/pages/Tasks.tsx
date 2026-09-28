@@ -528,6 +528,38 @@ export default function Tasks() {
                 </div>
               )}
 
+              {/* docs/17：降级标记展示（失败可见，不静默）
+                  - result_json.degraded: 需求分析降级（v2.18 既有契约，SRR 折价生成）
+                  - result_json.proto_degraded_flags: HTML 原型解析降级（截断/超时/解析失败/无语义） */}
+              {(() => {
+                const r: any = detailTask.result_json || {}
+                const protoFlags: string[] = Array.isArray(r.proto_degraded_flags) ? r.proto_degraded_flags : []
+                const hasDegraded = !!r.degraded || protoFlags.length > 0
+                if (!hasDegraded) return null
+                const PROTO_FLAG_LABELS: Record<string, string> = {
+                  proto_tree_truncated: '原型语义树超节点预算已截断',
+                  proto_parse_timeout: '原型解析超时（降级为纯文本）',
+                  proto_parse_failed: '原型解析失败（降级为纯文本）',
+                  proto_no_semantics: '原型无可识别语义节点（可能为纯视觉稿）',
+                }
+                return (
+                  <div>
+                    <p className="text-xs mb-0.5 flex items-center gap-1" style={{ color: 'var(--state-warning)' }}>
+                      <AlertCircle className="w-3 h-3" /> 降级提示
+                    </p>
+                    <div className="text-xs rounded p-3 space-y-1"
+                      style={{ color: 'var(--state-warning)', background: 'var(--state-warning-surface)', border: '1px solid var(--state-warning)' }}>
+                      {r.degraded && (
+                        <div>⚠️ {String(r.degraded_reason || 'SRR 生成降级，可能存在不完整')}</div>
+                      )}
+                      {protoFlags.map((f, i) => (
+                        <div key={i}>⚠️ {PROTO_FLAG_LABELS[f] || `原型解析降级：${f}`}</div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })()}
+
               {/* 阶段耗时 */}
               {detailTask.phase_timings && Object.keys(detailTask.phase_timings).length > 0 && (
                 <div>

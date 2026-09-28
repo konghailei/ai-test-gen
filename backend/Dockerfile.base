@@ -15,14 +15,20 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装全部 Python 依赖（Docker 层缓存加速重复构建）
+# PIP_INDEX_URL：可选构建参数，外网直连 pypi.org 不稳定时可传国内镜像源，如：
+#   docker build -f backend/Dockerfile.base --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple -t ai-test-gen-base:latest .
+# 默认为空 = 官方源，行为不变（内网不构建 base 镜像，不受影响）
+ARG PIP_INDEX_URL=""
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN pip install --no-cache-dir -r requirements.txt ${PIP_INDEX_URL:+-i $PIP_INDEX_URL} \
     && mkdir -p /app/data \
     # v3.4.5（缺陷 A 防复发）：requirements.txt 里早已声明 langgraph-checkpoint-postgres
     # 与 psycopg[binary,pool]，但某次构建静默未安装这两个包——镜像直到运行时才暴露为
     # 「PostgresSaver 初始化失败 → 检查点降级 memory」，durable execution 全程是假的。
     # 构建期硬校验：缺包直接让构建失败，绝不允许带着坏镜像上线。
     && python -c "import langgraph.checkpoint.postgres, psycopg_pool; print('[build] checkpoint deps ok')" \
+    # docs/17（R1）：HTML 原型解析依赖——漏装则上传 .html 原型时运行时 ImportError
+    && python -c "import bs4, lxml; print('[build] html proto deps ok')" \
     # 清理编译产物减小镜像
     && apt-get purge -y gcc make \
     && apt-get autoremove -y \

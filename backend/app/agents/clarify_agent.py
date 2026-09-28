@@ -101,6 +101,67 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
     # 结构缺口最多注入几个（避免问题列表被规则项刷屏）
     _STRUCTURE_GAP_MAX: int = 4
 
+    def _prototype_gap_questions(self, srr: dict) -> list[dict]:
+        """把原型专属缺口（规则层）确定性地转为澄清问题（docs/17 §4.4.2）。
+
+        ## 为什么需要这个方法（2026-09-28 实测缺陷）
+
+        `_detect_prototype_gaps` 的产出原先**只作为 `ambiguities` 透传给 LLM 当线索**
+        （见 ② 规则检测 → `_generate_questions(ambiguities=...)`），没有任何确定性
+        到达 questions 的路径：
+          - `_fallback_gap_queries` 只读 `completeness` 的 missing 列表，**不读 `ambiguities`**
+            （对比 PRD 专项检测会**同时**塞进 `completeness["important_missing"]`，
+            所以 PRD 缺口有兜底，原型缺口没有）；
+          - 提示词里 `原型`/`prototype` 出现 0 次，LLM 无从主动生成；
+          - 三个 `prototype_*` type 全库**只有定义、无消费方**。
+
+        后果：23 个原型相关任务、原型类澄清问题**命中 0 次**（其中多条有 9-12 条
+        questions，说明澄清流程本身正常运转，是原型问题从未被发出）。
+
+        ## 设计对齐
+
+        与 ⑧d「结构缺口驱动澄清」（v3.3/docs14 A3）同构——那条注释已明确
+        「结构缺口是**确定性**的（不受 LLM 波动影响）」并直接 extend 进 questions。
+        本方法遵循同一原则：原型问题是纯关键词/正则检测（零 LLM），实测 5/5 一致，
+        因此**跳过 KB、直接作为人工问题**（与 conflict 类同理：KB 无法回答
+        "你们这个页面有没有 JS 联动"）。
+
+        上限沿用 `_detect_prototype_gaps` 的 `results[:3]`（R7：避免打断用户）。
+
+        Returns:
+            list[dict]: 澄清问题列表（结构对齐 ⑧d 的 SGxxx 模板）
+        """
+        try:
+            from app.agents.clarify_detect import ClarifyDetectMixin
+            gaps = ClarifyDetectMixin._detect_prototype_gaps(self, srr or {})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[ClarifyAgent] 原型缺口检测失败（不阻断澄清）: {}", str(e)[:150])
+            return []
+
+        out: list[dict] = []
+        for g in gaps:
+            _f = str(g.get("field", "") or "")
+            if not _f:
+                continue
+            # 优先用规则层给的建议问题；供 KB 查询用的 question 字段此处不用
+            question = (g.get("_suggested_question") or g.get("description") or "").strip()
+            if not question:
+                continue
+            out.append({
+                "id": f"PG{len(out) + 1:03d}",
+                "field": _f,
+                "priority": "important",
+                "category": "ambiguity",
+                "question": question,
+                "context": g.get("description", ""),
+                "default_answer": "",
+                "input_type": "select" if g.get("_suggested_options") else "text",
+                "options": list(g.get("_suggested_options") or []),
+                # 标记来源，便于前端/排查区分「规则缺口」与「LLM 生成」
+                "_source": "prototype_gap",
+            })
+        return out
+
     @staticmethod
     async def _load_fp_srrs(req_id: str) -> list[dict]:
         """读取功能点子 SRR。
@@ -1304,6 +1365,26 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
             structure_info = {}
             logger.warning(
                 "[ClarifyAgent] 结构缺口注入失败（不阻断澄清）: {}", str(e)[:150]
+            )
+
+        # ⑧e docs/17：原型专属缺口驱动澄清（与 ⑧d 同构，规则层确定性注入）
+        #   规则层 `_detect_prototype_gaps` 原先只当 LLM 线索（ambiguities），
+        #   无确定性到达 questions 的路径 → 实测 23 个原型任务命中 0 次。
+        #   此处补齐：原型静态盲区/未命名字段/删除二次确认 → 直接人工问题。
+        #   注：注入项会占澄清名额，但有 MAX_CLARIFY_ITERATIONS（最多 3 轮）总量约束，
+        #   不引入无界风险。
+        try:
+            prototype_questions = self._prototype_gap_questions(srr)
+            if prototype_questions:
+                questions.extend(prototype_questions)
+                logger.info(
+                    "[ClarifyAgent] 原型缺口驱动澄清: 注入 {} 个（字段={}）",
+                    len(prototype_questions),
+                    [q["field"].split(".", 1)[-1] for q in prototype_questions],
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[ClarifyAgent] 原型缺口注入失败（不阻断澄清）: {}", str(e)[:150]
             )
 
         # ⑧b 需求模式库缺失维度（docs/01 §4.3.3 遗漏检测）

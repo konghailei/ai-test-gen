@@ -199,7 +199,72 @@ class ClarifyDetectMixin:
             作为重点检测线索。
         """
         cross = self._detect_cross_doc_conflicts(srr)
-        return cross
+        proto = self._detect_prototype_gaps(srr)
+        return cross + proto
+
+    def _detect_prototype_gaps(self, srr: dict) -> list[dict]:
+        """原型类来源专属问题（docs/17 §4.4.2，规则层，不新增 LLM 调用）。
+
+        检测到 _raw_text 含「【原型：」标记时，追加原型专属问题模板：
+        静态盲区必发问（JS 联动/异步校验原型无法体现）+ 未命名字段汇总。
+        与 KB 检索问题合并出题，受现有最大澄清轮次约束。
+        """
+        import re
+        raw_text = srr.get("_raw_text", "") or ""
+        if "【原型：" not in raw_text:
+            return []
+
+        results: list[dict] = []
+
+        # 1. 静态盲区（必发问）：原型为静态文件，JS 动态行为无法体现
+        results.append({
+            "type": "prototype_static_blindspot",
+            "field": "prototype.dynamic_behavior",
+            "description": "原型为静态 HTML，无法体现字段联动显隐、异步校验、页面跳转等 JS 动态行为",
+            "evidence": "来源标记: 【原型：",
+            "_suggested_question": (
+                "原型为静态文件，无法体现动态交互。该页面是否存在字段联动/异步校验/动态显隐/跳转逻辑？请补充说明。"
+            ),
+            "_suggested_options": [
+                "存在字段联动显隐，将补充说明",
+                "存在异步校验，将补充说明",
+                "存在跳转逻辑，将补充说明",
+                "均为静态展示，无动态行为",
+            ],
+        })
+
+        # 2. 未命名字段汇总 > 0 时发问
+        m_unnamed = re.search(r"共 (\d+) 个未命名字段", raw_text)
+        if m_unnamed and int(m_unnamed.group(1)) > 0:
+            n = m_unnamed.group(1)
+            results.append({
+                "type": "prototype_unnamed_fields",
+                "field": "prototype.unnamed_fields",
+                "description": f"原型中有 {n} 个未命名字段（无 label/aria-label/placeholder）",
+                "evidence": "解析提示: 未命名字段汇总",
+                "_suggested_question": f"原型中有 {n} 个未命名字段，请补充这些字段的业务含义与用途。",
+                "_suggested_options": ["将在后续补充说明", "字段可忽略（装饰性元素）"],
+            })
+
+        # 3. 删除类按钮：确认交互线索
+        m_del = re.search(r'button "([^"]*删[^"]*)"', raw_text)
+        if m_del:
+            btn = m_del.group(1)
+            results.append({
+                "type": "prototype_delete_confirm",
+                "field": "prototype.delete_confirm",
+                "description": f"原型含「{btn}」按钮，未体现二次确认交互",
+                "evidence": f"语义树: button \"{btn}\"",
+                "_suggested_question": f"「{btn}」类按钮是否需要二次确认（如确认弹窗）？误操作如何撤销？",
+                "_suggested_options": [
+                    "需要二次确认弹窗",
+                    "需要二次确认且有撤销机制",
+                    "直接执行，无需确认",
+                ],
+            })
+
+        # 原型类问题模板设上限（R7：避免打断用户，并入现有澄清轮次约束）
+        return results[:3]
 
     # ========================================================================
     # KB 检索
