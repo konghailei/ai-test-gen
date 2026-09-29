@@ -46,7 +46,10 @@ OUTBOX_BATCH = 50
 OUTBOX_INTERVAL_SECONDS = 5
 
 VALID_ACTIONS = ("upsert", "delete")
-VALID_AGGREGATES = ("test_case", "requirement")
+# v3.5.0（docs/18 P0）：fp_crsr = 功能点权威完整版 SRR（CRSR 编译层产物）。
+# CRSR 同样遵循出箱语义：PG 固化行（functional_point_crsr）与"写入 Milvus 的意图"
+# 同事务提交，relay 幂等 upsert（确定性 ID，重复投递不堆积）。
+VALID_AGGREGATES = ("test_case", "requirement", "fp_crsr")
 
 
 def gen_event_id() -> str:
@@ -128,6 +131,21 @@ def _deliver(row) -> None:
             vector_store.add_requirement(
                 row.aggregate_id,
                 payload.get("requirement_json") or {},
+                metadata=metadata,
+            )
+        else:
+            vector_store.delete_requirement(row.aggregate_id)
+    elif row.aggregate_type == "fp_crsr":
+        # v3.5.0（docs/18 P0-T1）：CRSR 投递。复用 add_requirement（SRR 同构，
+        # _srr_to_text 同口径）；metadata.type=fp_crsr 由 payload 带入，
+        # add_requirement 会自动同步 doc_type（milvus_store 内部 meta["doc_type"]=meta["type"]）。
+        if row.action == "upsert":
+            metadata = dict(payload.get("metadata") or {})
+            metadata["revision"] = row.revision
+            metadata["content_hash"] = row.content_hash
+            vector_store.add_requirement(
+                row.aggregate_id,
+                payload.get("crsr_content") or {},
                 metadata=metadata,
             )
         else:

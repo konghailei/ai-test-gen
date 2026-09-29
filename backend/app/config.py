@@ -197,6 +197,20 @@ class Settings(BaseSettings):
     """知识库维护周期（秒）。默认 1 小时——对账本身轻量，但会遍历 Milvus 全量 ID。"""
     KB_MAINTENANCE_INTERVAL: int = 3600
 
+    # ========== CRSR 编译层接入检索（v3.5.0 / docs/18 P0） ==========
+    """KB 问答/澄清检索是否启用 fp_crsr 条目（功能点权威完整版 SRR）。
+
+    False 时 kqa/clarify 检索结果过滤掉 fp_crsr 类型（向量仍在库，一键回退）。
+    归档/纠错时的 CRSR 向量化（出箱投递）不受此开关控制——编译层持续更新，
+    检索侧按需消费。
+    """
+    KB_CRSR_ENABLED: bool = True
+
+    """KB lint 周期自检间隔（秒）。默认 24h——只读扫描 + 报告，轻量。
+    置 0 或 KB_LINT_ENABLED=False 关闭。"""
+    KB_LINT_ENABLED: bool = True
+    KB_LINT_INTERVAL: int = 86400
+
     # ========== 嵌入模型配置 ==========
     """嵌入模型类型：local（sentence-transformers，默认）| cloud（远程 API 嵌入）。
     注：ChromaDB 已弃用，chroma_default 选项不再可用；模型实际加载由 EMBEDDING_MODEL_NAME 决定。"""

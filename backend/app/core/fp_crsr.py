@@ -35,6 +35,41 @@ _LIST_KEYS = ("business_rules", "data_constraints", "test_hints")
 _SCALAR_KEYS = ("summary", "suggested_module")
 
 
+def crsr_vector_id(product_id: str, fp_name: str) -> str:
+    """CRSR 向量主键（v3.5.0 / docs/18 P0）。
+
+    确定性 ID：同一 (product_id, fp_name) 跨多次归档/纠错 upsert 始终同一条，
+    不会产生版本堆积；变更由出箱 revision/content_hash 追踪。
+    """
+    import hashlib
+    raw = f"{product_id}|{fp_name}"
+    return "CRSR-" + hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def crsr_outbox_payload(row: FunctionalPointCRSR) -> dict:
+    """构造 fp_crsr 出箱投递 payload（v3.5.0 / docs/18 P0-T5）。
+
+    供归档链路（products.py）与纠错链路（knowledge_qa.py）共用——两处对称
+    由构造保证（09-24 修复 2 模式：共享组装函数，禁止各写一份）。
+
+    metadata 必含 status="archived"：search_similar_requirements 按
+    status=archived 硬过滤（milvus_store.py），漏了 = 向量存在但永远检索不到。
+    """
+    return {
+        "crsr_content": row.content or {},
+        "metadata": {
+            "type": "fp_crsr",           # add_requirement 会自动同步 doc_type
+            "status": "archived",        # 必含：KB 检索只取 archived（硬过滤）
+            "product_id": row.product_id or "",
+            "fp_name": row.fp_name or "",
+            "title": row.fp_name or "",
+            "version_count": len(row.source_fp_ids or []),
+            "latest_version_ref": (list(row.version_refs or []) or [{}])[-1].get("version_id", ""),
+            "consolidated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+
 def _sig(item) -> str:
     """列表项内容签名（规范化 JSON 字符串），用于跨版本去重。"""
     try:
@@ -500,13 +535,35 @@ async def consolidate_crsr(
             row.source_fp_ids = live["source_fp_ids"]
             row.version_refs = refs
         else:
-            session.add(FunctionalPointCRSR(
+            row = FunctionalPointCRSR(
                 product_id=product_id,
                 fp_name=fp_name,
                 content=live["crsr"],
                 source_fp_ids=live["source_fp_ids"],
                 version_refs=refs,
-            ))
+            )
+            session.add(row)
+
+        # v3.5.0（docs/18 P0-T5）：CRSR 固化行与"写入向量库的意图"同事务出箱。
+        # enqueue 刻意不 commit（与业务行一起提交，调用方负责 commit）；
+        # relay 幂等投递（确定性 ID upsert）。失败不阻断固化主流程
+        # （CRSR 本身可重算重建，出箱失败也有 failed 终态 + 对账兜底）。
+        try:
+            from app.core.vector_outbox import enqueue as outbox_enqueue
+            outbox_enqueue(
+                session,
+                aggregate_type="fp_crsr",
+                aggregate_id=crsr_vector_id(product_id, fp_name),
+                action="upsert",
+                payload=crsr_outbox_payload(row),
+                created_by="crsr_consolidate",
+            )
+        except Exception as outbox_e:
+            logger.warning(
+                "[CRSR] 向量出箱 enqueue 失败（固化不受影响，等对账）: product={}, fp={}, err={}",
+                product_id, fp_name, str(outbox_e)[:150],
+            )
+
         logger.info(
             "[CRSR] 固化完成: product={}, fp={}, versions={}, ref={}",
             product_id, fp_name, live["version_count"], version_id or "-",
