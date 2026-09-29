@@ -120,6 +120,7 @@ def _doc_text_for_qa(r: dict) -> str:
 AUTHORITY_BY_TYPE = {
     "requirement": "L0",        # 需求文档：规则权威
     "functional_point": "L1",   # 功能点 SRR/CRSR：次权威
+    "fp_crsr": "L1",            # v3.5.0（docs/18）：功能点权威完整版 SRR（跨版本聚合编译层）
     "test_case": "L3",          # 用例默认 L3，命中人工核准/复用时降为 L2
     "knowledge_qa": "L2",       # 历史问答：可作参考
 }
@@ -223,6 +224,8 @@ def _build_qa_prompt(question: str, kb_results: list[dict], enriched_sources: li
         "2) 你只能根据 <documents> 内的资料来回答；若资料不足，按规则说明缺失。\n"
         "3) 绝对不要编造不存在的 ID、编号或需求号；引用使用「来源类型: 来源标题」格式。\n"
         "4) 多个版本同时出现时，以日期靠后的最新版本为准，并在回答中标注版本与日期。\n"
+        "   标注为「最新整理版」的来源是该功能跨版本聚合后的权威完整版（v3.5.0），\n"
+        "   与单版本记录同时出现且内容冲突时，优先采信「最新整理版」，并说明差异。\n"
         "5) 资料按权威层级采信（见每个 document 的「权威层级」属性）：\n"
         "   L0 需求文档 > L1 功能点说明 > L2 人工核准用例/历史问答 > L3 AI 生成用例。\n"
         "   L2/L3 用例可用于说明「系统实际做了什么」，但**不能**作为「规则应当是什么」的依据。\n"
@@ -324,6 +327,9 @@ async def _enrich_sources(
     case_ids = [s["id"] for s in kb_sources if s.get("type") == "test_case"]
     # v3.3（修 N6）：功能点单独查询——向量主键为 "FP-"+functional_points.id
     fp_ids = [s["id"] for s in kb_sources if s.get("type") == "functional_point"]
+    # v3.5.0（docs/18 P0-T3）：CRSR 单独查询——向量主键为 "CRSR-"+md5(product|fp_name)[:16]，
+    # 定位键是 metadata 里的 (product_id, fp_name)，不是 PG 主键
+    crsr_sources = [s for s in kb_sources if s.get("type") == "fp_crsr"]
 
     # 查询需求详情（获取 title + product_id + 版本日期链）
     # v3.3（N1 / B6-3）：额外取 go_live_date / archived_at / updated_at / created_at，
@@ -354,6 +360,38 @@ async def _enrich_sources(
         for row in result.all():
             fp_map[row[0]] = {"name": row[1], "requirement_id": row[2]}
 
+    # v3.5.0（docs/18 P0-T3）：CRSR 详情——按 (product_id, fp_name) 查固化行，
+    # 取版本数与固化时间做来源展示；产品名从 product 表取。
+    # CRSR 行查不到（被删/未固化）→ 按孤儿处理（向量可能滞后于 PG）。
+    crsr_map: dict[str, dict] = {}
+    if crsr_sources:
+        from app.core.fp_crsr import crsr_vector_id
+        from app.db.models import FunctionalPointCRSR
+        _crsr_keys: dict[str, tuple[str, str]] = {}   # vector_id -> (product_id, fp_name)
+        for s in crsr_sources:
+            md = s.get("metadata") or {}
+            pid, fname = md.get("product_id") or "", md.get("fp_name") or ""
+            if pid and fname:
+                _crsr_keys[crsr_vector_id(pid, fname)] = (pid, fname)
+        if _crsr_keys:
+            stmt = select(
+                FunctionalPointCRSR.product_id, FunctionalPointCRSR.fp_name,
+                FunctionalPointCRSR.source_fp_ids, FunctionalPointCRSR.version_refs,
+                FunctionalPointCRSR.updated_at,
+            ).where(
+                (FunctionalPointCRSR.product_id + "|" + FunctionalPointCRSR.fp_name).in_(
+                    [f"{p}|{n}" for p, n in _crsr_keys.values()]
+                )
+            )
+            result = await session.execute(stmt)
+            for row in result.all():
+                pid, fname = row[0], row[1]
+                crsr_map[crsr_vector_id(pid, fname)] = {
+                    "fp_name": fname,
+                    "version_count": len(row[2] or []),
+                    "consolidated_at": row[4].isoformat() if row[4] else "",
+                }
+
     # 查询测试用例详情（v3.3：额外取 source 区分 L2/L3；额外取 archived_at 做归档过滤）
     case_map: dict[str, dict] = {}
     if case_ids:
@@ -373,6 +411,11 @@ async def _enrich_sources(
     for info in req_map.values():
         if info.get("product_id"):
             product_ids.add(info["product_id"])
+    # v3.5.0（docs/18 P0-T3）：CRSR 条目的产品名按 metadata.product_id 补充
+    for s in crsr_sources:
+        _cpid = (s.get("metadata") or {}).get("product_id")
+        if _cpid:
+            product_ids.add(_cpid)
     product_names: dict[str, str] = {}
     if product_ids:
         stmt = select(Product.id, Product.name).where(Product.id.in_(product_ids))
@@ -415,6 +458,19 @@ async def _enrich_sources(
                     effective_date = req_info.get("effective_date") or ""
                 found = True
 
+        elif src_type == "fp_crsr":
+            # v3.5.0（docs/18 P0-T3）：CRSR 来源富化。
+            # display 形态「功能点名（最新整理版，聚合 N 个版本）」+ 产品名 + 固化日期。
+            info = crsr_map.get(src_id)
+            if info:
+                title = f"{info['fp_name']}（最新整理版，聚合 {info['version_count']} 个版本）"
+                md = src.get("metadata") or {}
+                pname = product_names.get(md.get("product_id", ""), "")
+                if pname:
+                    product_name = pname
+                effective_date = info.get("consolidated_at") or ""
+                found = True
+
         elif src_type == "test_case" and src_id in case_map:
             info = case_map[src_id]
             # v3.3（N1 治理 · 与需求侧口径对齐）：只取**已固化（归档）**的用例。
@@ -436,7 +492,8 @@ async def _enrich_sources(
         # v3.3（修 N6）：functional_point 一并纳入——之前只校验 requirement，
         # 而功能点被误标为 requirement，导致**合法 FP 被当孤儿丢弃**；
         # 现在类型已正确，这里的判定对 FP 是真孤儿过滤（保留卫生作用）。
-        if not found and src_type in ("requirement", "functional_point"):
+        # v3.5.0（docs/18）：fp_crsr 同样纳入——CRSR 固化行被删/重建间隙的向量视为孤儿。
+        if not found and src_type in ("requirement", "functional_point", "fp_crsr"):
             logger.warning("[API/knowledge-qa] 跳过孤儿向量: id={}, type={}", src_id, src_type)
             continue
         # v3.3：未固化用例在上面的 test_case 分支里已置 found=False，这里统一丢弃
@@ -638,9 +695,24 @@ async def kqa_ask(
             # `_enrich_sources` 拿它去 `requirements` 表校验存在性，必然查不到
             # （功能点向量主键是 "FP-"+fp.id）→ 被当孤儿 `continue` 丢弃，
             # **整个 L1 权威层在 KB 问答中静默失效**。
+            # v3.5.0（docs/18 P0-T2）：fp_crsr 同样显式识别——若落到 else 分支会被
+            # 误标为 requirement → _enrich_sources 查不到 → 孤儿丢弃（N6 同款形态）。
             _md_type = (r.get("metadata") or {}).get("type") or ""
-            r["type"] = "functional_point" if _md_type == "functional_point" else "requirement"
+            if _md_type == "functional_point":
+                r["type"] = "functional_point"
+            elif _md_type == "fp_crsr":
+                r["type"] = "fp_crsr"
+            else:
+                r["type"] = "requirement"
             kb_sources.append(r)
+        # v3.5.0（docs/18）：灰度开关——False 时检索面剔除 fp_crsr（一键回退）。
+        # 过滤放检索后而不是检索前（doc_type 参数一次只能传一个值，三类型并存需并集）。
+        try:
+            from app.config import settings as _crsr_settings
+            if not getattr(_crsr_settings, "KB_CRSR_ENABLED", True):
+                kb_sources = [s for s in kb_sources if s.get("type") != "fp_crsr"]
+        except Exception:  # noqa: BLE001
+            pass
     except Exception as e:
         err_msg = str(e)[:200]
         search_errors.append(f"需求检索: {err_msg}")
