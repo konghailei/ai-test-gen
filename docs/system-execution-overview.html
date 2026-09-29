@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-test-gen · 执行链路与规范全景</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-size: 14px; line-height: 1.7; color: #2C2C2A; background: #F6F6F4;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 40px 24px 80px; }
+  header.hero { padding-bottom: 26px; border-bottom: 1px solid #E3E3DE; margin-bottom: 34px; }
+  header.hero h1 { font-size: 25px; font-weight: 500; margin: 0 0 10px; color: #1A1A18; letter-spacing: -0.2px; }
+  header.hero .sub { font-size: 14px; color: #5F5E5A; margin: 0 0 20px; max-width: 820px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .metric { background: #FFFFFF; border: 1px solid #E3E3DE; border-radius: 12px; padding: 14px 16px; }
+  .metric .k { font-size: 12px; color: #888780; margin: 0 0 6px; }
+  .metric .v { font-size: 22px; font-weight: 500; color: #1A1A18; margin: 0; line-height: 1.2; }
+  .metric .n { font-size: 12px; color: #888780; margin: 4px 0 0; }
+  section { margin-bottom: 40px; }
+  section > h2 {
+    font-size: 18px; font-weight: 500; color: #1A1A18; margin: 0 0 6px;
+    padding-left: 12px; border-left: 3px solid #185FA5; line-height: 1.4;
+  }
+  section > .lead { font-size: 13px; color: #5F5E5A; margin: 0 0 18px; padding-left: 15px; }
+  .grid { display: grid; gap: 12px; }
+  .g4 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .g3 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .g5 { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .card { background: #FFFFFF; border: 1px solid #E3E3DE; border-radius: 12px; padding: 16px 18px; }
+  .card.amber { background: #FAEEDA; border-color: #EFCFA6; }
+  .card.teal { background: #E1F5EE; border-color: #A9DCC9; }
+  .card h3 { font-size: 15px; font-weight: 500; margin: 0 0 6px; color: #1A1A18; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .card h3 .pct { font-size: 12px; font-weight: 400; color: #888780; }
+  .card .en { font-size: 12px; color: #8A8A82; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0 0 8px; }
+  .card p { margin: 0; font-size: 13px; color: #5F5E5A; }
+  .card ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: #5F5E5A; }
+  .card li { margin-bottom: 4px; }
+  .node-no {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: #E6F1FB; color: #0C447C; font-size: 12px; margin-right: 8px; flex: 0 0 auto;
+  }
+  .bar { height: 4px; border-radius: 2px; background: #EDEDE9; margin-top: 12px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: #185FA5; }
+  table { width: 100%; border-collapse: collapse; background: #FFFFFF; border: 1px solid #E3E3DE; border-radius: 12px; overflow: hidden; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #EFEFEA; vertical-align: top; }
+  th { font-weight: 500; color: #1A1A18; background: #FAFAF8; font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  td.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #993C1D; white-space: nowrap; }
+  .stateflow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+  .state { background: #FFFFFF; border: 1px solid #E3E3DE; border-radius: 8px; padding: 6px 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #444441; }
+  .state.on { background: #E1F5EE; border-color: #A9DCC9; color: #085041; }
+  .arrow { color: #B4B2A9; }
+  .note { background: #FAFAF8; border: 1px solid #E3E3DE; border-radius: 12px; padding: 14px 18px; font-size: 13px; color: #5F5E5A; }
+  .note b { font-weight: 500; color: #1A1A18; }
+  footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid #E3E3DE; font-size: 12px; color: #888780; }
+  footer code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #5F5E5A; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>ai-test-gen · 执行链路与规范全景</h1>
+  <p class="sub">
+    从需求上传到用例入库的完整执行链路。核心约束一句话：
+    <b>需求必须先「人工确认」才能生成；生成走 7 节点的执行 DAG；进有 6 道守卫，出有 3 档门禁；
+    中途每一步都可断点续跑，但输入指纹必须一致。</b>
+  </p>
+  <div class="metrics">
+    <div class="metric"><p class="k">链路阶段</p><p class="v">2</p><p class="n">需求分析 · 用例生成</p></div>
+    <div class="metric"><p class="k">生成 DAG 执行节点</p><p class="v">7</p><p class="n">含 1 条补生成回边</p></div>
+    <div class="metric"><p class="k">入口守卫</p><p class="v">6</p><p class="n">顺序执行，任一失败即中断</p></div>
+    <div class="metric"><p class="k">发布门禁</p><p class="v">3</p><p class="n">自动 / 人工 / 阻断</p></div>
+    <div class="metric"><p class="k">澄清轮次上限</p><p class="v">3</p><p class="n">达上限强制放行</p></div>
+  </div>
+</header>
+
+<section>
+  <h2>阶段一 · 需求分析链路</h2>
+  <p class="lead">目标是把一份非结构化文档变成结构化的双层 SRR，并拿到人的确认。</p>
+  <div class="grid g4">
+    <div class="card">
+      <h3><span><span class="node-no">1</span>上传需求</span></h3>
+      <p class="en">ReqAgent</p>
+      <p>支持 docx / markdown / 图片（多模态识别）。产出<b>双层 SRR</b>：总 SRR（整体约束）+ 功能点 SRR（逐模块）。</p>
+    </div>
+    <div class="card">
+      <h3><span><span class="node-no">2</span>澄清问答</span></h3>
+      <p class="en">ClarifyAgent</p>
+      <p>先查知识库，查得到就自动补全、不再打扰人；查不到才生成问题。最多 <b>3 轮</b>，第 3 轮强制放行并打标记。</p>
+    </div>
+    <div class="card">
+      <h3><span><span class="node-no">3</span>待确认</span></h3>
+      <p class="en">pending_review</p>
+      <p>解析与澄清结果进入待确认态，人工在确认页核对 SRR 内容。</p>
+    </div>
+    <div class="card">
+      <h3><span><span class="node-no">4</span>人工确认</span></h3>
+      <p class="en">confirmed</p>
+      <p>确认后需求才具备生成资格。这是生成入口的<b>硬门槛</b>（守卫 3），未确认一律 409。</p>
+    </div>
+  </div>
+  <div class="note" style="margin-top:14px;">
+    <b>需求状态机：</b>
+    <div class="stateflow" style="margin-top:8px;">
+      <span class="state">draft</span><span class="arrow">→</span>
+      <span class="state">analyzing</span><span class="arrow">→</span>
+      <span class="state">pending_review</span><span class="arrow">→</span>
+      <span class="state on">confirmed</span><span class="arrow">→</span>
+      <span class="state">archived</span><span class="arrow">⇄</span>
+      <span class="state">active</span>
+    </div>
+    <p style="margin:10px 0 0;">澄清重解析会把需求退回 <span class="en" style="font-size:12px">draft</span>，需要重新确认；生成失败回退时也会回到 <span class="en" style="font-size:12px">confirmed</span>（而不是 draft），避免用户被迫重走整条确认链。</p>
+  </div>
+</section>
+
+<section>
+  <h2>阶段二 · 用例生成 DAG（7 个执行节点）</h2>
+  <p class="lead">LangGraph 编排，节点进度直接驱动前端进度条。主链路一条直线，唯一回边是审核后的补生成。</p>
+  <div class="grid g4">
+    <div class="card">
+      <h3><span><span class="node-no">1</span>需求解析</span><span class="pct">20%</span></h3>
+      <p class="en">parse</p>
+      <p>加载 SRR 并校验非空。<b>不调用 LLM</b>，纯数据准备。</p>
+      <div class="bar"><i style="width:20%"></i></div>
+    </div>
+    <div class="card">
+      <h3><span><span class="node-no">2</span>生成准备</span><span class="pct">25%</span></h3>
+      <p class="en">select_channel</p>
+      <p>构造本次生成的环节开关：是否启用影响分析、多类型生成与完整审核。</p>
+      <div class="bar"><i style="width:25%"></i></div>
+    </div>
+    <div class="card amber">
+      <h3><span><span class="node-no">3</span>质量门禁</span><span class="pct">40%</span></h3>
+      <p class="en">gate</p>
+      <p>按评分与关键问题判定。未通过时不回环，直接<b>强制放行</b>进入影响分析。</p>
+      <div class="bar"><i style="width:40%"></i></div>
+    </div>
+    <div class="card">
+      <h3><span><span class="node-no">4</span>影响分析</span><span class="pct">50%</span></h3>
+      <p class="en">impact</p>
+      <p>仅<b>优化需求</b>启用：沿原需求取历史用例，产出生成指引供下游注入。</p>
+      <div class="bar"><i style="width:50%"></i></div>
+    </div>
+    <div class="card">
+      <h3><span><span class="node-no">5</span>测试设计</span><span class="pct">62%</span></h3>
+      <p class="en">test_design</p>
+      <p><b>零 LLM 调用</b>。产出测试设计蓝图：技术适用性、边界与决策表目标等。</p>
+      <div class="bar"><i style="width:62%"></i></div>
+    </div>
+    <div class="card">
+      <h3><span><span class="node-no">6</span>用例生成</span><span class="pct">70%</span></h3>
+      <p class="en">generate</p>
+      <p>按三条路径生成（见下），逐功能点落 checkpoint；单点失败不阻断。</p>
+      <div class="bar"><i style="width:70%"></i></div>
+    </div>
+    <div class="card amber">
+      <h3><span><span class="node-no">7</span>审核入库</span><span class="pct">90%</span></h3>
+      <p class="en">review</p>
+      <p>置信度 + 规则预检 + LLM 六维审核 + 覆盖统计；必要时补生成一次。</p>
+      <div class="bar"><i style="width:90%"></i></div>
+    </div>
+  </div>
+  <div class="note" style="margin-top:14px;">
+    <b>回边说明：</b>
+    <ul style="margin:8px 0 0; padding-left:20px;">
+      <li><b>审核 → 生成</b>：审核发现覆盖缺口才补生成，<b>最多 1 次</b>；二次仍缺则标记「补生成已用尽」，不让前端误以为还会继续补。</li>
+    </ul>
+    <p style="margin:10px 0 0;">终点 <span class="en" style="font-size:12px">done 100%</span>：用例落库 + 知识库回流。</p>
+  </div>
+</section>
+
+<section>
+  <h2>执行规范</h2>
+  <p class="lead">三张表分别对应「进得来」「怎么生成」「出得去」。</p>
+
+  <h3 style="font-size:15px; font-weight:500; margin:0 0 10px;">入口 · 六道前置守卫</h3>
+  <table>
+    <thead><tr><th style="width:60px;">顺序</th><th style="width:230px;">校验项</th><th style="width:90px;">失败码</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>需求存在</td><td class="code">404</td><td>需求 ID 无效直接中断</td></tr>
+      <tr><td>2</td><td>产品可见性</td><td class="code">403</td><td>只能对自己可见产品下的需求发起生成</td></tr>
+      <tr><td>3</td><td>状态为 confirmed</td><td class="code">409</td><td>必须先走完 解析 → 澄清 → 人工确认</td></tr>
+      <tr><td>4</td><td>无未确认的影响分析条目</td><td class="code">409</td><td>防止回归覆盖范围无声缩水</td></tr>
+      <tr><td>5</td><td>SRR 非空</td><td class="code">400</td><td>明确禁止回退到原始文本，保证生成输入是结构化 SRR</td></tr>
+      <tr><td>6</td><td>并发互斥</td><td class="code">409</td><td>原子占位：事务内加锁 → 僵尸回收 → 活动检查 → 插入；数据库唯一索引兜底。<b>断点续跑同样受此约束</b></td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="font-size:15px; font-weight:500; margin:24px 0 10px;">生成 · 三条路径</h3>
+  <table>
+    <thead><tr><th style="width:200px;">路径</th><th style="width:220px;">触发条件</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><b>逐功能点分片</b>（主）</td><td>功能点列表非空</td><td>每个功能点用独立小 prompt 定向生成，质量最高；用例缺归属时补为对应功能点</td></tr>
+      <tr><td>全量兜底</td><td>功能点列表为空</td><td>一次性按整份 SRR 生成，防止功能点拆分失败的需求<b>静默产出 0 条用例</b></td></tr>
+      <tr><td>跨功能点集成</td><td>存在跨功能点流程 / 共享业务规则</td><td>独立组装全局片段生成组合场景，类型归一为集成用例，避免拆分后丢失跨模块场景</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="font-size:15px; font-weight:500; margin:24px 0 10px;">出口 · 三档发布门禁</h3>
+  <table>
+    <thead><tr><th style="width:200px;">决策</th><th style="width:240px;">触发条件</th><th>处置</th></tr></thead>
+    <tbody>
+      <tr><td><b>自动发布</b></td><td>覆盖证据与合同校验全部通过</td><td>直接写入知识库并固化用例</td></tr>
+      <tr><td><b>人工审核</b></td><td>覆盖情况未知，或存在警告项</td><td>转人工审核队列，不自动入库</td></tr>
+      <tr><td><b>阻断</b></td><td>合同校验失败</td><td>拒绝入库并给出原因</td></tr>
+    </tbody>
+  </table>
+  <p class="lead" style="margin:10px 0 0; padding-left:0;">门禁判定是<b>纯函数</b>（可单测、可复现），并在真正写库的副作用边界做<b>二次校验</b>，防止判定与写入之间状态漂移。</p>
+</section>
+
+<section>
+  <h2>贯穿全程的五项机制</h2>
+  <p class="lead">这些不是某个节点专属，而是整条链路都在生效的约束。</p>
+  <div class="grid g5">
+    <div class="card">
+      <h3>断点续跑</h3>
+      <p>每个功能点完成即写检查点。检查点携带<b>输入指纹</b>（需求 ID、产品、修订号、SRR 哈希、功能点集合哈希、提示词版本、模型、合同版本），续跑前逐字段比对，<b>不一致直接拒绝</b>，避免把旧产物拼到新输入上。</p>
+    </div>
+    <div class="card">
+      <h3>容错策略</h3>
+      <p>单个功能点生成失败<b>不阻断</b>整体，标记为失败并继续；续跑时会自动重试这些点。整体失败则落明确终态，不留下无提示的悬挂任务。</p>
+    </div>
+    <div class="card">
+      <h3>多层去重</h3>
+      <p>生成器内部四级去重（精确 / 语义 / 子集 / 等价）→ 三条路径汇总时再做一次标题级去重 → 入库前对同标题只保留置信度最高的一条。</p>
+    </div>
+    <div class="card">
+      <h3>向量出箱</h3>
+      <p>业务事务内<b>只写意图</b>，由独立的 relay 幂等投递到向量库并退避重试。业务提交不会因为向量库抖动而失败或产生不一致。</p>
+    </div>
+    <div class="card">
+      <h3>并发互斥</h3>
+      <p>同一需求同时只允许一个生成任务：应用层原子占位 + 数据库唯一索引双保险。僵尸任务由看门狗按超时回收。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>关键常量速查</h2>
+  <p class="lead">排查问题时最常需要核对的几个数字。</p>
+  <table>
+    <thead><tr><th style="width:280px;">项目</th><th style="width:140px;">取值</th><th>备注</th></tr></thead>
+    <tbody>
+      <tr><td>澄清轮次上限</td><td class="code">3</td><td>需求分析链路的澄清上限；达到即强制放行并打标记</td></tr>
+      <tr><td>补生成次数上限</td><td class="code">1</td><td>二次仍缺覆盖则标记用尽</td></tr>
+      <tr><td>列表分页上限</td><td class="code">100</td><td>所有列表端点统一；超限返回校验错误，前端须循环翻页</td></tr>
+      <tr><td>向量库单次查询上限</td><td class="code">16384</td><td>批量删除按此分轮循环，并有轮次上限保护</td></tr>
+      <tr><td>模型调用总预算</td><td class="code">240 秒</td><td>单次调用跨供应商、跨重试的墙钟上限，超限即快速失败并提示更换供应商</td></tr>
+      <tr><td>生成任务看门狗</td><td class="code">60 分钟</td><td>无进展即标记中断并联动回退卡死需求</td></tr>
+      <tr><td>供应商连续失败禁用</td><td class="code">3 次 / 600 秒</td><td>额度耗尽、认证失败等硬失败则<b>立即禁用</b></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  依据 <code>docs/13-case-generation-logic.md</code>（用例生成整体逻辑）、
+  <code>docs/15-AI-Agent端到端架构审查与优化方案.md</code>（v3.4 落地项）、
+  <code>docs/KNOWN-ISSUES.md</code>（当前缺陷与修复状态）整理。
+  本页为单文件 HTML，无外部依赖，可直接分享或打印。
+</footer>
+
+</div>
+</body>
+</html>
