@@ -135,6 +135,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("[VectorOutbox] relay 启动失败（不影响启动）: {}", str(e)[:150])
 
+    # v3.5.0（docs/18 P2）：知识库编译层 Lint 周期自检。
+    # CRSR 漂移 / 跨版本规则矛盾 / 向量缺失三项只读扫描 + 报告（不自动修复）。
+    try:
+        from app.core.kb_lint import start_kb_lint, stop_kb_lint
+        start_kb_lint()
+    except Exception as e:
+        logger.warning("[KbLint] 启动失败（不影响启动）: {}", str(e)[:150])
+
     logger.info("AI测试用例生成系统 启动完成，监听端口 {}", settings.APP_PORT)
 
     yield
@@ -156,6 +164,11 @@ async def lifespan(app: FastAPI):
         await stop_vector_outbox_relay()
     except Exception as e:
         logger.warning("[VectorOutbox] 停止失败: {}", str(e)[:150])
+    try:
+        from app.core.kb_lint import stop_kb_lint
+        await stop_kb_lint()
+    except Exception as e:
+        logger.warning("[KbLint] 停止失败: {}", str(e)[:150])
     try:
         from app.core.orchestrator import orchestrator
         await orchestrator.close_checkpoint_backend()
