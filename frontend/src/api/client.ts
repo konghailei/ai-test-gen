@@ -844,6 +844,14 @@ export const settings = {
       `/settings/llm/test${providerName ? `?provider_name=${providerName}` : ''}`,
       { method: 'POST' }
     ),
+  // v3.5.5: 生成性能设置（FP 子批并发开关）
+  getGeneration: () =>
+    request<{ fp_concurrency: number; min: number; max: number }>('/settings/generation'),
+  setGeneration: (fp_concurrency: number) =>
+    request<{ fp_concurrency: number }>('/settings/generation', {
+      method: 'PUT',
+      body: JSON.stringify({ fp_concurrency }),
+    }),
 }
 
 // ============================================================

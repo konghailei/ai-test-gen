@@ -51,6 +51,43 @@ class ReviewLLMSettingRequest(BaseModel):
     provider: str = Field(default="", max_length=64, description="供应商名（空=清除，跟随主力）")
 
 
+# v3.5.5（docs/22 方案①）：FP 子批并发生成设置（kb_settings 通用 KV 复用）
+GEN_CONCURRENCY_SETTING_KEY = "generation_fp_concurrency"
+# 合法区间：1=串行回退（与 v3.5.4 行为一致）；上限 5 防误配打爆供应商
+GEN_CONCURRENCY_MIN = 1
+GEN_CONCURRENCY_MAX = 5
+
+
+class GenerationSettingRequest(BaseModel):
+    """生成性能设置。"""
+    fp_concurrency: int = Field(
+        ge=GEN_CONCURRENCY_MIN, le=GEN_CONCURRENCY_MAX,
+        description="FP 分片生成并发度（1=串行回退，2-5=受控并发）",
+    )
+
+
+async def get_gen_fp_concurrency(session: AsyncSession) -> int:
+    """读取 FP 子批并发度（kb_settings KV；未设置/非法值时回退 config 默认）。
+
+    供 orchestrator 在每次生成任务启动时调用——设置页改完立即对下一次生成生效，
+    无需重启。
+    """
+    try:
+        result = await session.execute(
+            select(KBSetting).where(KBSetting.key == GEN_CONCURRENCY_SETTING_KEY)
+        )
+        row = result.scalar_one_or_none()
+        if row is not None and row.value:
+            v = int(row.value)
+            if GEN_CONCURRENCY_MIN <= v <= GEN_CONCURRENCY_MAX:
+                return v
+    except (ValueError, TypeError):
+        pass
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[settings] 读取生成并发配置失败（用默认值）: {}", str(e)[:100])
+    return int(getattr(settings, "GEN_FP_CONCURRENCY", 3) or 3)
+
+
 router = APIRouter()
 
 
@@ -735,3 +772,40 @@ async def set_review_llm_config(
     await session.commit()
     return ApiResponse(success=True, message="评审 LLM 供应商已更新" if provider else "评审 LLM 已恢复跟随主力",
                        data={"provider": provider})
+
+
+# ============================================================================
+# v3.5.5（docs/22 方案①）：生成性能设置（FP 子批并发开关）
+# ============================================================================
+
+@router.get("/generation", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def get_generation_settings(
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """获取生成性能设置（当前并发度 + 合法区间，供设置页展示）。"""
+    current = await get_gen_fp_concurrency(session)
+    return ApiResponse(success=True, message="ok", data={
+        "fp_concurrency": current,
+        "min": GEN_CONCURRENCY_MIN,
+        "max": GEN_CONCURRENCY_MAX,
+    })
+
+
+@router.put("/generation", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def set_generation_settings(
+    req: GenerationSettingRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """设置 FP 子批并发度（立即生效，无需重启；下一次生成任务读取新值）。
+
+    1 = 串行回退（与 v3.5.4 行为一致）；2-5 = 受控并发（Semaphore 限流）。
+    """
+    await session.execute(
+        delete(KBSetting).where(KBSetting.key == GEN_CONCURRENCY_SETTING_KEY)
+    )
+    session.add(KBSetting(key=GEN_CONCURRENCY_SETTING_KEY, value=str(req.fp_concurrency)))
+    await session.commit()
+    return ApiResponse(success=True,
+                       message=f"生成并发度已更新为 {req.fp_concurrency}"
+                               + ("（串行模式）" if req.fp_concurrency == 1 else ""),
+                       data={"fp_concurrency": req.fp_concurrency})

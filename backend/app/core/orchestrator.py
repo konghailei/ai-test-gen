@@ -1216,60 +1216,193 @@ class Orchestrator:
                            str(_fp_err)[:140])
 
         # 1) 各功能点分片定向生成（小 prompt）
-        for fp in fp_list:
+        # v3.5.4（docs/21 D-5）：大 FP 按要点类型二次分片。
+        # 增量文档常把几十个要点塞进同一个 FP（v2.0 实测 1 FP/97 要点 →
+        # 单分片 prompt 膨胀 → LLM 覆盖面不足，覆盖率仅 26.8%）。
+        # 对要点数 > _BIG_FP_POINT_THRESHOLD 的 FP，按要点类型分组拆成多批，
+        # 每批只携带本批要点（fp_scope 机制复用），prompt 缩小、覆盖聚焦。
+        from app.utils.coverage import collect_points as _collect_points
+
+        def _split_big_fp(fp: dict) -> list[dict]:
+            """单 FP 要点数超阈值时按要点类型分组切子批；否则返回原 [fp]。"""
+            sub = fp.get("srr_json") if isinstance(fp.get("srr_json"), dict) else {}
+            pts = _collect_points(srr, [fp])
+            if len(pts) <= 40:
+                return [fp]
+            # 分组键：happy_path / alt_flow / rule+shared_rule / data / 其余扩展类型
+            def _gk(p: dict) -> str:
+                t = p.get("ptype", "")
+                if t == "happy_path":
+                    return "happy_path"
+                if t in ("alt_flow", "alternate_flow"):
+                    return "alt_flow"
+                if t in ("rule", "shared_rule"):
+                    return "rule"
+                if t == "data":
+                    return "data"
+                return "extended"
+
+            groups: dict[str, list[dict]] = {}
+            for p in pts:
+                groups.setdefault(_gk(p), []).append(p)
+            # 只有一个组（全部同类型超限）→ 按数量对半切，避免死循环
+            if len(groups) == 1:
+                only = next(iter(groups.values()))
+                mid = len(only) // 2
+                groups = {"part1": only[:mid], "part2": only[mid:]}
+            shards: list[dict] = []
+            for gk, gpts in groups.items():
+                if not gpts:
+                    continue
+                shard = dict(fp)
+                shard["srr_json"] = dict(sub or {})
+                # 注入本批要点清单：GenAgent prompt 构建读取 points 字段做定向
+                shard["srr_json"]["points"] = [
+                    {"id": p["id"], "type": p["ptype"], "description": p["desc"],
+                     "priority": p["priority"]} for p in gpts
+                ]
+                shard["name"] = f"{fp.get('name', '')} [{gk}]"
+                shards.append(shard)
+            logger.info(
+                "[Orchestr] 大FP[{}]要点数={} 超阈值，按类型二次分片为 {} 批: {}",
+                fp.get("name", ""), len(pts), len(shards),
+                {k: len(v) for k, v in groups.items()},
+            )
+            return shards
+
+        # ── v3.5.5（docs/22 方案①）：FP 子批受控并发生成 ──
+        # FP 之间无数据依赖（各生成各的，汇合点统一三道去重：同名 / 3-gram / semantic 0.92），
+        # 原串行循环是纯浪费（自举验证实测 3 FP 串行 LLM ≈ 43.5min）。
+        # 并发度从 kb_settings 动态读取（设置页可调，改后立即对下一次生成生效）；
+        # 1 = 串行回退（与 v3.5.4 行为完全一致）。
+        #
+        # 关键语义保持（docs/22 §1 可行性验证结论）：
+        #   a) checkpoint 完成即写：每次写入都是全量覆盖（fp_groups 整体重写），
+        #      任意完成交织下单调递增、最终一致，无需加锁；
+        #      纪律 = append 与 save 必须在同一完成回调内成对出现。
+        #   b) 进度事件按 fp_id key 刷新 + 全量快照下发，乱序安全，前端零改动。
+        #   c) 单 FP 失败不阻断其它 FP（N9 降级标记语义不变）。
+        #   d) D-5 大 FP 子批在单 FP 任务内仍串行（共享该 FP 的要点上下文）。
+        gen_fp_conc = 3
+        try:
+            from app.db.database import async_session as _gs_session
+            from app.api.settings import get_gen_fp_concurrency as _get_conc
+            async with _gs_session() as _s:
+                gen_fp_conc = await _get_conc(_s)
+        except Exception as e:
+            logger.warning("[Orchestrator] 读取生成并发配置失败（用默认 3）: {}", str(e)[:100])
+        _pending_fps = [fp for fp in fp_list if fp.get("id") not in completed_fps]
+        logger.info("[Orchestrator] FP 并发度={}（pending FP={} 个）", gen_fp_conc, len(_pending_fps))
+
+        async def _gen_one_fp(fp: dict) -> None:
+            """单 FP（含其 D-5 子批）完整生成：局部收集 → 完成回调内合并 + checkpoint。"""
             fid = fp.get("id", "")
             fname = fp.get("name", "")
-            if fid in completed_fps:
-                continue
-            await _emit_gen(
-                f"功能点 [{fname}] 生成中...",
-                {"key": fid, "name": fname, "status": "generating", "cases": 0},
-            )
+            # v3.5.4 D-5：大 FP 二次分片（要点级定向，prompt 缩小）
             try:
-                fp_cases = await gen_agent.generate(
-                    srr,
-                    enable_multi_type=enable_multi_type,
-                    impact_guidance=impact_guidance,
-                    functional_points=[fp],
-                    fp_scope=fp,
-                    historical_regression=state.get("test_design_blueprint", {}).get(
-                        "historical_regression_cases", []
-                    ),
-                    coverage_gaps=state.get("test_design_blueprint", {}).get(
-                        "coverage_gaps", []
-                    ),
-                )
+                shards = _split_big_fp(fp)
             except Exception as e:
-                # v3.3（修 N9）：生成通道失败会**静默减少用例数量**——
-                # done 事件只报"流水线完成"，用户不知道少了哪些功能点的用例。
-                logger.warning(
-                    "[Orchestrator] 功能点[{}]分片生成失败（不阻断，续跑将重试）: {}",
-                    fname, str(e)[:150],
-                )
-                if "fp_generate_failed" not in degraded_flags:
-                    degraded_flags.append("fp_generate_failed")
-                await _emit_gen(
-                    f"功能点 [{fname}] 生成失败",
-                    {"key": fid, "name": fname, "status": "failed", "cases": 0},
-                )
-                continue
-            for c in fp_cases:
-                if not c.get("related_fp"):
-                    c["related_fp"] = fid
-            resolved_cases.extend(fp_cases)
+                logger.warning("[Orchestrator] FP[{}] 二次分片失败（回退整 FP 生成）: {}", fname, str(e)[:120])
+                shards = [fp]
+            fp_cases_all: list[dict] = []   # 局部收集（并发下不直接 extend 共享列表）
+            shard_total_cases = 0
+            single_shard_failed = False     # 单分片 FP 失败：跳过完成回调（原语义：续跑重试）
+            async with _gen_sem:
+                for _si, shard in enumerate(shards, 1):
+                    shard_name = shard.get("name", fname)
+                    if len(shards) > 1:
+                        await _emit_gen(
+                            f"功能点 [{fname}] 子批 {_si}/{len(shards)} 生成中...",
+                            {"key": fid, "name": fname, "status": "generating", "cases": shard_total_cases},
+                        )
+                    else:
+                        await _emit_gen(
+                            f"功能点 [{shard_name}] 生成中...",
+                            {"key": fid, "name": fname, "status": "generating", "cases": 0},
+                        )
+                    try:
+                        fp_cases = await gen_agent.generate(
+                            srr,
+                            enable_multi_type=enable_multi_type,
+                            impact_guidance=impact_guidance,
+                            functional_points=[shard],
+                            fp_scope=shard,
+                            historical_regression=state.get("test_design_blueprint", {}).get(
+                                "historical_regression_cases", []
+                            ),
+                            coverage_gaps=state.get("test_design_blueprint", {}).get(
+                                "coverage_gaps", []
+                            ),
+                        )
+                    except Exception as e:
+                        # v3.3（修 N9）：生成通道失败会**静默减少用例数量**——
+                        # done 事件只报"流水线完成"，用户不知道少了哪些功能点的用例。
+                        logger.warning(
+                            "[Orchestrator] 功能点[{}]分片生成失败（不阻断，续跑将重试）: {}",
+                            fname, str(e)[:150],
+                        )
+                        if "fp_generate_failed" not in degraded_flags:
+                            degraded_flags.append("fp_generate_failed")
+                        await _emit_gen(
+                            f"功能点 [{fname}] 生成失败",
+                            {"key": fid, "name": fname, "status": "failed", "cases": shard_total_cases},
+                        )
+                        fp_cases = []
+                        # 子批失败不阻断其它子批，但该 FP 计为失败批次（与原语义一致）
+                        if len(shards) == 1:
+                            single_shard_failed = True
+                            break
+                    for c in fp_cases:
+                        if not c.get("related_fp"):
+                            c["related_fp"] = fid
+                    fp_cases_all.extend(fp_cases)
+                    shard_total_cases += len(fp_cases)
+            # ── 完成回调：合并 + checkpoint（append 与 save 成对、全量覆盖收敛）──
+            # v3.5.5 守卫修复：单分片 FP 失败时不进入完成回调（与 v3.5.4 原语义一致：
+            # 失败 FP 不写 checkpoint、不发 done → 续跑时 completed_fps 不含它，会重试）。
+            # 若这里无条件执行，失败 FP 会被记成"完成 0 条"，续跑被跳过、永不重试。
+            if single_shard_failed:
+                return
+            resolved_cases.extend(fp_cases_all)
             checkpoint_groups.append({
                 "fp_id": fid, "fp_name": fname,
-                "case_count": len(fp_cases), "cases": list(fp_cases),
+                "case_count": shard_total_cases, "cases": list(fp_cases_all),
             })
             await _emit_gen(
-                f"功能点 [{fname}] 生成完成：{len(fp_cases)} 条",
-                {"key": fid, "name": fname, "status": "done", "cases": len(fp_cases)},
+                f"功能点 [{fname}] 生成完成：{shard_total_cases} 条"
+                + (f"（{len(shards)} 子批）" if len(shards) > 1 else ""),
+                {"key": fid, "name": fname, "status": "done", "cases": shard_total_cases},
             )
             try:
                 await self._save_gen_checkpoint(task_id, checkpoint_groups, fingerprint=checkpoint_fingerprint)
             except Exception as e:
                 logger.debug("[Orchestrator] checkpoint 写入失败（不阻断）: {}", str(e)[:120])
 
+        if gen_fp_conc <= 1 or len(_pending_fps) <= 1:
+            # 串行回退（v3.5.4 行为）；单 FP 也无需并发开销
+            _gen_sem = asyncio.Semaphore(1)  # _gen_one_fp 内引用，占位保证定义完整
+            for fp in _pending_fps:
+                await _gen_one_fp(fp)
+        else:
+            _gen_sem = asyncio.Semaphore(gen_fp_conc)
+            _gather_results = await asyncio.gather(
+                *[_gen_one_fp(fp) for fp in _pending_fps], return_exceptions=True
+            )
+            # gather 兜底：任务级异常（理论上 _gen_one_fp 内部已捕获 LLM 错误，
+            # 此处只防 _emit_gen / checkpoint 等基础设施异常导致该 FP 静默丢失）
+            for fp, r in zip(_pending_fps, _gather_results):
+                if isinstance(r, BaseException):
+                    fid, fname = fp.get("id", ""), fp.get("name", "")
+                    logger.warning(
+                        "[Orchestrator] 功能点[{}]并发任务异常（不阻断，续跑将重试）: {}",
+                        fname, str(r)[:150],
+                    )
+                    if "fp_generate_failed" not in degraded_flags:
+                        degraded_flags.append("fp_generate_failed")
+                    await _emit_gen(
+                        f"功能点 [{fname}] 生成失败",
+                        {"key": fid, "name": fname, "status": "failed", "cases": 0},
+                    )
         # v3.1.7 修复：FP 为空时的批量兜底通道。
         # v3.1.3 FP 分片改造后，无功能点需求（FP 拆分失败/被跳过/极简需求）会静默
         # 生成 0 条用例（FP 循环不执行、集成通道无 cross_fp 数据也不执行）。
@@ -1729,6 +1862,36 @@ class Orchestrator:
                 "skip_reason": "publication_blocked",
                 "reasons": publication.get("reasons", []),
             }
+        elif publication["decision"] == "partial_block" and reviewed_cases:
+            # v3.5.2（docs/21 方案B"剔坏留好"）：partial_block 允许回流——
+            # persist_to_kb 内部会剔除坏条进 error_cases，剩余按置信度分级入库。
+            # 批次级质量信号（coverage 等）通过 degraded 标记 + publication 透出。
+            logger.warning(
+                "[Orchestrator] ✂ 发布决策=partial_block，执行剔坏留好回流: {}",
+                publication.get("case_level_reasons"),
+            )
+            if "publication_partial_block" not in _degraded:
+                _degraded.append("publication_partial_block")
+            try:
+                kb_result = await review_agent.persist_to_kb(
+                    srr, reviewed_cases, report, publication_context=publication_context,
+                )
+                logger.info(
+                    "[Orchestrator] partial_block 剔坏留好回流完成: purged={}, auto_approved={}, pending={}, rejected={}",
+                    kb_result.get("purged_cases", 0),
+                    kb_result.get("auto_approved", 0),
+                    kb_result.get("pending_review", 0),
+                    kb_result.get("rejected", 0),
+                )
+                if kb_result.get("vector_write_failed"):
+                    report["vector_write_failed"] = kb_result["vector_write_failed"]
+                    report.setdefault("warnings", []).append(
+                        f"{kb_result['vector_write_failed']} 条用例的 Milvus 向量写入失败，"
+                        "PG 已入库但回归检索基线缺失；请检查 Milvus 服务后重新批量审核补写。"
+                    )
+            except Exception as kb_exc:
+                logger.error("[Orchestrator] partial_block 回流异常: {}", str(kb_exc)[:200])
+                kb_result = {"error": str(kb_exc)[:300]}
         elif reviewed_cases:
             try:
                 kb_result = await review_agent.persist_to_kb(

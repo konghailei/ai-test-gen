@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database, Image, Sparkles, Code } from 'lucide-react'
+import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database, Image, Sparkles, Code, Zap } from 'lucide-react'
 import { settings as settingsApi, health, auth, knowledge } from '../api/client'
 import type { LLMConfig, LLMProviderItem, HealthStatus } from '../types'
 
@@ -49,6 +49,25 @@ export default function Settings() {
   const [visionLlmProviders, setVisionLlmProviders] = useState<Array<{ provider: string; provider_label: string; model: string }>>([])
   const [visionLlmLoading, setVisionLlmLoading] = useState(false)
 
+  // v3.5.5: 生成性能（FP 子批并发开关）
+  const [fpConcurrency, setFpConcurrency] = useState<number>(3)
+  const [fpConcurrencyRange, setFpConcurrencyRange] = useState<{ min: number; max: number }>({ min: 1, max: 5 })
+  const [fpConcurrencySaving, setFpConcurrencySaving] = useState(false)
+
+  const loadGeneration = () => {
+    settingsApi.getGeneration().then(r => {
+      setFpConcurrency(r.fp_concurrency)
+      setFpConcurrencyRange({ min: r.min, max: r.max })
+    }).catch(() => {})
+  }
+
+  const handleFpConcurrencyChange = (v: number) => {
+    setFpConcurrencySaving(true)
+    settingsApi.setGeneration(v).then(() => {
+      setFpConcurrency(v)
+    }).catch(() => {}).finally(() => setFpConcurrencySaving(false))
+  }
+
   const loadKbLlm = () => {
     knowledge.getKbLlm().then(r => {
       setKbLlmProvider(r.provider || '')
@@ -77,6 +96,7 @@ export default function Settings() {
     }).catch(() => {}).finally(() => setLoading(false))
     loadKbLlm()
     loadVisionLlm()
+    loadGeneration()
   }
 
   useEffect(() => { loadSettings() }, [])
@@ -631,6 +651,43 @@ export default function Settings() {
             {visionLlmLoading && <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'var(--foreground-tertiary)' }} />}
           </div>
         )}
+      </div>
+
+      {/* v3.5.5: 生成性能（FP 子批并发开关） */}
+      <div className="card">
+        <h2 className="section-title flex items-center gap-2 mb-4">
+          <Zap className="w-4 h-4" style={{ color: 'var(--state-warning)' }} /> 生成性能
+        </h2>
+        <p className="text-xs mb-4" style={{ color: 'var(--foreground-tertiary)' }}>
+          控制测试用例生成时各功能点的并发数。并发越高生成越快，但会同时占用多个 LLM 请求；若供应商出现限流或超时，可调低或改为串行。修改后对下一次生成任务立即生效。
+        </p>
+        <div className="flex items-center gap-3">
+          <span className="text-sm" style={{ color: 'var(--foreground-secondary)' }}>功能点并发数：</span>
+          <select
+            value={fpConcurrency}
+            onChange={e => handleFpConcurrencyChange(Number(e.target.value))}
+            disabled={fpConcurrencySaving}
+            className="select-field text-sm max-w-[160px]"
+          >
+            {Array.from(
+              { length: fpConcurrencyRange.max - fpConcurrencyRange.min + 1 },
+              (_, i) => fpConcurrencyRange.min + i
+            ).map(v => (
+              <option key={v} value={v}>
+                {v === 1 ? '1（串行，最稳）' : `${v} 路${v >= 4 ? '（最快，需供应商支持）' : ''}`}
+              </option>
+            ))}
+          </select>
+          {fpConcurrencySaving && <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'var(--foreground-tertiary)' }} />}
+          {fpConcurrency === 1 && !fpConcurrencySaving && (
+            <span className="text-xs" style={{ color: 'var(--foreground-tertiary)' }}>当前为串行模式（与旧版本行为一致）</span>
+          )}
+          {fpConcurrency >= 4 && !fpConcurrencySaving && (
+            <span className="inline-flex items-center gap-1 text-xs" style={{ color: 'var(--state-warning)' }}>
+              <AlertCircle className="w-3 h-3" /> 高并发可能触发供应商限流
+            </span>
+          )}
+        </div>
       </div>
 
       {/* 系统信息 */}
