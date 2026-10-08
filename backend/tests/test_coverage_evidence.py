@@ -279,9 +279,73 @@ def test_normalize_structured_ids_drops_unknown_keeps_valid():
 
 
 def test_normalize_does_not_touch_notes_annotation():
-    """notes 兜底标注（启发式）不归本函数管——只处理结构化字段。"""
+    """notes 覆盖段合法标注不动——只修复清单外编号。"""
     from app.utils.coverage import normalize_structured_point_ids
     cases = [{"notes": "覆盖: [happy_path.1]", "covered_point_ids": ["happy_path.1"]}]
     assert normalize_structured_point_ids(cases, _srr(1), []) == 0
     assert cases[0]["notes"] == "覆盖: [happy_path.1]"
+
+
+def test_normalize_fixes_bare_id_in_notes_via_related_fp():
+    """自举验证实测缺陷（防线不对称）：FP 分片生成时 LLM 在 notes 写裸形态
+    [rule.1]（清单实际是 REQ-xxx.rule.1），旧版 normalize 只清结构化字段不清
+    notes → 裸 ID 被 extract 捞出 → invalid_point_references 全批阻断。
+    修复后：notes 覆盖段的裸 ID 按 related_fp 补前缀挽救。"""
+    from app.utils.coverage import normalize_structured_point_ids
+    fp_id = "REQ-001"
+    fp = {
+        "id": fp_id,
+        "name": "登录",
+        "srr_json": {
+            "requirement": {"id": fp_id, "priority": "P1"},
+            "flows": {"happy_path": {"steps": [{"action": "输入密码"}]}},
+            "business_rules": [{"rule": "密码 8 位起"}],
+        },
+    }
+    srr = _srr(1)
+    cases = [{
+        "related_fp": fp_id,
+        "covered_point_ids": ["happy_path.1", f"{fp_id}.happy_path.1", f"{fp_id}.rule.1"],
+        "notes": "覆盖: [happy_path.1] [rule.1]；技术: 场景法",
+        "gen_metadata": {"notes": "覆盖: [happy_path.1] [rule.1]"},
+    }]
+    fixed = normalize_structured_point_ids(cases, srr, [fp])
+    assert fixed == 1
+    # notes 覆盖段：裸 rule.1 → 前缀补全（结构化字段本已合法，不动）
+    assert cases[0]["notes"] == "覆盖: [happy_path.1] [" + fp_id + ".rule.1]；技术: 场景法"
+    assert cases[0]["gen_metadata"]["notes"] == "覆盖: [happy_path.1] [" + fp_id + ".rule.1]"
+    # 修复后 extract 不再产生裸 ID
+    assert extract_point_ids(cases[0]) == {"happy_path.1", f"{fp_id}.happy_path.1", f"{fp_id}.rule.1"}
+
+
+def test_normalize_drops_unmappable_bare_id_in_notes():
+    """related_fp 为空或映射不上的裸 ID：从 notes 覆盖段剔除，正文不动。"""
+    from app.utils.coverage import normalize_structured_point_ids
+    cases = [{
+        "covered_point_ids": ["happy_path.1"],
+        "notes": "覆盖: [happy_path.1] [rule.99]；技术: 边界值",
+    }]
+    fixed = normalize_structured_point_ids(cases, _srr(1), [])
+    assert fixed == 1
+    assert cases[0]["notes"] == "覆盖: [happy_path.1]；技术: 边界值"
+    assert cases[0]["covered_point_ids"] == ["happy_path.1"]
+
+
+def test_normalize_prefixed_bare_id_in_structured_field_rescued():
+    """结构化字段里的裸 ID：related_fp 能映射 → 补前缀挽救（旧版直接剔）。"""
+    from app.utils.coverage import normalize_structured_point_ids
+    fp_id = "REQ-002"
+    fp = {
+        "id": fp_id,
+        "name": "上传",
+        "srr_json": {
+            "requirement": {"id": fp_id, "priority": "P1"},
+            "business_rules": [{"rule": "单文件 ≤10MB"}],
+        },
+    }
+    srr = _srr(1)
+    cases = [{"related_fp": fp_id, "covered_point_ids": ["happy_path.1", "rule.1"]}]
+    fixed = normalize_structured_point_ids(cases, srr, [fp])
+    assert fixed == 1
+    assert cases[0]["covered_point_ids"] == ["happy_path.1", f"{fp_id}.rule.1"]
 

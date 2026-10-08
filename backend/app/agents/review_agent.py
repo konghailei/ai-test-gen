@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 from app.core.llm_client import llm_client
@@ -1091,7 +1092,67 @@ class ReviewAgent:
                 decision.get("reasons"),
             )
             return stats
-        auto_allowed = decision["decision"] == "auto_approve"
+        # v3.5.2（docs/21 方案B"剔坏留好"）：partial_block 时先剔除内容级坏条
+        # （进 error_cases 隔离），剩余条按置信度正常分级入库。
+        # 坏条来源：① 审核 blocker issues（带 case_id，可精确定位）
+        #           ② validation_issues 的 cases[N] 路径（结构合同失败）
+        purged_ids: set[str] = set()
+        purged_cases: list[dict] = []
+        if decision["decision"] == "partial_block":
+            for issue in report.get("issues", []):
+                if isinstance(issue, dict) and issue.get("severity") == "blocker":
+                    cid = issue.get("case_id", "")
+                    if cid:
+                        purged_ids.add(cid)
+            content_errors = validation_issues(reviewed_cases)
+            case_path_re = re.compile(r"^cases\[(\d+)\]")
+            for err in content_errors:
+                m = case_path_re.match(str(err))
+                if m and int(m.group(1)) < len(reviewed_cases):
+                    cid = reviewed_cases[int(m.group(1))].get("id", "")
+                    if cid:
+                        purged_ids.add(cid)
+            if purged_ids and reviewed_cases:
+                kept = [c for c in reviewed_cases if c.get("id", "") not in purged_ids]
+                purged_cases = [c for c in reviewed_cases if c.get("id", "") in purged_ids]
+                if not kept:
+                    # 兜底 fail-closed：剔除后无存活条 → 退化为整批拒绝
+                    stats["skipped"] = True
+                    stats["skip_reason"] = "publication_blocked_after_purge"
+                    stats["blocked_reasons"] = decision.get("case_level_reasons", [])
+                    logger.error(
+                        "[ReviewAgent] ⛔ partial_block 剔除后无存活用例，退化为整批拒绝: {}",
+                        sorted(purged_ids),
+                    )
+                    return stats
+                stats["purged_cases"] = len(purged_cases)
+                stats["purged_case_ids"] = sorted(purged_ids)
+                logger.warning(
+                    "[ReviewAgent] ✂ 发布决策=partial_block，剔除 {} 条坏条进 error_cases"
+                    "（{} 条好条按置信度正常入库）: {}",
+                    len(purged_cases), len(kept), sorted(purged_ids),
+                )
+                reviewed_cases = kept
+            else:
+                # 无法定位坏条（理论上不该发生）：fail-closed 保持整批拒绝
+                stats["skipped"] = True
+                stats["skip_reason"] = "publication_blocked_unlocalizable"
+                stats["blocked_reasons"] = decision.get("case_level_reasons", [])
+                logger.error(
+                    "[ReviewAgent] ⛔ partial_block 但无法定位坏条，保持整批拒绝（fail-closed）"
+                )
+                return stats
+        # v3.5.4（D-3 终版）：auto_allowed 由「决策类型白名单」改为「内容级缺陷判定」。
+        # 连坐问题的完整形态（docs/21 §5）：
+        #   - 初版：仅 auto_approve 可 auto → partial_block 批次全部降级（v3.5.2 已修）
+        #   - 残留：quality_gate_forced / human_review 等批次级信号继续连坐——
+        #     v2.0 实证 31 条置信度 0.831-0.922（全部 ≥0.70 auto 档）且
+        #     case_level_reasons=[] 却全部 reviewed。
+        # 本质：批次级信号（gate 强制放行、覆盖率不足）描述的是批次处境，
+        # 与单条用例自身质量无关；内容级缺陷已由 case_level_reasons 独立判定。
+        # 故：无内容级缺陷（case_level_reasons 为空）→ 高置信条照常 auto；
+        #     有内容级缺陷 → 维持人工审查（防线不放松）。
+        auto_allowed = not decision.get("case_level_reasons")
 
         # 获取 blocker 用例 ID 集合
         blocked_case_ids = set()
@@ -1135,6 +1196,54 @@ class ReviewAgent:
         reviewed_cases = deduped_cases
 
         async with async_session() as session:
+            # v3.5.2（方案B"剔坏留好"）：partial_block 剔除的坏条先落 error_cases
+            # （隔离留档，供后续 ReviewAgent 学习与提示词改进），不进主用例库。
+            # 外键顺序：先 flush test_cases 的 draft 占位行，再写 error_cases。
+            if purged_cases:
+                for pcase in purged_cases:
+                    pid = pcase.get("id", "")
+                    try:
+                        existing_pid = (
+                            await session.execute(
+                                select(TestCaseModel.id).where(TestCaseModel.id == pid)
+                            )
+                        ).scalar_one_or_none()
+                        if existing_pid is None:
+                            session.add(TestCaseModel(
+                                id=pid,
+                                req_id=req_id,
+                                product_id=product_id,
+                                module=modules[0] if modules else "",
+                                modules=modules,
+                                title=pcase.get("title", ""),
+                                type=pcase.get("type", "functional"),
+                                priority=pcase.get("priority", "P1"),
+                                status="draft",
+                                case_json={**pcase, "publication": {**decision, "purged": True}},
+                                source=self._resolve_case_source(pcase),
+                                confidence=pcase.get("confidence", 0.0),
+                                gen_batch_id=batch_id,
+                            ))
+                            await session.flush()
+                        perr_reason = "；".join(decision.get("case_level_reasons", [])) or "content_blocker"
+                        session.add(ErrorCase(
+                            error_id=gen_error_id(),
+                            original_case_id=pid,
+                            error_type="blocked_content",
+                            error_detail=f"发布门禁 partial_block 剔除: {perr_reason}",
+                            feedback={"reason": "partial_block_purge",
+                                      "case_level_reasons": decision.get("case_level_reasons", [])},
+                            corrected_json=pcase,
+                        ))
+                        stats["purged_recorded"] = stats.get("purged_recorded", 0) + 1
+                    except Exception as pe:
+                        # 坏条留档失败不阻断好条入库，但必须可见
+                        logger.error(
+                            "[ReviewAgent/KB] partial_block 坏条 {} 留档失败（不阻断）: {}",
+                            pid, str(pe)[:120],
+                        )
+                        stats["purged_record_errors"] = stats.get("purged_record_errors", 0) + 1
+
             for case in reviewed_cases:
                 case_id = case.get("id", gen_test_case_id())
                 confidence = case.get("confidence", 0.0)

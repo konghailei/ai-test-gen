@@ -157,3 +157,4 @@ backend/tests/_e2e_*.py
 # marktext 便携版（用于人工核对 xmind/markdown 导出效果）
 tests/marktext-x64-win.zip
 tests/marktext-x64-win/
+_dogfood_tmp/

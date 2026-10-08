@@ -258,7 +258,7 @@ def normalize_structured_point_ids(
     srr: dict,
     functional_points: list[dict],
 ) -> int:
-    """规范化结构化 `covered_point_ids`：剔除清单里不存在的编号（就地修改）。
+    """规范化结构化 `covered_point_ids` 与 notes 覆盖段：修复清单外编号（就地修改）。
 
     背景（v3.4）：生成 prompt 要求 LLM 直接输出结构化 covered_point_ids；
     LLM 可能编造清单里没有的编号，而 calc_point_coverage 会把未知引用记为
@@ -266,23 +266,94 @@ def normalize_structured_point_ids(
     （**含前置条件**——合法 ID 集 ≠ 覆盖分母，见 calc_point_coverage 注释）中的
     编号剔除，notes 兜底与启发式回填逻辑不受影响。
 
+    v3.5.1（自举验证实测缺陷，防线对称性修复）：normalize 原先只处理
+    covered_point_ids 结构化字段，但 extract_point_ids 还会从 **notes 方括号
+    标注**（POINT 正则）与标题/描述/步骤（BARE 正则）提取 ID——LLM 按 prompt
+    示例在 notes 写裸形态 `[rule.1]`（清单里实际是 `REQ-xxx.rule.1`），这些裸
+    ID 不在 known_ids → 依旧触发 invalid_point_references 全批阻断。
+    修复分两步，优先挽救而非丢弃：
+    1. **前缀补全**：裸 `rule.N`/`data.N` 等形态若 `related_fp + 裸ID` 在合法
+       集合中（用例 related_fp 已指向 FP），改写为带前缀的合法 ID（结构化字段
+       与 notes 覆盖段同步改写）；
+    2. **剔除兜底**：无法映射的清单外编号从结构化字段与 notes 覆盖段中移除
+       （正文文本不动——那是给用户读的描述）。
+
     Returns:
-        int: 被剔除编号的用例数量。
+        int: 被修复（补前缀或剔除）编号的用例数量。
     """
     known_ids = {
         p["id"]
         for p in collect_points(srr, functional_points or [], include_preconditions=True)
     }
+
+    # 裸 ID → 带前缀合法 ID 的映射（基于 related_fp）
+    _BARE_ID_RE = re.compile(
+        r"^(happy_path|alternate_flow|alt_flow|rule|data|precondition|shared_rule|"
+        r"non_functional|api|role|dependency|ui_rule)\.\d+$"
+    )
+
+    def _normalize_one(bare_id: str, related_fp: str) -> str | None:
+        """裸 ID 补前缀；成功返回合法 ID，失败返回 None。已是合法 ID 原样返回。"""
+        if bare_id in known_ids:
+            return bare_id
+        if _BARE_ID_RE.match(bare_id) and related_fp:
+            prefixed = f"{related_fp}.{bare_id}"
+            if prefixed in known_ids:
+                return prefixed
+        return None
+
     fixed = 0
     for c in cases or []:
         if not isinstance(c, dict):
             continue
+        related_fp = str(c.get("related_fp") or "")
+        changed = False
+
+        # 1) 结构化字段：逐条尝试补前缀，映射失败才剔除
         ids = c.get("covered_point_ids")
-        if not isinstance(ids, list):
-            continue
-        valid = [str(i) for i in ids if str(i) in known_ids]
-        if len(valid) != len(ids):
-            c["covered_point_ids"] = valid
+        if isinstance(ids, list):
+            new_ids: list[str] = []
+            for raw in ids:
+                pid = str(raw)
+                mapped = _normalize_one(pid, related_fp)
+                if mapped is None:
+                    changed = True  # 剔除清单外编号
+                    continue
+                if mapped != pid:
+                    changed = True
+                new_ids.append(mapped)
+            if changed:
+                c["covered_point_ids"] = new_ids
+
+        # 2) notes 覆盖段：对「覆盖:」后方括号标注做同样的补前缀/剔除
+        notes = c.get("notes")
+        if isinstance(notes, str) and "覆盖" in notes:
+            def _rewrite_note(m: re.Match) -> str:
+                nonlocal changed
+                pid = m.group(1)
+                mapped = _normalize_one(pid, related_fp)
+                if mapped is None:
+                    changed = True
+                    return ""  # 从 notes 覆盖段剔除
+                if mapped != pid:
+                    changed = True
+                    return f"[{mapped}]"
+                return m.group(0)
+
+            new_notes = re.sub(r"\[([^\[\]]+?)\]", _rewrite_note, notes)
+            new_notes = re.sub(r"覆盖:\s*(；|\s)*$", "", new_notes)   # 移除空覆盖段
+            new_notes = re.sub(r"\s+([；;])", r"\1", new_notes)       # 剔除后残留空格
+            new_notes = re.sub(r"\s{2,}", " ", new_notes).strip()
+            if changed:
+                c["notes"] = new_notes
+                gm = c.get("gen_metadata")
+                if isinstance(gm, dict) and isinstance(gm.get("notes"), str):
+                    gm_notes = re.sub(r"\[([^\[\]]+?)\]", _rewrite_note, gm["notes"])
+                    gm_notes = re.sub(r"覆盖:\s*(；|\s)*$", "", gm_notes)
+                    gm_notes = re.sub(r"\s+([；;])", r"\1", gm_notes)
+                    gm["notes"] = re.sub(r"\s{2,}", " ", gm_notes).strip()
+
+        if changed:
             fixed += 1
     return fixed
 

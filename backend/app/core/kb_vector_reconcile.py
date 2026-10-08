@@ -190,6 +190,23 @@ async def scan_orphan_vectors(coll_key: str = "requirements") -> dict[str, Any]:
             valid[key] = {str(x) for x in
                           (await s.execute(text(sql))).scalars().all()}
 
+        # v3.5.4 修复 D-6：CRSR 整理版向量的 ID 不是表主键，而是由
+        # (product_id, fp_name) 派生的确定性哈希（crsr_vector_id，MD5 前 16 位）。
+        # 此前白名单漏 CRSR 体系 → 全部整理版向量被误判孤儿（实测 93 条 / 54.4%），
+        # 若执行 kb_orphan_gc.py --apply 会误删全部整理版成果。
+        # 修复：按派生算法重算全部合法 CRSR 向量 ID（与生成侧同源，永不漂移）。
+        try:
+            from app.core.fp_crsr import crsr_vector_id
+            crsr_rows = (await s.execute(text(
+                "SELECT product_id, fp_name FROM functional_point_crsr"
+            ))).fetchall()
+            valid["fp_crsr"] = {
+                crsr_vector_id(pid, fp_name) for pid, fp_name in crsr_rows
+            }
+        except Exception as e:  # noqa: BLE001 - 表不存在等场景保守跳过，不影响其它类型
+            logger.warning("[KBReconcile] CRSR 合法 ID 集重算失败（跳过）: {}", str(e)[:120])
+            valid["fp_crsr"] = set()
+
     from app.db.milvus_store import vector_store
 
     vector_store._ensure_connected()

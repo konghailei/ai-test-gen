@@ -28,6 +28,7 @@ SSE 事件格式（由 orchestrator.make_sse_event 产生）：
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -133,15 +134,18 @@ async def generate_test_cases(
     # v1.6：仅 confirmed（确认完成）状态的需求可生成测试用例。
     # 用户需先确认 SRR 内容、功能点、影响分析无误后，通过 POST /{req_id}/confirm 确认，
     # 状态变为 confirmed 后方可生成。
-    if requirement.status != "confirmed":
+    # v3.5.3：archived 需求允许 resume 续跑（归档后重新生成走 resume 语义，
+    # 不破坏归档状态；全新生成仍要求 confirmed）。
+    if requirement.status != "confirmed" and not (req.resume and req.resume_from_task):
         logger.warning(
-            "[API/generate] 需求状态非 confirmed，拒绝生成: req_id={}, status={}",
-            req.req_id, requirement.status,
+            "[API/generate] 需求状态非 confirmed，拒绝生成: req_id={}, status={}, resume={}",
+            req.req_id, requirement.status, req.resume,
         )
         raise HTTPException(
             status_code=409,
             detail=f"需求状态为 {requirement.status}，仅 confirmed（确认完成）状态可生成测试用例。"
-                   f"请先确认需求分析结果（SRR/功能点/影响分析）后再试。",
+                   f"请先确认需求分析结果（SRR/功能点/影响分析）后再试。"
+                   f"（archived 需求可用 resume 续跑）",
         )
 
     # v3.1.3 修复 P2：confirmed 后重跑影响分析会写入新的未确认候选条目，
@@ -259,7 +263,11 @@ async def generate_test_cases(
     )
 
     async def _update_gen_task(**fields) -> None:
-        """更新生成任务状态（静默失败，不阻断 SSE 流）。"""
+        """更新生成任务状态（静默失败，不阻断 SSE 流）。
+
+        v3.5.3：失败日志升 WARNING 并打印完整异常——取消路径的收尸 task
+        若静默失败（原 DEBUG 级 + 空 message），缺陷会伪装成"收尸从未执行"。
+        """
         try:
             from sqlalchemy import update as sa_update
             async with async_session() as s:
@@ -269,11 +277,36 @@ async def generate_test_cases(
                 ).values(**fields)
                 await s.execute(stmt)
                 await s.commit()
+        except asyncio.CancelledError:
+            logger.warning("[API/generate] 收尸 task 被取消（进程关闭中，交给看门狗兜底）: task_id={}", task_id)
+            raise
         except Exception as e:
-            logger.debug("[API/generate] 更新任务状态失败: {}", str(e)[:120])
+            logger.warning("[API/generate] 更新任务状态失败: task_id={}, err={}", task_id, repr(e)[:200])
 
     # Request-local state shared with aclose; do not reference a nested local.
     aborted = {"flag": False}
+
+    async def _shielded_reaper(tid: str, progress: int) -> None:
+        """v3.5.3.1：shield 包裹的收尸任务。
+
+        - shield：即使创建它的请求 scope 被整体取消（应用关闭），收尸仍能跑完；
+        - 显式 status 守卫（IN pending,running）：任务已终态时 UPDATE 匹配 0 行，幂等。
+        """
+        try:
+            await asyncio.shield(_update_gen_task(
+                status="aborted",
+                phase="generate",
+                progress=max(0, progress),
+                message="生成已被中断（连接断开，可用断点续跑恢复）",
+                error="SSE cancelled: client disconnected or server shutdown",
+                completed_at=datetime.now(timezone.utc),
+            ))
+            logger.warning("[API/generate] ✅ SSE 断连收尸完成: task_id={}", tid)
+        except asyncio.CancelledError:
+            logger.error("[API/generate] ⚠️ 收尸 task 也被取消（应用正在关闭，交给重启清扫兜底）: task_id={}", tid)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[API/generate] ⚠️ 收尸 task 异常: task_id={}, err={}", tid, repr(e)[:200])
+
     # SSE 事件生成器：包装 orchestrator.run_pipeline 的 AsyncGenerator
     async def event_generator():
         """SSE 事件生成器。
@@ -459,6 +492,28 @@ async def generate_test_cases(
                     "event": "message",
                     "data": json.dumps(event, ensure_ascii=False, default=str),
                 }
+        except asyncio.CancelledError:
+            # v3.5.3 修复缺陷①（SSE 断连协程静默消失）：
+            # 客户端断连 → sse-starlette task_group.cancel_scope.cancel() →
+            # CancelledError 注入本生成器（except Exception 接不住，它是
+            # BaseException）→ 流水线协程连同 LLM 流式调用一起被取消。
+            # 此时本 scope 已被取消，任何 await 都会立刻再抛 Cancelled——
+            # DB 收尸必须抛到取消 scope 之外执行（create_task 新任务）。
+            # _update_gen_task 自带 status IN (pending, running) 守卫：
+            # 任务已 completed/failed 时 UPDATE 匹配 0 行，天然幂等。
+            logger.warning(
+                "[API/generate] SSE 生成器被取消（客户端断连/服务关闭）: task_id={}",
+                task_id,
+            )
+            _progress = getattr(event_generator, "_last_progress", 0)
+            # v3.5.3.1：改用 ShieldedReaper——裸 create_task 在「整个应用关闭」
+            # （uvicorn reload / 容器重启）时会被事件循环顺手取消，收尸再次失败
+            # （09-30 09:06:53 实证）。shield + 独立 task 让收尸不受外层取消影响；
+            # 进程真死时由重启清扫（database.py init_db）+ 看门狗双兜底。
+            asyncio.get_running_loop().create_task(_shielded_reaper(
+                task_id, _progress,
+            ))
+            raise  # 取消必须继续传播，不能吞掉
         except Exception as e:
             # 兜底：orchestrator 内部未捕获的异常（正常情况已被 run_pipeline 的
             # try/except 捕获并 yield error 事件，此处为防御性处理）
@@ -479,16 +534,19 @@ async def generate_test_cases(
                 "data": json.dumps(error_event, ensure_ascii=False),
             }
         finally:
-            # 修复 H6：generator 正常/异常/被 aclose 三种终止路径统一进入 finally
-            # 只要还没完成且未失败/中止，客户端断连则写 aborted；
-            # 若任务 status 仍为 running（极端情况），也写入 unknown_abort，避免永久 running 幽灵。
+            # v3.5.3：不再在 finally 里 await is_disconnected()——取消路径下
+            # 该 await 会立即再抛 Cancelled，导致清理代码自身被掐断（原缺陷根因）。
+            # 取消路径的收尸已由 except CancelledError 分支的 create_task 完成；
+            # 正常完成路径 aborted["flag"] 为 False 且任务已是终态，
+            # 这里只在「非取消、未标记、未发 done/error」的遗漏场景兜底一次。
             if not aborted["flag"]:
                 try:
-                    # 无论如何尝试再检查一次连接；已 completed/failed 的任务状态不会变
                     if await request.is_disconnected():
                         await _mark_aborted("finally_client_disconnected")
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
-                    # 检查失败：用 DB 行状态兜底
+                    # 检查失败：收尸已由取消分支的 create_task 兜底
                     pass
 
     # 构建 EventSourceResponse，并把 generator 的 _mark_aborted 绑定到 response 的 aclose 钩子，

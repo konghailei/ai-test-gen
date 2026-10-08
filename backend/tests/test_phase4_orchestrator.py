@@ -1049,11 +1049,15 @@ async def test_review_supplement_failure_keeps_cases(result: TestResult):
 
 
 async def test_publication_gate_fail_closed(result: TestResult):
-    """畸形用例不得自动发布：不中断流水线、判 blocked、PG 与 Milvus 均不写入。
+    """畸形用例不得自动发布：不中断流水线、判 partial_block、坏条剔除好条不污染。
 
+    v3.5.2（docs/21 方案B"剔坏留好"）更新契约：
+    - 内容级缺陷 → partial_block（原 blocked 整批连坐已废弃）
+    - 坏条剔除（KB 回流统计 purged_cases），剩余条正常分级
+    - 本用例只有 1 条畸形用例 → 剔除后无存活 → fail-closed 退化为拒绝写入
     对应 docs/15 §4.1 验收：合同不合格的内容不能变成权威知识。
     """
-    print("\n[测试 12] 发布门禁 fail-closed")
+    print("\n[测试 12] 发布门禁 fail-closed（v3.5.2 剔坏留好）")
 
     from app.db.milvus_store import vector_store
 
@@ -1074,7 +1078,7 @@ async def test_publication_gate_fail_closed(result: TestResult):
 
     vector_store.add_test_case = _counting_add
     try:
-        # persist_to_kb 走真实实现：blocked 时必须在触碰 DB 之前返回
+        # persist_to_kb 走真实实现：单条畸形 → 剔除后无存活 → 必须拒绝写入
         events, _ = await collect_events_with_mocks(
             "用户登录功能",
             parse_return=SRR_P2_FAST,
@@ -1092,10 +1096,12 @@ async def test_publication_gate_fail_closed(result: TestResult):
 
     done = next((e for e in events if e["stage"] == "done"), {})
     publication = done.get("publication", {}) or {}
-    result.assert_eq("发布决策=blocked", publication.get("decision"), "blocked")
-    result.assert_true("原因含 invalid_case_content",
-                       "invalid_case_content" in (publication.get("reasons") or []))
-    result.assert_eq("终态 failed（不得 completed）", done.get("completion_status"), "failed")
+    result.assert_eq("发布决策=partial_block（剔坏留好）",
+                     publication.get("decision"), "partial_block")
+    result.assert_true("case_level_reasons 含 invalid_case_content",
+                       "invalid_case_content" in (publication.get("case_level_reasons") or []))
+    result.assert_eq("终态 awaiting_human_review（非 failed）",
+                     done.get("completion_status"), "awaiting_human_review")
     result.assert_true("需人工介入", done.get("manual_action_required") is True)
     result.assert_eq("Milvus 写入 0 次", vector_calls["n"], 0)
     result.assert_true("KB 回流已跳过", (done.get("kb_flowback") or {}).get("skipped") is True)
