@@ -136,6 +136,9 @@ backend/test_req_doc.md
 backend/clarify_v1_1_results.json
 # v3.0.0: 根目录下的一次性端到端验证目录（不入库）
 _e2e_v30/
+# v3.5.6: 同类一次性 E2E 验证目录（版本号后缀会变化，统一忽略）
+_e2e_v*/
+_e2e_v3*/
 # v2.8.60: 根目录临时报告文件（应归档到 docs/ 或删除）
 BUG_REPORT_*.md
 SECURITY-AUDIT-REPORT.md

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database, Image, Sparkles, Code, Zap } from 'lucide-react'
+import { Settings as SettingsIcon, Key, Server, RefreshCw, CheckCircle2, XCircle, Loader2, Eye, EyeOff, AlertCircle, Plus, Trash2, Star, Lock, Shield, Database, Image, Sparkles, Code, Zap, Power } from 'lucide-react'
 import { settings as settingsApi, health, auth, knowledge } from '../api/client'
 import type { LLMConfig, LLMProviderItem, HealthStatus } from '../types'
 
@@ -80,6 +80,23 @@ export default function Settings() {
       setVisionLlmProvider(r.provider || '')
       setVisionLlmProviders(r.providers || [])
     }).catch(() => {})
+  }
+
+  // v3.5.6: 供应商启停操作中状态
+  const [togglingProvider, setTogglingProvider] = useState<string | null>(null)
+
+  const handleToggleProvider = async (provider: string, currentEnabled: boolean) => {
+    const action = currentEnabled ? '禁用' : '启用'
+    if (!confirm(`确定要${action}供应商「${provider}」吗？` + (currentEnabled ? '禁用后该供应商不参与 LLM 调用。' : ''))) return
+    setTogglingProvider(provider)
+    try {
+      await settingsApi.setProviderEnabled(provider, !currentEnabled)
+      loadSettings()
+    } catch (e: any) {
+      alert(`${action}失败: ` + (e?.message || '未知错误'))
+    } finally {
+      setTogglingProvider(null)
+    }
   }
 
   const loadSettings = () => {
@@ -264,7 +281,23 @@ export default function Settings() {
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold" style={{ color: 'var(--foreground-secondary)' }}>{p.provider_label || p.provider}</span>
                       {p.is_primary && <span className="badge text-[10px]" style={{ background: 'rgba(0, 122, 255, 0.12)', color: 'var(--brand-500)' }}>主供应商</span>}
+                      {/* v3.5.6: 禁用状态标识 */}
+                      {p.enabled === false && (
+                        <span className="badge text-[10px]" style={{ background: 'var(--state-error-surface)', color: 'var(--state-error)' }}>
+                          已禁用（{p.disabled_by === 'manual' ? '人工' : '系统'}：{p.disabled_reason || '未知原因'}）
+                        </span>
+                      )}
                     </div>
+                    {/* v3.5.6: 启用/禁用开关 */}
+                    <button
+                      onClick={() => handleToggleProvider(p.provider, p.enabled !== false)}
+                      disabled={togglingProvider === p.provider}
+                      className="btn-secondary text-xs py-1"
+                      title={p.enabled === false ? '重新启用该供应商' : '禁用该供应商（不参与 LLM 调用）'}
+                    >
+                      {togglingProvider === p.provider ? <Loader2 className="w-3 h-3 animate-spin" /> : <Power className="w-3 h-3" />}
+                      {p.enabled === false ? '启用' : '禁用'}
+                    </button>
                   </div>
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div><span style={{ color: 'var(--foreground-tertiary)' }}>标识</span><br /><span className="font-medium" style={{ color: 'var(--foreground-secondary)' }}>{p.provider}</span></div>

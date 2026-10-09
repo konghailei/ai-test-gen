@@ -93,6 +93,8 @@ async def init_db() -> None:
         FunctionalPointCases,
         # v3.4: 评估运行记录（prompt 候选激活的服务器端证据，docs/15 §4.5 P0-5）
         EvaluationRun,
+        # v3.5.6: 管理员通知（LLM 供应商禁用/全败告警）
+        AdminNotification,
         # v3.4: 向量库写入出箱（PG→Milvus 事务性 outbox，docs/15 §4.4）
         VectorOutbox,
     )
@@ -211,6 +213,13 @@ async def init_db() -> None:
             # v2.23: 任务阶段耗时追踪
             "analysis_tasks": [
                 ("phase_timings", "JSON NOT NULL DEFAULT '{}'::json", "phase_timings"),
+            ],
+            # v3.5.6: LLM 供应商启用/禁用开关（持久化禁用，取代进程内存临时禁用）
+            "llm_config": [
+                ("enabled", "BOOLEAN NOT NULL DEFAULT TRUE", "enabled"),
+                ("disabled_reason", "TEXT NOT NULL DEFAULT ''", "disabled_reason"),
+                ("disabled_by", "VARCHAR(16) NOT NULL DEFAULT ''", "disabled_by"),
+                ("disabled_at", "TIMESTAMP WITH TIME ZONE", "disabled_at"),
             ],
             # v2.45: fp_dependency_version_items 跨需求双向追溯字段
             # 该表为 v2.45 新表，整体由 create_all 创建；此处补条目是为

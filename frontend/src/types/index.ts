@@ -265,6 +265,15 @@ export interface SSEEvent extends GenerationResult {
   supplement_iteration?: number
   should_supplement?: boolean
   test_design?: Record<string, unknown>
+  /** v3.5.6: LLM 供应商等待重试提示（generate 阶段） */
+  wait_retry?: {
+    message: string
+    level: string
+    attempt: number
+    total_retries: number
+    /** 倒计时片：剩余秒数（level='countdown' 时携带） */
+    remain_sec?: number
+  }
   consistency_check?: {
     is_inconsistent?: boolean
     count_diff_pct?: number
@@ -421,6 +430,23 @@ export interface LLMProviderItem {
   enable_thinking?: boolean
   /** v2.37: 自定义思考参数（JSON 字符串，为空时使用内置规则） */
   thinking_params?: string
+  /** v3.5.6: 启用/禁用开关（持久化；禁用后不参与 LLM 调用） */
+  enabled?: boolean
+  disabled_reason?: string
+  disabled_by?: '' | 'manual' | 'system'
+  disabled_at?: string | null
+}
+
+/** v3.5.6: 管理员通知 */
+export interface AdminNotificationItem {
+  id: number
+  type: string
+  title: string
+  content: string
+  related_type: string
+  related_id: string
+  is_read: boolean
+  created_at: string | null
 }
 
 export interface LLMConfig {

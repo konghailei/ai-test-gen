@@ -852,6 +852,25 @@ export const settings = {
       method: 'PUT',
       body: JSON.stringify({ fp_concurrency }),
     }),
+  // v3.5.6: 供应商启用/禁用（持久化，管理员手动操作）
+  setProviderEnabled: (provider: string, enabled: boolean) =>
+    request<{ provider: string; enabled: boolean }>(`/settings/llm/${encodeURIComponent(provider)}/enabled`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+  // v3.5.6: 管理员通知
+  listNotifications: (params: { only_unread?: boolean; page?: number; page_size?: number } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.only_unread) sp.set('only_unread', 'true')
+    sp.set('page', String(params.page || 1))
+    sp.set('page_size', String(params.page_size || 20))
+    return request<{ items: Array<{ id: number; type: string; title: string; content: string; related_type: string; related_id: string; is_read: boolean; created_at: string | null }>; total: number; unread: number; page: number; page_size: number }>(`/settings/notifications?${sp}`)
+  },
+  markNotificationsRead: (ids?: number[]) =>
+    request<{ marked: number }>('/settings/notifications/read', {
+      method: 'POST',
+      body: JSON.stringify(ids || null),
+    }),
 }
 
 // ============================================================

@@ -196,7 +196,9 @@ class LLMClient:
     """
 
     # 重试配置（docs/03 §6.3）
-    MAX_ATTEMPTS = 5
+    # v3.5.6：单供应商内重试 5 → 3（"三次失败则切换供应商"，与大方向一致）。
+    # 429 限流单独处理（见 _call_with_retry 内的限流分支），不计入本次数。
+    MAX_ATTEMPTS = 3
     BASE_DELAY = 1.0
     MAX_DELAY = 60.0
     # v3.1.3 流式空闲超时（秒）：两个 chunk 之间超过该时长无数据视为链路死亡。
@@ -211,15 +213,42 @@ class LLMClient:
     # **跳过剩余重试直接切换备用提供商**，不乘 MAX_ATTEMPTS。
     DEFAULT_FIRST_RESPONSE_TIMEOUT = 180
 
+    # v3.5.6：**等待重试轮**的首响应超时收紧值（秒）。
+    # 背景（2026-10-09 实证）：原 240s 总预算已取消，挂起防护靠首响应超时。
+    # 但"三家全败后等待 60s 再重试"的轮次里，若仍用 180s，单次 call 最坏
+    # 3 轮 × 3 家 × 180s + 2×60s 等待 ≈ 30 分钟，链路过长。
+    # 首轮保留 180s（避免误杀"prefill 慢但最终能出结果"的慢模型）；
+    # 重试轮收紧到 60s——前提是"刚才已经失败过"，60s 无任何输出基本可判定未恢复。
+    DEFAULT_RETRY_FIRST_RESPONSE_TIMEOUT = 60
+
     # 故障转移配置（docs/03 §6.4）
+    # v3.5.6：PROVIDER_FAILURE_THRESHOLD/_DISABLE_SECONDS 语义变更——
+    # 软失败（超时/5xx/重试耗尽）不再触发**跨调用**禁用（原实现是内存禁用 600s，
+    # 重启即失效、多进程不一致，且"自动恢复后反复撞死供应商"）；改由调用内
+    # 等待重试兜底。硬失败（401/403/额度耗尽）→ **持久化禁用**（DB enabled=false，
+    # 不自动恢复，管理员手动启用）+ 写管理员通知。
+    # 以下两常量仅保留给传统单例回退路径的兼容判断，新逻辑不再主动设置内存禁用。
     PROVIDER_FAILURE_THRESHOLD = 3
-    PROVIDER_DISABLE_SECONDS = 600  # 10 分钟
+    PROVIDER_DISABLE_SECONDS = 600  # 兼容保留，新逻辑不再用于自动恢复
+
+    # v3.5.6：等待重试配置。
+    # 三家全败 → 等待 WAIT_RETRY_INTERVAL 秒后重试，最多额外 RETRY_ROUNDS 轮
+    # （即总尝试轮次 = 1 + RETRY_ROUNDS = 3；失败则抛出，前端提示人工排查）。
+    WAIT_RETRY_INTERVAL = 60       # 每轮等待秒数
+    RETRY_ROUNDS = 2               # 额外重试轮数（总 3 轮）
+    COUNTDOWN_TICK = 5             # v3.5.6: 等待期倒计时推送间隔（秒）
 
     # v3.4.2：单次 call() 的总墙钟预算（秒），跨 provider × 跨重试累计。
     # 供应商全挂时应快速失败并提示更换供应商，而不是逐家等满 180s 首响应超时
     # （3 家 × 180s ≈ 9 分钟，再叠加重试可达数十分钟）。优先读
     # settings.LLM_CALL_TOTAL_BUDGET。
-    DEFAULT_CALL_TOTAL_BUDGET = 240
+    # v3.5.6（2026-10-08 自举复测实证）：**此机制已默认停用**（DEFAULT=0 / settings=0）。
+    # 240s 总预算与首响应超时/流空闲超时语义重叠，且会把推理模型的正常长生成
+    # 拦腰截断（实证：火山 glm-5.3-flash 解析 9K 需求流式全程 279-370s 正常吐字）。
+    # 两道精准超时（首响应 180s / 流空闲 180s）已覆盖"挂起"与"断流"两类故障，
+    # 供应商全挂时 3 家 × 180s ≈ 9 分钟内必然失败返回，无需总预算。
+    # 常量保留供显式配置回退参考（settings.LLM_CALL_TOTAL_BUDGET > 0 时生效）。
+    DEFAULT_CALL_TOTAL_BUDGET = 0
 
     # v3.4.3 修复 L-15：厂商"不支持流式"的**精确**错误短语白名单。
     # 原判定是「错误里含 stream 且含 support/invalid/unknown/not found」——过宽：
@@ -241,9 +270,20 @@ class LLMClient:
         """初始化客户端。"""
         self._breaker = CircuitBreaker()
         # 提供商连续失败计数：{provider_key: failures}
+        # v3.5.6：仍保留用于"调用内"判断，但不再据此做跨调用内存禁用。
         self._provider_failures: dict[str, int] = {}
         # 提供商禁用截止时间：{provider_key: disabled_until_timestamp}
+        # v3.5.6：**保留仅为向后兼容**（历史调用方可能读取）。新逻辑改用 DB
+        # `llm_config.enabled` 持久化禁用（硬失败），不再设置内存禁用。
         self._provider_disabled_until: dict[str, float] = {}
+        # v3.5.6：DB 级禁用缓存 —— {provider_name: {"enabled": bool, "reason": str}}
+        # 由 settings 加载/API 更新时刷新（见 app.api.settings._apply_config_to_settings），
+        # 供 _candidate_providers 过滤。进程内存，重启后由 DB 重建，主责仍以 DB 为准。
+        self._db_disabled_providers: dict[str, dict] = {}
+        # v3.5.6：等待重试回调（ContextVar，orchestrator 注入，用于推 SSE 进度提示）。
+        # 签名：async def cb(message: str, level: str, attempt: int, total: int) -> None
+        from contextvars import ContextVar
+        self._wait_retry_cb: ContextVar = ContextVar("llm_wait_retry_cb", default=None)
         # 最近一次调用使用的模型名（用于错误报告）
         self._last_model: str = ""
         # 优化 4：LLM 响应缓存（进程内 LRU，仅缓存 temperature=0 的确定性调用）
@@ -390,90 +430,161 @@ class LLMClient:
             raise err
 
         start_ts = time.time()
-        # v3.4.2：单次调用的总墙钟预算（跨 provider × 跨重试累计）。
-        # 供应商全挂时立即失败并提示更换供应商，不再逐家等满 180s 首响应超时。
-        budget = int(getattr(settings, "LLM_CALL_TOTAL_BUDGET", 0) or self.DEFAULT_CALL_TOTAL_BUDGET)
-        deadline = start_ts + budget
+        # v3.5.6：**取消总墙钟预算**（原 v3.4.2 LLM_CALL_TOTAL_BUDGET=240s。
+        # 2026-10-08 自举复测实证其误杀正常生成：火山 glm-5.3-flash 解析 9K 需求时
+        # 思考 45.8K 字符、流式全程 279-370s 且 chunk 持续到达无停滞，240s 预算把
+        # 生成中的请求拦腰截断，再逐家转移到同样耗尽预算的备用家 → 报"三家全部不可用"。
+        # 挂起/死亡链路防护由两道**精准的**超时兜底，总预算语义与之重叠且更粗暴：
+        #   - 首响应超时 LLM_FIRST_RESPONSE_TIMEOUT=180s：连接+prefill 期间无任何输出
+        #     （含思考）→ 切供应商（防"完全挂起"）；
+        #   - 流空闲超时 STREAM_IDLE_TIMEOUT=180s：首响应后无新 chunk → 切供应商
+        #     （防"吐到一半断流"）。
+        # 供应商全挂场景：3 家 × 180s 首响应 ≈ 9 分钟内必然失败返回，无需总预算兜底。
+        # 变量保留读取（settings 显式配置 >0 时仍生效，兼容存量部署），默认无总预算。
+        budget = int(getattr(settings, "LLM_CALL_TOTAL_BUDGET", 0) or 0)
+        deadline = start_ts + budget if budget > 0 else None
         last_error: Exception | None = None
         last_provider_key = ""
         failure_notes: list[str] = []
         attempted = 0
 
-        for prov in providers:
-            remaining = deadline - time.time()
-            if remaining <= 3:
-                logger.warning(
-                    "[LLM] 调用总预算 {}s 已耗尽，跳过剩余 {} 家提供商（已尝试 {} 家）",
-                    budget, len(providers) - attempted, attempted,
-                )
-                break
-            attempted += 1
-            last_provider_key = prov["key"]
-            try:
-                content, usage, model_used = await self._call_with_retry(
-                    prov, messages, temperature, response_format, max_tokens, deadline=deadline
-                )
-                self._breaker.record_success()
-                self._provider_failures.pop(prov["key"], None)
-                # 优化 4：写入缓存（仅 temperature=0 的确定性调用）
-                if temperature == 0:
-                    self._cache_put(cache_key, content)
-                    logger.debug("[LLM] 缓存写入: key={}", cache_key[:12])
-                duration_ms = int((time.time() - start_ts) * 1000)
-                if not _skip_log:
-                    await self._log_call(
-                        agent_name, system_prompt or "", prompt, content, None,
-                        temperature, duration_ms, usage, True, "",
-                        model_used=model_used,
-                        provider_used=prov["key"],
+        # ── v3.5.6：外层"等待重试"循环（大哥方案）──
+        # 第 1 轮：正常尝试所有候选（首响应超时 180s，避免误杀慢模型）；
+        # 全败 → 若还有可试的候选，推 SSE 提示 + 等待 60s → 第 2 轮；
+        # 第 2 轮全败 → 同样等待后再试（第 3 轮）；
+        # 第 3 轮全败 → 抛错（前端提示人工排查）+ 写管理员通知。
+        # 重试轮的首响应超时收紧到 60s（"刚才已失败过"，60s 无输出基本可判定未恢复）。
+        # 若候选全部被**持久化禁用**（硬失败），等待无意义 → 立即失败。
+        total_rounds = self.RETRY_ROUNDS + 1
+        for _round in range(0, total_rounds):
+            # 每轮重新构建候选：上一轮可能已把硬失败家持久化禁用（_db_disabled_providers）
+            round_providers = (
+                providers if _round == 0
+                else self._candidate_providers(model, provider=provider)
+            )
+            if not round_providers:
+                break  # 已无可用候选（全被禁用）→ 等待重试无意义
+            # 重试轮收紧首响应超时
+            first_resp_timeout = (
+                None if _round == 0 else self.DEFAULT_RETRY_FIRST_RESPONSE_TIMEOUT
+            )
+            round_failed = 0
+            for prov in round_providers:
+                remaining = (deadline - time.time()) if deadline is not None else None
+                if remaining is not None and remaining <= 3:
+                    logger.warning(
+                        "[LLM] 调用总预算 {}s 已耗尽，跳过剩余 {} 家提供商（已尝试 {} 家）",
+                        budget, len(round_providers) - round_failed, attempted,
                     )
-                if return_usage:
-                    return content, usage, model_used, prov["key"]
-                return content
-            except _FirstResponseTimeoutError as e:
-                # v3.3（N4 根治）：模型在首响应预算内无任何输出（含思考内容）
-                # → 直接切换备用提供商，不重试同一模型
-                last_error = e
-                self._record_provider_failure(prov)
-                failure_notes.append(f"{prov['key']} 首响应超时")
-                logger.warning(
-                    "提供商 {} 首响应超时，切换备用: {}",
-                    prov["key"],
-                    str(e)[:200],
-                )
-            except _RetryableError as e:
-                # 重试耗尽 → 记录失败，尝试下一提供商
-                last_error = e
-                self._record_provider_failure(prov)
-                failure_notes.append(f"{prov['key']} 重试耗尽")
-                logger.warning(
-                    "提供商 {} 重试耗尽，尝试故障转移: {}",
-                    prov["key"],
-                    str(e)[:200],
-                )
-            except _NonRetryableError as e:
-                # 4xx 等不可重试错误 → 直接故障转移（docs/03 §6.3：4xx 不重试）
-                # v3.4.2：额度耗尽/认证失败属"硬失败"，立即禁用该提供商（不等累计 3 次），
-                # 使当前调用马上换下一家、后续调用直接跳过它。
-                last_error = e
-                self._disable_provider_now(prov, reason=str(e)[:80])
-                failure_notes.append(f"{prov['key']} {str(e)[:60]}")
-                logger.warning("提供商 {} 不可重试错误，故障转移: {}", prov["key"], str(e)[:200])
+                    break
+                attempted += 1
+                last_provider_key = prov["key"]
+                try:
+                    content, usage, model_used = await self._call_with_retry(
+                        prov, messages, temperature, response_format, max_tokens,
+                        deadline=deadline, first_response_timeout=first_resp_timeout,
+                    )
+                    self._breaker.record_success()
+                    self._provider_failures.pop(prov["key"], None)
+                    # 优化 4：写入缓存（仅 temperature=0 的确定性调用）
+                    if temperature == 0:
+                        self._cache_put(cache_key, content)
+                        logger.debug("[LLM] 缓存写入: key={}", cache_key[:12])
+                    duration_ms = int((time.time() - start_ts) * 1000)
+                    if not _skip_log:
+                        await self._log_call(
+                            agent_name, system_prompt or "", prompt, content, None,
+                            temperature, duration_ms, usage, True, "",
+                            model_used=model_used,
+                            provider_used=prov["key"],
+                        )
+                    if _round > 0:
+                        logger.info(
+                            "[LLM] 等待重试第 {} 轮成功：provider={}, 耗时={:.0f}s",
+                            _round, prov["key"], time.time() - start_ts,
+                        )
+                    if return_usage:
+                        return content, usage, model_used, prov["key"]
+                    return content
+                except _FirstResponseTimeoutError as e:
+                    # v3.3（N4 根治）：模型在首响应预算内无任何输出（含思考内容）
+                    # → 直接切换备用提供商，不重试同一模型
+                    last_error = e
+                    self._record_provider_failure(prov)
+                    failure_notes.append(f"{prov['key']} 首响应超时")
+                    logger.warning(
+                        "提供商 {} 首响应超时，切换备用: {}",
+                        prov["key"],
+                        str(e)[:200],
+                    )
+                except _RetryableError as e:
+                    # 重试耗尽 → 记录失败，尝试下一提供商
+                    last_error = e
+                    self._record_provider_failure(prov)
+                    failure_notes.append(f"{prov['key']} 重试耗尽")
+                    logger.warning(
+                        "提供商 {} 重试耗尽，尝试故障转移: {}",
+                        prov["key"],
+                        str(e)[:200],
+                    )
+                except _NonRetryableError as e:
+                    # 4xx 等不可重试错误 → 直接故障转移（docs/03 §6.3：4xx 不重试）
+                    # v3.4.2：额度耗尽/认证失败属"硬失败"
+                    # v3.5.6：硬失败 → **持久化禁用**（DB enabled=false + 通知管理员），
+                    # 不再自动恢复 600s（原实现会反复撞同一家死供应商）。
+                    last_error = e
+                    await self._disable_provider_now(prov, reason=str(e)[:80])
+                    failure_notes.append(f"{prov['key']} {str(e)[:60]}")
+                    logger.warning("提供商 {} 不可重试错误，已持久化禁用并故障转移: {}",
+                                   prov["key"], str(e)[:200])
+                round_failed += 1
 
-        # 所有提供商均失败（或总预算耗尽）
+            # 本轮结束判定：是否还有下一轮可试
+            if _round >= total_rounds - 1:
+                break
+            next_providers = self._candidate_providers(model, provider=provider)
+            if not next_providers:
+                break  # 下一轮已无候选（全被禁用）→ 不等了
+            # 推 SSE 提示 + 等待
+            wait_sec = self.WAIT_RETRY_INTERVAL
+            await self._emit_wait_retry(_round + 1, total_rounds - 1, wait_sec, len(next_providers))
+            logger.warning(
+                "[LLM] 第 {} 轮全部失败，等待 {}s 后重试（剩余 {} 家候选）",
+                _round + 1, wait_sec, len(next_providers),
+            )
+            # v3.5.6：等待期间分批推送倒计时（让前端有直观反馈；
+            # 按 COUNTDOWN_TICK 秒一片，最后一片落在 0）。
+            _tick = self.COUNTDOWN_TICK
+            _elapsed = 0
+            while _elapsed < wait_sec:
+                _sleep = min(_tick, wait_sec - _elapsed)
+                await asyncio.sleep(_sleep)
+                _elapsed += _sleep
+                await self._emit_wait_countdown(
+                    _round + 1, total_rounds - 1, max(0, wait_sec - _elapsed)
+                )
+
+        # 所有提供商均失败（或总预算耗尽 / 全被禁用）
         self._breaker.record_failure()
         duration_ms = int((time.time() - start_ts) * 1000)
         detail = "；".join(failure_notes[:4]) if failure_notes else str(last_error or "")
-        hint = "请到「系统设置 → LLM 供应商」更换可用供应商，或检查 API Key / 额度。"
+        hint = "请到「系统设置 → LLM 供应商」检查供应商状态（可能已被禁用），或等待其恢复后重试。"
         if attempted == 0:
             err = LLMNoProviderAvailable(
                 f"所有 LLM 提供商均不可用（候选 {len(providers)} 家当前均处于禁用期）。{hint}"
             )
         else:
             err = LLMNoProviderAvailable(
-                f"所有 LLM 提供商均不可用（已尝试 {attempted} 家，耗时 {duration_ms // 1000}s）。{hint}"
+                f"所有 LLM 提供商均不可用（已重试 {total_rounds} 轮、尝试 {attempted} 家，"
+                f"耗时 {duration_ms // 1000}s）。{hint}"
                 + (f" 明细：{detail}" if detail else "")
             )
+        # v3.5.6：写管理员通知（软失败耗尽也通知，便于及时排查）
+        try:
+            from app.core.provider_admin import notify_all_providers_failed
+            await notify_all_providers_failed(attempted, detail or str(last_error or ""), agent_name)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[LLM] 写全败通知失败（不阻断）: {}", str(e)[:120])
         if not _skip_log:
             await self._log_call(
                 agent_name, system_prompt or "", prompt, "", None,
@@ -481,6 +592,42 @@ class LLMClient:
                 provider_used=last_provider_key,
             )
         raise err
+
+    async def _emit_wait_retry(self, round_no: int, total_retry_rounds: int,
+                               wait_sec: int, candidates: int) -> None:
+        """推送"等待重试"提示（经 orchestrator 注入的回调 → SSE）。
+
+        无回调时（如后台脚本、非 SSE 场景）只记日志，不报错。
+        """
+        cb = self._wait_retry_cb.get()
+        msg = (
+            f"LLM 供应商暂不可用，{wait_sec}s 后自动重试"
+            f"（第 {round_no}/{total_retry_rounds} 次重试，剩余 {candidates} 家候选）"
+        )
+        logger.warning("[LLM] {}", msg)
+        if cb is None:
+            return
+        try:
+            await cb(msg, "error", round_no, total_retry_rounds)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[LLM] 等待重试回调失败（不阻断）: {}", str(e)[:120])
+
+    async def _emit_wait_countdown(self, round_no: int, total_retry_rounds: int,
+                                   remain_sec: int) -> None:
+        """推送等待倒计时（v3.5.6）。
+
+        与 `_emit_wait_retry` 共用回调，但走 `level='countdown'` 语义，
+        前端据此刷新剩余秒数而不重复弹新提示条。
+        """
+        cb = self._wait_retry_cb.get()
+        if cb is None:
+            return
+        msg = f"等待供应商恢复…{remain_sec}s 后重试（第 {round_no}/{total_retry_rounds} 次）"
+        try:
+            await cb(msg, "countdown", round_no, total_retry_rounds,
+                     {"remain_sec": remain_sec})
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[LLM] 倒计时回调失败（不阻断）: {}", str(e)[:120])
 
     async def call_json(
         self,
@@ -617,13 +764,15 @@ class LLMClient:
         # v3.4.4（自审补漏 N-3）：多模态链路此前没有总预算，供应商全挂时会逐家等满
         # provider.timeout（默认 300s）× 最多 5 次重试 ≈ 数十分钟。现与文本链路对齐：
         # 总预算内逐家故障转移，预算耗尽立即失败并给出可行动的提示。
+        # v3.5.6：与文本链路同步——总预算默认取消（settings 显式配置 >0 才生效），
+        # 挂起防护由视觉链路自身的 wait_for 超时兜底（见 _call_vision_with_retry）。
         start_ts = time.time()
-        budget = int(getattr(settings, "LLM_CALL_TOTAL_BUDGET", 0) or self.DEFAULT_CALL_TOTAL_BUDGET)
-        deadline = start_ts + budget
+        budget = int(getattr(settings, "LLM_CALL_TOTAL_BUDGET", 0) or 0)
+        deadline = start_ts + budget if budget > 0 else None
         last_error: Exception | None = None
         attempted = 0
         for prov in providers:
-            if deadline - time.time() <= 3:
+            if deadline is not None and deadline - time.time() <= 3:
                 logger.warning(
                     "[LLM] 多模态调用总预算 {}s 已耗尽，跳过剩余 {} 家提供商（已尝试 {} 家）",
                     budget, len(providers) - attempted, attempted,
@@ -796,13 +945,20 @@ class LLMClient:
         all_configs: dict = getattr(settings, "_all_provider_configs", {})
         primary_provider = getattr(settings, "LLM_PROVIDER", "deepseek")
 
+        # v3.5.6：DB 持久化禁用判断（人工禁用 / 硬失败自动禁用）。
+        # 与内存禁用（_provider_disabled_until，历史兼容）取"与"关系：
+        # 任一判定为禁用即跳过该供应商。
+        def _is_db_disabled(p_name: str) -> bool:
+            info = self._db_disabled_providers.get(p_name)
+            return bool(info) and not info.get("enabled", True)
+
         # 若指定了 provider，优先返回该供应商，并追加其他可用供应商作为故障转移候选
         # v2.27: 旧版指定 provider 时仅返回该供应商，若其调用失败（如 403/额度耗尽）
         # 无故障转移目标，直接报"所有 LLM 提供商均不可用"。现改为追加备用供应商，
         # 确保指定供应商失败后能自动回退到其他可用供应商。
         if provider and all_configs and provider in all_configs:
             cfg = all_configs[provider]
-            if cfg.get("api_key"):
+            if cfg.get("api_key") and not _is_db_disabled(provider):
                 key = f"{provider}:{cfg.get('model', '')}"
                 if self._provider_disabled_until.get(key, 0) < now:
                     primary_candidate = {
@@ -819,7 +975,7 @@ class LLMClient:
                         for p_name, p_cfg in all_configs.items():
                             if p_name == provider:
                                 continue
-                            if not p_cfg.get("api_key"):
+                            if not p_cfg.get("api_key") or _is_db_disabled(p_name):
                                 continue
                             b_key = f"{p_name}:{p_cfg.get('model', '')}"
                             if self._provider_disabled_until.get(b_key, 0) < now:
@@ -840,7 +996,7 @@ class LLMClient:
             # 主供应商
             if primary_provider in all_configs:
                 cfg = all_configs[primary_provider]
-                if cfg.get("api_key"):
+                if cfg.get("api_key") and not _is_db_disabled(primary_provider):
                     key = f"{primary_provider}:{cfg.get('model', '')}"
                     if self._provider_disabled_until.get(key, 0) < now:
                         candidates.append({
@@ -857,7 +1013,7 @@ class LLMClient:
                 for p_name, p_cfg in all_configs.items():
                     if p_name == primary_provider:
                         continue  # 主供应商已添加
-                    if not p_cfg.get("api_key"):
+                    if not p_cfg.get("api_key") or _is_db_disabled(p_name):
                         continue
                     key = f"{p_name}:{p_cfg.get('model', '')}"
                     if self._provider_disabled_until.get(key, 0) < now:
@@ -996,6 +1152,7 @@ class LLMClient:
         response_format: str | None,
         max_tokens: int | None,
         deadline: float | None = None,
+        first_response_timeout: int | None = None,
     ) -> str:
         """对单个提供商执行全抖动重试调用。
 
@@ -1008,6 +1165,9 @@ class LLMClient:
             deadline: 调用方给定的总预算截止时间戳（time.time() 口径）。
                 v3.4.2：到点即不再重试、且首响应等待不超过剩余预算，
                 避免供应商全挂时单次调用悬挂数十分钟。
+            first_response_timeout: v3.5.6 首响应超时**覆盖值**（秒）。
+                None 表示用 settings.LLM_FIRST_RESPONSE_TIMEOUT / 默认 180s；
+                等待重试轮传 60s（收紧，避免单次 call 链路过长）。
 
         Returns:
             tuple[str, dict, str]: (生成文本, token 使用量字典, 实际使用的模型名)
@@ -1021,6 +1181,7 @@ class LLMClient:
         last_error: Exception | None = None
         for attempt in range(1, self.MAX_ATTEMPTS + 1):
             # v3.4.2：调用方总预算耗尽则立即停止重试（避免"全挂"场景把时间耗在重试上）
+            # v3.5.6：总预算默认取消（deadline=None），仅显式配置时生效
             if deadline is not None and time.time() >= deadline - 2:
                 raise _RetryableError(
                     f"LLM 调用总预算耗尽（第 {attempt}/{self.MAX_ATTEMPTS} 次尝试前）: {last_error}"
@@ -1076,6 +1237,9 @@ class LLMClient:
                     getattr(settings, "LLM_FIRST_RESPONSE_TIMEOUT", 0)
                     or self.DEFAULT_FIRST_RESPONSE_TIMEOUT
                 )
+                # v3.5.6：等待重试轮的首响应超时收紧（调用方显式覆盖，如 60s）
+                if first_response_timeout is not None:
+                    _first_response_timeout = int(first_response_timeout)
                 # v3.4.2：首响应等待也不得超过调用总预算的剩余时间——
                 # 供应商全挂时避免"每家都等满 180s"把单次调用拖到数十分钟。
                 if deadline is not None:
@@ -1307,37 +1471,56 @@ class LLMClient:
         return False
 
     def _record_provider_failure(self, provider: dict) -> None:
-        """记录提供商失败，达阈值则临时禁用。
+        """记录提供商失败（调用内计数）。
+
+        v3.5.6 语义变更：**软失败不再触发跨调用禁用**。
+        原实现达 3 次即设内存禁用 600s——问题是：①内存禁用重启即失效、多进程不一致；
+        ②"自动恢复后又反复撞同一家慢/挂的供应商"（2026-10-09 实证：三家同时进禁用窗口，
+        导致整个 FP 的 5 个子批全部秒挂）。现在软失败（超时/5xx/重试耗尽）只在
+        **本次 call 内**让当前供应商让位给下一家，跨调用禁用交给等待重试兜底。
+        硬失败（401/403）请走 `_disable_provider_now`（持久化禁用）。
 
         Args:
             provider: 失败的提供商配置
         """
         key = provider["key"]
         self._provider_failures[key] = self._provider_failures.get(key, 0) + 1
-        if self._provider_failures[key] >= self.PROVIDER_FAILURE_THRESHOLD:
-            self._provider_disabled_until[key] = time.time() + self.PROVIDER_DISABLE_SECONDS
-            logger.warning(
-                "提供商 {} 连续失败 {} 次，临时禁用 {} 秒",
-                key,
-                self.PROVIDER_FAILURE_THRESHOLD,
-                self.PROVIDER_DISABLE_SECONDS,
-            )
+        logger.debug(
+            "[LLM] 提供商 {} 本次调用内失败计数={}（软失败不跨调用禁用，由等待重试兜底）",
+            key, self._provider_failures[key],
+        )
 
-    def _disable_provider_now(self, provider: dict, reason: str = "") -> None:
-        """立即禁用某提供商（不等累计阈值）。
+    async def _disable_provider_now(self, provider: dict, reason: str = "") -> None:
+        """**持久化**禁用某提供商（硬失败专用）。
 
-        v3.4.2：适用于"硬失败"——额度耗尽（403 Free quota exhausted）、认证失败（401）、
-        模型不存在等。这类错误**重试与等待都无意义**，立即禁用 10 分钟可让当前调用
-        立刻跳到下一家、后续调用直接跳过它，从而把"全挂"的判断从数十分钟压到一次探测。
+        v3.5.6：适用"硬失败"——额度耗尽（403 Free quota exhausted）、认证失败（401）、
+        模型不存在等。这类错误**重试与等待都无意义**。
+
+        改造要点（对比 v3.4.2 的内存禁用 600s）：
+        - 写 DB `llm_config.enabled=False` + disabled_reason + disabled_by='system'
+          + disabled_at，**不自动恢复**（原 600s 自动过期会反复撞死供应商）；
+        - 同步刷新内存缓存 `_db_disabled_providers`，使当前进程立刻跳过；
+        - 写管理员通知（admin_notifications）；
+        - 若被禁用的是主供应商，自动把主标记让给下一个启用中的供应商。
+        由管理员在「系统设置」手动重新启用。
         """
         key = provider["key"]
+        provider_name = provider.get("name") or key.split(":")[0]
         self._provider_failures[key] = max(
             self._provider_failures.get(key, 0), self.PROVIDER_FAILURE_THRESHOLD
         )
-        self._provider_disabled_until[key] = time.time() + self.PROVIDER_DISABLE_SECONDS
-        logger.warning(
-            "提供商 {} 立即禁用 {} 秒（{}）", key, self.PROVIDER_DISABLE_SECONDS, reason or "硬失败"
-        )
+        # 内存缓存同步禁用（立即生效，无需等配置重载）
+        self._db_disabled_providers[provider_name] = {
+            "enabled": False, "reason": reason or "硬失败",
+        }
+        logger.warning("[LLM] 提供商 {} 硬失败 → 持久化禁用（需人工重新启用）: {}",
+                       key, reason or "硬失败")
+        # 落库 + 通知（不阻断主流程）
+        try:
+            from app.core.provider_admin import disable_provider_persistently
+            await disable_provider_persistently(provider_name, reason or "硬失败")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[LLM] 持久化禁用写库失败（仅内存生效）: {}", str(e)[:150])
 
     async def _log_call(
         self,

@@ -227,6 +227,11 @@ class LLMConfigItem(BaseModel):
     is_primary: bool = Field(default=False, description="是否为主供应商")
     enable_thinking: bool = Field(default=False, description="是否启用思考模式（仅对支持思考的模型生效）")
     thinking_params: str = Field(default="", description="自定义思考参数（JSON 字符串，为空时使用内置规则）")
+    # v3.5.6: 启用/禁用开关（读响应返回；禁用原因/来源/时间也一并返回）
+    enabled: bool = Field(default=True, description="是否启用（False=已禁用，不参与调用）")
+    disabled_reason: str = Field(default="", description="禁用原因（人工禁用/系统硬失败原因）")
+    disabled_by: str = Field(default="", description="禁用来源：manual/system/空=未禁用")
+    disabled_at: str | None = Field(default=None, description="禁用时间（ISO 格式，未禁用为 null）")
 
 
 class LLMConfigRequest(BaseModel):

@@ -29,6 +29,7 @@ import Tasks from './pages/Tasks'
 import Logs from './pages/Logs'
 import Generate from './pages/Generate'
 import ReviewReports from './pages/ReviewReports'
+import Notifications from './pages/Notifications'
 
 /** 路由守卫：未登录 → 登录页 */
 function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -128,6 +129,7 @@ export default function App() {
           <Route path="roles" element={<AdminGuard><RoleManagement /></AdminGuard>} />
           <Route path="logs" element={<AdminGuard><Logs /></AdminGuard>} />
           <Route path="settings" element={<AdminGuard><Settings /></AdminGuard>} />
+          <Route path="notifications" element={<AdminGuard><Notifications /></AdminGuard>} />
           <Route path="*" element={<Navigate to="/admin" replace />} />
         </Route>
       </Routes>

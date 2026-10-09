@@ -22,6 +22,8 @@ export default function Layout() {
   const [pwdNew, setPwdNew] = useState('')
   const [pwdSaving, setPwdSaving] = useState(false)
   const [runningTaskCount, setRunningTaskCount] = useState(0)
+  // v3.5.6: 管理员通知未读数（铃铛角标）
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0)
 
   const handleChangePassword = async () => {
     if (!pwdCurrent || !pwdNew) return
@@ -69,6 +71,26 @@ export default function Layout() {
     const timer = setInterval(pollRunningCount, 5000)
     return () => clearInterval(timer)
   }, [])
+
+  // v3.5.6: 管理员通知未读数轮询（60s；仅管理员）
+  useEffect(() => {
+    if (!hasAdmin) return
+    const pollUnread = async () => {
+      const token = localStorage.getItem('aitestgen_token')
+      if (!token) return
+      try {
+        const res = await fetch('/api/settings/notifications?page=1&page_size=1', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!res.ok) return
+        const json = await res.json()
+        setUnreadNotifCount(json?.data?.unread || 0)
+      } catch { /* 忽略 */ }
+    }
+    pollUnread()
+    const timer = setInterval(pollUnread, 60000)
+    return () => clearInterval(timer)
+  }, [hasAdmin])
 
   const handleLogout = () => {
     logout()
@@ -337,6 +359,29 @@ export default function Layout() {
               <BookOpen className="w-[18px] h-[18px]" />
               <span className="hidden lg:inline">用户手册</span>
             </button>
+
+            {/* v3.5.6: 管理员通知铃铛（未读数角标） */}
+            {hasAdmin && (
+              <button
+                onClick={() => navigate('/admin/notifications')}
+                className="relative flex items-center gap-1.5 transition-colors"
+                style={{ height: 40, padding: '0 12px', borderRadius: 'calc(var(--radius) * 0.5)', fontSize: 13, color: 'var(--foreground-secondary)' }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--background-muted)' }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                title="通知消息"
+              >
+                <Bell className="w-[18px] h-[18px]" />
+                <span className="hidden lg:inline">通知</span>
+                {unreadNotifCount > 0 && (
+                  <span
+                    className="absolute flex items-center justify-center text-[10px] font-bold text-white"
+                    style={{ top: 4, right: 4, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 9, background: 'var(--state-error)' }}
+                  >
+                    {unreadNotifCount > 99 ? '99+' : unreadNotifCount}
+                  </span>
+                )}
+              </button>
+            )}
 
             {/* 用户区 */}
             <div className="relative" ref={userMenuRef}>

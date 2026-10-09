@@ -206,6 +206,13 @@ def _build_item(row: LLMConfigModel) -> LLMConfigItem:
         is_primary=row.is_primary or False,
         enable_thinking=row.enable_thinking or False,
         thinking_params=row.thinking_params or "",
+        # v3.5.6: 启用/禁用状态
+        enabled=getattr(row, "enabled", True),
+        disabled_reason=getattr(row, "disabled_reason", "") or "",
+        disabled_by=getattr(row, "disabled_by", "") or "",
+        disabled_at=(
+            row.disabled_at.isoformat() if getattr(row, "disabled_at", None) else None
+        ),
     )
 
 
@@ -253,10 +260,29 @@ async def load_db_config_to_settings(session: AsyncSession) -> None:
         # 迁移并加载所有供应商配置
         all_configs: list[dict] = []
         primary_config: dict | None = None
+        # v3.5.6：显式重建禁用缓存（唯一起源，避免残留/遗漏）。
+        # 背景：禁用的供应商在上面被 continue 跳过、不进 all_configs，
+        # 因此不会经过 _apply_config_to_settings → 缓存无法被填充。
+        # 这里在加载起点全量重建：先清空，再把每个禁用行写入缓存。
+        from app.core.llm_client import llm_client as _lc_sync
+        _lc_sync._db_disabled_providers.clear()
 
         for row in rows:
             raw_key = row.api_key or ""
             decrypted_key = ""
+            # v3.5.6：跳过被禁用的供应商（人工禁用/硬失败自动禁用），不参与主备选择
+            if not getattr(row, "enabled", True):
+                _lc_sync._db_disabled_providers[row.provider] = {
+                    "enabled": False,
+                    "reason": (getattr(row, "disabled_reason", "") or "已禁用"),
+                }
+                logger.info(
+                    "[settings] 供应商 {} 处于禁用状态（{}），跳过加载: {}",
+                    row.provider,
+                    getattr(row, "disabled_by", "") or "未知",
+                    (getattr(row, "disabled_reason", "") or "")[:80],
+                )
+                continue
 
             if raw_key:
                 if _is_encrypted(raw_key):
@@ -279,6 +305,9 @@ async def load_db_config_to_settings(session: AsyncSession) -> None:
                 "is_primary": row.is_primary or False,
                 "enable_thinking": row.enable_thinking or False,
                 "thinking_params": row.thinking_params or "",
+                # v3.5.6: 启用/禁用状态（透传给 _apply_config_to_settings 同步缓存）
+                "enabled": getattr(row, "enabled", True),
+                "disabled_reason": getattr(row, "disabled_reason", "") or "",
             }
             all_configs.append(cfg)
 
@@ -357,6 +386,19 @@ def _apply_config_to_settings(cfg: dict) -> None:
         "enable_thinking": cfg.get("enable_thinking", False),
         "thinking_params": cfg.get("thinking_params", ""),
     }
+
+    # v3.5.6：同步禁用状态到 llm_client 的 DB 禁用缓存（候选过滤用）
+    try:
+        from app.core.llm_client import llm_client as _lc
+        if cfg.get("enabled", True):
+            _lc._db_disabled_providers.pop(provider, None)
+        else:
+            _lc._db_disabled_providers[provider] = {
+                "enabled": False,
+                "reason": cfg.get("disabled_reason", "") or "已禁用",
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[settings] 同步禁用缓存失败（不阻断）: {}", str(e)[:100])
 
     # 如果当前 provider 是 is_primary，也写入传统字段
     if cfg.get("is_primary", False):
@@ -809,3 +851,85 @@ async def set_generation_settings(
                        message=f"生成并发度已更新为 {req.fp_concurrency}"
                                + ("（串行模式）" if req.fp_concurrency == 1 else ""),
                        data={"fp_concurrency": req.fp_concurrency})
+
+
+# ============================================================================
+# v3.5.6：供应商启用/禁用（持久化）+ 管理员通知
+# ============================================================================
+
+class ProviderEnabledRequest(BaseModel):
+    """供应商启停请求。"""
+    enabled: bool = Field(..., description="True=启用，False=禁用")
+
+
+@router.put("/llm/{provider_name}/enabled", response_model=ApiResponse,
+            dependencies=[Depends(require_admin)])
+async def set_provider_enabled_api(
+    provider_name: str,
+    req: ProviderEnabledRequest,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """启用/禁用单个 LLM 供应商（管理员手动操作，立即生效）。
+
+    - 禁用：disabled_by='manual'，reason='人工禁用'；该供应商退出候选，不参与调用；
+    - 启用：清空禁用标记恢复候选；需已有 api_key；
+    - 若禁用的是主供应商，主标记自动让给下一个启用中的供应商。
+    """
+    from app.core.provider_admin import set_provider_enabled
+    ok = await set_provider_enabled(provider_name, req.enabled)
+    if not ok:
+        detail = "供应商不存在或无 API Key（启用需先配置 Key）"
+        raise HTTPException(status_code=400, detail=detail)
+    return ApiResponse(
+        success=True,
+        message=f"供应商 {provider_name} 已{'启用' if req.enabled else '禁用（人工禁用）'}",
+        data={"provider": provider_name, "enabled": req.enabled},
+    )
+
+
+@router.get("/notifications", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def list_notifications(
+    only_unread: bool = False,
+    page: int = 1,
+    page_size: int = 20,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """获取管理员通知列表（登录即可见；未读数供铃铛展示）。"""
+    from app.db.models import AdminNotification
+    q = select(AdminNotification).order_by(AdminNotification.created_at.desc())
+    if only_unread:
+        q = q.where(AdminNotification.is_read.is_(False))
+    total = len((await session.execute(select(AdminNotification.id))).scalars().all())
+    rows = (await session.execute(
+        q.offset((page - 1) * page_size).limit(page_size)
+    )).scalars().all()
+    unread = len((await session.execute(
+        select(AdminNotification.id).where(AdminNotification.is_read.is_(False))
+    )).scalars().all())
+    items = [{
+        "id": r.id, "type": r.type, "title": r.title, "content": r.content,
+        "related_type": r.related_type, "related_id": r.related_id,
+        "is_read": r.is_read, "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]
+    return ApiResponse(success=True, message="ok", data={
+        "items": items, "total": total, "unread": unread,
+        "page": page, "page_size": page_size,
+    })
+
+
+@router.post("/notifications/read", response_model=ApiResponse, dependencies=[Depends(require_admin)])
+async def mark_notifications_read(
+    ids: list[int] | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse:
+    """标记通知已读（ids 为空 = 全部已读）。"""
+    from app.db.models import AdminNotification
+    q = select(AdminNotification).where(AdminNotification.is_read.is_(False))
+    if ids:
+        q = q.where(AdminNotification.id.in_(ids))
+    rows = (await session.execute(q)).scalars().all()
+    for r in rows:
+        r.is_read = True
+    await session.commit()
+    return ApiResponse(success=True, message=f"已标记 {len(rows)} 条通知为已读",
+                       data={"marked": len(rows)})

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle, Folder, ChevronDown, RotateCcw, Lock, ShieldAlert } from 'lucide-react'
+import { Play, FileText, Search, CheckCircle2, AlertCircle, XCircle, Download, ArrowRight, Sparkles, Loader2, StopCircle, Folder, ChevronDown, RotateCcw, Lock, ShieldAlert, AlertTriangle } from 'lucide-react'
 import { requirements as reqApi, generateCases, testCases as tcApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { SSEEvent, Requirement, TestCase, Project, ReviewReport, ReviewIssue, KbFlowback } from '../types'
@@ -67,6 +67,11 @@ export default function Generate() {
   const [shouldSupplement, setShouldSupplement] = useState(false)
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
+  // v3.5.6: LLM 供应商等待重试提示（非 null 时显示红色横条）
+  const [waitRetryNotice, setWaitRetryNotice] = useState<{ message: string; level: string; attempt: number; total_retries: number; remain_sec?: number } | null>(null)
+  // v3.5.6: 重试倒计时剩余秒数（null = 不显示倒计时）
+  const [countdownSec, setCountdownSec] = useState<number | null>(null)
+  const countdownTimerRef = useRef<number | null>(null)
   // v2.0：导出错误独立状态，避免污染主流程 error
   const [exportError, setExportError] = useState('')
   // v3.1.3：细粒度 FP 进度卡片 + 续跑标记
@@ -136,6 +141,16 @@ export default function Generate() {
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // v3.5.6: 组件卸载时清理等待重试倒计时定时器
+  useEffect(() => {
+    return () => {
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current)
+        countdownTimerRef.current = null
+      }
+    }
   }, [])
 
   // 需求搜索过滤
@@ -216,6 +231,33 @@ export default function Generate() {
           setError(e.message || '生成过程出错')
           setGenerating(false)
           setResuming(false)
+        }
+        // v3.5.6: LLM 供应商等待重试提示（红字横条 + 倒计时）
+        if (e.stage === 'generate' && e.wait_retry) {
+          const wr = e.wait_retry as { message: string; level: string; attempt: number; total_retries: number; remain_sec?: number }
+          setWaitRetryNotice(wr)
+          // 倒计时片：本地也起一个定时器逐秒递减，避免 5s 一跳不流畅
+          if (wr.level === 'countdown' && typeof wr.remain_sec === 'number') {
+            if (countdownTimerRef.current) clearInterval(countdownTimerRef.current)
+            let remain = wr.remain_sec
+            setCountdownSec(remain)
+            countdownTimerRef.current = window.setInterval(() => {
+              remain -= 1
+              setCountdownSec(remain > 0 ? remain : 0)
+              if (remain <= 0 && countdownTimerRef.current) {
+                clearInterval(countdownTimerRef.current)
+                countdownTimerRef.current = null
+              }
+            }, 1000)
+          } else if (wr.level !== 'countdown') {
+            // 新的重试提示（非倒计时）→ 初始化倒计时显示
+            setCountdownSec(wr.remain_sec ?? null)
+          }
+        }
+        if (e.stage === 'done' || e.stage === 'error') {
+          setWaitRetryNotice(null)
+          setCountdownSec(null)
+          if (countdownTimerRef.current) { clearInterval(countdownTimerRef.current); countdownTimerRef.current = null }
         }
       },
       (err) => { setError(err); setGenerating(false); setResuming(false) },
@@ -500,6 +542,29 @@ export default function Generate() {
                 </div>
               )
             })}
+          </div>
+        </div>
+      )}
+
+      {/* v3.5.6: LLM 供应商等待重试提示（标红 + 倒计时） */}
+      {waitRetryNotice && (
+        <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-medium text-red-800">
+                LLM 供应商暂不可用（自动重试中）
+              </p>
+              {countdownSec !== null && (
+                <span className="text-xs font-mono font-semibold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
+                  {countdownSec}s 后重试
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-red-600 mt-0.5">{waitRetryNotice.message}</p>
+            <p className="text-[11px] text-red-500 mt-1">
+              如长时间无进展，请到「系统设置 → LLM 供应商」检查供应商状态或联系管理员排查。
+            </p>
           </div>
         </div>
       )}

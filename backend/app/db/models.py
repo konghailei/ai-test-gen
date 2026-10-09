@@ -288,6 +288,48 @@ class LLMConfig(Base):
     thinking_params: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+    # ========== v3.5.6：启用/禁用开关（持久化，取代进程内存的临时禁用） ==========
+    # 背景（2026-10-09 自举实证）：原禁用机制是 `llm_client._provider_disabled_until`
+    # （进程内存 + 600s 自动过期）。问题：①重启/多进程不一致（web 与 worker 各有一份）；
+    # ②"硬失败"（额度耗尽 401/403）禁用 600s 后自动恢复，会反复撞同一家死供应商、
+    # 白等首响应超时；③运维看不到"某家被禁用了"。
+    # 改造：硬失败 → 持久化禁用（enabled=False，不自动恢复，管理员手动启用）+ 写通知；
+    # 软失败（超时/5xx）→ 不再禁用，改由调用内等待重试兜底。
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 禁用原因：人工禁用固定为"人工禁用"；系统禁用写具体硬失败原因（如"403 额度耗尽"）
+    disabled_reason: Mapped[str] = mapped_column(Text, default="")
+    # 禁用来源：'manual'（管理员手动）/ 'system'（硬失败自动）；空串=未禁用
+    disabled_by: Mapped[str] = mapped_column(String(16), default="")
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ============================================================================
+# 8.1 管理员通知表（v3.5.6 新增）
+# ============================================================================
+
+class AdminNotification(Base):
+    """管理员通知（v3.5.6）。
+
+    首期用途：LLM 供应商被禁用时通知管理员及时排查。
+    - 硬失败（额度耗尽/认证失败）→ 系统自动禁用供应商 → 写一条通知；
+    - 三家供应商全部调用失败（软失败耗尽）→ 写一条通知（便于及时排查，非禁用）。
+    前端：顶部导航铃铛（未读数）+ 通知消息页面。
+    """
+    __tablename__ = "admin_notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # 通知类型：llm_provider_disabled（供应商硬失败被禁用）/ llm_all_providers_failed（全部失败）
+    type: Mapped[str] = mapped_column(String(64), index=True, default="")
+    title: Mapped[str] = mapped_column(String(256), default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    # 关联对象（如 type='llm_provider_disabled' 时 related_id=provider 名）
+    related_type: Mapped[str] = mapped_column(String(64), default="")
+    related_id: Mapped[str] = mapped_column(String(128), default="")
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
 
 # ============================================================================
 # 9. 产品表（products）

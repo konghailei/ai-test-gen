@@ -2262,6 +2262,28 @@ class Orchestrator:
             queue: asyncio.Queue = asyncio.Queue()
             queue_token = self._gen_event_queue.set(queue)
 
+            # v3.5.6：LLM 等待重试回调 —— llm_client 在"三家全败等待重试"时，
+            # 通过此回调推 SSE 事件给前端（红色提示条：供应商暂不可用/请人工排查）。
+            # ContextVar 隔离：只影响当前生成任务，不影响其它协程/后台脚本。
+            async def _llm_wait_retry_cb(message: str, level: str,
+                                         attempt: int, total_retries: int,
+                                         extra: dict | None = None) -> None:
+                from app.core.orchestrator import make_sse_event
+                payload = {
+                    "message": message, "level": level,
+                    "attempt": attempt, "total_retries": total_retries,
+                }
+                if extra:
+                    payload.update(extra)  # v3.5.6: 倒计时片携带 remain_sec
+                ev = make_sse_event("generate", message, wait_retry=payload)
+                try:
+                    await queue.put(ev)
+                except Exception:
+                    pass
+
+            from app.core.llm_client import llm_client as _llm_for_cb
+            cb_token = _llm_for_cb._wait_retry_cb.set(_llm_wait_retry_cb)
+
             # v3.4（docs/15 §4.10）：节点级 span。
             # stream_mode="updates" 的 chunk 到达 = 该节点执行结束：
             # 「本 chunk 到达时刻 - 上个 chunk 到达时刻」= 本 chunk 节点的执行时长
@@ -2371,6 +2393,12 @@ class Orchestrator:
                     pass
                 finally:
                     self._gen_event_queue.reset(queue_token)
+                    # v3.5.6: 重置 LLM 等待重试回调
+                    try:
+                        from app.core.llm_client import llm_client as _llm_for_cb
+                        _llm_for_cb._wait_retry_cb.reset(cb_token)
+                    except Exception:
+                        pass
 
             # ── v3.2: FP 覆盖率矩阵 ──
             # v3.1.3: 优先读 state（test_design 已统一加载），避免流水线内第 3 次 FP 查询
