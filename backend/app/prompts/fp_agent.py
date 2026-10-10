@@ -292,7 +292,7 @@ FP_INTEGRATED_USER_PROMPT = """请从以下需求中拆分所有功能点，同�
 - 宁少勿多，每个 FP 的信息量要饱满
 - **business_rules.type 只能从以下值中选择**：validation/calculation/workflow/permission/security/business/constraint/mandatory/uniqueness/format/range/logic/data_integrity/field_validation/access_control/authorization/authentication/prerequisite/presentation/initialization/enumeration/data_format/relationship/duplication/session/timeout/rate_limit/notification/data_retention/audit/encryption/integration
 - **允许字段为空**：alternate_flows / business_rules / data_constraints 若原文未提及，输出 `[]`，不得编造内容填充
-- **如果提示词中列出「以上功能点已存在数据库中」，则这些名称对应的 FP 的 sub_srr 只需保留 name/fp_type/summary（不得重新生成内部规则），在 functional_points 中标记 \"reuse_existing\": true
+- **如果提示词中列出「同模块已归档基线 / 弱匹配」候选，只有当前需求的目标功能与该候选是**同一个功能**（非版本迭代、非内容变化）时，才在 functional_points 中标记 \"reuse_existing\": true（sub_srr 留空）；若当前是该功能的新版本/迭代，必须正常新建并生成完整 sub_srr。宁可新建，不可误复用。**
 {extra_constraint}
 """
 

@@ -420,6 +420,134 @@ async def _save_fps_to_db(
     )
     return saved
 
+async def _register_reused_fps(
+    session: AsyncSession, req_id: str, reused_fps: list[dict], priority: str = "P2",
+) -> int:
+    """将 LLM 标记 reuse_existing 的功能点登记为「复用副本」落库（v3.5.7，DEF-1 修复 P1-A）。
+
+    原缺陷：`_fp_extract_from_raw` 把 reuse_existing 项过滤后直接丢弃、不落库，
+    导致「全复用场景下需求 FP 恒为 0」（docs/24 实证复现 3 次）。
+
+    语义对齐 POST /requirements/{rid}/fp/reuse 端点（v2.3）：
+      - 源 FP 必须已归档（复用 = 从基线拷贝）；
+      - 复制 name / fp_type / srr_json / atomicity_check / test_hints，继承模块；
+      - 新 FP 状态 pending_review（在新需求上下文下重新审核）；
+      - 同需求下查重（同名已存在则跳过该副本）。
+
+    额外动作（对齐 docs/25 方案 §2.3）：
+      - srr_json 写入 _reuse_source 追溯信息（源 FP / 源需求 / 归档时间）；
+      - 建立跨版本依赖边：新 FP --depends_on--> 源 FP（pending，需求确认时自动审核），
+        让「改基线 → 波及复用方」进入影响分析，同时给 CRSR 聚合制造同名输入。
+
+    Returns:
+        int: 实际登记的副本数量
+    """
+    if not reused_fps:
+        return 0
+
+    saved = 0
+    for item in reused_fps:
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("name") or "").strip()
+        source_fp_id = item.get("source_fp_id") or ""
+        if not name or not source_fp_id:
+            logger.warning(
+                "[FP-Reuse] 复用副本信息不完整，跳过: req_id={}, name={!r}, source={!r}",
+                req_id, name, source_fp_id,
+            )
+            continue
+
+        source_fp = await session.get(FunctionalPoint, source_fp_id)
+        if not source_fp:
+            logger.warning(
+                "[FP-Reuse] 源 FP 不存在（候选已失效），跳过: req_id={}, source_fp_id={}",
+                req_id, source_fp_id,
+            )
+            continue
+        if source_fp.status != "archived":
+            # 与 /fp/reuse 语义对齐：源未归档不构成复用基线 → 丢弃（不静默）
+            logger.warning(
+                "[FP-Reuse] 源 FP 未归档（status={}），按新建处理并丢弃复用副本: req_id={}, fp={}",
+                source_fp.status, req_id, name,
+            )
+            continue
+
+        # 同需求查重（uq_fp_req_name 唯一约束保护 + 与新建 FP 撞名时复用副本优先跳过重复项）
+        dup = await session.execute(
+            select(FunctionalPoint.id).where(
+                FunctionalPoint.requirement_id == req_id,
+                FunctionalPoint.name == name,
+            )
+        )
+        if dup.scalar_one_or_none():
+            logger.info("[FP-Reuse] 同需求已存在同名 FP，跳过副本: req_id={}, name={}", req_id, name)
+            continue
+
+        source_req = await session.get(Requirement, source_fp.requirement_id)
+        new_fp = FunctionalPoint(
+            id=gen_requirement_id(),
+            requirement_id=req_id,
+            module_id=source_fp.module_id,
+            modules=list(source_fp.modules or []),
+            name=name,
+            fp_type=item.get("fp_type") or source_fp.fp_type,
+            priority=priority,
+            srr_json={
+                **(source_fp.srr_json if isinstance(source_fp.srr_json, dict) else {}),
+                "_reuse_source": {
+                    "fp_id": source_fp.id,
+                    "req_id": source_fp.requirement_id,
+                    "req_title": (source_req.title if source_req else ""),
+                    "archived_at": (
+                        source_req.archived_at.isoformat()
+                        if source_req and getattr(source_req, "archived_at", None) else ""
+                    ),
+                },
+            },
+            atomicity_check=(
+                dict(source_fp.atomicity_check)
+                if isinstance(source_fp.atomicity_check, dict) else {}
+            ),
+            test_hints=list(source_fp.test_hints or []),
+            status="pending_review",
+        )
+        session.add(new_fp)
+        await session.flush()  # 拿到 new_fp.id 供依赖边使用
+
+        # 跨版本依赖边：新 FP depends_on 源 FP（pending，confirm 时随本需求自动审核）
+        try:
+            dep_dup = await session.execute(
+                select(FPDependency).where(
+                    FPDependency.source_fp_id == new_fp.id,
+                    FPDependency.target_fp_id == source_fp.id,
+                    FPDependency.relation_type == "depends_on",
+                )
+            )
+            if not dep_dup.scalar_one_or_none():
+                session.add(FPDependency(
+                    source_fp_id=new_fp.id,
+                    target_fp_id=source_fp.id,
+                    relation_type="depends_on",
+                    description=f"跨版本复用基线（源需求：{source_req.title if source_req else source_fp.requirement_id}）",
+                ))
+        except Exception as dep_e:
+            logger.warning(
+                "[FP-Reuse] 复用追溯依赖边创建失败（不阻断）: req_id={}, fp={}, err={}",
+                req_id, name, str(dep_e)[:150],
+            )
+
+        saved += 1
+        logger.info(
+            "[FP-Reuse] 复用副本已登记: req_id={}, name={}, source_fp_id={}, source_req_id={}",
+            req_id, name, source_fp.id, source_fp.requirement_id,
+        )
+
+    if saved:
+        logger.info("[FP-Reuse] 需求 {} 共登记 {} 个复用副本", req_id, saved)
+    return saved
+
+
 async def _bump_req_revision(session: AsyncSession, req_id: str) -> None:
     """v2.33: 自增需求的 revision 字段，用于多人协作冲突检测。
 
@@ -721,6 +849,8 @@ async def _save_fp_dependencies(
         if relation not in ("depends_on", "data_flows", "invariants", "lifecycle_scenarios", "conflicts_with"):
             relation = "depends_on"
         # 查重（含跨需求方向）
+        # v3.5.7：scalar_one_or_none() → first()——存量脏数据存在多行时前者抛
+        # MultipleResultsFound 直接炸掉保存本身；first() 只判「存在」。
         dup = await session.execute(
             select(FPDependency).where(
                 FPDependency.source_fp_id == src_id,
@@ -728,8 +858,26 @@ async def _save_fp_dependencies(
                 FPDependency.relation_type == relation,
             )
         )
-        if dup.scalar_one_or_none():
+        if dup.first():
             continue
+        # v3.5.7（P1-B 对偶边治理）：depends_on 建边前检查反向矛盾边——
+        # 「A depends_on B」与「B depends_on A」并存即逻辑矛盾（图谱成环、
+        # 影响分析 BFS 范围虚增）。发现反向边已存在时跳过本边并告警（宁缺毋滥）。
+        if relation == "depends_on":
+            rev = await session.execute(
+                select(FPDependency).where(
+                    FPDependency.source_fp_id == tgt_id,
+                    FPDependency.target_fp_id == src_id,
+                    FPDependency.relation_type == "depends_on",
+                )
+            )
+            if rev.first():
+                logger.warning(
+                    "[FP-Dep] 检测到反向 depends_on 边已存在，跳过本边（防对偶成环）: "
+                    "src_fp={} tgt_fp={}（已有 {}→{}）",
+                    src_id, tgt_id, tgt_id, src_id,
+                )
+                continue
         session.add(FPDependency(
             source_fp_id=src_id,
             target_fp_id=tgt_id,
@@ -1153,6 +1301,7 @@ async def _run_requirement_analysis(
 
         # v2.8.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
         captured_fps = parse_result.fps
+        captured_reused_fps = getattr(parse_result, "reused_fps", []) or []
         captured_fp_deps = parse_result.fp_deps
         captured_interaction_srr = parse_result.interaction_srr
         # v3.4.6（缺陷 B）：在调用点立即捕获 FP 提取降级标记。
@@ -1226,6 +1375,8 @@ async def _run_requirement_analysis(
                 ))
                 try:
                     await _save_fps_to_db(save_s, req_id, captured_fps, req_data.get("priority", "P2"), product_id=product_id)
+                    # v3.5.7（P1-A）：复用副本登记（原实现被过滤丢弃，全复用场景 FP 恒 0）
+                    await _register_reused_fps(save_s, req_id, captured_reused_fps, req_data.get("priority", "P2"))
                     await _save_fp_dependencies(save_s, req_id, captured_fp_deps)
                     await _update_fp_index_in_srr(save_s, req_id)
                     await save_s.commit()
@@ -1403,6 +1554,8 @@ async def _run_requirement_analysis(
                 await s.execute(stmt)
                 # v1.5.1: 自动保存 ReqAgent 一体式提取的功能点 + 依赖关系
                 await _save_fps_to_db(s, req_id, captured_fps, req_data.get("priority", "P2"), product_id=product_id)
+                # v3.5.7（P1-A）：复用副本登记
+                await _register_reused_fps(s, req_id, captured_reused_fps, req_data.get("priority", "P2"))
                 await _save_fp_dependencies(s, req_id, captured_fp_deps)
                 await _update_fp_index_in_srr(s, req_id)  # v2.18: 更新总 SRR 的 fp_index
                 await s.commit()
@@ -1436,6 +1589,12 @@ async def _run_requirement_analysis(
             # v2.18: ClarifyAgent 失败时 kb_empty 设为 None（未知），不再误报为 True
             "kb_empty": clarify_result.get("kb_status", {}).get("kb_empty") if clarify_result else None,
         }
+        # v3.5.7（P1-A）：复用副本透出（用户可见「哪些 FP 是复用基线」）
+        if captured_reused_fps:
+            result["reused_fps"] = [
+                {"name": r.get("name", ""), "source_fp_id": r.get("source_fp_id", "")}
+                for r in captured_reused_fps if isinstance(r, dict)
+            ]
         # v2.18: 降级警告传递给前端
         if srr_json_data.get("_finalize_degraded"):
             result["degraded"] = True
@@ -1566,21 +1725,26 @@ async def _run_clarify_reparse(
         # 降级标记打在本次任务的 SRR 上（原先漏传，失败无从察觉）。
         if original_raw:
             try:
-                captured_fps, captured_fp_deps, captured_interaction_srr = await req_agent._fp_extract_from_raw(
+                captured_fps, captured_reused_fps, captured_fp_deps, captured_interaction_srr = await req_agent._fp_extract_from_raw(
                     raw_text=original_raw,
                     srr=final_srr,
                 )
-                logger.info("[Task/Clarify] FP 重提取完成（基于原始文本）: {} 个", len(captured_fps))
+                logger.info(
+                    "[Task/Clarify] FP 重提取完成（基于原始文本）: {} 个新, {} 个复用",
+                    len(captured_fps), len(captured_reused_fps),
+                )
                 fp_extract_degraded, fp_extract_error = _read_fp_extract_degrade(final_srr)
             except Exception as fp_e:
                 logger.warning("[Task/Clarify] FP 重提取失败（降级使用 enhanced_raw 结果）: {}", str(fp_e)[:200])
                 captured_fps = clarify_result.fps
+                captured_reused_fps = getattr(clarify_result, "reused_fps", []) or []
                 captured_fp_deps = clarify_result.fp_deps
                 captured_interaction_srr = clarify_result.interaction_srr
                 fp_extract_degraded = True
                 fp_extract_error = f"{type(fp_e).__name__}: {str(fp_e)[:200]}"
         else:
             captured_fps = clarify_result.fps
+            captured_reused_fps = getattr(clarify_result, "reused_fps", []) or []
             captured_fp_deps = clarify_result.fp_deps
             captured_interaction_srr = clarify_result.interaction_srr
         if fp_extract_degraded:
@@ -1834,7 +1998,9 @@ async def _run_clarify_reparse(
         )
 
         # ===== FP 重提取（含 P3 修复：清理旧 FP 向量）=====
-        if captured_fps:
+        # v3.5.7（P1-A）：`if captured_fps` → `if captured_fps or captured_reused_fps`，
+        # 全复用场景（新 FP 为 0 但有合法复用副本）不再跳过整个 FP 更新块。
+        if captured_fps or captured_reused_fps:
             async with async_session() as s:
                 old_fps = await s.execute(
                     select(FunctionalPoint.id).where(FunctionalPoint.requirement_id == req_id)
@@ -1865,15 +2031,26 @@ async def _run_clarify_reparse(
                         logger.warning("[Task/Clarify] 旧 FP 向量清理失败(不阻断): {}", str(e)[:200])
 
                 await _save_fps_to_db(s, req_id, captured_fps, priority, product_id=product_id)
+                # v3.5.7（P1-A）：复用副本登记
+                await _register_reused_fps(s, req_id, captured_reused_fps, priority)
                 await _save_fp_dependencies(s, req_id, captured_fp_deps)
                 await _update_fp_index_in_srr(s, req_id)  # v2.18: 更新总 SRR 的 fp_index
                 await s.commit()
-                logger.info("[Task/Clarify] 澄清后重新提取 FP: {} 个", len(captured_fps))
+                logger.info(
+                    "[Task/Clarify] 澄清后重新提取 FP: {} 个新, {} 个复用",
+                    len(captured_fps), len(captured_reused_fps),
+                )
 
         # 甲2+丙: result 携带再验证结果和质量警告
         recheck_result_json: dict = {"req_id": req_id, "status": recheck_final_status}
         if recheck_questions:
             recheck_result_json["new_questions"] = len(recheck_questions)
+        # v3.5.7（P1-A）：复用副本透出
+        if captured_reused_fps:
+            recheck_result_json["reused_fps"] = [
+                {"name": r.get("name", ""), "source_fp_id": r.get("source_fp_id", "")}
+                for r in captured_reused_fps if isinstance(r, dict)
+            ]
         if recheck_quality_warning:
             recheck_result_json["quality_warning"] = recheck_quality_warning
         # v3.4.6（缺陷 B）：FP 提取失败降级透出（与 _run_requirement_analysis 对称）。
@@ -1973,15 +2150,19 @@ async def _run_regenerate_reparse(
         # v2.8.52: 从 ParseResult 元组捕获 FP（不再依赖实例属性）
         # v3.4.6（缺陷 B）：捕获 FP 提取降级标记（在调用点捕获，避免中间层覆盖）。
         captured_fps: list = []
+        captured_reused_fps: list = []
         captured_fp_deps: list = []
         captured_interaction_srr = None
         if original_raw:
             try:
-                captured_fps, captured_fp_deps, captured_interaction_srr = await req_agent._fp_extract_from_raw(
+                captured_fps, captured_reused_fps, captured_fp_deps, captured_interaction_srr = await req_agent._fp_extract_from_raw(
                     raw_text=original_raw,
                     srr=final_srr,
                 )
-                logger.info("[Task/Regenerate] FP 提取完成（基于原始文本）: {} 个", len(captured_fps))
+                logger.info(
+                    "[Task/Regenerate] FP 提取完成（基于原始文本）: {} 个新, {} 个复用",
+                    len(captured_fps), len(captured_reused_fps),
+                )
                 fp_extract_degraded, fp_extract_error = _read_fp_extract_degrade(final_srr)
                 if fp_extract_degraded:
                     logger.warning(
@@ -1991,11 +2172,12 @@ async def _run_regenerate_reparse(
             except Exception as fp_e:
                 logger.warning("[Task/Regenerate] FP 提取失败（降级使用 parse 结果）: {}", str(fp_e)[:200])
                 captured_fps = regen_result.fps
+                captured_reused_fps = getattr(regen_result, "reused_fps", []) or []
                 captured_fp_deps = regen_result.fp_deps
                 captured_interaction_srr = regen_result.interaction_srr
         else:
             captured_fps = regen_result.fps
-            captured_fp_deps = regen_result.fp_deps
+            captured_reused_fps = getattr(regen_result, "reused_fps", []) or []
             captured_interaction_srr = regen_result.interaction_srr
 
         await _update_task(task_id, phase="parse", progress=50, message="SRR 生成完成，正在检索知识库...")
@@ -2038,7 +2220,7 @@ async def _run_regenerate_reparse(
                 ))
                 # v2.42: 使用 captured_fps（来自 _fp_extract_from_raw），与正常路径一致
                 try:
-                    if captured_fps:
+                    if captured_fps or captured_reused_fps:
                         from app.db.models import FunctionalPoint as FP, FPDependency
                         old_fp_rows = (await save_s.execute(
                             select(FP.id).where(FP.requirement_id == req_id)
@@ -2056,6 +2238,8 @@ async def _run_regenerate_reparse(
                             select(Requirement.priority).where(Requirement.id == req_id)
                         )).scalar_one_or_none()
                         await _save_fps_to_db(save_s, req_id, captured_fps, req_row or "P2", product_id=product_id)
+                        # v3.5.7（P1-A）：复用副本登记
+                        await _register_reused_fps(save_s, req_id, captured_reused_fps, req_row or "P2")
                         await _save_fp_dependencies(save_s, req_id, captured_fp_deps)
                         await _update_fp_index_in_srr(save_s, req_id)
                 except Exception as fp_e:
@@ -2231,16 +2415,20 @@ async def _run_regenerate_reparse(
 
         # v2.42: 使用 captured_fps（来自 _fp_extract_from_raw 基于 original_raw），
         # 与 _run_requirement_analysis / _run_clarify_reparse 保持一致
+        # v3.5.7（P1-A）：`if captured_fps` → `if captured_fps or captured_reused_fps`，
+        # 全复用场景（新 FP 为 0 但有合法复用副本）不再跳过 FP 更新块。
         try:
-            if captured_fps:
+            if captured_fps or captured_reused_fps:
                 # 使用独立 session，不依赖 HTTP 请求的 session（此函数在后台协程运行）
                 async with async_session() as fp_split_sess:
                     record2 = (await fp_split_sess.execute(
                         select(Requirement).where(Requirement.id == req_id)
                     )).scalar_one_or_none()
                     if record2:
-                        logger.info("[Task/Regenerate] 应用提取的 FP: req_id={}, fp_count={}",
-                                    req_id, len(captured_fps))
+                        logger.info(
+                            "[Task/Regenerate] 应用提取的 FP: req_id={}, 新 FP={}, 复用={}",
+                            req_id, len(captured_fps), len(captured_reused_fps),
+                        )
                         from app.db.models import FunctionalPoint as FP, FPDependency
                         old_fp_rows = (await fp_split_sess.execute(
                             select(FP.id).where(FP.requirement_id == req_id)
@@ -2271,12 +2459,20 @@ async def _run_regenerate_reparse(
                             await fp_split_sess.execute(sa_delete(FP).where(FP.requirement_id == req_id))
                             await fp_split_sess.flush()
                         await _save_fps_to_db(fp_split_sess, req_id, captured_fps, record2.priority, product_id=product_id)
+                        # v3.5.7（P1-A）：复用副本登记
+                        await _register_reused_fps(fp_split_sess, req_id, captured_reused_fps, record2.priority)
                         await _save_fp_dependencies(fp_split_sess, req_id, captured_fp_deps)
                         await _update_fp_index_in_srr(fp_split_sess, req_id)
                         await fp_split_sess.commit()
-                        logger.info("[Task/Regenerate] FP 应用完成: req_id={}, fps={}", req_id, len(captured_fps))
+                        logger.info(
+                            "[Task/Regenerate] FP 应用完成: req_id={}, 新 FP={}, 复用={}",
+                            req_id, len(captured_fps), len(captured_reused_fps),
+                        )
             else:
-                logger.warning("[Task/Regenerate] FP 提取未产出结果，跳过 FP 更新: req_id={}", req_id)
+                logger.warning(
+                    "[Task/Regenerate] FP 提取未产出结果（新 FP=0 且无合格复用副本），跳过 FP 更新: req_id={}",
+                    req_id,
+                )
         except Exception as fp_err:
             # v2.18: FP 应用失败不再静默——中断流水线，标记任务失败
             fp_err_msg = str(fp_err)[:500]
@@ -2309,6 +2505,12 @@ async def _run_regenerate_reparse(
             "needs_clarification": needs_clarify,
             "question_count": len(questions),
         }
+        # v3.5.7（P1-A）：复用副本透出（用户可见「哪些 FP 是复用基线」）
+        if captured_reused_fps:
+            regen_result_json["reused_fps"] = [
+                {"name": r.get("name", ""), "source_fp_id": r.get("source_fp_id", "")}
+                for r in captured_reused_fps if isinstance(r, dict)
+            ]
         if regen_quality_warning:
             regen_result_json["quality_warning"] = regen_quality_warning
         # v3.4.6（缺陷 B）：FP 提取失败降级透出（与 _run_requirement_analysis 对称）。

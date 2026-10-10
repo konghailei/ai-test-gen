@@ -31,6 +31,7 @@ class ParseResult(NamedTuple):
     fps: list[dict]                    # 功能点列表（新生成的）
     fp_deps: list[dict]                # FP 间依赖关系
     interaction_srr: dict | None       # 交互层 SRR（跨 FP 规则）
+    reused_fps: list[dict] = []        # v3.5.7：复用副本清单（source_fp_id/name/...）
 
 from app.core.llm_client import llm_client
 from app.db.milvus_store import vector_store
@@ -56,8 +57,11 @@ class ReqAgent:
         """初始化 ReqAgent。"""
         self._llm = llm_client
         self.last_fps: list[dict] = []  # v1.5.1: 存储最近一次解析提取的功能点
+        self.last_reused_fps: list[dict] = []  # v3.5.7: 最近一次解析的复用副本清单
         self.last_fp_dependencies: list[dict] = []  # v1.5.1: FP 间依赖关系
         self.interaction_srr: dict | None = None  # v1.6: 交互层 SRR（跨 FP 规则）
+        self._last_reused_fps: list[dict] = []  # v3.5.7: 内部复用结果（供调用方读取）
+        self._last_candidate_meta: list[dict] = []  # v3.5.7: 复用候选元数据
 
     async def parse(
         self,
@@ -213,16 +217,20 @@ class ReqAgent:
 
         # 6. FP 提取：基于修改后的新 SRR（不从原始文件提取，也不从旧 SRR 提取）
         self.last_fps = []
+        self.last_reused_fps = []
         self.last_fp_dependencies = []
         try:
             # 把修改后的新 SRR JSON 作为 raw_text 传入，让 LLM 从中提取 FP
             new_srr_text = json.dumps(srr, ensure_ascii=False)
-            self.last_fps = await self._fp_extract_from_raw(
+            self.last_fps, self.last_reused_fps, self.last_fp_dependencies, _ = await self._fp_extract_from_raw(
                 raw_text=new_srr_text,
                 srr=srr,
                 product_name=product_name,
             )
-            logger.info("[ReqAgent] FP 提取完成(refine): {} 个功能点", len(self.last_fps))
+            logger.info(
+                "[ReqAgent] FP 提取完成(refine): {} 个功能点（复用 {}）",
+                len(self.last_fps), len(self.last_reused_fps),
+            )
         except Exception as e:
             logger.warning("[ReqAgent] FP 提取失败(refine，不阻断主流程）: {}", str(e)[:200])
 
@@ -341,22 +349,30 @@ class ReqAgent:
         fps: list[dict] = []
         fp_deps: list[dict] = []
         interaction_srr: dict | None = None
+        reused_fps: list[dict] = []
         try:
-            fps, fp_deps, interaction_srr = await self._fp_extract_from_raw(
+            fps, reused_fps, fp_deps, interaction_srr = await self._fp_extract_from_raw(
                 raw_text=raw_requirement,
                 srr=srr,
                 product_name=product_name,
             )
-            logger.info("[ReqAgent] FP 提取完成: {} 个功能点", len(fps))
+            logger.info(
+                "[ReqAgent] FP 提取完成: {} 个新功能点, {} 个复用副本",
+                len(fps), len(reused_fps),
+            )
         except Exception as e:
             logger.warning("[ReqAgent] FP 提取失败（不阻断主流程）: {}", str(e)[:200])
 
         # v2.8.52: 保持向后兼容——写入实例属性（旧代码读取）
         self.last_fps = fps
+        self.last_reused_fps = reused_fps
         self.last_fp_dependencies = fp_deps
         self.interaction_srr = interaction_srr
 
-        return ParseResult(srr=srr, fps=fps, fp_deps=fp_deps, interaction_srr=interaction_srr)
+        return ParseResult(
+            srr=srr, fps=fps, fp_deps=fp_deps,
+            interaction_srr=interaction_srr, reused_fps=reused_fps,
+        )
 
     def _post_process(
         self,
@@ -886,6 +902,7 @@ class ReqAgent:
             from app.db.database import async_session
             from app.db.models import FunctionalPoint
             from sqlalchemy import select as sa_select, or_ as _sa_or, and_ as _sa_and, func as _sa_func
+            import sqlalchemy as _sa
             import difflib as _difflib
 
             req_meta = srr.get("requirement", {}) if isinstance(srr, dict) else {}
@@ -896,24 +913,67 @@ class ReqAgent:
 
             async with async_session() as s:
                 from app.db.models import Requirement as _ReqModel
-                # --- ① 强候选：module_id 或 modules JSON 命中（限定同产品，避免跨产品历史 FP 混入复用候选）---
-                where_clauses_strong = []
-                if product_id:
-                    where_clauses_strong.append(_ReqModel.product_id == product_id)
-                if modules:
-                    where_clauses_strong.append(FunctionalPoint.module_id.in_(modules))
-                    # PostgreSQL JSONB @> 运算符：modules 列表包含任意目标模块
-                    # 注意：若 modules 列是 JSON 而非 JSONB，我们使用 func.jsonb 转换兜底
-                    try:
-                        import sqlalchemy as _sa
-                        for _m in modules:
-                            where_clauses_strong.append(
+                # --- ① 强候选：同产品 AND 同模块 AND 已归档（v3.5.7 修复 DEF-1）---
+                # v3.5.7（DEF-1 根因修复，两处）：
+                #   bug① 原实现用 `_sa_or(产品条件, 模块条件)` —— 产品条件单独出现在 OR 列表，
+                #        导致「同产品全部历史 FP」被标为「强匹配（同模块）」，与模块无关。
+                #        自举场景（产品=系统自身）下历史 FP 全量命中 → 提示词诱导 LLM 全部
+                #        reuse_existing=true → 过滤后 new_fps=[] → 新需求 FP 恒为 0（复现 3 次）。
+                #        修复：产品/归档为「过滤前提」，模块为「匹配条件」，二者是交集（AND）非并集。
+                #   bug② 原实现 `FunctionalPoint.module_id.in_(modules)` —— modules 是上传表单
+                #        传入的「模块名称」（如"知识库"），而 module_id 列存的是「模块 ID」
+                #        （MOD-xxx）；名称比对 ID 恒不命中，`@> ["模块名"]` 同理 → 死子句。
+                #        修复：先按 (product_id, name) 查 Module 表把名称解析为 ID，再比对。
+                #   另：限定源 FP 已归档（与 /fp/reuse 端点语义对齐）——复用=从基线拷贝，
+                #        进行中的需求不应成为复用候选。
+                where_strong: list = []
+                _skip_strong = False
+                if not modules or not [m for m in modules if m and m.strip()]:
+                    # 上传未指定模块 → 无强匹配依据（强匹配必须建立在真实模块匹配上，
+                    # 产品级全量是 DEF-1 的根因），只走弱匹配。
+                    _skip_strong = True
+                if not _skip_strong:
+                    _mod_names = [m.strip() for m in modules if m and m.strip()]
+                    from app.db.models import Module as _ModuleModel
+                    _mod_rows = await s.execute(
+                        sa_select(_ModuleModel.id).where(
+                            _ModuleModel.product_id == product_id,
+                            _ModuleModel.name.in_(_mod_names),
+                        )
+                    )
+                    _mod_ids = [r[0] for r in _mod_rows.fetchall()]
+                    if _mod_ids:
+                        _module_match_clauses = [
+                            FunctionalPoint.module_id.in_(_mod_ids),
+                            *[
                                 _sa.func.jsonb(FunctionalPoint.modules).op("@>")(
-                                    _sa.func.jsonb(f'["{_m}"]')
+                                    _sa.func.jsonb(_json.dumps([_mid]))
                                 )
-                            )
-                    except Exception:
-                        pass
+                                for _mid in _mod_ids
+                            ],
+                        ]
+                        where_strong.append(_sa_or(*_module_match_clauses))
+                    else:
+                        # v3.5.7 实测修正（端到端验收 F2 抓出）：模块名解析失败时
+                        # **直接跳过强候选**。原"退化为产品级"方案经实测复现 DEF-1
+                        # 同款全量命中（自举产品 17 条 FP 全进强候选）——退化 = bug①
+                        # 换了个入口回来。无强候选时由弱匹配（名称相似 ≥0.68）兜底，
+                        # 语义判断交给 LLM，宁缺毋滥。
+                        logger.info(
+                            "[ReqAgent] 模块名未匹配到 Module 记录（强候选置空，弱匹配兜底）: "
+                            "product_id={!r} modules={!r}", product_id, _mod_names,
+                        )
+                        _skip_strong = True
+                if _skip_strong:
+                    where_strong = []  # 下方 where(False) → 0 行
+                else:
+                    # 过滤前提：同产品 + 需求与 FP 均已归档（与 /fp/reuse 语义对齐）
+                    where_strong = [
+                        _ReqModel.product_id == product_id,
+                        _ReqModel.status == "archived",
+                        FunctionalPoint.status == "archived",
+                        *where_strong,
+                    ]
                 q_strong = (
                     sa_select(
                         FunctionalPoint.name,
@@ -922,7 +982,7 @@ class ReqAgent:
                         FunctionalPoint.summary,
                     )
                     .join(_ReqModel, _ReqModel.id == FunctionalPoint.requirement_id)
-                    .where(_sa_or(*where_clauses_strong) if where_clauses_strong else False)
+                    .where(_sa_and(*where_strong) if where_strong else False)
                     .distinct()
                     .limit(60)
                 )
@@ -934,6 +994,7 @@ class ReqAgent:
                         "name": r.name,
                         "match": "module_hard",
                         "module_id": r.module_id,
+                        "fp_id": r.id,
                         "summary": (r.summary or "")[:80],
                     })
                     if r.name not in existing_names:
@@ -982,23 +1043,30 @@ class ReqAgent:
                         for r in weak_rows.fetchall():
                             if not r.name or r.name in existing_names:
                                 continue
-                            # 名称相似度 ≥ 0.68 或关键词中包含该名称（子串匹配）
+                            # v3.5.7（DEF-1 关联收敛）：子串命中改为「长度比护栏」，
+                            # 避免中文短词（如"知识库"⊂"知识库编译化功能"）直接给高分。
+                            # 只有子串且长度比 ≥0.6（二者规模相当）才视为弱命中。
                             name = r.name
-                            matched_kw = next(
-                                (kw for kw in weak_candidate_keywords if kw and (kw in name or name in kw)),
-                                None,
-                            )
-                            score_by_kw = 0.82 if matched_kw else 0.0
+                            matched_kw = None
+                            for kw in weak_candidate_keywords:
+                                if not kw:
+                                    continue
+                                _ratio = min(len(kw), len(name)) / max(len(kw), len(name))
+                                if (kw in name or name in kw) and _ratio >= 0.6:
+                                    matched_kw = kw
+                                    break
+                            # 子串命中同样按相似度评分（不再直接给 0.82 高分）
                             score_by_sim = max(
                                 (_difflib.SequenceMatcher(None, name, kw).ratio() for kw in weak_candidate_keywords if kw),
                                 default=0.0,
                             )
-                            best_score = max(score_by_kw, score_by_sim)
+                            best_score = score_by_sim
                             if best_score >= 0.68:
                                 existing_names_meta.append({
                                     "name": name,
                                     "match": "name_similarity",
                                     "module_id": r.module_id,
+                                    "fp_id": r.id,
                                     "summary": (r.summary or "")[:80],
                                     "similarity": round(best_score, 3),
                                     "matched_keyword": matched_kw,
@@ -1019,21 +1087,29 @@ class ReqAgent:
                 for n in hard_names[:30]
             ) if hard_names else ""
             weak_lines = "\n".join(
-                f"- {m['name']}（similarity={m.get('similarity','')}，matched_keyword={m.get('matched_keyword','')[:20]}，summary={m.get('summary','')[:60]}）"
+                f"- {m['name']}（similarity={m.get('similarity','')}，matched_keyword={(m.get('matched_keyword') or '')[:20]}，summary={m.get('summary','')[:60]}）"
                 for m in weak_names_meta[:30]
             ) if weak_names_meta else ""
 
             existing_fp_hint = (
-                "\n\n## 以下功能点已存在数据库中——请勿重新生成，只需保留名称和类型"
-                "（在 functional_points 中标记 \"reuse_existing\": true，sub_srr 留空）：\n"
-                + (f"\n### 强匹配（同模块）\n{hard_lines}" if hard_lines else "")
+                "\n\n## 以下功能点在**同产品同模块的已归档基线**中存在——可供复用参考"
+                "（确认为同一功能才标记 \"reuse_existing\": true，sub_srr 留空）：\n"
+                + (f"\n### 同模块已归档基线（候选复用）\n{hard_lines}" if hard_lines else "")
                 + (f"\n### 弱匹配（名称相似，请确认语义是否一致后再复用）\n{weak_lines}" if weak_lines else "")
             )
+            # v3.5.7（DEF-1 修复）：原「硬性约束：禁止重新生成」会诱导 LLM 把全部候选
+            # 标为 reuse_existing，在候选误判为产品全量时直接吞掉整个需求的 FP。
+            # 改为按「语义是否同一功能」判断：版本迭代（内容变化）必须正常新建。
             extra_constraint = (
-                "\n\n**硬性约束**：以上【强匹配】功能点名称，禁止在 functional_points 中重新生成内部 sub_srr。"
-                "只需输出 name/fp_type/summary 并标记 \"reuse_existing\": true，sub_srr 必须为空对象 {{}}。"
-                "【弱匹配】仅当你确认其语义与当前需求某功能点**完全一致**时才标记 reuse_existing=true，"
-                "若只是名字相似但语义不同，应仍然正常新建功能点（不要标记 reuse_existing）。"
+                "\n\n**复用判定规则**：以上【同模块已归档基线】与【弱匹配】仅为候选，"
+                "**只有当前需求的目标功能与该候选是同一个功能（非版本迭代、非内容变化）时**，"
+                "才在 functional_points 中标记 \"reuse_existing\": true 并留空 sub_srr。"
+                "若当前需求是该功能的**新版本/迭代**（规则、流程、字段可能已变化），"
+                "**必须正常新建功能点并生成完整 sub_srr**，不要标记 reuse_existing。"
+                "宁可新建，不可误复用——复用错误的代价是需求功能点丢失。"
+                "另：若候选基线与本需求功能点存在业务依赖，可在 dependencies 数组中"
+                "以候选的名称建立跨需求依赖边（source_fp_name 用本需求功能点名，"
+                "target_fp_name 用候选基线名）。"
             )
         else:
             existing_fp_hint = ""
@@ -1068,21 +1144,74 @@ class ReqAgent:
             if isinstance(result, dict):
                 interaction_srr = result.get("interaction_srr")
                 fp_deps = result.get("dependencies", [])
-                # 过滤掉 LLM 标记为 reuse_existing 的（已在 DB 中，只保留真正新生成的）
                 all_fps = result.get("functional_points", [])
+                # v3.5.7（P1-A 修复）：复用标记不再静默丢弃——
+                # 原实现 `new_fps = [f for f in all_fps if not f.get("reuse_existing")]`
+                # 把复用项直接过滤掉且不登记，导致「全复用场景下需求 FP 恒为 0」。
+                # 现改为：把复用项解析为可落库的副本清单（reused_fps），与 new_fps 一并返回。
                 new_fps = [f for f in all_fps if not f.get("reuse_existing")]
-                return new_fps, fp_deps, interaction_srr
+                reused_fps = self._resolve_reused_fps(
+                    all_fps, existing_names_meta,
+                )
+                self._last_candidate_meta = existing_names_meta
+                self._last_reused_fps = reused_fps
+                return new_fps, reused_fps, fp_deps, interaction_srr
             # v3.4.6（缺陷 B）：LLM 返回了非 dict（如 null/字符串）——同样是失败，
             # 不能静默当成「0 个功能点」。
             _mark_degraded(f"LLM 返回类型异常: {type(result).__name__}")
             logger.warning("[ReqAgent] FP 一体式提取返回类型异常: {}", type(result).__name__)
-            return [], [], None
+            return [], [], [], None
         except Exception as e:
             # v3.4.6（缺陷 B）：失败必须显式可辨——打标记 + 带上真实原因（如首响应超时）
             _err = f"{type(e).__name__}: {str(e)[:200]}"
             _mark_degraded(_err)
             logger.warning("[ReqAgent] FP 一体式提取 LLM 调用失败（已置 _fp_extract_degraded）: {}", _err)
-            return [], [], None
+            return [], [], [], None
+
+    @staticmethod
+    def _resolve_reused_fps(
+        all_fps: list, candidate_meta: list[dict],
+    ) -> list[dict]:
+        """v3.5.7（P1-A）：把 LLM 标记 reuse_existing 的项解析为可落库的复用副本清单。
+
+        复用资格（宁缺毋滥）：
+          1. 名称必须出现在本次注入的候选清单中（LLM 不得复用未展示的名称）；
+          2. 候选必须带 fp_id（强/弱候选查询均已带回）；
+          3. 同名多候选（跨需求同名）→ 取首个（查询已 limit + distinct，由调用方
+             在落库时按「同需求名称唯一」二次校验）；
+          4. 资格不符 → 丢弃该复用项并告警（不静默）。
+
+        Returns:
+            list[dict]: 每项含 name / source_fp_id / source_module_id / fp_type / summary
+        """
+        if not all_fps or not candidate_meta:
+            return []
+        # 名称 → 候选（带 fp_id）
+        by_name: dict[str, dict] = {}
+        for m in candidate_meta:
+            if m.get("fp_id") and m.get("name") and m["name"] not in by_name:
+                by_name[m["name"]] = m
+        reused: list[dict] = []
+        for f in all_fps:
+            if not isinstance(f, dict) or not f.get("reuse_existing"):
+                continue
+            name = (f.get("name") or "").strip()
+            cand = by_name.get(name)
+            if not cand:
+                logger.warning(
+                    "[ReqAgent] 复用标记无效（名称不在候选清单内，按新建处理）: name={!r}", name,
+                )
+                continue
+            reused.append({
+                "name": name,
+                "source_fp_id": cand.get("fp_id"),
+                "source_module_id": cand.get("module_id"),
+                "fp_type": f.get("fp_type") or "workflow",
+                "summary": f.get("summary") or cand.get("summary", ""),
+            })
+        if reused:
+            logger.info("[ReqAgent] 解析出 {} 条复用副本候选: {}", len(reused), [r["name"] for r in reused])
+        return reused
 
     @staticmethod
     def update_fp_summary_from_fps(srr: dict, fps: list[dict]) -> dict:

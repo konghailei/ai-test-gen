@@ -324,7 +324,8 @@ async def test_fp_extract_degrade(result: httpx.AsyncClient) -> None:
 
     req_agent._llm.call_json = _boom
     try:
-        fps, deps, inter = await req_agent._fp_extract_from_raw(
+        # v3.5.7：返回值扩展为 4 元组 (new_fps, reused_fps, fp_deps, interaction_srr)
+        fps, reused, deps, inter = await req_agent._fp_extract_from_raw(
             raw_text="商品管理：新增/编辑/删除", srr=srr_probe, product_name="P",
         )
     finally:
