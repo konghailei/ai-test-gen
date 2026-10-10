@@ -497,7 +497,12 @@ async def test_llm_first_response_timeout(result: TestResult):
     1. 思考内容（reasoning_content）算「有响应」——思考阶段停顿不会被误判
     2. 正文 chunk 同样算首响应
     3. 首响应超时 → 跳过剩余重试**直接切换备用提供商**（不重试 MAX_ATTEMPTS 次）
-    4. 全部提供商超时 → 快速失败，等待时长不随重试放大
+    4. 全部提供商超时 → 按 v3.5.6「等待重试」合同失败：
+       总轮次 = 1 + RETRY_ROUNDS（默认 2）→ 每家提供商共调用 3 次；
+       耗时 ≈ 2×WAIT_RETRY_INTERVAL（每轮间等待 60s）+ 各轮调用耗时，
+       **不**断言"快速失败 <6s"（那是 v3.4 快速失败时代的合同，已被 docs/23
+       等待重试机制取代——2026-10-10 夹具过期修正，实测 362s 吻合 2×60s 等待）。
+       本用例通过把 WAIT_RETRY_INTERVAL 调小来验证轮次结构而非真实等待。
     """
     from app.config import settings
     from app.core import llm_client as llm_mod
@@ -516,6 +521,10 @@ async def test_llm_first_response_timeout(result: TestResult):
 
         llm_mod.litellm.acompletion = _fake
         client = LLMClient()
+        # v3.5.7 夹具修正：等待重试间隔与重试轮首响应超时调小（原 60s/60s），
+        # 验证轮次结构而不真等（60s 间隔 ×2 + 重试轮 60s 超时 ×2家×2轮 = 244s 实测）。
+        client.WAIT_RETRY_INTERVAL = 1
+        client.DEFAULT_RETRY_FIRST_RESPONSE_TIMEOUT = 1
         providers = [_fr_provider(tag, model) for tag, model in models]
         client._candidate_providers = lambda model, provider=None: providers  # type: ignore[method-assign]
         return client
@@ -584,11 +593,22 @@ async def test_llm_first_response_timeout(result: TestResult):
             "全部超时：报「所有 LLM 提供商均不可用」",
             _err is not None and "均不可用" in str(_err), repr(_err),
         )
+        # v3.5.7 夹具修正：等待重试合同（docs/23）——总轮次 = 1 + RETRY_ROUNDS(2) = 3，
+        # 每轮各调 1 次 → 每家提供商共 3 次调用（v3.4 快速失败时代的"各 1 次"已过期）。
+        total_rounds = LLMClient.RETRY_ROUNDS + 1
         result.assert_eq(
-            "全部超时：每个提供商各调用 1 次",
-            [calls.get("m-d1"), calls.get("m-d2")], [1, 1],
+            f"全部超时：每提供商共调用 {total_rounds} 次（等待重试 3 轮合同）",
+            [calls.get("m-d1"), calls.get("m-d2")], [total_rounds, total_rounds],
         )
-        result.assert_true("全部超时：总耗时 < 6s（等待不随重试放大）", _elapsed < 6.0, f"{_elapsed:.2f}s")
+        # 耗时上限 = 轮间等待 (RETRY_ROUNDS × WAIT_RETRY_INTERVAL=1s)
+        #   + 全部轮次调用（每轮 2 家 × 首响应预算 1s）+ 余量。
+        # v3.5.6 真实合同下（60s/60s）该值为 244s 量级——夹具把两个常量调小后
+        # 结构不变、耗时按比例缩小，断言的仍是「轮次结构固定、不无限放大」。
+        _budget = LLMClient.RETRY_ROUNDS * 1 + total_rounds * 2 * 1 + 15
+        result.assert_true(
+            f"全部超时：总耗时 < {_budget}s（等待重试轮次结构，不随次数放大）",
+            _elapsed < _budget, f"{_elapsed:.2f}s",
+        )
     finally:
         settings.LLM_FIRST_RESPONSE_TIMEOUT = saved_timeout
         llm_mod.litellm.acompletion = saved_acompletion
