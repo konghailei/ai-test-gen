@@ -1087,8 +1087,24 @@ async def archive_project(
             # v3.4: FP 最新用例集固化结果
             "fpc_consolidated": fpc_count,
             "fpc_failed": fpc_failed,
+            # v3.5.7（P1-C）：归档时点待投递的固化任务数——>0 表示知识固化仍在
+            # 异步进行中，此窗口内 KB 问答可能 miss 最新归档内容（前端可提示）。
+            "kb_pending_count": await _count_pending_outbox(session),
         },
     )
+
+
+async def _count_pending_outbox(session) -> int:
+    """v3.5.7（P1-C）：统计 vector_outbox 中待投递（pending）条数。
+
+    归档 → 固化 → 出箱 → 异步 relay → Milvus 可检索存在时间窗口；
+    pending 数即「尚未进入 Milvus 的固化任务数」，供调用方轮询等待。
+    """
+    from sqlalchemy import func as _func
+    from app.db.models import VectorOutbox as _Outbox
+    return int((await session.execute(
+        select(_func.count()).select_from(_Outbox).where(_Outbox.status == "pending")
+    )).scalar() or 0)
 
 
 # ============================================================================

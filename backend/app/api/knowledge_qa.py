@@ -745,6 +745,23 @@ async def kqa_ask(
         "error": "; ".join(search_errors) if search_errors else "",
         "total": len(kb_sources),
     }
+    # v3.5.7（P1-C）：知识固化进行中标记——归档 → CRSR 固化 → 出箱 → 异步 relay
+    # → Milvus 可检索存在时间窗口，窗口内的提问会 miss 最新归档知识（docs/24 Q6
+    # 「固化时序回退」的组成部分）。此处检查 vector_outbox 是否有 pending 的
+    # 固化任务并透出，让前端可提示「知识固化中，结果可能不含最新归档内容」。
+    try:
+        from sqlalchemy import select as _sa_select, func as _sa_func
+        from app.db.models import VectorOutbox as _Outbox
+        _pending = (await session.execute(
+            _sa_select(_sa_func.count()).select_from(_Outbox).where(
+                _Outbox.status == "pending",
+            )
+        )).scalar() or 0
+        kb_status["kb_solidifying"] = _pending > 0
+        kb_status["kb_pending_outbox"] = int(_pending)
+    except Exception as _sol_e:
+        # 出箱表不可查（异常/迁移中）→ 不标记、不阻断问答
+        logger.warning("[API/knowledge-qa] 固化状态检查失败（不标记）: {}", str(_sol_e)[:120])
 
     logger.info(
         "[API/knowledge-qa] 检索完成: sources={}, search_ok={}, errors={}",
