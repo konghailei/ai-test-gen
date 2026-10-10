@@ -2698,9 +2698,15 @@ async def confirm_requirement(
                 src = flow.get("source_fp", "") or ""
                 tgt = flow.get("target_fp", "") or ""
                 if src and tgt and src != tgt:
-                    rel = flow.get("relation_type") or flow.get("interaction_type") or "depends_on"
+                    # v3.5.7（P1-B 对偶边治理）：cross_fp_flows 的 source→target 是
+                    # 「数据/顺序流方向」（上游→下游），默认映射 must 是 data_flows
+                    # （A 的输出流至 B），而非 depends_on（依赖方向：依赖方→被依赖方）。
+                    # 原默认 depends_on 与 LLM dependencies 数组的正确方向成对出现时，
+                    # 会产生方向相反的对偶边（v2.0 实测 4 组），图谱成环、影响分析
+                    # BFS 范围虚增。
+                    rel = flow.get("relation_type") or flow.get("interaction_type") or "data_flows"
                     if rel not in ("depends_on", "data_flows", "invariants", "lifecycle_scenarios", "conflicts_with"):
-                        rel = "depends_on"
+                        rel = "data_flows"
                     flow_deps.append({
                         "source_fp_name": src,
                         "target_fp_name": tgt,
@@ -4099,6 +4105,10 @@ async def fp_delete(
     # v3.1.3 修复 P4：srr_json 列类型为 json（非 jsonb），原 SQL 直接用 jsonb_set/
     # jsonb_array_elements 操作 json 列会导致 "function jsonb_set(json) does not exist"
     # 运行时报错并被旧 catch 吞掉，跨需求清理实际从未生效。现通过 ::jsonb 显式转型。
+    # v3.5.7 修复 DEF-2：`:fp_id::text` 中「绑定参数紧跟双冒号转型」不会被 SQLAlchemy
+    #   text() 解析为参数（官方文档：:value::int 视为字面文本），原样透传给 asyncpg →
+    #   PG 报 syntax error at or near ":"；事务随之中毒（InFailedSQLTransaction），
+    #   后续 SELECT 全部失败 → 接口 500。改用 CAST(:fp_id AS text) 等价且可正确绑定。
     try:
         cleanup_stmt = text(
             """
@@ -4116,7 +4126,7 @@ async def fp_delete(
                    )
                )::json
              WHERE COALESCE((srr_json->'impact_analysis')::jsonb, '[]'::jsonb) @>
-                   jsonb_build_array(jsonb_build_object('fp_id', :fp_id::text))
+                   jsonb_build_array(jsonb_build_object('fp_id', CAST(:fp_id AS text)))
             """
         )
         res = await session.execute(cleanup_stmt, {"fp_id": fp_id})
@@ -4125,10 +4135,19 @@ async def fp_delete(
             fp_id, res.rowcount,
         )
     except Exception as e:  # pragma: no cover - 保护型清理，失败不应阻断删除
+        # v3.5.7（DEF-2 加固）：保护型清理失败必须回滚，否则事务进入 aborted 状态，
+        # 后续所有语句抛 InFailedSQLTransactionError → 接口 500（原缺陷的表征）。
+        # 回滚后 ORM 实例（req/fp）会过期，必须重新加载，避免后续属性访问触发
+        # MissingGreenlet（async 下隐式 lazy load 不可用）。
         logger.warning(
-            "[FP-Delete] 级联清理 SRR.impact_analysis 引用失败: fp={} error={}",
+            "[FP-Delete] 级联清理 SRR.impact_analysis 引用失败，已回滚（不阻断删除）: fp={} error={}",
             fp_id, str(e)[:200],
         )
+        await session.rollback()
+        req = await _load_active_requirement(req_id, session)
+        fp = await session.get(FunctionalPoint, fp_id)
+        if not fp or fp.requirement_id != req_id:
+            raise HTTPException(status_code=404, detail="功能点不存在")
 
     # ---- 清理可追溯性矩阵中的 FP 关联 ----
     # v3.1.3 修复 P3：使用真实字段 Traceability.requirement_field（review_agent 以
