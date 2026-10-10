@@ -669,7 +669,8 @@ def build_user_prompt(
 ## 跨 FP 共享业务规则（总 SRR 的 cross_fp_interactions.shared_business_rules，适用于多个 FP）
 {json.dumps(shared_rules, ensure_ascii=False, indent=2)}
 
-**覆盖要求**：若某条共享规则 applied_fps 涉及 ≥2 个 FP，应生成一个跨 FP 集成用例验证该规则的端到端一致性。"""
+**覆盖要求**：若某条共享规则 applied_fps 涉及 ≥2 个 FP，应生成一个跨 FP 集成用例验证该规则的端到端一致性。
+**数值保真要求**（v3.5.7）：共享规则与全局约束中的具体数值（时长、次数、上限、阈值、频率等，如「锁定 30 分钟」「失败 5 次」「令牌 8 小时」「40 条封顶」「60 次/分钟」）必须在相关用例的步骤（steps）或预期结果（expected）中**原值出现**，不得改写为"多次""超时后"等模糊表述。"""
         fp_requirements = """
 ### 功能点覆盖要求（优先级最高）
 - 每个功能点（FP）至少生成 1 个测试用例，覆盖其 happy_path_steps 中的每个步骤

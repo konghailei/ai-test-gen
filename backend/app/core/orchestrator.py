@@ -159,6 +159,9 @@ class PipelineState(TypedDict, total=False):
     # v3.4.5（缺陷 E）：跨通道/跨子轮语义去重的留痕（generate 节点产出，
     # done 事件消费）。未声明会被 LangGraph 静默过滤 → 前端永远看不到。
     semantic_dedup_removed: list
+    # v3.5.7（P2-B）：共享规则数值保真报告（done 节点产出 → done 事件透出）。
+    # 同上：未声明会被 LangGraph 静默过滤。
+    value_fidelity: dict
 
     # 控制流
     clarify_iteration: int
@@ -1550,6 +1553,17 @@ class Orchestrator:
                 len(content_errors), content_errors[:3],
             )
 
+        # v3.5.7（P2-B）：共享规则数值保真校验（只标记不中断，随 done 事件透出）。
+        # docs/24 O-1：SBR/global_constraints 数值（锁定 30min/令牌 8h 等）在用例中
+        # 间接出现甚至缺失，且此前无任何可见性。
+        try:
+            from app.core.value_fidelity import check_value_fidelity
+            state["value_fidelity"] = check_value_fidelity(
+                state.get("srr") or {}, cases,
+            )
+        except Exception as vf_e:
+            logger.warning("[Orchestrator] 数值保真校验失败（不阻断）: {}", str(vf_e)[:150])
+
         logger.info(
             "[Orchestrator] ◀ 节点 generate（FP分片）完成 ▶ 下一节点 review: cases={}, fp_tagged={}, fp_groups={}",
             len(cases),
@@ -2476,6 +2490,8 @@ class Orchestrator:
                 failed_subtasks=final_state.get("failed_subtasks", []),
                 dedup_removed=final_state.get("dedup_removed", []),
                 semantic_dedup_removed=final_state.get("semantic_dedup_removed", []),
+                # v3.5.7（P2-B）：共享规则数值保真（规则数/命中率/未命中明细）
+                value_fidelity=final_state.get("value_fidelity", {}),
                 # v3.4（docs/15 §4.10）：节点级 span（trace = 任务 → 节点 → LLM 调用）
                 node_spans=_node_spans,
             )
