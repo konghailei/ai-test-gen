@@ -50,6 +50,9 @@ services:
       - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
       # bge-reranker-base 重排模型：独立挂载
       - ./models/bge-reranker-base:/models/bge-reranker-base:ro
+      # bge-small-zh-v1.5 去重专用模型（docs/27 A/C3 定标用；与全局
+      # EMBEDDING_MODEL_NAME 解耦——KB 向量仍是 large/1024 维，celery 不挂）
+      - ./models/bge-small-zh-v1.5:/models/bge-small-zh-v1.5:ro
     environment:
       - APP_PORT=8000
       - DEBUG=${DEBUG:-true}

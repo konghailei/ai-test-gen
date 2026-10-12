@@ -249,6 +249,20 @@ class Settings(BaseSettings):
     提示，不影响去重判定逻辑。"""
     DEDUP_SINGLE_CASE_SEC: float = 4.0
 
+    """去重专用嵌入模型（docs/27 A）：绝对路径，仅 dedup_semantic 使用。
+    与全局 EMBEDDING_MODEL_NAME **完全解耦**——KB 检索/Milvus 向量化继续用
+    全局 bge-large（1024 维），去重可用轻量模型（bge-small 512 维），两者
+    向量空间不同，混用即错。默认空 = 不启用（用全局模型，行为同现状）。
+    目录无效/加载失败 → log warning 并回退全局模型（性能特性，不阻断生成）。"""
+    DEDUP_EMBEDDING_MODEL_NAME: str = ""
+
+    """去重专用模型计算设备：cpu | cuda | mps"""
+    DEDUP_EMBEDDING_DEVICE: str = "cpu"
+
+    """语义去重阈值（docs/27）：默认 0.92（09-16 定标值）。
+    换模型（A）后若定标报告要求独立适配，经环境变量覆盖（如 small 0.90）。"""
+    DEDUP_SEMANTIC_THRESHOLD: float = 0.92
+
     # ========== 知识库维护配置 ==========
     """时间衰减率（半衰期 ~180 天）"""
     KB_DECAY_RATE: float = 0.005

@@ -97,6 +97,11 @@ class MilvusVectorStore:
         self._model_error = ""
         self._connect_lock = threading.Lock()
         self._model_lock = threading.Lock()
+        # docs/27 A：去重专用模型槽——与全局 _model 完全隔离（独立锁/独立加载），
+        # KB 检索与 Milvus 向量化绝不使用它；反之去重也不写 self._model。
+        self._dedup_model: SentenceTransformer | None = None
+        self._dedup_model_lock = threading.Lock()
+        self._dedup_model_broken = False
 
     @property
     def test_patterns(self):
@@ -299,6 +304,79 @@ class MilvusVectorStore:
         if not texts:
             return []
         return self._embed(texts)
+
+    # ------------------------------------------------------------------
+    # docs/27 A：去重专用嵌入模型（与全局模型完全解耦）
+    # ------------------------------------------------------------------
+
+    def _ensure_dedup_model(self) -> SentenceTransformer | None:
+        """加载去重专用模型（docs/27 A）。
+
+        隔离原则：独立槽位/独立锁，**绝不写 self._model**——全局模型服务于
+        KB 检索与 Milvus 向量化（1024 维），去重可用轻量模型（bge-small
+        512 维），两者向量空间不同，混用即错。
+
+        加载规则（与 _ensure_model 的本地目录分支对齐）：
+        - DEDUP_EMBEDDING_MODEL_NAME 为空 → None（调用方回退全局模型）；
+        - 绝对路径且目录有效 → 加载（双检锁，防并发重复加载）；
+        - 目录无效 → 明确报错（不回退联网下载，与全局路径同哲学）；
+        - 任何加载异常由调用方接住并回退全局模型（性能特性，不阻断生成）。
+        """
+        name = settings.DEDUP_EMBEDDING_MODEL_NAME
+        if not name:
+            return None
+        if self._dedup_model is None:
+            with self._dedup_model_lock:
+                if self._dedup_model is None:
+                    if not os.path.isabs(name) or not self._model_dir_valid(name):
+                        msg = (
+                            f"去重专用模型未就绪：DEDUP_EMBEDDING_MODEL_NAME={name}"
+                            f"（需为绝对路径且含 config.json + 权重文件）"
+                        )
+                        logger.error("[Milvus] {}", msg)
+                        raise FileNotFoundError(msg)
+                    logger.info("[Milvus] 加载去重专用模型: {} (device={})",
+                                name, settings.DEDUP_EMBEDDING_DEVICE)
+                    self._dedup_model = SentenceTransformer(
+                        name, device=settings.DEDUP_EMBEDDING_DEVICE
+                    )
+        return self._dedup_model
+
+    def dedup_model_id(self) -> str:
+        """当前生效的去重 embed 模型标识（进 B 缓存 key，docs/27 §2.5）。
+
+        空配置 → "global"；配置了但加载失败（回退全局）→ "global-fallback"
+        ——保证缓存 key 反映**实际产出向量的模型**，防模型错位污染。
+        """
+        if not settings.DEDUP_EMBEDDING_MODEL_NAME:
+            return "global"
+        if self._dedup_model_broken:
+            return "global-fallback"
+        return settings.DEDUP_EMBEDDING_MODEL_NAME
+
+    def embed_texts_for_dedup(self, texts: list[str]) -> list[list[float]]:
+        """去重专用 embed 入口（docs/27 A；orchestrator 两处 dedup_semantic 用）。
+
+        模型链：DEDUP_EMBEDDING_MODEL_NAME 有效 → 专用模型；
+        为空/加载失败 → 全局 _embed（log warning）。
+        调用方（dedup_semantic）对 embed 异常已有 3-gram 降级接住。
+        """
+        if not texts:
+            return []
+        try:
+            model = self._ensure_dedup_model()
+        except Exception as e:  # noqa: BLE001
+            self._dedup_model_broken = True
+            logger.warning(
+                "[Milvus] 去重专用模型加载失败，回退全局模型: {}", str(e)[:200]
+            )
+            model = None
+        if model is None:
+            return self._embed(texts)
+        vectors = model.encode(
+            texts, normalize_embeddings=True, show_progress_bar=False
+        )
+        return vectors.tolist()
 
     def _get_collection(self, coll_key: str) -> Collection:
         """获取已加载的 Collection。"""

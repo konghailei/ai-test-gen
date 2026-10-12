@@ -1523,7 +1523,9 @@ class Orchestrator:
         from app.utils.case_dedup import dedup_semantic
         try:
             from app.db.milvus_store import vector_store as _vs_gen
-            _embed_gen = _vs_gen.embed_texts
+            # docs/27 A：去重专用 embed 入口（DEDUP_EMBEDDING_MODEL_NAME 为空时
+            #   内部回退全局模型，行为同现状）；KB 检索路径不受影响。
+            _embed_gen = _vs_gen.embed_texts_for_dedup
         except Exception:  # noqa: BLE001
             _embed_gen = None
         # v3.5.8（docs/27 D）：语义去重前发进度消息。去重是同步 CPU 阻塞
@@ -1538,7 +1540,8 @@ class Orchestrator:
         )
         # bge 推理是同步 CPU 调用，按 GenAgent 先例用 to_thread 包装（避免阻塞事件循环）
         cases, semantic_removed = await asyncio.to_thread(
-            dedup_semantic, cases, embed_func=_embed_gen
+            dedup_semantic, cases, embed_func=_embed_gen,
+            threshold=settings.DEDUP_SEMANTIC_THRESHOLD,
         )
         await _emit_gen(
             f"语义去重完成：去掉 {len(semantic_removed)} 条（保留 {len(cases)} 条）",
@@ -1819,7 +1822,8 @@ class Orchestrator:
                 from app.utils.case_dedup import dedup_semantic
                 try:
                     from app.db.milvus_store import vector_store as _vs
-                    _embed = _vs.embed_texts
+                    # docs/27 A：与 generate 节点同款去重专用 embed 入口。
+                    _embed = _vs.embed_texts_for_dedup
                 except Exception:  # noqa: BLE001
                     _embed = None
                 # v3.5.8（docs/27 D）：与 generate 节点对称的去重进度消息。
@@ -1846,7 +1850,8 @@ class Orchestrator:
                 )
                 # bge 推理是同步 CPU 调用，用 to_thread 包装（与 GenAgent 同一先例）
                 merged_cases, _sem_removed = await asyncio.to_thread(
-                    dedup_semantic, merged_cases, embed_func=_embed
+                    dedup_semantic, merged_cases, embed_func=_embed,
+                    threshold=settings.DEDUP_SEMANTIC_THRESHOLD,
                 )
                 await _emit_dedup_rv(
                     f"语义去重完成：去掉 {len(_sem_removed)} 条（保留 {len(merged_cases)} 条）",
