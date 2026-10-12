@@ -243,6 +243,12 @@ class Settings(BaseSettings):
     """嵌入模型计算设备：cpu | cuda | mps"""
     EMBEDDING_DEVICE: str = "cpu"
 
+    """语义去重单条用例 embedding 耗时估算（秒，docs/27 D 方案进度消息用）。
+    按实测分阶段更新：E 口径前 4.0（bge-large × 整例 JSON）；E 上线后 1.8；
+    A（bge-small 专用模型）上线后 0.3。仅用于 SSE「语义去重中」的预计时长
+    提示，不影响去重判定逻辑。"""
+    DEDUP_SINGLE_CASE_SEC: float = 4.0
+
     # ========== 知识库维护配置 ==========
     """时间衰减率（半衰期 ~180 天）"""
     KB_DECAY_RATE: float = 0.005

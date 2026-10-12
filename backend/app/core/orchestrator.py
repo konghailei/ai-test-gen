@@ -1526,9 +1526,24 @@ class Orchestrator:
             _embed_gen = _vs_gen.embed_texts
         except Exception:  # noqa: BLE001
             _embed_gen = None
+        # v3.5.8（docs/27 D）：语义去重前发进度消息。去重是同步 CPU 阻塞
+        #   （526 条实测 ~35min），此前无任何 SSE 消息 → 进度条停 70% 被
+        #   用户误判为挂死（docs/26）。预计时长按 settings.DEDUP_SINGLE_CASE_SEC
+        #   估算（分阶段更新：E 后 1.8 / A small 后 0.3），宁可高估。
+        _dedup_est_sec = round(len(cases) * settings.DEDUP_SINGLE_CASE_SEC)
+        await _emit_gen(
+            f"语义去重中：{len(cases)} 条，预计 ~{max(1, round(_dedup_est_sec / 60))} 分钟",
+            {"key": "__dedup__", "name": "语义去重", "status": "running",
+             "cases": len(cases), "est_seconds": _dedup_est_sec},
+        )
         # bge 推理是同步 CPU 调用，按 GenAgent 先例用 to_thread 包装（避免阻塞事件循环）
         cases, semantic_removed = await asyncio.to_thread(
             dedup_semantic, cases, embed_func=_embed_gen
+        )
+        await _emit_gen(
+            f"语义去重完成：去掉 {len(semantic_removed)} 条（保留 {len(cases)} 条）",
+            {"key": "__dedup__", "name": "语义去重", "status": "done",
+             "removed": len(semantic_removed), "kept": len(cases)},
         )
         if semantic_removed:
             logger.info(
@@ -1807,9 +1822,36 @@ class Orchestrator:
                     _embed = _vs.embed_texts
                 except Exception:  # noqa: BLE001
                     _embed = None
+                # v3.5.8（docs/27 D）：与 generate 节点对称的去重进度消息。
+                #   review 节点无 _emit_gen 闭包，复用同款 ContextVar 队列
+                #   （run() 内 set，LangGraph 节点链可见）；None 时降级日志。
+                _rv_queue = self._gen_event_queue.get()
+
+                async def _emit_dedup_rv(msg: str, subtask: dict) -> None:
+                    if _rv_queue is None:
+                        logger.debug("[Orchestrator] [review-dedup] {}", msg)
+                        return
+                    try:
+                        await _rv_queue.put(
+                            make_sse_event("generate", msg, fp_subtask=subtask)
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                _rdedup_est_sec = round(len(merged_cases) * settings.DEDUP_SINGLE_CASE_SEC)
+                await _emit_dedup_rv(
+                    f"语义去重中：{len(merged_cases)} 条，预计 ~{max(1, round(_rdedup_est_sec / 60))} 分钟",
+                    {"key": "__dedup__", "name": "语义去重", "status": "running",
+                     "cases": len(merged_cases), "est_seconds": _rdedup_est_sec},
+                )
                 # bge 推理是同步 CPU 调用，用 to_thread 包装（与 GenAgent 同一先例）
                 merged_cases, _sem_removed = await asyncio.to_thread(
                     dedup_semantic, merged_cases, embed_func=_embed
+                )
+                await _emit_dedup_rv(
+                    f"语义去重完成：去掉 {len(_sem_removed)} 条（保留 {len(merged_cases)} 条）",
+                    {"key": "__dedup__", "name": "语义去重", "status": "done",
+                     "removed": len(_sem_removed), "kept": len(merged_cases)},
                 )
                 if _sem_removed:
                     logger.info(
