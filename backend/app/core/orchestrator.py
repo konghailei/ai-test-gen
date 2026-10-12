@@ -1542,6 +1542,8 @@ class Orchestrator:
         cases, semantic_removed = await asyncio.to_thread(
             dedup_semantic, cases, embed_func=_embed_gen,
             threshold=settings.DEDUP_SEMANTIC_THRESHOLD,
+            # docs/27 B：model_id 进缓存 key（实际生效模型；回退时是 global-fallback）
+            model_id=_vs_gen.dedup_model_id() if _embed_gen else "",
         )
         await _emit_gen(
             f"语义去重完成：去掉 {len(semantic_removed)} 条（保留 {len(cases)} 条）",
@@ -1852,6 +1854,7 @@ class Orchestrator:
                 merged_cases, _sem_removed = await asyncio.to_thread(
                     dedup_semantic, merged_cases, embed_func=_embed,
                     threshold=settings.DEDUP_SEMANTIC_THRESHOLD,
+                    model_id=_vs.dedup_model_id() if _embed else "",
                 )
                 await _emit_dedup_rv(
                     f"语义去重完成：去掉 {len(_sem_removed)} 条（保留 {len(merged_cases)} 条）",

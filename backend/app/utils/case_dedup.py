@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import re
 
+from app.utils.logger import logger
+
 # 标题 3-gram 相似度：≥0.55 视为同一场景（实测重复对的下界）
 TITLE_SIM_THRESHOLD = 0.55
 # 标题中等相似 + 步骤动作有一定重合（步骤只作**辅助**信号）
@@ -207,10 +209,82 @@ def semantic_near_duplicate(
     return False, ""
 
 
+# ============================================================================
+# 进程内向量缓存（docs/27 B，v3.5.8）
+# ============================================================================
+# 背景：dedup_semantic 在主链路两个对称点全量重算——补生成合并点的输入
+# 与主合并点 ~90% 重叠（v1.0-r2：第二轮 280 条里 266 条已算过），
+# 缓存命中后第二轮只 embed 新增十几条（17min → <1min）。
+#
+# 设计要点：
+# - key = md5(model_id | 口径版本 | 文本)：换模型（A）/改口径（E 的版本号
+#   递增）→ 全量 miss，防旧向量冒充新模型结果（dedup_model_id() 已处理
+#   加载失败回退的 global-fallback 标记）；
+# - 失效无需主动机制：内容变（title/steps/assertions 改动）→ _semantic_text
+#   输出变 → key 变 → 自动重算；review 追加的元数据不进语义文本 → 照常命中
+#   （E↔B 协同）；
+# - 进程内 LRU（4096 条 × 1024 维 float ≈ 16MB）：两次去重同进程，
+#   跨进程无需求，不引 Redis；进程重启缓存清空（只损失一轮，可接受）；
+# - model_id 为空 = 模型未知 → **不缓存**（fail-safe：宁可不缓存也不错位）。
+from collections import OrderedDict
+import hashlib
+import threading
+
+_EMBED_CACHE: "OrderedDict[str, list[float]]" = OrderedDict()
+_EMBED_CACHE_MAX = 4096
+_CACHE_LOCK = threading.Lock()
+
+
+def _cache_key(model_id: str, text: str) -> str:
+    """缓存 key：模型 + 口径版本 + 文本 三元组绑定。"""
+    payload = f"{model_id}|{SEMANTIC_SERIALIZATION_VERSION}|{text}"
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+
+def _embed_cached(embed_func, model_id: str, texts: list[str]) -> list[list[float]]:
+    """批量查缓存 → 只 embed miss 的 → 回填（保持输入顺序）。
+
+    embed_func 返回数量与输入不符 → 抛错，由 dedup_semantic 的降级分支接住
+    （与 embedding 抖动同一失败语义：降级 3-gram，不击穿）。
+    """
+    if not model_id or embed_func is None:
+        return embed_func(texts) if embed_func is not None else []
+
+    keys = [_cache_key(model_id, t) for t in texts]
+    with _CACHE_LOCK:
+        hit_map = {k: _EMBED_CACHE[k] for k in keys if k in _EMBED_CACHE}
+        for k in keys:  # LRU touch：命中也刷新新鲜度
+            if k in _EMBED_CACHE:
+                _EMBED_CACHE.move_to_end(k)
+    miss_idx = [i for i, k in enumerate(keys) if k not in hit_map]
+
+    if not miss_idx:
+        logger.debug("[DedupCache] 全命中: {}/{}", len(keys), len(keys))
+        return [hit_map[k] for k in keys]
+
+    miss_vecs = embed_func([texts[i] for i in miss_idx])
+    if len(miss_vecs) != len(miss_idx):
+        raise RuntimeError(
+            f"embed 返回数量不符: 请求 {len(miss_idx)} 条，返回 {len(miss_vecs)} 条"
+        )
+    with _CACHE_LOCK:
+        for i, v in zip(miss_idx, miss_vecs):
+            _EMBED_CACHE[keys[i]] = v
+        while len(_EMBED_CACHE) > _EMBED_CACHE_MAX:
+            _EMBED_CACHE.popitem(last=False)
+    logger.debug(
+        "[DedupCache] 命中 {}/{}，新算 {}，缓存规模 {}",
+        len(hit_map), len(keys), len(miss_idx), len(_EMBED_CACHE),
+    )
+    miss_map = {keys[i]: v for i, v in zip(miss_idx, miss_vecs)}
+    return [hit_map[k] if k in hit_map else miss_map[k] for k in keys]
+
+
 def dedup_semantic(
     cases: list[dict],
     embed_func: "callable | None" = None,
     threshold: float | None = None,
+    model_id: str = "",
 ) -> tuple[list[dict], list[dict]]:
     """跨子轮语义去重（persist 前的安全网）。
 
@@ -223,13 +297,17 @@ def dedup_semantic(
     调用方/测试不得假设可 json.loads 解析（契约变更，见 test_case_dedup.py
     的 _scripted_embed 改造）。
 
+    v3.5.8（docs/27 B）：向量经 _embed_cached 走进程内 LRU（model_id 绑定）。
+    model_id 传 vector_store.dedup_model_id()（实际生效模型）；空 = 不缓存。
+
     Args:
         cases: 待去重用例列表。
         embed_func: 文本→向量的函数（list[str] → list[vector]），
-                    通常传 vector_store.embed_texts。None 时退化为纯
+                    通常传 vector_store.embed_texts_for_dedup。None 时退化为纯
                     3-gram 判定（等价 dedup_near_duplicates），保证无
                     embedding 环境下行为安全。
         threshold: 覆盖默认阈值（定标/校准用）。
+        model_id: 生效的 embed 模型标识（进缓存 key；空 = 模型未知，不缓存）。
 
     Returns:
         (保留的用例列表, 被去掉的记录列表)
@@ -246,7 +324,6 @@ def dedup_semantic(
 
     # v3.5.8（docs/27 E）：语义字段序列化（口径 e1）替代整例 JSON。
     texts = [_semantic_text(c) for _, c in indexed]
-
     # 代表选择排序：与 quality_rank 不同，**完整性优先于置信度**。
     # 定标实证（09-16 批次）：integration 改写版置信度常比 FP 分片版高
     # 0.002~0.005（LLM 噪声级），但步骤/断言更少——按 quality_rank 会留下
@@ -262,9 +339,19 @@ def dedup_semantic(
 
     order = sorted(indexed, key=lambda pair: (_rep_rank(pair[1]), -pair[0]), reverse=True)
     try:
-        vectors = embed_func(texts)
+        # v3.5.8（docs/27 B）：进程内 LRU 缓存（model_id 绑定；空 = 不缓存）。
+        vectors = _embed_cached(embed_func, model_id, texts)
     except Exception:  # noqa: BLE001
-        # embedding 失败 → 降级为 3-gram（不能因为向量化抖动击穿去重环节）
+        # embedding 失败（含缓存层抛出的数量不符）→ 降级为 3-gram
+        # （不能因为向量化抖动击穿去重环节）
+        return dedup_near_duplicates(cases)
+    if len(vectors) != len(indexed):
+        # 兜底：数量不符时 zip 会静默截断 → 下游 vec_by_id KeyError 击穿节点。
+        # 与 embedding 抖动同一失败语义：降级 3-gram。
+        logger.warning(
+            "[DedupCache] embed 返回数量不符（请求 {} 返回 {}），降级 3-gram",
+            len(indexed), len(vectors),
+        )
         return dedup_near_duplicates(cases)
 
     # 归一化余弦（embed_texts 产出可能未归一）

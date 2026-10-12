@@ -341,3 +341,117 @@ def test_semantic_text_includes_title_steps_assertions():
     assert "functional" in text  # type 保留
     # 元数据不得泄漏进文本
     assert "TC-1" not in text and "0.9" not in text
+
+
+# ============================================================================
+# B 方案：进程内向量缓存（docs/27 §2.5，v3.5.8）
+# ============================================================================
+
+def _counting_embed(counter: dict):
+    """记录调用次数的确定性假 embedding（按 _semantic_text 分组返回）。"""
+    from app.utils.case_dedup import _semantic_text
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        counter["calls"] = counter.get("calls", 0) + 1
+        counter["texts"] = counter.get("texts", 0) + len(texts)
+        return [[float(len(t)), 1.0] for t in texts]
+
+    return embed
+
+
+def test_cache_second_call_is_full_hit():
+    """同输入二次调用 → embed_func 零新增调用（缓存生效的核心验收）。"""
+    from app.utils.case_dedup import _EMBED_CACHE, _embed_cached
+
+    _EMBED_CACHE.clear()
+    counter: dict = {}
+    embed = _counting_embed(counter)
+    texts = ["aaa", "bbb", "ccc"]
+    v1 = _embed_cached(embed, "model-x", texts)
+    assert counter["calls"] == 1 and counter["texts"] == 3
+    v2 = _embed_cached(embed, "model-x", texts)
+    assert counter["calls"] == 1, "第二次必须全命中，不再调 embed_func"
+    assert v1 == v2
+
+
+def test_cache_invalidates_on_content_change():
+    """用例内容变 → _semantic_text 变 → key 变 → 只重算变的那条。"""
+    from app.utils.case_dedup import _EMBED_CACHE, _embed_cached
+
+    _EMBED_CACHE.clear()
+    counter: dict = {}
+    embed = _counting_embed(counter)
+    _embed_cached(embed, "model-x", ["aaa", "bbb"])
+    _embed_cached(embed, "model-x", ["aaa", "bbb-modified"])
+    assert counter["texts"] == 3, "只有变化的文本重新 embed"
+    assert counter["calls"] == 2
+
+
+def test_cache_key_isolates_models_and_versions():
+    """换模型/改口径 → 全量 miss（A/B 协同：防旧向量冒充新模型/新口径结果）。"""
+    from app.utils.case_dedup import _EMBED_CACHE, _cache_key, _embed_cached
+    import app.utils.case_dedup as cd
+
+    _EMBED_CACHE.clear()
+    counter: dict = {}
+    embed = _counting_embed(counter)
+    _embed_cached(embed, "model-a", ["aaa"])
+    _embed_cached(embed, "model-b", ["aaa"])
+    assert counter["calls"] == 2, "不同 model_id 不得共享缓存条目"
+
+    # 口径版本进 key：版本变更后同模型同文本也 miss
+    orig = cd.SEMANTIC_SERIALIZATION_VERSION
+    try:
+        k_before = _cache_key("model-a", "aaa")
+        cd.SEMANTIC_SERIALIZATION_VERSION = orig + "-x"
+        assert _cache_key("model-a", "aaa") != k_before, "口径版本必须进缓存 key"
+        _embed_cached(embed, "model-a", ["aaa"])
+        assert counter["calls"] == 3, "口径变更 → 全量 miss → 重算"
+    finally:
+        cd.SEMANTIC_SERIALIZATION_VERSION = orig
+
+
+def test_cache_skipped_without_model_id():
+    """model_id 空 = 模型未知 → 不缓存（fail-safe：宁可不缓存也不错位）。"""
+    from app.utils.case_dedup import _EMBED_CACHE, _embed_cached
+
+    _EMBED_CACHE.clear()
+    counter: dict = {}
+    embed = _counting_embed(counter)
+    _embed_cached(embed, "", ["aaa"])
+    _embed_cached(embed, "", ["aaa"])
+    assert counter["calls"] == 2, "空 model_id 每次直连，不进缓存"
+    assert len(_EMBED_CACHE) == 0
+
+
+def test_cache_embed_length_mismatch_degrades_to_3gram():
+    """embed 返回数量不符 → dedup_semantic 降级 3-gram，不击穿（健壮性缺口修复）。"""
+    from app.utils.case_dedup import dedup_semantic
+
+    def short_embed(texts):
+        return [[1.0, 0.0]]  # 请求 2 条只回 1 条
+
+    a = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间")
+    b = _case("TC-2", "锁定期间尝试登录被拒绝并提示剩余锁定时间")
+    kept, removed = dedup_semantic([a, b], embed_func=short_embed, model_id="m")
+    assert len(kept) == 1, "降级后 3-gram 仍能抓表面重复"
+
+
+def test_dedup_semantic_cache_end_to_end():
+    """端到端：两轮同内容去重，第二轮 embed_func 零调用（review 合并点场景）。"""
+    from app.utils.case_dedup import _EMBED_CACHE, dedup_semantic
+
+    _EMBED_CACHE.clear()
+    counter: dict = {}
+    embed = _counting_embed(counter)
+    cases = [
+        _case("TC-A", "锁定期间尝试登录提示剩余锁定时间"),
+        _case("TC-B", "登录成功跳转首页并展示用户名"),
+    ]
+    k1, _ = dedup_semantic(cases, embed_func=embed, model_id="model-x")
+    assert counter["calls"] == 1
+    # 模拟 review 追加元数据字段（内容不变的语义负载）
+    cases2 = [dict(c, review_status="approved", reviewed_by="r") for c in cases]
+    k2, _ = dedup_semantic(cases2, embed_func=embed, model_id="model-x")
+    assert counter["calls"] == 1, "review 元数据不进语义文本 → 第二轮全命中"
+    assert {c["id"] for c in k1} == {c["id"] for c in k2}
