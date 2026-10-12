@@ -137,7 +137,48 @@ def is_near_duplicate(a: dict, b: dict) -> tuple[bool, str]:
 #   → 取 0.92：命中 8/10，叠加数字护栏后误删 0；
 #     漏掉的 2 对（0.8839/0.8927）留在审核环节人工把关
 #     （与既有取舍一致：宁可不报，不误删）。
+#
+# ⚠️ v3.5.8（docs/27 E）：embedding 输入从「整例 JSON」切换为「语义字段
+#   序列化」（_semantic_text，口径版本 e1）——元数据字段（priority/
+#   gen_metadata/confidence/covered_point_ids 等）对"是否重复"零贡献，
+#   却占 40-60% 文本量并加剧 bge 512 截断。切换后相似度分布必然漂移，
+#   **0.92 阈值已安排 docs/27 C3 定标 gate 用 v1.0-r2 真实批次复标**
+#   （三档对照：large×整例JSON / large×语义字段 / small×语义字段）。
 SEMANTIC_SIM_THRESHOLD = 0.92
+
+# 语义字段序列化口径版本（docs/27 E）。进向量缓存 key（B 方案）：
+# 改口径必须递增版本号，否则旧缓存会以旧口径向量冒充新口径结果。
+SEMANTIC_SERIALIZATION_VERSION = "e1"
+
+
+def _semantic_text(case: dict) -> str:
+    """去重专用序列化：只保留语义负载字段（口径 v=e1，docs/27 §2.2）。
+
+    字段清单与取舍依据：
+    - title：场景主信号（一级）；
+    - type：用例类型（boundary/integration 等改写常带类型变化，弱信号保留）；
+    - steps[].action / steps[].expected：操作与预期（一级，不含 step 序号）；
+    - assertions：断言语义（dict 取 expected_value/target/description 值）。
+
+    显式排除：priority / confidence / gen_metadata / covered_point_ids /
+    source / id / status / review 相关字段——对重复判定零贡献；且 review
+    节点会追加/修改它们，排除后 B 缓存才能跨 review 轮命中（E↔B 协同）。
+    """
+    parts: list[str] = [str(case.get("title") or ""), str(case.get("type") or "")]
+    for s in case.get("steps") or []:
+        if isinstance(s, dict):
+            parts.append(f"{s.get('action', '')}->{s.get('expected', '')}")
+        else:
+            parts.append(str(s))
+    for a in case.get("assertions") or []:
+        if isinstance(a, dict):
+            parts.append(" ".join(
+                str(v) for v in (a.get("expected_value"), a.get("target"), a.get("description"))
+                if v
+            ))
+        else:
+            parts.append(str(a))
+    return "\n".join(p for p in parts if p)
 
 
 def semantic_near_duplicate(
@@ -175,7 +216,12 @@ def dedup_semantic(
 
     与 dedup_near_duplicates 同构：质量高者优先成为代表，被去重条目留痕
     （removed/kept/reason），输出保持原输入顺序。区别在判定信号——
-    用整例 JSON embedding 余弦（阈值 0.92）替代标题 3-gram。
+    用语义字段 embedding 余弦（阈值 0.92）替代标题 3-gram。
+
+    v3.5.8（docs/27 E）：embedding 输入为 _semantic_text 输出（口径 e1），
+    不再整例 JSON 序列化。embed_func 收到的文本因此**不再是合法 JSON**，
+    调用方/测试不得假设可 json.loads 解析（契约变更，见 test_case_dedup.py
+    的 _scripted_embed 改造）。
 
     Args:
         cases: 待去重用例列表。
@@ -196,8 +242,10 @@ def dedup_semantic(
         # 无 embedding 信号 → 退化为既有 3-gram 去重（安全兜底，不丢功能）
         return dedup_near_duplicates(cases)
 
-    import json as _json
     from math import sqrt
+
+    # v3.5.8（docs/27 E）：语义字段序列化（口径 e1）替代整例 JSON。
+    texts = [_semantic_text(c) for _, c in indexed]
 
     # 代表选择排序：与 quality_rank 不同，**完整性优先于置信度**。
     # 定标实证（09-16 批次）：integration 改写版置信度常比 FP 分片版高
@@ -213,7 +261,6 @@ def dedup_semantic(
         )
 
     order = sorted(indexed, key=lambda pair: (_rep_rank(pair[1]), -pair[0]), reverse=True)
-    texts = [_json.dumps(c, ensure_ascii=False) for _, c in indexed]
     try:
         vectors = embed_func(texts)
     except Exception:  # noqa: BLE001

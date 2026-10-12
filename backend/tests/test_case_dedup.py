@@ -128,7 +128,7 @@ def test_identical_title_similarity_is_one():
 #   ≥0.92 判重复（数字护栏先短路）；<0.92 保留。
 # ============================================================================
 
-def _scripted_embed(group_of: dict[str, str]):
+def _scripted_embed(cases: list[dict], group_of: dict[str, str]):
     """构造**确定性**假 embedding（离线 CI 可跑，不依赖 bge 模型）。
 
     group_of: {case_id: 组名}——同组的用例走同一基向量（余弦 1.0，代表
@@ -137,16 +137,21 @@ def _scripted_embed(group_of: dict[str, str]):
 
     ⚠️ 刻意**不用 hash()**：Python 每个进程的 hash 种子随机，
     `hash(x) % N` 跨运行会碰撞，导致"不同组"意外共线、测试时好时坏。
+
+    v3.5.8（docs/27 E）：dedup_semantic 的输入文本从整例 JSON 切换为
+    _semantic_text 输出（不再可 json.loads），映射表改为按语义文本查找；
+    cases 用于预计算 text→组名。**同语义文本的不同用例会碰撞**——构造
+    夹具时保证 title 不同（本文件所有夹具均满足）。
     """
+    from app.utils.case_dedup import _semantic_text
+    text_to_group = {_semantic_text(c): group_of.get(c["id"]) for c in cases}
     groups = sorted(set(group_of.values()))
 
     def embed(texts: list[str]) -> list[list[float]]:
-        import json as _json
         out = []
         for t in texts:
-            cid = _json.loads(t)["id"]
+            g = text_to_group.get(t)
             v = [0.0] * (len(groups) + 1)
-            g = group_of.get(cid)
             v[groups.index(g) if g in groups else len(groups)] = 1.0
             out.append(v)
         return out
@@ -154,17 +159,24 @@ def _scripted_embed(group_of: dict[str, str]):
     return embed
 
 
-def _embed_with_cosine(target: float, cid_a: str, cid_b: str):
-    """两个用例余弦恰为 target 的假 embedding（用于阈值边界用例）。"""
-    import json as _json
+def _embed_with_cosine(cases: list[dict], target: float, cid_a: str, cid_b: str):
+    """两个用例余弦恰为 target 的假 embedding（用于阈值边界用例）。
+
+    v3.5.8（docs/27 E）：同 _scripted_embed，按 _semantic_text 映射。
+    """
+    from app.utils.case_dedup import _semantic_text
     import math
 
+    def _text(cid: str) -> str:
+        return _semantic_text(next(c for c in cases if c["id"] == cid))
+
+    table = {
+        _text(cid_a): [1.0, 0.0],
+        _text(cid_b): [target, math.sqrt(max(0.0, 1 - target * target))],
+    }
+
     def embed(texts: list[str]) -> list[list[float]]:
-        table = {
-            cid_a: [1.0, 0.0],
-            cid_b: [target, math.sqrt(max(0.0, 1 - target * target))],
-        }
-        return [table[_json.loads(t)["id"]] for t in texts]
+        return [table[t] for t in texts]
 
     return embed
 
@@ -179,7 +191,7 @@ def test_semantic_dedup_merges_cross_channel_rewrite():
               steps=("连续登录失败5次", "验证账号被锁定并提示"))
     # 该对是定标里的"跨通道改写"形态：3-gram 抓不住，必须靠语义
     assert not is_near_duplicate(a, b)[0]
-    embed = _scripted_embed({"TC-FP-1": "lock5", "TC-INT-1": "lock5"})
+    embed = _scripted_embed([a, b], {"TC-FP-1": "lock5", "TC-INT-1": "lock5"})
     kept, removed = dedup_semantic([a, b], embed_func=embed)
     assert len(kept) == 1 and len(removed) == 1
     assert "语义相似度" in removed[0]["reason"]
@@ -191,7 +203,7 @@ def test_semantic_dedup_number_guardrail_protects_boundaries():
 
     a = _case("TC-45", "连续失败4次不锁定第5次锁定验证失败次数边界")
     b = _case("TC-6", "锁定期间第6次失败计数保持5不增加")
-    embed = _scripted_embed({"TC-45": "same", "TC-6": "same"})  # 向量说像（余弦 1.0）
+    embed = _scripted_embed([a, b], {"TC-45": "same", "TC-6": "same"})  # 向量说像（余弦 1.0）
     kept, removed = dedup_semantic([a, b], embed_func=embed)
     assert len(kept) == 2 and removed == []
 
@@ -210,7 +222,7 @@ def test_semantic_dedup_keeps_more_complete_case_as_representative():
     int_rewrite = _case("TC-INT", "锁定期间尝试登录被拒绝并提示剩余锁定时间",
                         steps=("锁定账号", "尝试登录验证被拒"),
                         conf=0.951, covered_point_ids=["alternate_flow.2"])
-    embed = _scripted_embed({"TC-FP": "g1", "TC-INT": "g1"})
+    embed = _scripted_embed([int_rewrite, fp_full], {"TC-FP": "g1", "TC-INT": "g1"})
     kept, removed = dedup_semantic([int_rewrite, fp_full], embed_func=embed)
     assert [c["id"] for c in kept] == ["TC-FP"], "必须保留更完整的 FP 分片版"
     assert removed[0]["removed"] == "TC-INT"
@@ -249,7 +261,7 @@ def test_semantic_dedup_below_threshold_keeps_both():
     a = _case("TC-A", "统一错误提示防止用户名枚举")
     b = _case("TC-B", "用户名不存在与密码错误提示一致不泄露账号存在性")
     # 余弦恰为 0.89（低于阈值 0.92）→ 必须两条都保留
-    embed = _embed_with_cosine(0.89, "TC-A", "TC-B")
+    embed = _embed_with_cosine([a, b], 0.89, "TC-A", "TC-B")
     kept, removed = dedup_semantic([a, b], embed_func=embed)
     assert len(kept) == 2 and removed == []
 
@@ -260,7 +272,7 @@ def test_semantic_dedup_above_threshold_is_merged():
 
     a = _case("TC-A", "锁定到期自动解锁并清除失败计数")
     b = _case("TC-B", "锁定期满自动解锁且失败次数重置")
-    embed = _embed_with_cosine(0.93, "TC-A", "TC-B")
+    embed = _embed_with_cosine([a, b], 0.93, "TC-A", "TC-B")
     kept, removed = dedup_semantic([a, b], embed_func=embed)
     assert len(kept) == 1 and len(removed) == 1
 
@@ -272,7 +284,60 @@ def test_semantic_dedup_result_keeps_input_order():
     a = _case("TC-A", "锁定期间尝试登录提示剩余锁定时间")
     b = _case("TC-B", "登录成功跳转首页并展示用户名")
     c = _case("TC-C", "锁定期间尝试登录被拒绝并提示剩余锁定时间")
-    embed = _scripted_embed({"TC-A": "g1", "TC-C": "g1", "TC-B": "g2"})
+    embed = _scripted_embed([a, b, c], {"TC-A": "g1", "TC-C": "g1", "TC-B": "g2"})
     kept, removed = dedup_semantic([a, b, c], embed_func=embed)
     assert [x["id"] for x in kept] == ["TC-A", "TC-B"]  # 原顺序
     assert len(removed) == 1
+
+
+# ============================================================================
+# E 口径：语义字段序列化（docs/27 §2.2，v3.5.8）
+# ============================================================================
+
+def test_semantic_text_ignores_metadata():
+    """元数据变更不改变语义文本——B 缓存能跨 review 轮命中的基础。
+
+    review 节点会追加/修改 review_status 等元数据字段；id/优先级/置信度/
+    gen_metadata/covered_point_ids 对"是否重复"零贡献，必须排除。
+    """
+    from app.utils.case_dedup import _semantic_text
+
+    a = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间")
+    b = _case("TC-2", "锁定期间尝试登录提示剩余锁定时间",
+              priority="P0", confidence=0.5, source="integration",
+              gen_metadata={"model": "deepseek-chat", "gen_confidence": 0.5},
+              covered_point_ids=["happy_path.1"],
+              review_status="approved", reviewed_by="reviewer")
+    assert _semantic_text(a) == _semantic_text(b)
+
+
+def test_semantic_text_tracks_semantic_payload():
+    """语义负载变更必须改变文本——否则缓存 stale、去重漏判。"""
+    from app.utils.case_dedup import _semantic_text
+
+    base = _case("TC-1", "上传大小刚好10MB的文件成功")
+    diff_steps = _case("TC-1", "上传大小刚好10MB的文件成功",
+                       steps=("选择10MB文件", "点击上传确认"))
+    diff_assertions = _case("TC-1", "上传大小刚好10MB的文件成功",
+                            assertions=[{"type": "equals", "target": "list.size",
+                                         "expected_value": "2"}])
+    diff_type = _case("TC-1", "上传大小刚好10MB的文件成功", ctype="boundary")
+    t_base = _semantic_text(base)
+    assert _semantic_text(diff_steps) != t_base
+    assert _semantic_text(diff_assertions) != t_base
+    assert _semantic_text(diff_type) != t_base
+
+
+def test_semantic_text_includes_title_steps_assertions():
+    """语义负载字段必须在文本里（一级信号，缺一个都可能漏判）。"""
+    from app.utils.case_dedup import _semantic_text
+
+    a = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间",
+              steps=("锁定账号", "尝试登录"))
+    text = _semantic_text(a)
+    assert "锁定期间尝试登录提示剩余锁定时间" in text
+    assert "锁定账号" in text
+    assert "尝试登录" in text
+    assert "functional" in text  # type 保留
+    # 元数据不得泄漏进文本
+    assert "TC-1" not in text and "0.9" not in text
