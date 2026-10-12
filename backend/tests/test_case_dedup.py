@@ -138,8 +138,8 @@ def _scripted_embed(cases: list[dict], group_of: dict[str, str]):
     ⚠️ 刻意**不用 hash()**：Python 每个进程的 hash 种子随机，
     `hash(x) % N` 跨运行会碰撞，导致"不同组"意外共线、测试时好时坏。
 
-    v3.5.8（docs/27 E）：dedup_semantic 的输入文本从整例 JSON 切换为
-    _semantic_text 输出（不再可 json.loads），映射表改为按语义文本查找；
+    v3.5.8（docs/27 C3）：映射表按 _semantic_text 输出构造，与序列化口径
+    解耦（口径 e1→e2 回退时本 helper 无需改动——当时改造的收益）。
     cases 用于预计算 text→组名。**同语义文本的不同用例会碰撞**——构造
     夹具时保证 title 不同（本文件所有夹具均满足）。
     """
@@ -162,7 +162,7 @@ def _scripted_embed(cases: list[dict], group_of: dict[str, str]):
 def _embed_with_cosine(cases: list[dict], target: float, cid_a: str, cid_b: str):
     """两个用例余弦恰为 target 的假 embedding（用于阈值边界用例）。
 
-    v3.5.8（docs/27 E）：同 _scripted_embed，按 _semantic_text 映射。
+    v3.5.8（docs/27 C3）：同 _scripted_embed，按 _semantic_text 映射（口径解耦）。
     """
     from app.utils.case_dedup import _semantic_text
     import math
@@ -291,56 +291,47 @@ def test_semantic_dedup_result_keeps_input_order():
 
 
 # ============================================================================
-# E 口径：语义字段序列化（docs/27 §2.2，v3.5.8）
+# E 口径：序列化出口 _semantic_text（docs/27 C3 定标回退，v3.5.8）
 # ============================================================================
+# e1（语义字段瘦身）经 1055 条真实用例定标否决（判重 586→119，漏判 469 对
+# 真重复——JSON 结构共现是该口径的工作部件）。当前 e2 = 整例 JSON。
+# 以下用例锁定 e2 形态，防将来"再优化序列化"时无声回退到已否决的 e1。
 
-def test_semantic_text_ignores_metadata():
-    """元数据变更不改变语义文本——B 缓存能跨 review 轮命中的基础。
+def test_semantic_text_is_full_case_json():
+    """e2 口径：序列化 = 整例 JSON（合法 JSON、含全部字段、与 09-16 定标口径一致）。"""
+    import json as _json
 
-    review 节点会追加/修改 review_status 等元数据字段；id/优先级/置信度/
-    gen_metadata/covered_point_ids 对"是否重复"零贡献，必须排除。
-    """
     from app.utils.case_dedup import _semantic_text
 
     a = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间")
-    b = _case("TC-2", "锁定期间尝试登录提示剩余锁定时间",
-              priority="P0", confidence=0.5, source="integration",
-              gen_metadata={"model": "deepseek-chat", "gen_confidence": 0.5},
-              covered_point_ids=["happy_path.1"],
-              review_status="approved", reviewed_by="reviewer")
-    assert _semantic_text(a) == _semantic_text(b)
+    text = _semantic_text(a)
+    parsed = _json.loads(text)  # 必须是合法 JSON（C2 期间"不可解析"契约已作废）
+    assert parsed["title"] == "锁定期间尝试登录提示剩余锁定时间"
+    assert parsed["steps"] and parsed["assertions"]
+    # 元数据在整例 JSON 里（结构共现是判别力的组成部分，不得剔除）
+    assert "TC-1" in text and "0.9" in text and "functional" in text
 
 
-def test_semantic_text_tracks_semantic_payload():
-    """语义负载变更必须改变文本——否则缓存 stale、去重漏判。"""
+def test_semantic_text_tracks_content_changes():
+    """内容变 → 序列化变（缓存 stale 防护的基础，任何口径都必须满足）。"""
     from app.utils.case_dedup import _semantic_text
 
     base = _case("TC-1", "上传大小刚好10MB的文件成功")
     diff_steps = _case("TC-1", "上传大小刚好10MB的文件成功",
                        steps=("选择10MB文件", "点击上传确认"))
-    diff_assertions = _case("TC-1", "上传大小刚好10MB的文件成功",
-                            assertions=[{"type": "equals", "target": "list.size",
-                                         "expected_value": "2"}])
-    diff_type = _case("TC-1", "上传大小刚好10MB的文件成功", ctype="boundary")
+    diff_meta = _case("TC-1", "上传大小刚好10MB的文件成功", priority="P0")
     t_base = _semantic_text(base)
     assert _semantic_text(diff_steps) != t_base
-    assert _semantic_text(diff_assertions) != t_base
-    assert _semantic_text(diff_type) != t_base
+    assert _semantic_text(diff_meta) != t_base, "整例 JSON 口径下元数据变更也改变文本（正确行为）"
 
 
-def test_semantic_text_includes_title_steps_assertions():
-    """语义负载字段必须在文本里（一级信号，缺一个都可能漏判）。"""
-    from app.utils.case_dedup import _semantic_text
+def test_semantic_text_version_marker_is_e2():
+    """口径版本锁 e2：任何人把 _semantic_text 改回 e1 瘦身，本用例先红。"""
+    import app.utils.case_dedup as cd
 
-    a = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间",
-              steps=("锁定账号", "尝试登录"))
-    text = _semantic_text(a)
-    assert "锁定期间尝试登录提示剩余锁定时间" in text
-    assert "锁定账号" in text
-    assert "尝试登录" in text
-    assert "functional" in text  # type 保留
-    # 元数据不得泄漏进文本
-    assert "TC-1" not in text and "0.9" not in text
+    assert cd.SEMANTIC_SERIALIZATION_VERSION == "e2", (
+        "e1（语义字段瘦身）已定标否决；如启新口径先跑 docs/27 C3 定标再递增版本号"
+    )
 
 
 # ============================================================================
@@ -411,6 +402,35 @@ def test_cache_key_isolates_models_and_versions():
         cd.SEMANTIC_SERIALIZATION_VERSION = orig
 
 
+def test_cache_projection_excludes_volatile_fields():
+    """投影排除 review 会原地改写的字段（confidence）——跨轮命中的关键。
+
+    review_agent.py:298 实证：review() 把 case["confidence"] 改写为
+    final_confidence，reviewed_cases 是同一批 dict 对象。若 key 用整例
+    JSON，confidence 数值变化即全量 miss（17min 问题复活）。
+    """
+    from app.utils.case_dedup import _cache_projection
+
+    base = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间")
+    after_review = _case("TC-1", "锁定期间尝试登录提示剩余锁定时间",
+                         conf=0.87, review_status="approved", reviewed_by="r",
+                         source="integration")
+    assert _cache_projection(base) == _cache_projection(after_review)
+
+
+def test_cache_projection_tracks_semantic_content():
+    """语义内容变 → 投影变 → 重算（缓存不得返回陈旧向量）。"""
+    from app.utils.case_dedup import _cache_projection
+
+    base = _case("TC-1", "上传大小刚好10MB的文件成功")
+    diff_steps = _case("TC-1", "上传大小刚好10MB的文件成功",
+                       steps=("选择10MB文件", "点击上传确认"))
+    diff_title = _case("TC-1", "上传大小刚好11MB的文件成功")
+    p = _cache_projection(base)
+    assert _cache_projection(diff_steps) != p
+    assert _cache_projection(diff_title) != p
+
+
 def test_cache_skipped_without_model_id():
     """model_id 空 = 模型未知 → 不缓存（fail-safe：宁可不缓存也不错位）。"""
     from app.utils.case_dedup import _EMBED_CACHE, _embed_cached
@@ -437,8 +457,12 @@ def test_cache_embed_length_mismatch_degrades_to_3gram():
     assert len(kept) == 1, "降级后 3-gram 仍能抓表面重复"
 
 
-def test_dedup_semantic_cache_end_to_end():
-    """端到端：两轮同内容去重，第二轮 embed_func 零调用（review 合并点场景）。"""
+def test_dedup_semantic_cache_survives_review_confidence_rewrite():
+    """端到端（真实流水线场景）：review 原地改写 confidence 后第二轮全命中。
+
+    这是 key/文本解耦的设计场景——embedding 文本（整例 JSON）随 confidence
+    变化，但缓存 key（语义投影）不变 → 复用已有向量，不重算。
+    """
     from app.utils.case_dedup import _EMBED_CACHE, dedup_semantic
 
     _EMBED_CACHE.clear()
@@ -450,8 +474,23 @@ def test_dedup_semantic_cache_end_to_end():
     ]
     k1, _ = dedup_semantic(cases, embed_func=embed, model_id="model-x")
     assert counter["calls"] == 1
-    # 模拟 review 追加元数据字段（内容不变的语义负载）
-    cases2 = [dict(c, review_status="approved", reviewed_by="r") for c in cases]
+    # 模拟 review() 的真实行为：原地改写 confidence（review_agent.py:298）
+    cases2 = [dict(c, confidence=0.87) for c in cases]
     k2, _ = dedup_semantic(cases2, embed_func=embed, model_id="model-x")
-    assert counter["calls"] == 1, "review 元数据不进语义文本 → 第二轮全命中"
+    assert counter["calls"] == 1, "review 改写 confidence 不得导致缓存 miss"
     assert {c["id"] for c in k1} == {c["id"] for c in k2}
+
+
+def test_dedup_semantic_cache_misses_on_semantic_change():
+    """语义内容变 → 投影变 → miss 重算（与上一条互为护栏）。"""
+    from app.utils.case_dedup import _EMBED_CACHE, dedup_semantic
+
+    _EMBED_CACHE.clear()
+    counter: dict = {}
+    embed = _counting_embed(counter)
+    a = _case("TC-A", "锁定期间尝试登录提示剩余锁定时间")
+    dedup_semantic([a], embed_func=embed, model_id="model-x")
+    a2 = _case("TC-A", "锁定期间尝试登录提示剩余锁定时间",
+               steps=("锁定账号", "用正确密码登录"))
+    dedup_semantic([a2], embed_func=embed, model_id="model-x")
+    assert counter["calls"] == 2, "steps 变了必须重算"

@@ -140,47 +140,40 @@ def is_near_duplicate(a: dict, b: dict) -> tuple[bool, str]:
 #     漏掉的 2 对（0.8839/0.8927）留在审核环节人工把关
 #     （与既有取舍一致：宁可不报，不误删）。
 #
-# ⚠️ v3.5.8（docs/27 E）：embedding 输入从「整例 JSON」切换为「语义字段
-#   序列化」（_semantic_text，口径版本 e1）——元数据字段（priority/
-#   gen_metadata/confidence/covered_point_ids 等）对"是否重复"零贡献，
-#   却占 40-60% 文本量并加剧 bge 512 截断。切换后相似度分布必然漂移，
-#   **0.92 阈值已安排 docs/27 C3 定标 gate 用 v1.0-r2 真实批次复标**
-#   （三档对照：large×整例JSON / large×语义字段 / small×语义字段）。
+# ⚠️ v3.5.8（docs/27 C3 定标）：曾尝试把 embedding 输入从「整例 JSON」切到
+#   「语义字段序列化」（口径 e1）——1055 条真实用例实测**否决**：
+#   判重从 586 对跌到 119 对，漏判 469 对真重复（详见下方版本史）。
+#   已回退整例 JSON（口径 e2），0.92 阈值继续有效（分布未变）。
 SEMANTIC_SIM_THRESHOLD = 0.92
 
 # 语义字段序列化口径版本（docs/27 E）。进向量缓存 key（B 方案）：
 # 改口径必须递增版本号，否则旧缓存会以旧口径向量冒充新口径结果。
-SEMANTIC_SERIALIZATION_VERSION = "e1"
+#
+# ⚠️ 版本史（定标实证，docs/27 C3，1055 条真实用例三档对照）：
+#   e1 = 语义字段序列化（title+type+steps+assertions）——**已否决**。
+#        T1 判重 119 对 vs T0（整例 JSON）586 对，漏判 469 对真重复
+#        （T1 sim 中位 0.872，43/60 落在 0.90+，与须保留对分布重叠，
+#        调阈值无法救回）。根因：整例 JSON 的键名/结构共现不是噪声，
+#        而是该口径的工作部件——同场景用例的 JSON 结构 token 完全共现，
+#        抬高了余弦基数，0.92 阈值（09-16 定标）就是在含该基数的分布
+#        上定的。去掉结构 = 分布塌陷 = 判定失效。
+#   e2 = 回退整例 JSON 序列化（与 C2 前逐字节一致：dumps 不排序）。
+SEMANTIC_SERIALIZATION_VERSION = "e2"
 
 
 def _semantic_text(case: dict) -> str:
-    """去重专用序列化：只保留语义负载字段（口径 v=e1，docs/27 §2.2）。
+    """去重序列化口径（当前 e2 = 整例 JSON，docs/27 C3 定标回退）。
 
-    字段清单与取舍依据：
-    - title：场景主信号（一级）；
-    - type：用例类型（boundary/integration 等改写常带类型变化，弱信号保留）；
-    - steps[].action / steps[].expected：操作与预期（一级，不含 step 序号）；
-    - assertions：断言语义（dict 取 expected_value/target/description 值）。
+    e1（语义字段：title+type+steps+assertions，排除元数据）经 1055 条
+    真实用例定标**否决**——漏判 80%（详见上方版本史注释）。结论：
+    "元数据/结构噪声"实际承担特征对齐职责，去重口径不得瘦身。
 
-    显式排除：priority / confidence / gen_metadata / covered_point_ids /
-    source / id / status / review 相关字段——对重复判定零贡献；且 review
-    节点会追加/修改它们，排除后 B 缓存才能跨 review 轮命中（E↔B 协同）。
+    本函数保留为唯一序列化入口：缓存 key 与后续口径实验都经由此处，
+    将来若基于定标再启新口径，只改此处 + 递增版本号。
     """
-    parts: list[str] = [str(case.get("title") or ""), str(case.get("type") or "")]
-    for s in case.get("steps") or []:
-        if isinstance(s, dict):
-            parts.append(f"{s.get('action', '')}->{s.get('expected', '')}")
-        else:
-            parts.append(str(s))
-    for a in case.get("assertions") or []:
-        if isinstance(a, dict):
-            parts.append(" ".join(
-                str(v) for v in (a.get("expected_value"), a.get("target"), a.get("description"))
-                if v
-            ))
-        else:
-            parts.append(str(a))
-    return "\n".join(p for p in parts if p)
+    import json as _json
+
+    return _json.dumps(case, ensure_ascii=False)
 
 
 def semantic_near_duplicate(
@@ -217,12 +210,18 @@ def semantic_near_duplicate(
 # 缓存命中后第二轮只 embed 新增十几条（17min → <1min）。
 #
 # 设计要点：
-# - key = md5(model_id | 口径版本 | 文本)：换模型（A）/改口径（E 的版本号
-#   递增）→ 全量 miss，防旧向量冒充新模型结果（dedup_model_id() 已处理
-#   加载失败回退的 global-fallback 标记）；
-# - 失效无需主动机制：内容变（title/steps/assertions 改动）→ _semantic_text
-#   输出变 → key 变 → 自动重算；review 追加的元数据不进语义文本 → 照常命中
-#   （E↔B 协同）；
+# - **key 与文本解耦**（docs/27 C3 定标回退 E 后的关键修正）：
+#   key = md5(model_id | 口径版本 | _cache_projection(case))，其中投影是
+#   语义白名单（title/type/description/preconditions/tags/steps/assertions/
+#   notes）；embedding 文本仍是整例 JSON（e2 口径）。原因：review() 会**原地
+#   改写** case["confidence"]（review_agent.py:298，reviewed_cases 是同一批
+#   dict 对象）——若 key 用整例 JSON，confidence 数值变化就会全量 miss，
+#   跨轮缓存命中率归零（17min 问题复活）。投影排除 confidence 等易变字段，
+#   语义内容不变即命中；title/steps 等语义字段变 → key 变 → 正确重算。
+#   （注意与已否决的 e1 区分：e1 是拿白名单做 embedding **文本**——丢了
+#   JSON 结构共现导致分布塌陷；此处白名单只做缓存 **key**，向量内容不变。）
+# - 模型隔离：换模型（A）→ key 变 → 全量 miss（dedup_model_id() 已处理
+#   加载失败回退的 global-fallback 标记）；口径版本递增同理。
 # - 进程内 LRU（4096 条 × 1024 维 float ≈ 16MB）：两次去重同进程，
 #   跨进程无需求，不引 Redis；进程重启缓存清空（只损失一轮，可接受）；
 # - model_id 为空 = 模型未知 → **不缓存**（fail-safe：宁可不缓存也不错位）。
@@ -234,15 +233,47 @@ _EMBED_CACHE: "OrderedDict[str, list[float]]" = OrderedDict()
 _EMBED_CACHE_MAX = 4096
 _CACHE_LOCK = threading.Lock()
 
+# 缓存投影白名单：语义内容字段（变 → 必须重算向量）。
+# 排除：confidence（review 原地改写）/ id / gen_metadata / status /
+# reviewed_by / source / weight / gen_batch_id 等易变或无语义字段。
+_CACHE_PROJECTION_FIELDS = (
+    "title", "type", "description", "preconditions", "tags",
+    "steps", "assertions", "notes", "expected",
+)
 
-def _cache_key(model_id: str, text: str) -> str:
-    """缓存 key：模型 + 口径版本 + 文本 三元组绑定。"""
-    payload = f"{model_id}|{SEMANTIC_SERIALIZATION_VERSION}|{text}"
+
+def _cache_projection(case: dict) -> str:
+    """缓存 key 用的稳定投影（语义白名单，sort_keys 保序）。
+
+    与 _semantic_text（embedding 文本，整例 JSON）刻意不同：
+    投影只回答"语义内容变没变"，不参与 embedding。
+    """
+    import json as _json
+
+    proj = {k: case.get(k) for k in _CACHE_PROJECTION_FIELDS}
+    return _json.dumps(proj, ensure_ascii=False, sort_keys=True)
+
+
+def _cache_key(model_id: str, projection: str) -> str:
+    """缓存 key：模型 + 口径版本 + 语义投影 三元组绑定。"""
+    payload = f"{model_id}|{SEMANTIC_SERIALIZATION_VERSION}|{projection}"
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 
-def _embed_cached(embed_func, model_id: str, texts: list[str]) -> list[list[float]]:
+def _embed_cached(
+    embed_func,
+    model_id: str,
+    texts: list[str],
+    cache_keys: "list[str] | None" = None,
+) -> list[list[float]]:
     """批量查缓存 → 只 embed miss 的 → 回填（保持输入顺序）。
+
+    Args:
+        embed_func: 文本→向量（输入 texts）。
+        model_id: 生效模型标识（空 = 不缓存）。
+        texts: embedding 文本（整例 JSON，口径 e2）。
+        cache_keys: 与 texts 等长的缓存 key 依据（语义投影）；None 时
+            退化为用 texts 自身做 key（测试/简单场景）。
 
     embed_func 返回数量与输入不符 → 抛错，由 dedup_semantic 的降级分支接住
     （与 embedding 抖动同一失败语义：降级 3-gram，不击穿）。
@@ -250,7 +281,8 @@ def _embed_cached(embed_func, model_id: str, texts: list[str]) -> list[list[floa
     if not model_id or embed_func is None:
         return embed_func(texts) if embed_func is not None else []
 
-    keys = [_cache_key(model_id, t) for t in texts]
+    key_src = cache_keys if cache_keys is not None else texts
+    keys = [_cache_key(model_id, k) for k in key_src]
     with _CACHE_LOCK:
         hit_map = {k: _EMBED_CACHE[k] for k in keys if k in _EMBED_CACHE}
         for k in keys:  # LRU touch：命中也刷新新鲜度
@@ -290,12 +322,12 @@ def dedup_semantic(
 
     与 dedup_near_duplicates 同构：质量高者优先成为代表，被去重条目留痕
     （removed/kept/reason），输出保持原输入顺序。区别在判定信号——
-    用语义字段 embedding 余弦（阈值 0.92）替代标题 3-gram。
+    用整例 JSON embedding 余弦（阈值 0.92）替代标题 3-gram。
 
-    v3.5.8（docs/27 E）：embedding 输入为 _semantic_text 输出（口径 e1），
-    不再整例 JSON 序列化。embed_func 收到的文本因此**不再是合法 JSON**，
-    调用方/测试不得假设可 json.loads 解析（契约变更，见 test_case_dedup.py
-    的 _scripted_embed 改造）。
+    v3.5.8（docs/27 C3）：序列化口径经 _semantic_text 统一出口。e1（语义
+    字段瘦身）已定标否决并回退，当前 e2 = 整例 JSON（与 09-16 定标口径
+    逐字节一致）。embed_func 收到的文本**是合法 JSON**（C2 期间的"不可
+    解析"契约已随回退作废）。
 
     v3.5.8（docs/27 B）：向量经 _embed_cached 走进程内 LRU（model_id 绑定）。
     model_id 传 vector_store.dedup_model_id()（实际生效模型）；空 = 不缓存。
@@ -322,7 +354,8 @@ def dedup_semantic(
 
     from math import sqrt
 
-    # v3.5.8（docs/27 E）：语义字段序列化（口径 e1）替代整例 JSON。
+    # v3.5.8（docs/27 C3）：序列化经 _semantic_text 唯一出口（当前口径 e2
+    #   = 整例 JSON；e1 语义字段瘦身已定标否决，见版本史注释）。
     texts = [_semantic_text(c) for _, c in indexed]
     # 代表选择排序：与 quality_rank 不同，**完整性优先于置信度**。
     # 定标实证（09-16 批次）：integration 改写版置信度常比 FP 分片版高
@@ -339,8 +372,12 @@ def dedup_semantic(
 
     order = sorted(indexed, key=lambda pair: (_rep_rank(pair[1]), -pair[0]), reverse=True)
     try:
-        # v3.5.8（docs/27 B）：进程内 LRU 缓存（model_id 绑定；空 = 不缓存）。
-        vectors = _embed_cached(embed_func, model_id, texts)
+        # v3.5.8（docs/27 B）：进程内 LRU 缓存。key 用语义投影（_cache_projection，
+        #   排除 confidence 等 review 会原地改写的字段），文本仍是整例 JSON。
+        vectors = _embed_cached(
+            embed_func, model_id, texts,
+            cache_keys=[_cache_projection(c) for _, c in indexed],
+        )
     except Exception:  # noqa: BLE001
         # embedding 失败（含缓存层抛出的数量不符）→ 降级为 3-gram
         # （不能因为向量化抖动击穿去重环节）
