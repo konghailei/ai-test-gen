@@ -50,9 +50,10 @@ services:
       - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
       # bge-reranker-base 重排模型：独立挂载
       - ./models/bge-reranker-base:/models/bge-reranker-base:ro
-      # bge-small-zh-v1.5 去重专用模型（docs/27 A/C3 定标用；与全局
-      # EMBEDDING_MODEL_NAME 解耦——KB 向量仍是 large/1024 维，celery 不挂）
-      - ./models/bge-small-zh-v1.5:/models/bge-small-zh-v1.5:ro
+      # 注：bge-small/base 去重专用模型（docs/27 A）经 C3 定标**否决**——
+      #   换模型后 0.92 阈值无法迁移（small 过判 979 对/base 漏判 47%），
+      #   详见 docs/27 附录 A。模型文件在 ./models/ 未删，代码入口
+      #   embed_texts_for_dedup 保留（默认关闭），将来重启 A 路线需重跑定标。
     environment:
       - APP_PORT=8000
       - DEBUG=${DEBUG:-true}
