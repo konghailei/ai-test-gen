@@ -404,3 +404,41 @@ T0 的 67min/1055 条 ≈ 3.81s/条，独立复现 docs/26 的瓶颈量化（526
 - 判定逻辑、阈值、序列化口径**零改动**——这是与 E/A 的本质区别。
 
 **未决事项**：真实生成 e2e 回验（需大哥提供需求跑一轮，验 SSE 进度消息合理性 + 主合并点命中率日志）；本批 commit 尚未 push（等回归全绿后按发布纪律处理）。
+
+### B.5 实施后复核（2026-10-13，大哥要求"对比前后是否合理优化 + 查遗漏"）
+
+**前置事实**：基线 = 10-12 凌晨两任务（3486: 569 例 6076s；3487: 140 例 2660s，跑在优化前代码）；
+C1-C5 落盘于 10-12 下午，分片+预嵌入落盘于 10-13 晨——**优化后尚无真实生成任务**，故"前后对比"以
+行为级实测（真实用例直连判定函数）+ 代码审计双轨进行。
+
+#### 复核实证（真实数据）
+
+| # | 项 | 方法 | 结果 |
+|---|---|---|---|
+| 1 | 预热等价性 | 基线任务 20 条真实用例 + 12 条跨子轮重复（32 条），A 直算 vs B 分块预热+review 改写 | removed (removed,kept) 对**逐条一致**；kept 顺序一致；miss=0 |
+| 2 | 预热收益 | 同上计时 | 直算 116.1s → 命中后 **0.10s**（计算部分 ~1100×） |
+| 3 | 增量正确性 | 预热 12/20 条后查 miss | miss=8（精确等于未预热条数） |
+| 4 | review 改写安全 | 改写 confidence 后 count_cache_miss | miss=0（key 白名单排除 confidence，设计自洽） |
+
+#### 复核发现并已修复（v3.5.9.1）
+
+| # | 缺陷 | 根因 | 触发条件 | 修复 |
+|---|---|---|---|---|
+| 1 | **分片并行向量错位**（严重） | 交织分片 `[texts[i::workers]]` 按 chunk 顺序 extend 拼回 → 向量整体错配文本（[v0,v2,v4,v6,v1,v3,v5,v7]），判定失效 | 仅 `DEDUP_EMBED_WORKERS>1`（服务器开并行时）；dev 默认串行未触发 | 连续分块 + 按提交位置回填；FakePool 注入实测 PASS；新增 test_dedup_chunk_order.py 6 用例锁死 |
+| 2 | **fp_progress 计数污染**（中） | C1 的 `__dedup__` 假 FP 进度卡被 append 进 fp_subtasks 且 status=done 计入 covered → covered=4 > total=3，前端 FP 进度溢出 | 所有生成任务（含 dev） | covered 统计排除 `__` 前缀非 FP 子任务（快照保留，前端卡片仍可见）；test_fp_concurrency 断言同步更新 |
+| 3 | **mp_context 声明与实现不符**（低） | 注释声称 spawn 但未设 mp_context，Linux 默认 fork——fork 已初始化 torch 的主进程有死锁风险 | 服务器开并行时 | 显式 `mp.get_context("spawn")`（bench 脚本同步核对） |
+
+**为什么测试当年没拦住**：① 顺序 bug——bench 脚本与生产代码同款写法（一致性校验会报 DIVERGED 但
+没人跑过服务器形态）；② fp_progress——test_fp_concurrency 是 09-09 写的，C1 加 `__dedup__` 卡时
+**只 grep 了 orchestrator 调用方，没跑既有单测**（违反"改约束必须全量 grep + 回归"纪律，自省记入
+docs/27 §B.5）。复核时用 FakePool 注入 + 重跑既有单测，两处均一次现形。
+
+#### 复核后的回归状态
+
+| 测试 | 结果 |
+|---|---|
+| unit 全量（新增 test_dedup_chunk_order 6 条） | **241 passed, 1 skipped** |
+| phase2_core / phase4 / phase5 | 74 / **188** / 112，全绿 |
+| phase3 / phase6 / html | 91(2 skip) / 141 / 32（本轮未重跑，改动面不涉及；上轮全绿） |
+
+**仍待**：真实生成 e2e（大哥提供需求）；服务器 bench 定档。
