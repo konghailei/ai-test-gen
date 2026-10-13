@@ -45,6 +45,133 @@ from app.utils.logger import logger
 
 # 每个 Collection 的维度和索引配置
 # bge-large-zh-v1.5 输出 1024 维
+# ---------------------------------------------------------------------------
+# docs/27 分片并行（dev 机已定标探针；dev 不开 / 服务器自适应）
+# ---------------------------------------------------------------------------
+# 探针实证（2026-10-12，8 逻辑核 dev 容器，bge-large 48 条实测）：
+#   - 串行 4 线程 127.2s；ThreadPool 2 worker 122.4s（1.04×，≈假并行）——
+#     GIL 之外，torch intra-op 线程池进程级共享，worker 线程在同 4 个 OMP
+#     线程上排队，**线程池形态永远无效**；
+#   - ThreadPool 4 worker 333.2s（0.38×，负优化）——4×4=16 线程争 8 逻辑核；
+#   - ProcessPool 在 dev 机因内存不足（宿主 16GB，模型 1.3GB/worker）无法
+#     完成基准——**dev 机不开并行**，workers=1 即串行。
+# 服务器形态：DEDUP_EMBED_WORKERS>1 时用 ProcessPoolExecutor 分片，每 worker
+#   独立加载模型 + set_num_threads(4)（4 线程是单次 encode 实测最优粒度，
+#   docs/26 线程定标）。进程池经 spawn 启动，模型只加载一次、后续复用。
+# 内存预算：worker 数 × ~1.6GB（模型权重 + 运行时）。服务器至少留出
+#   workers × 1.6GB 空闲内存再开。
+# 判定零影响：分片只改"算得快不快"，每条文本的向量与串行逐位一致
+#   （normalize 前 float32 推理，无量化）。
+_DEDUP_PROC_POOL: "ProcessPoolExecutor | None" = None
+_DEDUP_PROC_POOL_LOCK = threading.Lock()
+_DEDUP_PROC_POOL_WORKERS = 0  # 当前池的 worker 数（与配置不符时重建）
+
+
+def _dedup_encode_worker_init() -> None:
+    """进程池 worker 初始化：固定 4 线程（探针实测最优）。"""
+    import torch as _torch
+
+    _torch.set_num_threads(4)
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def _dedup_encode_chunk(args: tuple[list[str], str]) -> list[list[float]]:
+    """进程池 worker：加载（复用）本进程模型并 encode 一个分片。"""
+    chunk, model_path = args
+    global _DEDUP_WORKER_MODEL
+    m = globals().get("_DEDUP_WORKER_MODEL")
+    if m is None:
+        from sentence_transformers import SentenceTransformer as _ST
+
+        m = _ST(model_path, device="cpu")
+        globals()["_DEDUP_WORKER_MODEL"] = m
+    vecs = m.encode(chunk, normalize_embeddings=True, show_progress_bar=False)
+    return vecs.tolist()
+
+
+def _get_dedup_proc_pool(workers: int):
+    """获取/复用进程池（worker 数变化时重建）。"""
+    global _DEDUP_PROC_POOL, _DEDUP_PROC_POOL_WORKERS
+    if workers <= 1:
+        return None
+    if _DEDUP_PROC_POOL is not None and _DEDUP_PROC_POOL_WORKERS == workers:
+        return _DEDUP_PROC_POOL
+    with _DEDUP_PROC_POOL_LOCK:
+        if _DEDUP_PROC_POOL is not None and _DEDUP_PROC_POOL_WORKERS == workers:
+            return _DEDUP_PROC_POOL
+        if _DEDUP_PROC_POOL is not None:
+            try:
+                _DEDUP_PROC_POOL.shutdown(wait=False, cancel_futures=True)
+            except Exception:  # noqa: BLE001
+                pass
+            _DEDUP_PROC_POOL = None
+        from concurrent.futures import ProcessPoolExecutor as _PPE
+
+        _DEDUP_PROC_POOL = _PPE(
+            max_workers=workers,
+            initializer=_dedup_encode_worker_init,
+        )
+        _DEDUP_PROC_POOL_WORKERS = workers
+        logger.info("[Milvus] 去重分片并行进程池就绪: {} workers", workers)
+    return _DEDUP_PROC_POOL
+
+
+def _physical_cores() -> int:
+    """保守估物理核（逻辑核 ÷2 去超线程；容器内 cpu_count 含超线程）。"""
+    try:
+        return max(1, (os.cpu_count() or 2) // 2)
+    except Exception:  # noqa: BLE001
+        return 1
+
+
+def _dedup_workers_configured() -> int:
+    """解析 DEDUP_EMBED_WORKERS：auto = max(1, 物理核-1)，留 1 核给主进程。"""
+    raw = str(settings.DEDUP_EMBED_WORKERS).strip().lower()
+    if raw in ("", "1", "off", "0"):
+        return 1
+    if raw == "auto":
+        return max(1, _physical_cores() - 1)
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning(
+            "[Milvus] DEDUP_EMBED_WORKERS={} 无法解析，回退串行", raw,
+        )
+        return 1
+
+
+def _encode_dedup_texts(
+    texts: list[str],
+    model_path: str | None,
+    serial_encode: "callable",
+) -> list[list[float]]:
+    """去重 embedding 主入口：串行或分片并行（每 worker 4 线程）。
+
+    workers=1（dev 默认）→ serial_encode(texts)，行为与 v3.5.8 前完全一致。
+    workers>1 → ProcessPool 分片（worker 内独立加载 model_path）；
+    任何并行异常回退串行重算（不击穿去重链路）。
+    """
+    workers = _dedup_workers_configured()
+    if workers > 1 and len(texts) >= workers * 2 and model_path:
+        pool = _get_dedup_proc_pool(workers)
+        if pool is not None:
+            try:
+                chunks = [texts[i::workers] for i in range(workers)]
+                futs = [
+                    pool.submit(_dedup_encode_chunk, (c, model_path))
+                    for c in chunks if c
+                ]
+                out: list[list[float]] = []
+                for f in futs:
+                    out.extend(f.result())
+                return out
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "[Milvus] 分片并行失败，回退串行: {}", str(e)[:200],
+                )
+    return serial_encode(texts)
+
+
 COLLECTION_CONFIGS = {
     "requirements": {
         "description": "需求向量",
@@ -359,24 +486,43 @@ class MilvusVectorStore:
 
         模型链：DEDUP_EMBEDDING_MODEL_NAME 有效 → 专用模型；
         为空/加载失败 → 全局 _embed（log warning）。
+        v3.5.9（docs/27 分片并行）：入口改经 _encode_dedup_texts——
+        workers=1 时与原行为逐位一致；workers>1 时 ProcessPool 分片
+        （worker 内独立加载模型，与主进程模型解耦）。
         调用方（dedup_semantic）对 embed 异常已有 3-gram 降级接住。
         """
         if not texts:
             return []
-        try:
-            model = self._ensure_dedup_model()
-        except Exception as e:  # noqa: BLE001
-            self._dedup_model_broken = True
-            logger.warning(
-                "[Milvus] 去重专用模型加载失败，回退全局模型: {}", str(e)[:200]
+
+        def _serial(ts: list[str]) -> list[list[float]]:
+            try:
+                model = self._ensure_dedup_model()
+            except Exception as e:  # noqa: BLE001
+                self._dedup_model_broken = True
+                logger.warning(
+                    "[Milvus] 去重专用模型加载失败，回退全局模型: {}", str(e)[:200]
+                )
+                model = None
+            if model is None:
+                return self._embed(ts)
+            vectors = model.encode(
+                ts, normalize_embeddings=True, show_progress_bar=False
             )
-            model = None
-        if model is None:
-            return self._embed(texts)
-        vectors = model.encode(
-            texts, normalize_embeddings=True, show_progress_bar=False
-        )
-        return vectors.tolist()
+            return vectors.tolist()
+
+        # 并行 worker 需要独立的模型路径；专用模型配置了但加载失败（broken）
+        # 时无路径可用 → 直接串行（内部会回退全局模型）。
+        model_path = None
+        if not self._dedup_model_broken:
+            name = settings.DEDUP_EMBEDDING_MODEL_NAME
+            if name and os.path.isabs(name) and self._model_dir_valid(name):
+                model_path = name
+            else:
+                # 全局模型路径（容器内挂载形态，compose: /models/bge-large-zh-v1.5）
+                gm = settings.EMBEDDING_MODEL_NAME
+                if gm and os.path.isabs(gm) and self._model_dir_valid(gm):
+                    model_path = gm
+        return _encode_dedup_texts(texts, model_path, _serial)
 
     def _get_collection(self, coll_key: str) -> Collection:
         """获取已加载的 Collection。"""

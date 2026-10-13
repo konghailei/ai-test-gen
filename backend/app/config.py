@@ -263,6 +263,15 @@ class Settings(BaseSettings):
     换模型（A）后若定标报告要求独立适配，经环境变量覆盖（如 small 0.90）。"""
     DEDUP_SEMANTIC_THRESHOLD: float = 0.92
 
+    """去重 embedding 分片并行 worker 数（docs/27 分片并行，v3.5.9）。
+    - ""/"1"/"0"/"off" → 串行（默认，dev 机形态——8 逻辑核实测并行无收益，
+      见 milvus_store.py 探针注释）；
+    - "auto" → max(1, 物理核-1)（物理核 = 逻辑核÷2 保守估计）；
+    - 整数 N → N 个 worker（ProcessPool，每 worker 独立加载模型 + 4 线程）。
+    内存预算：每 worker ~1.6GB；服务器开启前先确认空闲内存 ≥ N×1.6GB。
+    判定零影响：分片不改变向量数值，只改计算并行度。"""
+    DEDUP_EMBED_WORKERS: str = ""
+
     # ========== 知识库维护配置 ==========
     """时间衰减率（半衰期 ~180 天）"""
     KB_DECAY_RATE: float = 0.005
