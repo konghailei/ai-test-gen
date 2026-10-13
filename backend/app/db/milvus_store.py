@@ -106,10 +106,19 @@ def _get_dedup_proc_pool(workers: int):
                 pass
             _DEDUP_PROC_POOL = None
         from concurrent.futures import ProcessPoolExecutor as _PPE
+        import multiprocessing as _mp
 
+        # v3.5.9.1：显式 spawn（此前注释声称 spawn 但未设 mp_context，Linux
+        # 默认 fork——fork 已初始化 torch 线程池的主进程有死锁风险，且
+        # dev 探针当时是用独立脚本跑的，主进程形态下从未真正验证过）。
+        try:
+            _ctx = _mp.get_context("spawn")
+        except ValueError:  # 平台不支持 spawn（理论不达）→ 用默认
+            _ctx = None
         _DEDUP_PROC_POOL = _PPE(
             max_workers=workers,
             initializer=_dedup_encode_worker_init,
+            mp_context=_ctx,
         )
         _DEDUP_PROC_POOL_WORKERS = workers
         logger.info("[Milvus] 去重分片并行进程池就绪: {} workers", workers)
@@ -156,15 +165,27 @@ def _encode_dedup_texts(
         pool = _get_dedup_proc_pool(workers)
         if pool is not None:
             try:
-                chunks = [texts[i::workers] for i in range(workers)]
+                # 连续分块 + 按位置回填（v3.5.9.1 修复：交织分片 [i::workers]
+                # 按 chunk 顺序 extend 拼回会把向量错位分配给文本——
+                # texts=[t0..t7] workers=2 返回 [v0,v2,v4,v6,v1,v3,v5,v7]，
+                # 每条用例拿到别人的向量，判定整体失效。2026-10-13 复核时
+                # 用注入 FakePool 实测证错位。改为连续切块 + 结果按提交
+                # 位置写回，顺序天然保持。
+                n = len(texts)
+                bounds = [(i * n // workers, (i + 1) * n // workers)
+                          for i in range(workers)]
                 futs = [
-                    pool.submit(_dedup_encode_chunk, (c, model_path))
-                    for c in chunks if c
+                    (a, pool.submit(_dedup_encode_chunk,
+                                    (texts[a:b], model_path)))
+                    for a, b in bounds if b > a
                 ]
-                out: list[list[float]] = []
-                for f in futs:
-                    out.extend(f.result())
-                return out
+                out: "list[list[float] | None]" = [None] * n
+                for a, f in futs:
+                    for k, v in enumerate(f.result()):
+                        out[a + k] = v
+                if any(v is None for v in out):
+                    raise RuntimeError("分片回填不完整（存在空位）")
+                return out  # type: ignore[return-value]
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "[Milvus] 分片并行失败，回退串行: {}", str(e)[:200],

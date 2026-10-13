@@ -97,16 +97,25 @@ def main() -> None:
         return m.encode(texts, normalize_embeddings=True, show_progress_bar=False).tolist()
 
     def run_parallel(nw: int) -> list[list[float]]:
-        chunks = [texts[i::nw] for i in range(nw)]
+        # v3.5.9.1：连续分块 + 位置回填（与生产 _encode_dedup_texts 同款）。
+        # 旧交织分片写法会把向量错位拼回，被误判为模型发散。
+        n = len(texts)
+        bounds = [(i * n // nw, (i + 1) * n // nw) for i in range(nw)]
+        futs = []
         with ProcessPoolExecutor(
             max_workers=nw, initializer=_dedup_encode_worker_init,
         ) as ex:
-            futs = [ex.submit(_dedup_encode_chunk, (c, model_path))
-                    for c in chunks if c]
-            out: list[list[float]] = []
-            for f in futs:
-                out.extend(f.result())
-        return out
+            futs = [
+                (a, ex.submit(_dedup_encode_chunk, (texts[a:b], model_path)))
+                for a, b in bounds if b > a
+            ]
+            out: "list[list[float] | None]" = [None] * n
+            for a, f in futs:
+                for k, v in enumerate(f.result()):
+                    out[a + k] = v
+        if any(v is None for v in out):
+            raise RuntimeError("分片回填不完整")
+        return out  # type: ignore[return-value]
 
     t0 = time.time()
     base = run_serial()
