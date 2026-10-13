@@ -161,3 +161,10 @@ backend/tests/_e2e_*.py
 tests/marktext-x64-win.zip
 tests/marktext-x64-win/
 _dogfood_tmp/
+_calib_*.json
+_calib_*.log
+_acl_recovery/
+_cleanup_log.txt
+_cleanup_total.tmp
+backend/tests/_verify_*.py
+dsh-plugins-recommend.md
