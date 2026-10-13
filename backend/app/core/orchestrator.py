@@ -1146,7 +1146,16 @@ class Orchestrator:
                 fp_subtasks = [s for s in fp_subtasks if s.get("key") != key]
                 fp_subtasks.append(subtask)
             snap = [dict(s) for s in fp_subtasks]
-            covered_now = sum(1 for s in fp_subtasks if s.get("status") in ("done", "resumed"))
+            # v3.5.9.1 修复：covered 只数功能点 subtask。语义去重进度卡
+            # （key="__dedup__"，C1/docs/27 D 加入）也被 append 进 fp_subtasks
+            # 快照，status=done 会被误计入 covered → covered=4 > total=3，
+            # 前端 FP 进度溢出。约定：双下划线前缀 key = 非 FP 子任务，
+            # 不进 FP 进度分子（快照本身保留，前端卡片仍可见）。
+            covered_now = sum(
+                1 for s in fp_subtasks
+                if not str(s.get("key", "")).startswith("__")
+                and s.get("status") in ("done", "resumed")
+            )
             # v3.4.1 修复 L-13：分母固定为功能点总数（functional_points）。
             # 原实现取"已产生 subtask 的 FP 个数"作分母，会随生成推进逐条增长 ——
             # 第 1 个 FP 完成时显示 100%，第 2 个 FP 开始时又掉回 50%，进度来回跳；

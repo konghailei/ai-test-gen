@@ -144,7 +144,9 @@ async def test_no_failure_amplification():
         sub = ev.get("fp_subtask") or {}
         if sub.get("status") == "done":
             done_keys.add(sub["key"])
-    assert done_keys == {"FP-2", "FP-3"}
+    # v3.5.9（docs/27 C1/D）：语义去重进度卡 key="__dedup__" 也会以 done 透出，
+    # 属于合法的非 FP 子任务（不进 fp_progress 分子，见 _emit_gen 修复注释）。
+    assert done_keys == {"FP-2", "FP-3", "__dedup__"}
 
 
 @pytest.mark.asyncio
