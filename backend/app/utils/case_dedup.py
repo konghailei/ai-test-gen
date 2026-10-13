@@ -312,6 +312,71 @@ def _embed_cached(
     return [hit_map[k] if k in hit_map else miss_map[k] for k in keys]
 
 
+def count_cache_miss(cases: list[dict], model_id: str = "") -> int:
+    """数一遍缓存 miss 条数（只查 key，不 embed）——进度估算用。
+
+    v3.5.9：预热上线后主合并点 miss≈0，若仍按 len(cases)×单条耗时估算
+    会严重虚高（显示"预计 70 分钟"实际 30 秒），观感像卡死。
+    """
+    if not model_id or not cases:
+        return len(cases or [])
+    keys = [_cache_key(model_id, _cache_projection(c))
+            for c in cases if isinstance(c, dict)]
+    with _CACHE_LOCK:
+        return sum(1 for k in keys if k not in _EMBED_CACHE)
+
+
+def prewarm_semantic_cache(
+    cases: list[dict],
+    embed_func: "callable | None" = None,
+    model_id: str = "",
+    chunk_size: int = 64,
+) -> int:
+    """预嵌入：提前把用例向量写入 B 缓存（docs/27 增量去重，v3.5.9）。
+
+    设计：dedup_semantic 的耗时主体是 _embed_cached 里的 miss 部分（bge-large
+    CPU ~3.8s/条）。生成是逐 FP 子轮推进的，每子轮完成后立即预嵌入本子轮
+    用例，主合并点 dedup_semantic 时向量已全在缓存 → miss≈0，"全量重算"
+    就地变成"增量计算"。判定逻辑零改动（向量同、判定同、结果同）。
+
+    与 review() 的配合：review 会原地改写 case["confidence"]
+    （review_agent.py:298），但缓存 key 是语义投影（排除 confidence），
+    故 review 后的主合并点仍能命中生成期预嵌入的向量。
+
+    Args:
+        cases: 本子轮新产出的用例。
+        embed_func / model_id: 与 dedup_semantic 同款（模型必须一致，否则
+            key 不匹配等于白预热——调用方负责传同一来源）。
+        chunk_size: 分块预嵌入（bge encode 长列表内存峰值高，64 条/块）。
+    Returns:
+        成功预嵌入的条数（失败/无 embed 环境返回 0，调用方无需检查——
+        预热失败只是回退"主合并点现场算"的旧行为，不是错误）。
+    """
+    if embed_func is None or not model_id or not cases:
+        return 0
+    ok = 0
+    try:
+        for start in range(0, len(cases), chunk_size):
+            block = [
+                c for c in cases[start:start + chunk_size]
+                if isinstance(c, dict)
+            ]
+            if not block:
+                continue
+            _embed_cached(
+                embed_func, model_id,
+                [_semantic_text(c) for c in block],
+                cache_keys=[_cache_projection(c) for c in block],
+            )
+            ok += len(block)
+    except Exception as e:  # noqa: BLE001
+        # 预热是纯性能优化：任何失败（模型加载/内存/进程池）都不能影响
+        # 生成主链路。dedup_semantic 自带 embed 失败 → 3-gram 降级兜底。
+        logger.debug("[DedupCache] 预热失败（忽略，回退现场计算）: {}", str(e)[:150])
+        return ok
+    return ok
+
+
 def dedup_semantic(
     cases: list[dict],
     embed_func: "callable | None" = None,

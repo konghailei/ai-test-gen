@@ -1189,6 +1189,20 @@ class Orchestrator:
                 })
                 checkpoint_groups.append(dict(g))  # 累积，保证二次中断也能续
                 logger.info("[Orchestrator] 断点续跑：跳过已完成的 FP={}", fid)
+            # v3.5.9（docs/27 增量去重）：续跑恢复的历史用例同样预嵌入——
+            # 否则主合并点对这批"没经过生成阶段"的用例全量 miss。放在
+            # 恢复循环后一次性预热（后续 FP 未开始，CPU 空闲）。
+            if resolved_cases:
+                try:
+                    from app.utils.case_dedup import prewarm_semantic_cache
+                    from app.db.milvus_store import vector_store as _vs_rsm
+                    await asyncio.to_thread(
+                        prewarm_semantic_cache, list(resolved_cases),
+                        embed_func=_vs_rsm.embed_texts_for_dedup,
+                        model_id=_vs_rsm.dedup_model_id(),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("[Orchestrator] 续跑预嵌入跳过（不阻断）: {}", str(e)[:120])
 
         fp_list = functional_points or []
         # v3.4（docs/15 §4.2 第 3 条）：计算本任务的**输入指纹**，随每次 checkpoint 写入。
@@ -1380,6 +1394,22 @@ class Orchestrator:
                 await self._save_gen_checkpoint(task_id, checkpoint_groups, fingerprint=checkpoint_fingerprint)
             except Exception as e:
                 logger.debug("[Orchestrator] checkpoint 写入失败（不阻断）: {}", str(e)[:120])
+            # v3.5.9（docs/27 增量去重）：本 FP 子轮用例立即预嵌入——把
+            # "主合并点全量重算"摊销到各子轮完成时点。bge 推理同步 CPU，
+            # to_thread 包装（与主合并点 dedup 同一先例）；预热失败只回退
+            # 旧"现场计算"行为，无风险。与下一步 FP 的 LLM 生成（IO 等待）
+            # 天然错峰，CPU 争用窗口小。
+            if fp_cases_all:
+                try:
+                    from app.utils.case_dedup import prewarm_semantic_cache
+                    from app.db.milvus_store import vector_store as _vs_pw
+                    await asyncio.to_thread(
+                        prewarm_semantic_cache, fp_cases_all,
+                        embed_func=_vs_pw.embed_texts_for_dedup,
+                        model_id=_vs_pw.dedup_model_id(),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("[Orchestrator] 预嵌入跳过（不阻断）: {}", str(e)[:120])
 
         if gen_fp_conc <= 1 or len(_pending_fps) <= 1:
             # 串行回退（v3.5.4 行为）；单 FP 也无需并发开销
@@ -1528,11 +1558,34 @@ class Orchestrator:
             _embed_gen = _vs_gen.embed_texts_for_dedup
         except Exception:  # noqa: BLE001
             _embed_gen = None
+        # v3.5.9（docs/27 增量去重）：全量兜底/跨 FP 集成两通道不经 FP 子轮
+        #   挂点，先一次性预热（FP 子轮用例已被逐子轮预热，此处 miss≈0，
+        #   只补兜底/集成通道的新条目）。含缓存内查重：已预热的直接命中。
+        if _embed_gen is not None:
+            try:
+                from app.utils.case_dedup import prewarm_semantic_cache
+                await asyncio.to_thread(
+                    prewarm_semantic_cache, cases,
+                    embed_func=_embed_gen,
+                    model_id=_vs_gen.dedup_model_id(),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[Orchestrator] 合并前预嵌入跳过（不阻断）: {}", str(e)[:120])
         # v3.5.8（docs/27 D）：语义去重前发进度消息。去重是同步 CPU 阻塞
         #   （526 条实测 ~35min），此前无任何 SSE 消息 → 进度条停 70% 被
         #   用户误判为挂死（docs/26）。预计时长按 settings.DEDUP_SINGLE_CASE_SEC
         #   估算（分阶段更新：E 后 1.8 / A small 后 0.3），宁可高估。
-        _dedup_est_sec = round(len(cases) * settings.DEDUP_SINGLE_CASE_SEC)
+        # v3.5.9（docs/27 增量去重）：按**缓存 miss 数**估算（预热后 miss≈0，
+        #   全量 len(cases) 估算会虚高到"预计 70 分钟"实际 30 秒）。
+        try:
+            from app.utils.case_dedup import count_cache_miss
+            _miss_n = await asyncio.to_thread(
+                count_cache_miss, cases,
+                model_id=_vs_gen.dedup_model_id() if _embed_gen else "",
+            )
+        except Exception:  # noqa: BLE001
+            _miss_n = len(cases)
+        _dedup_est_sec = round(_miss_n * settings.DEDUP_SINGLE_CASE_SEC)
         await _emit_gen(
             f"语义去重中：{len(cases)} 条，预计 ~{max(1, round(_dedup_est_sec / 60))} 分钟",
             {"key": "__dedup__", "name": "语义去重", "status": "running",
@@ -1844,7 +1897,28 @@ class Orchestrator:
                     except Exception:  # noqa: BLE001
                         pass
 
-                _rdedup_est_sec = round(len(merged_cases) * settings.DEDUP_SINGLE_CASE_SEC)
+                # v3.5.9（docs/27 增量去重）：补生成用例先预热（它们没经过
+                # FP 子轮挂点），主用例集已预热过，_embed_cached 内部只算 miss。
+                if _embed is not None:
+                    try:
+                        from app.utils.case_dedup import prewarm_semantic_cache
+                        await asyncio.to_thread(
+                            prewarm_semantic_cache, supplement_cases or [],
+                            embed_func=_embed,
+                            model_id=_vs.dedup_model_id(),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                # v3.5.9：估算同样按 miss 数（见 generate 节点同款注释）。
+                try:
+                    from app.utils.case_dedup import count_cache_miss
+                    _rmiss_n = await asyncio.to_thread(
+                        count_cache_miss, merged_cases,
+                        model_id=_vs.dedup_model_id() if _embed else "",
+                    )
+                except Exception:  # noqa: BLE001
+                    _rmiss_n = len(merged_cases)
+                _rdedup_est_sec = round(_rmiss_n * settings.DEDUP_SINGLE_CASE_SEC)
                 await _emit_dedup_rv(
                     f"语义去重中：{len(merged_cases)} 条，预计 ~{max(1, round(_rdedup_est_sec / 60))} 分钟",
                     {"key": "__dedup__", "name": "语义去重", "status": "running",
