@@ -11,14 +11,16 @@ import CaseNoteDialog from '../components/CaseNoteDialog'
 import { notifyCasesChanged } from '../utils/caseSync'
 import {
   buildCaseNote, parseCaseNote, formatNoteErrors,
-  typeLabel, labelType, type ParsedNote,
+  labelType, type ParsedNote,
 } from '../utils/caseNote'
+import { caseTypeGroup, caseTypeGroupLabel, caseTypeGroupRepresentative } from '../utils/caseType'
 import type { TestCase, Requirement, Project } from '../types'
 
 /**
  * 真实 XMind 网页编辑页（基于 simple-mind-map / 思绪思维导图）
  * 将当前选中项目的测试用例渲染成可编辑思维导图。
- * 节点层级：项目(根) → 需求 → 功能点/业务场景 → 应用类型 → 用例
+ * 节点层级：项目(根) → 需求 → 功能点/业务场景 → 测试类型分组 → 用例
+ * （v3.5.11 类型层按展示分组聚合，见 utils/caseType.ts 镜像 docs/04 类型体系）
  * 节点 data 内记录用例元数据，编辑后保存回系统用例。
  *
  * 进入方式：测试用例页点「打开 XMind」→ 新标签页打开本页面。
@@ -37,6 +39,8 @@ interface XNodeData {
   reqId?: string
   fp?: string
   type?: string
+  /** v3.5.11: 类型层分组节点的分组 key（functional/scenario/…） */
+  group?: string
   note?: string
 }
 
@@ -168,10 +172,13 @@ export default function XMindEditPage() {
       }
       const fpNode = entry.nodes.get(fp)!
       const type = c.type || 'other'
-      let typeNode = fpNode.children.find((t: any) => t.data?.type === type && t.data?.kind === 'type')
+      // v3.5.11（docs/04 类型体系定稿）：类型层按展示分组聚合（功能测试/场景测试/…），
+      // 与后端 XMind 导出同构；细分 type 保留在用例节点 data.type 与备注里不丢
+      const group = caseTypeGroup(c.type)
+      let typeNode = fpNode.children.find((t: any) => t.data?.group === group && t.data?.kind === 'type')
       if (!typeNode) {
         typeNode = {
-          data: { text: typeLabel(type), kind: 'type', reqId, fp, type },
+          data: { text: caseTypeGroupLabel(c.type), kind: 'type', reqId, fp, group },
           children: [],
         }
         fpNode.children.push(typeNode)
@@ -481,7 +488,14 @@ export default function XMindEditPage() {
         }
         if (kind === 'req') reqId = d.reqId || reqId
         if (kind === 'fp') { fp = d.fp || node.data?.text || BIZ_SCENE; type = '' }
-        if (kind === 'type') type = d.type || labelType(node.data?.text || '')
+        // v3.5.11：类型层为分组节点（data.group）→ 新建用例兜底取分组代表细分
+        // （功能测试→functional / 场景测试→integration / …）；旧树/用户手建节点
+        // 仍按 data.type 或节点文本反查（labelType）兼容
+        if (kind === 'type') {
+          type = d.type
+            || (d.group ? caseTypeGroupRepresentative(d.group) : '')
+            || labelType(node.data?.text || '')
+        }
         if (kind === 'case' || (!kind && children.length === 0)) {
           // kind='case' 的节点即使被用户加了子节点也必须计入用例行（B-3）：
           // 否则它不进 seenIds，保存时会被当作"已从树中删除"而误删该用例
@@ -754,7 +768,7 @@ export default function XMindEditPage() {
           右键用例节点选「编辑用例详情」可用表单编辑优先级/描述/前置条件/测试步骤，保存后立即写回系统用例；
           选「编辑备注（文本）」可直接按格式改备注文本（改步骤/前置条件最快捷），格式有误会逐行提示、无法保存。
           修改备注或树结构后点击「保存」一次性写回系统用例（新增/更新/删除）。
-          节点层级：项目 → 需求 → 功能点(业务场景) → 应用类型 → 用例。
+          节点层级：项目 → 需求 → 功能点(业务场景) → 测试类型分组 → 用例（功能测试组内细分保留在用例标题前缀与备注）。
         </div>
       )}
 
