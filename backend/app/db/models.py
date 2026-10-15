@@ -1380,6 +1380,14 @@ class VectorOutbox(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
     )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, comment="投递完成时间")
+    # v4.1（缺陷 B / T3）：认领租约——认领后置 delivering + lease_until，投递在事务外
+    # 并行执行；中途崩溃由租约过期回收（Milvus 幂等，重复投递无副作用）。
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="本行被 relay 认领（置 delivering）的时间"
+    )
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="delivering 租约到期时间（过期可被重新认领）"
+    )
 
     __table_args__ = (
         Index("idx_outbox_dispatch", "status", "next_retry_at", "created_at"),

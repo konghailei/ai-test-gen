@@ -441,6 +441,9 @@ import threading
 
 _EMBED_CACHE: "OrderedDict[str, list[float]]" = OrderedDict()
 _EMBED_CACHE_MAX = 4096
+# v4.1（缺陷 C）：embed 分块大小。每块算完立即回填 LRU——崩溃只损失当前块，
+# 且块边界给事件循环/其它推理任务让出交错窗口（不长期霸占 CPU）。
+_DEDUP_EMBED_CHUNK = 32
 _CACHE_LOCK = threading.Lock()
 
 # 缓存投影白名单：语义内容字段（变 → 必须重算向量）。
@@ -504,16 +507,37 @@ def _embed_cached(
         logger.debug("[DedupCache] 全命中: {}/{}", len(keys), len(keys))
         return [hit_map[k] for k in keys]
 
-    miss_vecs = embed_func([texts[i] for i in miss_idx])
+    # v4.1（缺陷 C）：分块 embed + 逐块回填。
+    #   旧实现把全部 miss 一次性喂给 embed_func（526 条 ≈ 35 min 单次调用）：
+    #     ① 调用期间缓存层零进展，崩溃即全部白算；
+    #     ② 大列表 encode 内存峰值高；
+    #     ③ 无法观测进度（进度条分块更新才可估时）。
+    #   分块后每块算完立刻回填 LRU：崩溃只损失当前块，且与其他 to_thread
+    #   任务（bge 检索/出箱投递）在 CPU 上更细粒度地交替，不长期霸占。
+    #   与串行整批的结果**逐位一致**（同模型、同 normalize，仅拆分批边界）。
+    miss_texts_all = [texts[i] for i in miss_idx]
+    miss_vecs_all: list[list[float]] = []
+    for start in range(0, len(miss_texts_all), _DEDUP_EMBED_CHUNK):
+        block_texts = miss_texts_all[start:start + _DEDUP_EMBED_CHUNK]
+        block_vecs = embed_func(block_texts)
+        if len(block_vecs) != len(block_texts):
+            raise RuntimeError(
+                f"embed 返回数量不符: 请求 {len(block_texts)} 条，返回 {len(block_vecs)} 条"
+            )
+        miss_vecs_all.extend(block_vecs)
+        # 逐块回填（崩溃只损失当前块；后续块命中也刷新新鲜度）
+        with _CACHE_LOCK:
+            base = start
+            for j, v in enumerate(block_vecs):
+                _EMBED_CACHE[keys[miss_idx[base + j]]] = v
+            while len(_EMBED_CACHE) > _EMBED_CACHE_MAX:
+                _EMBED_CACHE.popitem(last=False)
+
+    miss_vecs = miss_vecs_all
     if len(miss_vecs) != len(miss_idx):
         raise RuntimeError(
             f"embed 返回数量不符: 请求 {len(miss_idx)} 条，返回 {len(miss_vecs)} 条"
         )
-    with _CACHE_LOCK:
-        for i, v in zip(miss_idx, miss_vecs):
-            _EMBED_CACHE[keys[i]] = v
-        while len(_EMBED_CACHE) > _EMBED_CACHE_MAX:
-            _EMBED_CACHE.popitem(last=False)
     logger.debug(
         "[DedupCache] 命中 {}/{}，新算 {}，缓存规模 {}",
         len(hit_map), len(keys), len(miss_idx), len(_EMBED_CACHE),
@@ -709,7 +733,27 @@ def dedup_semantic(
         nb_ = sqrt(sum(x * x for x in vb)) or 1.0
         return sum(x * y for x, y in zip(va, vb)) / (na_ * nb_)
 
+    # v4.1（缺陷 C）：O(n²) 余弦预计算为 numpy 矩阵点积。
+    #   旧实现内层对每对候选调 _norm_cos（纯 Python 1024 维乘加）——
+    #   500 条 kept × 500 候选 ≈ 25 万对 × 2×1024 次 Python 浮点 ≈ 数分钟。
+    #   numpy 化后：先把全部向量 L2 归一化，任意两对余弦 = 一次点积，
+    #   内层查表 O(1)。**数值逐位等价**（同向量、同归一化、同阈值判定）。
     vec_by_id = {i: v for (i, _), v in zip(indexed, vectors)}
+    try:
+        import numpy as _np
+
+        _mat = _np.asarray([vec_by_id[i] for i, _ in indexed], dtype=_np.float32)
+        _norms = _np.linalg.norm(_mat, axis=1, keepdims=True)
+        _norms[_norms == 0] = 1.0
+        _mat = _mat / _norms
+        _row_of = {idx: k for k, (idx, _) in enumerate(indexed)}
+
+        def _cos(i: int, j: int) -> float:
+            return float(_mat[_row_of[i]] @ _mat[_row_of[j]])
+    except Exception as _e:  # noqa: BLE001 - numpy 缺失/异常 → 回退纯 Python（行为不变）
+        logger.debug("[DedupSemantic] numpy 加速不可用，回退纯 Python 余弦: {}", str(_e)[:120])
+        _cos = _norm_cos  # type: ignore[assignment]
+
     kept: list[dict] = []
     kept_idx: list[int] = []
     removed: list[dict] = []
@@ -721,7 +765,7 @@ def dedup_semantic(
     for i, case in order:
         dup_of = None
         for j in kept_idx:
-            sim = _norm_cos(vec_by_id[i], vec_by_id[j])
+            sim = _cos(i, j)
             dup, reason = semantic_near_duplicate(
                 case, cases[j], sim=sim, extra_role_words=extra_role_words,
                 threshold=thr,

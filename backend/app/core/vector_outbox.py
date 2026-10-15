@@ -44,6 +44,13 @@ OUTBOX_BACKOFF_BASE = 5
 OUTBOX_BACKOFF_CAP = 300
 OUTBOX_BATCH = 50
 OUTBOX_INTERVAL_SECONDS = 5
+# v4.1（缺陷 B / T3）：认领后进入 delivering 的租约时长（秒）。投递中途崩溃时，
+# 行停在 delivering，租约到期后由 _claim_sql 的过期分支重新认领（Milvus 幂等，
+# 重复投递无副作用）。取足够容纳一批并行投递的时长（50 条 / 4 并发 × 14s ≈ 175s）。
+OUTBOX_LEASE_SECONDS = 600
+# v4.1（缺陷 B / T3）：并行投递并发度。本地 bge 推理是 CPU 密集，并发过高会把
+# 事件循环拖到秒级；4 是「吞吐 ×4 且事件循环仍可响应」的折中（可经环境变量调）。
+OUTBOX_DELIVER_CONCURRENCY = 4
 
 VALID_ACTIONS = ("upsert", "delete")
 # v3.5.0（docs/18 P0）：fp_crsr = 功能点权威完整版 SRR（CRSR 编译层产物）。
@@ -155,10 +162,22 @@ def _deliver(row) -> None:
 
 
 def _claim_sql(limit: int) -> str:
+    """认领 pending/failed 且到期的行；同时回收租约过期的 delivering 行。
+
+    v4.1（缺陷 B / T3）：新增 `delivering` 过期回收分支——投递中途崩溃的行
+    （status='delivering' 且 lease_until < now）会被重新认领，配合 Milvus 幂等
+    投递保证至少一次语义。
+    """
     return """
         SELECT event_id FROM vector_outbox
-        WHERE status IN ('pending', 'failed')
-          AND (next_retry_at IS NULL OR next_retry_at <= now())
+        WHERE (
+                status IN ('pending', 'failed')
+                AND (next_retry_at IS NULL OR next_retry_at <= now())
+              )
+           OR (
+                status = 'delivering'
+                AND (lease_until IS NULL OR lease_until <= now())
+              )
         ORDER BY created_at
         LIMIT :limit
         FOR UPDATE SKIP LOCKED
@@ -168,6 +187,24 @@ def _claim_sql(limit: int) -> str:
 async def dispatch_batch(limit: int = OUTBOX_BATCH) -> dict:
     """认领并投递一批出箱事件（至少一次；Milvus 侧幂等）。
 
+    v4.1（缺陷 B / T3 修复）：**认领与投递分离 + 并行投递**。
+      旧实现（v3.5.x）：在一个事务里 `FOR UPDATE SKIP LOCKED` 认领 50 条后，
+      **仍在同一事务内**逐条 `await asyncio.to_thread(_deliver)`（本地 bge CPU
+      推理 ~12-14s/条）。后果实测：
+        ① 该事务 `idle in transaction` 持锁约 12 分钟（50×14s）——违反短事务原则、
+           阻塞 PG 连接，多实例并发时连接池耗尽风险；
+        ② `OUTBOX_INTERVAL_SECONDS=5` 完全失效（一轮要 12 分钟）；
+        ③ 吞吐 ≈ 250 条/小时（串行）。
+
+      新实现分三段，每段都是短事务：
+        ① 认领段：`FOR UPDATE SKIP LOCKED` 认领后立即把状态置 `delivering`
+           （带 `lease_until` 租约），**提交并释放锁**；
+        ② 投递段：事务外 `asyncio.gather` **并行**投递（并发由信号量约束，
+           避免同时开 N 个 bge 推理把事件循环拖垮）；
+        ③ 回写段：另开一个**短事务**批量回写 done/failed 与退避时间。
+      崩溃覆盖：投递中途崩溃 → 行停在 `delivering`，租约到期后由 `_claim_sql`
+      的过期分支重新认领（Milvus 幂等 upsert/delete，重复投递无副作用）。
+
     Returns:
         dict: {"claimed": n, "done": n, "failed": n, "errors": [...]}
     """
@@ -175,28 +212,71 @@ async def dispatch_batch(limit: int = OUTBOX_BATCH) -> dict:
     from app.db.models import VectorOutbox
 
     stats = {"claimed": 0, "done": 0, "failed": 0, "errors": []}
+
+    # ── ① 认领段（短事务：认领 + 置 delivering + commit 释放锁）──
+    claimed_ids: list[str] = []
     async with async_session() as session:
         rows = (await session.execute(
             text(_claim_sql(limit)), {"limit": limit}
         )).all()
         if not rows:
             return stats
-        ids = [r[0] for r in rows]
+        claimed_ids = [r[0] for r in rows]
+        now = datetime.now(timezone.utc)
+        lease = now + timedelta(seconds=OUTBOX_LEASE_SECONDS)
+        # 置 delivering + 租约；commit 立即释放行锁（后续投递不持锁）
+        await session.execute(
+            text(
+                "UPDATE vector_outbox SET status='delivering', "
+                "lease_until=:lease, claimed_at=:now "
+                "WHERE event_id = ANY(:ids)"
+            ),
+            {"lease": lease, "now": now, "ids": claimed_ids},
+        )
+        await session.commit()
+
+    # 读取投递所需的完整行（新短事务，只读）
+    async with async_session() as session:
         objects = (await session.execute(
-            select(VectorOutbox).where(VectorOutbox.event_id.in_(ids))
+            select(VectorOutbox).where(VectorOutbox.event_id.in_(claimed_ids))
         )).scalars().all()
         stats["claimed"] = len(objects)
 
-        for row in objects:
+    # ── ② 投递段（事务外并行；Milvus 幂等，失败由回写段记账）──
+    sem = asyncio.Semaphore(OUTBOX_DELIVER_CONCURRENCY)
+
+    async def _deliver_one(row) -> tuple[str, str]:
+        """返回 (event_id, error)；error 为空表示成功。"""
+        async with sem:
             try:
                 await asyncio.to_thread(_deliver, row)
-                row.status = "done"
-                row.processed_at = datetime.now(timezone.utc)
-                row.error = ""
-                stats["done"] += 1
+                return row.event_id, ""
             except Exception as e:  # noqa: BLE001
+                return row.event_id, str(e)[:500]
+
+    results = await asyncio.gather(
+        *[_deliver_one(r) for r in objects], return_exceptions=False
+    )
+    outcome: dict[str, str] = {eid: err for eid, err in results}
+
+    # ── ③ 回写段（另一个短事务：批量回写 done/failed + 退避）──
+    async with async_session() as session:
+        fresh = (await session.execute(
+            select(VectorOutbox).where(VectorOutbox.event_id.in_(claimed_ids))
+        )).scalars().all()
+        now = datetime.now(timezone.utc)
+        for row in fresh:
+            err = outcome.get(row.event_id, "")
+            if not err:
+                row.status = "done"
+                row.processed_at = now
+                row.error = ""
+                row.lease_until = None
+                stats["done"] += 1
+            else:
                 row.retry_count = (row.retry_count or 0) + 1
-                row.error = str(e)[:500]
+                row.error = err
+                row.lease_until = None
                 if row.retry_count >= OUTBOX_MAX_RETRY:
                     row.status = "failed"
                     row.next_retry_at = None
@@ -206,7 +286,8 @@ async def dispatch_batch(limit: int = OUTBOX_BATCH) -> dict:
                     )
                 else:
                     delay = next_retry_delay(row.retry_count)
-                    row.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+                    row.status = "pending"
+                    row.next_retry_at = now + timedelta(seconds=delay)
                     logger.warning(
                         "[VectorOutbox] 投递失败将重试: event={}, agg={}, retry={}, 退避={}s, err={}",
                         row.event_id, row.aggregate_id, row.retry_count, delay, row.error[:160],
@@ -214,12 +295,14 @@ async def dispatch_batch(limit: int = OUTBOX_BATCH) -> dict:
                 stats["failed"] += 1
                 stats["errors"].append({"event_id": row.event_id, "error": row.error[:200]})
         await session.commit()
+
     if stats["done"] or stats["failed"]:
         logger.info(
-            "[VectorOutbox] 本轮投递: claimed={}, done={}, failed={}",
-            stats["claimed"], stats["done"], stats["failed"],
+            "[VectorOutbox] 本轮投递: claimed={}, done={}, failed={}（并发度={}）",
+            stats["claimed"], stats["done"], stats["failed"], OUTBOX_DELIVER_CONCURRENCY,
         )
     return stats
+
 
 
 async def pending_summary() -> dict:

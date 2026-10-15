@@ -44,7 +44,7 @@ class HybridSearcher:
         top_k: int = 20,
         status: str | None = None,
         session: AsyncSession | None = None,
-        doc_type: str | None = None,
+        doc_type: str | list[str] | None = None,
     ) -> list[dict]:
         """混合检索需求：向量 + BM25 → RRF 融合 → Cross-Encoder 重排 → Top-K。
 
@@ -55,9 +55,10 @@ class HybridSearcher:
             top_k: 返回数量
             status: 按状态过滤
             session: PG 异步会话（有值时启用 BM25 混合检索）
-            doc_type: 按文档类型过滤（v2.8.53 新增）
+            doc_type: 按文档类型过滤（v2.8.53 新增；v4.1 支持多值）
                 - "requirement": 仅检索总 SRR 记录（避免 FP 向量混入）
                 - "functional_point": 仅检索功能点 SRR 记录
+                - list[str]: 多类型并集（需求权威层 L0+L1）
                 - None: 同时检索两类（默认，向后兼容）
 
         Returns:
@@ -66,7 +67,11 @@ class HybridSearcher:
         # 0. 缓存查询（modules + doc_type + status + top_k 参与缓存键，避免跨筛选/跨长度缓存污染）
         from app.db.kb_cache import kb_cache
         modules_key = ",".join(sorted(modules)) if modules else ""
-        doc_type_key = doc_type or ""
+        # v4.1：doc_type 可能是 list，缓存键需稳定字符串化（排序后 join）
+        if isinstance(doc_type, (list, tuple, set)):
+            doc_type_key = ",".join(sorted(t for t in doc_type if t))
+        else:
+            doc_type_key = doc_type or ""
         cached = await kb_cache.get(
             query, product_id or "", "requirements", modules_key, doc_type_key,
             status=status or "", top_k=top_k,
@@ -258,6 +263,13 @@ class HybridSearcher:
                 "document": r.title or "",
                 "metadata": {
                     "req_id": r.id,
+                    # v4.1（缺陷 A 修复）：BM25 路查的是 requirements 表（总 SRR），
+                    # 类型恒为 requirement。原实现不写 type → 融合后被 _enrich_sources
+                    # 当作「未知类型 → 非 requirement 分支」→ found=False 但又不是
+                    # requirement/fp/crsr 三类型的孤儿检查范围 → 侥幸留下但标题显示
+                    # 「(已删除)」，且权威层级取 AUTHORITY_BY_TYPE 默认 L1（错误）。
+                    "type": "requirement",
+                    "doc_type": "requirement",
                     "status": r.status,
                     "product_id": r.product_id,
                     "srr_json": json.dumps(r.srr_json, ensure_ascii=False) if r.srr_json else "",

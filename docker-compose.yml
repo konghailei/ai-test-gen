@@ -69,6 +69,11 @@ services:
       - REDIS_PORT=6379
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      # v4.1（缺陷 C）：语义去重 embed 并行进程池 worker 数。
+      #   留空 = 串行（旧行为）；2 = 2 进程 × 4 线程（宿主 12 逻辑核 / 31.9GB，
+      #   worker 各 ~1.6GB，实测余量充足）。dedup_semantic 已在 to_thread 内，
+      #   进程池进一步把「单次 encode 35min」压到近半，且与出箱投递在 CPU 上交错。
+      - DEDUP_EMBED_WORKERS=${DEDUP_EMBED_WORKERS:-2}
     command: >
       sh -c "
         if [ '${DEBUG:-true}' = 'true' ]; then

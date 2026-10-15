@@ -128,6 +128,11 @@ class ClarifyKbMixin:
             # v2.8.67: 优先使用 _kb_short_query（ref_undef 类的短主题关键词），
             #  否则回退到 question 全文。长 question 含大量上下文噪声会导致
             #  BM25 分词后核心词被稀释，明明有历史规则却零命中。
+            # v4.1（缺陷 A 修复）：澄清「只用需求内容」，检索面 = 需求权威层
+            #  L0 requirement + L1 functional_point + fp_crsr（跨版本聚合权威）。
+            #  用例向量在**独立集合**（test_cases），澄清从不检索它；
+            #  单值 doc_type="requirement" 会把 L1 层整层排除 → 澄清命中率虚低，
+            #  改为多值并集后 L0+L1 同时参与，且天然不含任何测试用例。
             try:
                 from app.db.hybrid_search import hybrid_searcher
                 from app.db.database import async_session as _as
@@ -145,7 +150,7 @@ class ClarifyKbMixin:
                         product_id=srr.get("requirement", {}).get("product_id", ""),
                         modules=current_modules,
                         status="archived", session=tmp_session,
-                        doc_type="requirement",
+                        doc_type=["requirement", "functional_point", "fp_crsr"],
                     )
             except Exception as e:
                 # 降级策略：KB 不可用 → 静默跳过 → 继续生成澄清问题 → 人工澄清兜底

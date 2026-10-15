@@ -112,14 +112,10 @@ async def init_db() -> None:
         # 综合数据库迁移：检测所有表的所有缺失列，一次性修复
         # ================================================================
         SCHEMA_MIGRATIONS: dict[str, list[tuple[str, str, str]]] = {
-            "llm_config": [
-                ("provider_label", "VARCHAR(128) NOT NULL DEFAULT ''", "provider_label"),
-                ("is_primary", "BOOLEAN NOT NULL DEFAULT FALSE", "is_primary"),
-                # v2.36: 思考模式开关
-                ("enable_thinking", "BOOLEAN NOT NULL DEFAULT FALSE", "enable_thinking"),
-                # v2.37: 自定义思考参数（JSON 字符串）
-                ("thinking_params", "TEXT NOT NULL DEFAULT ''", "thinking_params"),
-            ],
+            # ⚠️ v4.1（缺陷 T1）：此处原有一个 "llm_config" 键（provider_label/
+            #   is_primary/enable_thinking/thinking_params），但文件后段（v3.5.6）
+            #   又定义了一个同名 "llm_config" 键，Python 字典后者覆盖前者 →
+            #   本处四项曾是死代码。已合并到后段唯一条目，**请勿再在此处重复定义**。
             "requirements": [
                 ("project_id", "VARCHAR(64) REFERENCES projects(id)", "project_id"),
                 ("superseded_by", "VARCHAR(64) REFERENCES requirements(id)", "superseded_by"),
@@ -148,6 +144,12 @@ async def init_db() -> None:
                 # 缺列时 embedding_tasks._update_tc_vectorization_status 的赋值被静默丢弃。
                 ("vectorization_status", "VARCHAR(20)", "vectorization_status"),
                 ("vectorization_error", "TEXT", "vectorization_error"),
+            ],
+            # v4.1（缺陷 B / T3）：出箱 relay 认领租约——认领与投递分离后，
+            # 需要 claimed_at / lease_until 支撑「投递中途崩溃 → 租约过期重新认领」。
+            "vector_outbox": [
+                ("claimed_at", "TIMESTAMP WITH TIME ZONE", "claimed_at"),
+                ("lease_until", "TIMESTAMP WITH TIME ZONE", "lease_until"),
             ],
             "projects": [
                 # v2.45 修复：version 字段补 NOT NULL，与 models.py 一致
@@ -217,7 +219,19 @@ async def init_db() -> None:
                 ("phase_timings", "JSON NOT NULL DEFAULT '{}'::json", "phase_timings"),
             ],
             # v3.5.6: LLM 供应商启用/禁用开关（持久化禁用，取代进程内存临时禁用）
+            # ⚠️ v4.1（缺陷 T1 修复）：**本文件此前存在两个同名 "llm_config" 键**
+            #   （另一处在字典开头，含 enable_thinking/thinking_params）。Python 字典
+            #   字面量遇重复键时**后者静默覆盖前者** → 开头那两项是**死代码**，
+            #   永远不会被 Step 2 检查/补齐。这正是"DROP 掉 enable_thinking 两列后
+            #   重启不补回"的真正根因（此前误判为 inspector 缓存问题）。
+            #   现将两处**合并为单一键**，四个字段一并纳入迁移清单。
             "llm_config": [
+                # —— 来自开头原条目（v2.36/v2.37，曾被同名覆盖而失效）——
+                ("provider_label", "VARCHAR(128) NOT NULL DEFAULT ''", "provider_label"),
+                ("is_primary", "BOOLEAN NOT NULL DEFAULT FALSE", "is_primary"),
+                ("enable_thinking", "BOOLEAN NOT NULL DEFAULT FALSE", "enable_thinking"),
+                ("thinking_params", "TEXT NOT NULL DEFAULT ''", "thinking_params"),
+                # —— v3.5.6：供应商启用/禁用开关 ——
                 ("enabled", "BOOLEAN NOT NULL DEFAULT TRUE", "enabled"),
                 ("disabled_reason", "TEXT NOT NULL DEFAULT ''", "disabled_reason"),
                 ("disabled_by", "VARCHAR(16) NOT NULL DEFAULT ''", "disabled_by"),
@@ -261,20 +275,89 @@ async def init_db() -> None:
                 Base.metadata.create_all(conn_sync)
 
             # Step 2: 对所有表检查缺失列并自动补齐
-            for table_name, columns in SCHEMA_MIGRATIONS.items():
-                if not inspector.has_table(table_name):
-                    continue
-                existing_cols = {c["name"] for c in inspector.get_columns(table_name)}
-                for col_name, col_def, log_desc in columns:
-                    if col_name not in existing_cols:
-                        try:
-                            conn_sync.execute(
-                                text(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}")
-                            )
-                            logger.info("DB 迁移: {}.{} 字段已新增", table_name, log_desc)
-                        except Exception as mig_e:
-                            logger.warning("DB 迁移: {}.{} 新增失败（可能已存在）: {}",
-                                           table_name, col_name, str(mig_e)[:80])
+            # v4.1（缺陷 T1 修复，双管齐下）：
+            #   ① **真正的根因**：本函数字典里此前有两个同名 "llm_config" 键，Python
+            #      后者覆盖前者 → enable_thinking/thinking_params 是死代码。已合并（见上方）。
+            #   ② **健壮性**：补列改用**独立连接 + 独立事务**（不受外层 `engine.begin()`
+            #      后续 savepoint 回滚/异常影响），并用 `information_schema` 实时读物理列
+            #      （绕开 SQLAlchemy `inspect` 的缓存快照——旧实现复用开头创建的一个
+            #      inspector，`create_all` 变更 schema 后仍读旧快照）。
+            def _apply_schema_migrations() -> None:
+                """在**独立连接+独立事务**里补列，提交后立即释放，不受外层回滚影响。"""
+                from sqlalchemy import create_engine as _ce
+
+                sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+                try:
+                    eng = _ce(sync_url)
+                except Exception as _ce_err:  # noqa: BLE001
+                    logger.warning("DB 迁移: 独立引擎创建失败，回退外层连接补列: {}",
+                                   str(_ce_err)[:200])
+                    _apply_schema_migrations_outer(conn_sync)
+                    return
+                try:
+                    with eng.begin() as conn2:
+                        for table_name, columns in SCHEMA_MIGRATIONS.items():
+                            if not inspect(conn2).has_table(table_name):
+                                continue
+                            live_rows = conn2.execute(
+                                text(
+                                    "SELECT column_name FROM information_schema.columns "
+                                    "WHERE table_name = :t"
+                                ),
+                                {"t": table_name},
+                            ).fetchall()
+                            existing_cols = {r[0] for r in live_rows}
+                            if not existing_cols:
+                                existing_cols = {
+                                    c["name"] for c in inspect(conn2).get_columns(table_name)
+                                }
+                            for col_name, col_def, log_desc in columns:
+                                if col_name not in existing_cols:
+                                    try:
+                                        conn2.execute(text(
+                                            f"ALTER TABLE {table_name} "
+                                            f"ADD COLUMN {col_name} {col_def}"
+                                        ))
+                                        existing_cols.add(col_name)
+                                        logger.info("DB 迁移: {}.{} 字段已新增",
+                                                    table_name, log_desc)
+                                    except Exception as mig_e:  # noqa: BLE001
+                                        logger.warning(
+                                            "DB 迁移: {}.{} 新增失败（可能已存在）: {}",
+                                            table_name, col_name, str(mig_e)[:80],
+                                        )
+                except Exception as _outer_err:  # noqa: BLE001
+                    logger.error("DB 迁移: 独立连接补列异常，回退外层连接: {}",
+                                 str(_outer_err)[:250])
+                    _apply_schema_migrations_outer(conn_sync)
+                finally:
+                    eng.dispose()
+
+            def _apply_schema_migrations_outer(conn_sync) -> None:
+                """回退路径：用外层连接补列（独立引擎不可用时）。"""
+                for table_name, columns in SCHEMA_MIGRATIONS.items():
+                    if not inspect(conn_sync).has_table(table_name):
+                        continue
+                    existing_cols = {
+                        c["name"] for c in inspect(conn_sync).get_columns(table_name)
+                    }
+                    for col_name, col_def, log_desc in columns:
+                        if col_name not in existing_cols:
+                            try:
+                                conn_sync.execute(text(
+                                    f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_def}"
+                                ))
+                                existing_cols.add(col_name)
+                                logger.info("DB 迁移: {}.{} 字段已新增", table_name, log_desc)
+                            except Exception as mig_e:  # noqa: BLE001
+                                logger.warning("DB 迁移: {}.{} 新增失败（可能已存在）: {}",
+                                               table_name, col_name, str(mig_e)[:80])
+
+            _apply_schema_migrations()
+
+            logger.info("[MIG-VERIFY] 补列函数返回；当前 llm_config 物理列数={}",
+                        len(inspect(conn_sync).get_columns("llm_config")) if inspect(conn_sync).has_table("llm_config") else -1)
+
 
             # Step 3: 确保唯一性约束（产品/项目/模块名称唯一 + 依赖边去重）
             UNIQUE_INDEXES: list[tuple[str, str, str]] = [

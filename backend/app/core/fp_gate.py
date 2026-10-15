@@ -9,9 +9,9 @@
 3. 不引入新表，直接在 FP 拆分流程中调用
 4. 校验项保持精简，避免阻塞正常流程
 
-检查项（3 项）：
+检查项：
 1. FP 非空：拆分后 FP 列表不能为空（除非需求确实无功能点）
-2. FP 字段完整：每个 FP 必须有 name 和 summary，缺失则阻断
+2. FP 字段完整：每个 FP 必须有 name（缺失则阻断）；summary 缺失仅告警（v4.0.3，可由 name 兜底）
 3. FP 唯一性：同一需求下 FP name 不能重复（违反唯一约束）
 """
 
@@ -97,9 +97,13 @@ class FPGate:
             blockers.append(
                 f"{len(missing_name)} 个 FP 缺少 name 字段（索引: {missing_name[:5]}）"
             )
+        # v4.0.3 修复（自证 T2）：summary 字段缺失从 Blocker 降为 WARNING。
+        # 理由：name 是 FP 的身份标识（缺失=真错误，必须拦）；summary 是描述性字段，
+        # 缺失时可由 name 兜底自动补全，不应中断整条解析流水线（曾导致澄清重生成熔断）。
         if missing_summary:
-            blockers.append(
-                f"{len(missing_summary)} 个 FP 缺少 summary 字段（索引: {missing_summary[:5]}）"
+            warnings.append(
+                f"{len(missing_summary)} 个 FP 缺少 summary 字段（索引: {missing_summary[:5]}），"
+                f"已按 name 兜底处理"
             )
 
         # 3. FP 唯一性检查（同一需求下 name 不能重复）

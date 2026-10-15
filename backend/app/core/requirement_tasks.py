@@ -322,6 +322,19 @@ async def _save_fps_to_db(
     if not fps:
         return 0
 
+    # v4.0.3 修复（自证 T2）：FP 字段归一化——补齐软性缺失字段，避免门禁误熔断。
+    # 背景：澄清重生成路径下 LLM 输出格式漂移，偶尔缺失 `summary` 字段（仅字段缺失、
+    # 内容可推导），而 FPGate 把「summary 字段不存在」判为 Blocker 直接中断整条流水线，
+    # 导致 12 个澄清答案白答、需求卡在 draft。summary 属「可自动补全的软性缺失」，
+    # 不应是 Blocker。此处统一归一化：name 缺失→用占位；summary 缺失/空→用 name 兜底；
+    # 保证门禁只拦真错误（空列表/重名）。
+    for _fp in fps:
+        if isinstance(_fp, dict):
+            if "summary" not in _fp or not str(_fp.get("summary") or "").strip():
+                _fp["summary"] = str(_fp.get("name") or "").strip()
+            if "name" not in _fp:
+                _fp["name"] = ""
+
     # v2.8.56: FP 拆分质量门禁检查
     from app.core.fp_gate import fp_gate
     gate_result = fp_gate.check(fps, srr=None)

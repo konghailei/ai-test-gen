@@ -746,13 +746,31 @@ async def kqa_ask(
     # 1. 检索知识库（带产品隔离 + 模块过滤 + 仅已归档需求）
     #    需求检索走 hybrid_searcher（向量 + BM25 + RRF + 重排）
     #    用例检索保持直接调用 vector_store（hybrid_searcher 暂未支持 test_cases）
+    #
+    # v4.1（缺陷 A 修复）：知识问答默认**只用需求权威层**，不检索测试用例。
+    #   实证（2026-10-15 自证）：用例向量的余弦相似度（0.67-0.69）系统性高于需求
+    #   文档（0.47-0.50），混合排序后 top-8 被 test_case 100% 占满 → 需求文档被
+    #   挤出，LLM 只能拿「AI 生成的异常用例」当规则依据 → 循环权威。
+    #   用例中含大量异常/边界样例（"上传10MB-成功""超过10MB-提示错误"），
+    #   语义上与"文件大小限制是多少"高度相似，但**不是规则本身**。
+    #   开关 KB_QA_INCLUDE_CASES（默认 False）可回退旧行为（用例作为 L2/L3 佐证）。
     kb_sources: list[dict[str, Any]] = []
     search_errors: list[str] = []
     try:
+        _include_cases = False
+        try:
+            from app.config import settings as _qa_settings
+            _include_cases = bool(getattr(_qa_settings, "KB_QA_INCLUDE_CASES", False))
+        except Exception:  # noqa: BLE001
+            _include_cases = False
         from app.db.hybrid_search import hybrid_searcher
+        # v4.1：检索面收敛为需求权威层（L0 requirement + L1 functional_point + fp_crsr），
+        #   多值并集取代旧的"无 doc_type"（后者即包含全部，仍是不含用例的 requirements 集合，
+        #   但显式列举可避免未来类型扩张时悄悄混入）。
         req_results = await hybrid_searcher.search_requirements(
             query=question, product_id=product_id, modules=modules, top_k=5,
             status="archived", session=session,
+            doc_type=["requirement", "functional_point", "fp_crsr"],
         )
         for r in req_results:
             # v3.3（修 N6）：按 Milvus metadata.type **保留真实类型**。
@@ -784,29 +802,35 @@ async def kqa_ask(
         search_errors.append(f"需求检索: {err_msg}")
         logger.warning("[API/knowledge-qa] 检索需求失败: {}", err_msg[:100])
 
-    try:
-        # v3.3：只取已固化用例时会过滤掉未固化项，故放大召回条数
-        # （KB_CASES_FETCH_K），再在 _enrich_sources / _build_qa_prompt 收窄。
+    # v4.1（缺陷 A 修复）：用例检索默认关闭（KB_QA_INCLUDE_CASES=False）。
+    #   保留代码路径与开关：确需用例佐证（"系统实际做了什么"）时可开启，
+    #   届时用例以 L3 权威层级进入 prompt，且受 _QA_MAX_CASE_DOCS 与相关度门槛约束。
+    if _include_cases:
         try:
-            from app.config import settings as _st
-            _case_k = int(getattr(_st, "KB_CASES_FETCH_K", 15))
-        except Exception:  # noqa: BLE001
-            _case_k = 15
-        case_results = await asyncio.to_thread(
-            vector_store.search_similar_cases,
-            question, top_k=_case_k, product_id=product_id, modules=modules,
-        )
-        for r in case_results:
-            r["type"] = "test_case"
-            # v4.0.1（S6）：用例走 vector_store 直检，similarity 是 COSINE 余弦，
-            # 显式标记来源，使相关度门槛对其生效（与 hybrid_search 的标记同口径）。
-            r["_score_kind"] = "vector"
-            if not any(s.get("id") == r.get("id") and s.get("type") == "test_case" for s in kb_sources):
-                kb_sources.append(r)
-    except Exception as e:
-        err_msg = str(e)[:200]
-        search_errors.append(f"用例检索: {err_msg}")
-        logger.warning("[API/knowledge-qa] 检索用例失败: {}", err_msg[:100])
+            # v3.3：只取已固化用例时会过滤掉未固化项，故放大召回条数
+            # （KB_CASES_FETCH_K），再在 _enrich_sources / _build_qa_prompt 收窄。
+            try:
+                from app.config import settings as _st
+                _case_k = int(getattr(_st, "KB_CASES_FETCH_K", 15))
+            except Exception:  # noqa: BLE001
+                _case_k = 15
+            case_results = await asyncio.to_thread(
+                vector_store.search_similar_cases,
+                question, top_k=_case_k, product_id=product_id, modules=modules,
+            )
+            for r in case_results:
+                r["type"] = "test_case"
+                # v4.0.1（S6）：用例走 vector_store 直检，similarity 是 COSINE 余弦，
+                # 显式标记来源，使相关度门槛对其生效（与 hybrid_search 的标记同口径）。
+                r["_score_kind"] = "vector"
+                if not any(s.get("id") == r.get("id") and s.get("type") == "test_case" for s in kb_sources):
+                    kb_sources.append(r)
+        except Exception as e:
+            err_msg = str(e)[:200]
+            search_errors.append(f"用例检索: {err_msg}")
+            logger.warning("[API/knowledge-qa] 检索用例失败: {}", err_msg[:100])
+    else:
+        logger.info("[API/knowledge-qa] 用例检索已按配置关闭（KB_QA_INCLUDE_CASES=False，仅用需求权威层）")
 
     # 构建知识库检索状态诊断
     kb_status = {

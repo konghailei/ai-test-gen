@@ -693,7 +693,7 @@ class MilvusVectorStore:
         modules: list[str] | None = None,
         top_k: int = 5,
         status: str | None = None,
-        doc_type: str | None = None,
+        doc_type: str | list[str] | None = None,
         fp_id: str | None = None,
         requirement_id: str | None = None,
         project_id: str | None = None,
@@ -713,10 +713,12 @@ class MilvusVectorStore:
             modules: 按模块过滤（同时作用于总 SRR 的 modules 和 FP 的 modules）
             top_k: Top-K
             status: 按状态过滤（archived/draft）
-            doc_type: 按文档类型过滤（v2.34 新增）
+            doc_type: 按文档类型过滤（v2.34 新增；v4.1 支持多值）
                 - "requirement": 仅检索总 SRR 记录
                 - "functional_point": 仅检索功能点 SRR 记录
-                - None: 同时检索两类（默认，向后兼容）
+                - list[str]: 多类型并集（如 ["requirement","functional_point","fp_crsr"]
+                  取需求权威层 L0+L1，排除用例）——澄清/问答「只用需求内容」的落地口径
+                - None: 同时检索全部类型（默认，向后兼容）
             fp_id: 按功能点 ID 过滤（v2.34 新增，仅对 FP 记录生效）
             requirement_id: 按需求 ID 过滤（v2.34 新增）
             project_id: 按项目 ID 过滤（v2.45 新增）
@@ -732,7 +734,17 @@ class MilvusVectorStore:
         if status:
             conditions.append(f'metadata["status"] == "{_safe_id(status, "status")}"')
         if doc_type:
-            conditions.append(f'metadata["type"] == "{_safe_id(doc_type, "type")}"')
+            # v4.1：支持多值——澄清/知识问答「只用需求权威层」需要 requirement +
+            # functional_point + fp_crsr 并集（单值精确匹配会让 L1 层静默失效，见 N6 同型）。
+            if isinstance(doc_type, (list, tuple, set)):
+                _types = [t for t in doc_type if t]
+                if _types:
+                    _expr = ", ".join(
+                        f'"{_safe_id(t, "type")}"' for t in _types
+                    )
+                    conditions.append(f'metadata["type"] in [{_expr}]')
+            else:
+                conditions.append(f'metadata["type"] == "{_safe_id(doc_type, "type")}"')
         if requirement_id:
             # v2.8.51 修复：总 SRR 写入 metadata.req_id，FP 归档写入 metadata.requirement_id
             # 需同时匹配两个字段，否则总 SRR 永远无法被 requirement_id 过滤命中
