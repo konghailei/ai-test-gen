@@ -231,6 +231,16 @@ export default function XMindEditPage() {
   const draftKeyRef = useRef('')
   draftKeyRef.current = `aitg-xmind-draft:${productId || 'p'}:${projectId || 'p'}`
   const draftTimerRef = useRef<number | null>(null)
+  // "干净树指纹"：每次从库内加载/重建后的树指纹。写草稿前若当前树与它一致，
+  // 说明用户没改动（或已改回原状、或刚保存完/刷新完），**不产草稿**。
+  // 背景（v3.5.12 实证 bug）：addHistoryOnInit 默认 true → 每次 new MindMap 都会
+  // emit data_change → scheduleDraft 把刚 clearDraft 的草稿"复活"，
+  // 导致保存成功后"本地草稿"提示常驻、点刷新（=放弃）后草稿又回来。
+  const baselineFpRef = useRef('')
+  // 同一挂载周期内草稿恢复只提示一次：StrictMode 下 effect 会双跑
+  // （mount → cleanup → mount），且 load() 后 treeVersion 变化也会重跑 effect，
+  // 不拦会让用户连看两次"是否恢复草稿"
+  const draftPromptedRef = useRef('')
 
   const readDraft = useCallback((): { savedAt: number; tree: any; fp: string } | null => {
     try {
@@ -247,8 +257,14 @@ export default function XMindEditPage() {
     try {
       const tree = me.getData()
       if (!tree) return
+      const fp = draftFingerprint(tree)
+      // 与库内基线一致 → 不写草稿（堵住"复活"与"无意义草稿"）
+      if (fp && baselineFpRef.current && fp === baselineFpRef.current) {
+        setDraftAt(0)
+        return
+      }
       localStorage.setItem(draftKeyRef.current, JSON.stringify({
-        savedAt: Date.now(), tree, fp: draftFingerprint(tree),
+        savedAt: Date.now(), tree, fp,
       }))
       setDraftAt(Date.now())
     } catch { /* 配额超限等：静默降级，绝不打断编辑 */ }
@@ -274,7 +290,9 @@ export default function XMindEditPage() {
     if (!cmd) return
     const i = typeof cmd.activeHistoryIndex === 'number' ? cmd.activeHistoryIndex : 0
     const len = Array.isArray(cmd.history) ? cmd.history.length : 0
-    setHistState({ canBack: i > 0, canForward: i < len - 1 })
+    const next = { canBack: i > 0, canForward: i < len - 1 }
+    // 相等则跳过 setState：data_change 在拖拽/打字时高频触发，无脑 set 会每帧重渲染顶栏
+    setHistState(prev => (prev.canBack === next.canBack && prev.canForward === next.canForward) ? prev : next)
   }, [])
 
   const applyHistory = useCallback((dir: 'back' | 'forward') => {
@@ -335,10 +353,14 @@ export default function XMindEditPage() {
     const docAny = document as any
     const sync = () => setIsFullscreen(!!docAny.fullscreenElement || !!docAny.webkitFullscreenElement)
     const onKey = (e: KeyboardEvent) => {
-      // CSS 沉浸模式没有原生 ESC 事件，需自己兜底退出
-      if (e.key === 'Escape' && !docAny.fullscreenElement && !docAny.webkitFullscreenElement) {
-        setIsFullscreen(false)
-      }
+      if (e.key !== 'Escape') return
+      // 原生全屏：ESC 由浏览器处理（退出后 fullscreenchange 会同步状态），页面不抢
+      if (docAny.fullscreenElement || docAny.webkitFullscreenElement) return
+      // 焦点在编辑态（节点文本编辑 / 输入框）时，ESC 的语义是"结束编辑"而非退出全屏
+      // ——否则沉浸模式改标题按一下 ESC 连全屏一起退，改一半被踢出沉浸态
+      const ae = document.activeElement as any
+      if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return
+      setIsFullscreen(false)
     }
     document.addEventListener('fullscreenchange', sync)
     document.addEventListener('webkitfullscreenchange', sync)
@@ -468,13 +490,22 @@ export default function XMindEditPage() {
     me.on('back_forward', refreshHist)
     refreshHist()
 
+    // 重建完成 → 记下"干净树指纹"（此后写草稿都以此为基线比对）
+    try {
+      const t0 = me.getData()
+      baselineFpRef.current = t0 ? draftFingerprint(t0) : ''
+    } catch { baselineFpRef.current = '' }
+
     // 居中显示
     try { me.view?.setViewCenter?.() } catch { /* noop */ }
 
     // v3.5.12 本地草稿恢复：与库内基线指纹一致 → 视为无改动，静默清理；
-    // 不一致才问用户（草稿只在浏览器本机，未点「保存」从未写库）
+    // 不一致才问用户（草稿只在浏览器本机，未点「保存」从未写库）。
+    // 注意：这里不能用 return 提前退出 effect——会跳过 cleanup 注册导致监听泄漏，
+    // 所以整个提示块包在 if 里；且同周期只提示一次（StrictMode / treeVersion 重跑）
     const draft = readDraft()
-    if (draft) {
+    if (draft && draftPromptedRef.current !== draftKeyRef.current) {
+      draftPromptedRef.current = draftKeyRef.current
       let same = false
       try { same = !!draft.fp && draft.fp === draftFingerprint(me.getData()) } catch { same = false }
       if (same) {
@@ -973,7 +1004,8 @@ export default function XMindEditPage() {
           <button onClick={handleReload} disabled={loading || saving} className="btn-ghost flex items-center gap-2"><RefreshCw className="w-4 h-4" />刷新</button>
           <button
             onClick={isFullscreen ? exitFullscreen : toggleFullscreen}
-            className="btn-secondary flex items-center gap-2"
+            disabled={loading}
+            className="btn-secondary flex items-center gap-2 disabled:opacity-40"
             title={isFullscreen ? '退出全屏（ESC）' : '全屏编辑（沉浸式，ESC 退出）'}
           >{isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}{isFullscreen ? '退出全屏' : '全屏'}</button>
           <button onClick={handleSave} disabled={saving || loading || cases.length === 0} className="btn-primary flex items-center gap-2 disabled:opacity-50">
