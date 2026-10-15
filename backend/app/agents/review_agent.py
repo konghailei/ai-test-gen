@@ -60,6 +60,21 @@ from app.utils.id_gen import gen_batch_id, gen_error_id, gen_test_case_id
 from app.utils.logger import logger
 
 
+# v3.5.10（docs/32 O-2）：NFR 阈值类要点判定（供 supplement_hints 优先位用）。
+# 口径：非功能点 且 描述带数值阈值（限流 60/min、禁用 600s、召回 20 条、
+# 用例上下限 40、校验 512 字节……）。纯文字 NFR（如"传输加密"）无阈值可验，
+# 不算此类，仍走通用 coverage_gap 提示。
+_NFR_THRESHOLD_DIGIT_RE = re.compile(r"\d")
+
+
+def _is_nfr_threshold_point(point: dict) -> bool:
+    if not isinstance(point, dict):
+        return False
+    if point.get("type") != "non_functional":
+        return False
+    return bool(_NFR_THRESHOLD_DIGIT_RE.search(str(point.get("desc", "") or "")))
+
+
 class ReviewAgent:
     """用例审核 Agent。
 
@@ -99,6 +114,43 @@ class ReviewAgent:
         src = str((case or {}).get("source") or "").strip()
         return src if src in ("reused", "manual", "imported", "human_approved",
                               "ai_approved") else "ai_generated"
+
+    @staticmethod
+    def _persist_route(
+        auto_allowed: bool,
+        confidence: float,
+        is_blocked: bool,
+        is_unreviewed: bool = False,
+    ) -> str:
+        """单条用例的落库路由（纯函数，落库分支与统计分支共用一次判定）。
+
+        v3.5.10（docs/32 B-1 + B-2）：
+        - B-1：内容级缺陷只剔坏条（persist 前已 purged），不再取消好条 auto 资格；
+        - B-2：所属 FP 分片审核失败（is_unreviewed）→ 未被 LLM 审过，不进 auto，
+          按置信度落 reviewed 待人工（防"未审先批"，docs/31 F1）。
+
+        抽成纯函数的原因：原实现落库分支（begin_nested 内）与统计分支（savepoint 后）
+        各写一份同型条件，改一处漏一处即"统计与落库不一致"（MEMORY 对称性陷阱）；
+        收敛为一次判定后可直接单测三形态叠加。
+
+        Returns:
+            "approved"（auto 入库）| "reviewed"（待人工）| "rejected"（低置信度）
+        """
+        if (
+            auto_allowed
+            and confidence >= Confidence.AUTO_APPROVE_THRESHOLD
+            and not is_blocked
+            and not is_unreviewed
+        ):
+            return "approved"
+        if (
+            not auto_allowed
+            or is_unreviewed
+            or Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD
+            or (confidence >= 0.70 and is_blocked)
+        ):
+            return "reviewed"
+        return "rejected"
 
     async def review(
         self,
@@ -371,6 +423,18 @@ class ReviewAgent:
                     "suggestion": "建议补充前置条件以确保可执行性",
                 })
 
+            # 完整性（B-4，docs/32）：顶层 expected 为空记 warning（软信号，
+            # 不进 blocker——docs/31 F4：133/320 空缺是质量缺口而非 schema 违规；
+            # 存量不回填，仅新生成生效）
+            if not (str(case.get("expected") or "").strip()):
+                issues.append({
+                    "case_id": case_id,
+                    "dimension": "completeness",
+                    "severity": "warning",
+                    "message": "用例缺少顶层 expected（整体预期结果）",
+                    "suggestion": "补充一句话整体预期结果，概括本用例通过后系统应处于的状态",
+                })
+
         return issues
 
     # ========================================================================
@@ -587,6 +651,16 @@ class ReviewAgent:
                     f"shard_review_all_failed: "
                     f"{'; '.join(e[:60] for _, _, e in failed_shards)}"
                 ),
+                # v3.5.10（docs/32 B-2 / F1）：全失败也要透出分片证据——
+                # 否则 persist 侧 unreviewed_fp_ids 拿不到失败清单，
+                # "未审用例"会漏拦（与部分失败同因，只是范围更大）。
+                "shard_review": {
+                    "total_shards": len(fp_ids),
+                    "ok_shards": 0,
+                    "failed_shards": [
+                        {"fp_id": fid, "error": err} for fid, _, err in failed_shards
+                    ],
+                },
             }
 
         merged_issues: list[dict] = []
@@ -801,7 +875,20 @@ class ReviewAgent:
             # v3.3（修 N8）：把 `_llm_review` 的降级标记**透传到最终 report**。
             # ⚠️ 不能只在 `_llm_review` 的返回值里打标——该返回值只是中间结果，
             # 会被本函数合并掉。实测探针正是靠这一点发现首版补丁无效的。
-            "review_status": "degraded" if llm_report.get("review_degraded") else "complete",
+            # v3.5.10（docs/32 B-2 / F1）：分片审核证据同理透传——原实现
+            # `shard_review` / `review_shard_partial_failure` 在合并时被丢弃，
+            # 失败分片「终态不可见」（docs/31 F1：13 条未审用例全部 approved）。
+            # review_status="partial"（非 complete）复用 publication_policy
+            # 既有 `review_not_verified` 判定，批次自动落入 human_review。
+            "review_status": (
+                "degraded" if llm_report.get("review_degraded")
+                else "partial" if llm_report.get("review_shard_partial_failure")
+                else "complete"
+            ),
+            "shard_review": llm_report.get("shard_review"),
+            "review_shard_partial_failure": bool(
+                llm_report.get("review_shard_partial_failure")
+            ),
             "rule_passed_cases": passed,
             # v3.4：合同问题随报告上抛，供发布策略判 blocked（不在此处中断流水线）
             "content_errors": content_errors,
@@ -875,11 +962,30 @@ class ReviewAgent:
         if issue_counts["coverage"] > 0:
             coverage_score = min(coverage_score, 1.0 - min(1.0, issue_counts["coverage"] / total))
 
+        # B-4（docs/32，docs/31 F4 口径盲区）：completeness 口径拆两层透出——
+        # completeness_step（step 级字段完整率）与 completeness_top（顶层
+        # expected 非空率）。原 completeness score 是要点覆盖率，看不出缺口在
+        # 哪一层（v3.0 score 0.785 但 step 层零缺失、顶层 expected 74.5% 空）。
+        n_cases = max(len(test_cases), 1)
+        n_step_ok = sum(
+            1 for c in test_cases
+            if (c.get("steps") or [])
+            and all(s.get("action") and s.get("expected") for s in c["steps"] if isinstance(s, dict))
+        )
+        n_top_ok = sum(
+            1 for c in test_cases if str(c.get("expected") or "").strip()
+        )
+        completeness_step = _clamp(n_step_ok / n_cases)
+        completeness_top = _clamp(n_top_ok / n_cases)
+
         return {
             "completeness": {
                 "score": None if coverage_unknown else _clamp(completeness_score),
                 "status": "unknown" if coverage_unknown else "measured",
                 "issue_count": issue_counts["completeness"],
+                # B-4：口径拆层（结构性事实，恒有值，不受 coverage_unknown 影响）
+                "completeness_step": completeness_step,
+                "completeness_top": completeness_top,
             },
             "deduplication": {
                 "score": _clamp(1.0 - min(1.0, issue_counts["deduplication"] / total)),
@@ -999,11 +1105,30 @@ class ReviewAgent:
 
         # 要点级覆盖缺口：定向补生成未覆盖要点（结构化 hint，编排器映射为 coverage_gaps）
         if point_coverage and point_coverage.get("uncovered"):
-            hints.append({
-                "case_type": "coverage_gap",
-                "reason": f"{len(point_coverage['uncovered'])} 个 SRR 要点未覆盖，需定向补生成",
-                "uncovered_points": point_coverage["uncovered"][:20],
-            })
+            uncovered = list(point_coverage["uncovered"])
+            # v3.5.10（docs/32 O-2）：NFR 阈值类要点（非功能点且描述带数值阈值，
+            # 如限流 60/min、禁用 600s、召回 20 条、用例上下限 40、校验 512 字节）
+            # 零命中是本轮实证的系统性缺口——泛化补生成常只补 happy path，
+            # 阈值边界/超限验证没人管。放 hints 首位定向提示（coverage_gap 优先位）。
+            nfr_points = [p for p in uncovered if _is_nfr_threshold_point(p)]
+            rest = [p for p in uncovered if not _is_nfr_threshold_point(p)]
+            if nfr_points:
+                hints.insert(0, {
+                    "case_type": "coverage_gap",
+                    "priority": "nfr_threshold",
+                    "reason": (
+                        f"{len(nfr_points)} 个 NFR 阈值要点未覆盖"
+                        f"（限流/禁用/召回/上下限/校验等带数值阈值的验证），"
+                        f"优先定向补生成阈值边界与超限用例"
+                    ),
+                    "uncovered_points": nfr_points[:20],
+                })
+            if rest:
+                hints.append({
+                    "case_type": "coverage_gap",
+                    "reason": f"{len(rest)} 个 SRR 要点未覆盖，需定向补生成",
+                    "uncovered_points": rest[:20],
+                })
 
         # 基于 test_points_hint 补充
         for hint in srr.get("test_points_hint", []):
@@ -1152,13 +1277,29 @@ class ReviewAgent:
         # 与单条用例自身质量无关；内容级缺陷已由 case_level_reasons 独立判定。
         # 故：无内容级缺陷（case_level_reasons 为空）→ 高置信条照常 auto；
         #     有内容级缺陷 → 维持人工审查（防线不放松）。
-        auto_allowed = not decision.get("case_level_reasons")
+        # v3.5.10（docs/32 B-1，F6 终版）：第三层连坐残留关闭——
+        # partial_block 时 case_level_reasons 非空也不再取消好条 auto 资格：
+        # 坏条已在上文 purged 剔除（剔坏留好），blocker 漏剔条由 is_blocked
+        # 独立拦截，未审条由 is_unreviewed（B-2 fail-closed）拦截——
+        # 三条防线收敛到单条维度后，批次级信号不再有连坐的正当性。
+        auto_allowed = True
 
         # 获取 blocker 用例 ID 集合
         blocked_case_ids = set()
         for issue in report.get("issues", []):
             if issue.get("severity") == "blocker":
                 blocked_case_ids.add(issue.get("case_id", ""))
+
+        # v3.5.10（docs/32 B-2 第二步 / F1 fail-closed）：分片审核失败的 FP 集合。
+        # 失败分片的用例**没被 LLM 审过**，不能进 auto（防"未审先批"）——
+        # docs/31 F1 实证 13 条未审用例全部 approved。它们按置信度落 reviewed
+        # 待人工。口径与 _group_cases_by_fp 的分组键一致（str(related_fp or "")，
+        # 注意 related_fp 可能为 None，不能用 str(x, "") 直接兜）。
+        unreviewed_fp_ids = {
+            str(f.get("fp_id", "") or "")
+            for f in (report.get("shard_review") or {}).get("failed_shards", [])
+            if isinstance(f, dict)
+        }
 
         # R3 修复：入库前按标题级严格去重。
         # 测试发现同批次出现重复标题（如"版本数据仅作者本人可见"出现 2 条），
@@ -1250,6 +1391,20 @@ class ReviewAgent:
                 case_type = case.get("type", "functional")
                 title = case.get("title", "")
                 is_blocked = case_id in blocked_case_ids
+                # v3.5.10（docs/32 B-2 fail-closed）：所属 FP 分片审核失败
+                # → 该用例未被 LLM 审过，不进 auto（防"未审先批"）。
+                # 同因延伸：review_degraded（单发整体失败/分片全失败）时
+                # **没有任何用例被 LLM 审过**，整批视同未审——否则该路径
+                # 无 shard_review 清单可拦，auto_allowed=True 后高置信条
+                # 会漏网（与 F1 同根因的 fail-open）。
+                is_unreviewed = bool(report.get("review_degraded")) or (
+                    str(case.get("related_fp", "") or "") in unreviewed_fp_ids
+                )
+                # v3.5.10：落库/统计共用一次路由判定（_persist_route 纯函数），
+                # 杜绝两处同型条件漂移（MEMORY 对称性陷阱）。
+                route = self._persist_route(
+                    auto_allowed, confidence, is_blocked, is_unreviewed
+                )
 
                 # Persist the server decision on the artifact too, so a later
                 # page load/export cannot mistake a draft for approved content.
@@ -1272,7 +1427,7 @@ class ReviewAgent:
                     # 单个用例 flush 失败时只回滚 savepoint，
                     # 不会让 session 进入 inactive 状态影响后续用例与最终 commit
                     async with session.begin_nested():
-                        if auto_allowed and confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
+                        if route == "approved":
                             # 高置信度：自动入库，标记 approved
                             # v3.5: 阈值 0.85→0.70。原 0.85 在冷启动（KB 无相似向量
                             # match_score=0、无模式命中 pattern_bonus=0）时不可达
@@ -1326,9 +1481,7 @@ class ReviewAgent:
                                     case_id, str(oe)[:120],
                                 )
 
-                        elif not auto_allowed or Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
-                            confidence >= 0.70 and is_blocked
-                        ):
+                        elif route == "reviewed":
                             # 中置信度：标记 reviewed，等待人工确认
                             record = TestCaseModel(
                                 id=case_id,
@@ -1406,12 +1559,12 @@ class ReviewAgent:
                     # 由 core/vector_outbox 的 relay 至少一次投递（幂等 upsert）。
                     # 因此本处只做统计：入箱失败才算 vector_write_failed，真正的
                     # "向量暂时没写成功"是出箱待投递（vector_pending），会自愈而不是报错。
-                    if auto_allowed and confidence >= Confidence.AUTO_APPROVE_THRESHOLD and not is_blocked:
+                    # 统计分支与落库分支共用同一 route（_persist_route 单次判定），
+                    # 统计不漂移（原两处同型条件的对称性陷阱收敛）。
+                    if route == "approved":
                         stats["auto_approved"] += 1
 
-                    elif not auto_allowed or Confidence.DEFAULT <= confidence < Confidence.AUTO_APPROVE_THRESHOLD or (
-                        confidence >= 0.70 and is_blocked
-                    ):
+                    elif route == "reviewed":
                         stats["pending_review"] += 1
 
                     else:
