@@ -41,6 +41,11 @@ import sys
 import time
 
 REVIEW_ROOT = "/app/_review_runs"
+
+# v4.1.1：需求分析链路默认落到哪个产品。显式传 --product-id 覆盖；
+# 传 --new-product <名称> 则先建一个全新产品再跑（冷启动场景）。
+DEFAULT_PRODUCT_ID = "PROD-53145-856"
+
 PROBES = [
     "_probe_concurrency.py",     # 并发互斥 + SSE 隔离
     "_probe_outbox.py",          # 出箱三崩溃点收敛
@@ -133,6 +138,26 @@ def _login(base: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _create_product(base: str, headers: dict, name: str) -> tuple[str, str]:
+    """新建一个全新产品，返回 (product_id, error)。
+
+    v4.1.1：支持"全新产品跑一轮"——冷启动产品无历史需求，KB 检索无同类样本
+    干扰，是检验 SRR 保真/生成对齐最干净的场景（也便于逐轮横向对比）。
+    """
+    import httpx
+    try:
+        r = httpx.post(f"{base}/api/products/", headers=headers,
+                       json={"name": name, "description": f"测试计划自证专用（{name}）"},
+                       timeout=120)
+        data = (r.json().get("data") or {}) if r.headers.get("content-type", "").startswith("application/json") else {}
+        pid = data.get("id", "")
+        if r.status_code == 200 and pid:
+            return pid, ""
+        return "", f"HTTP {r.status_code}: {r.text[:180]}"
+    except Exception as e:  # noqa: BLE001
+        return "", repr(e)[:180]
+
+
 def _poll_task(base: str, headers: dict, task_id: str, timeout_s: int,
                interval: int = 15) -> dict:
     """轮询 analysis_tasks 直到终态（解析/澄清重解析都是异步任务）。"""
@@ -152,7 +177,9 @@ def _poll_task(base: str, headers: dict, task_id: str, timeout_s: int,
     return {"status": "timeout", "data": {}}
 
 
-def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) -> dict:
+def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int,
+                  product_id: str = DEFAULT_PRODUCT_ID,
+                  title: str = "登录安全策略-测试计划样例") -> dict:
     """L2 需求分析链路：上传 → 解析 → 澄清回答 → 确认。只做结构断言，内容回传 AI。
 
     整体容错：任何一步抛异常都记为 FAIL 步骤返回（plan-results.json 始终可产出），
@@ -183,8 +210,8 @@ def step_analysis(base: str, headers: dict, doc_path: str, poll_timeout: int) ->
 
     # 1) 上传（异步解析任务）
     r = _req("POST", f"{base}/api/requirements/upload", timeout=120, json={
-        "raw_text": doc_text, "product_id": "PROD-53145-856",
-        "title": "登录安全策略-测试计划样例", "priority": "P0",
+        "raw_text": doc_text, "product_id": product_id,
+        "title": title, "priority": "P0",
         "modules": ["登录安全"],
     })
     up = (r.json().get("data") or {}) if r.headers.get("content-type", "").startswith("application/json") else {}
@@ -390,6 +417,12 @@ def main() -> int:
     ap.add_argument("--poll-timeout", type=int, default=1800,
                     help="解析/澄清异步任务轮询超时（秒，默认 1800）")
     ap.add_argument("--base", default="http://127.0.0.1:8000", help="API 基地址")
+    ap.add_argument("--product-id", default=DEFAULT_PRODUCT_ID,
+                    help=f"需求分析链路投递到的产品（默认 {DEFAULT_PRODUCT_ID}）")
+    ap.add_argument("--new-product", default="",
+                    help="先新建一个全新产品再跑（传产品名称；冷启动场景，优先于 --product-id）")
+    ap.add_argument("--req-title", default="登录安全策略-测试计划样例",
+                    help="上传需求时使用的标题")
     args = ap.parse_args()
 
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -418,7 +451,27 @@ def main() -> int:
         # v5.1：未指定需求时走**完整链路**——需求分析（上传→解析→澄清→确认）→ 生成
         if run_dir is None and gen_req is None:
             headers = _login(args.base)
-            analysis = step_analysis(args.base, headers, args.doc, args.poll_timeout)
+            product_id = args.product_id
+            product_note = ""
+            # v4.1.1：全新产品（冷启动）——先建产品，再上传需求
+            if args.new_product:
+                headers.update(_login(args.base))
+                pid, err = _create_product(args.base, headers, args.new_product)
+                if pid:
+                    product_id = pid
+                    product_note = f"new_product={pid}"
+                    print(f"  ✓ 已创建全新产品: {pid}（{args.new_product}）")
+                else:
+                    product_note = f"new_product_failed={err}"
+                    print(f"  ⚠ 新建产品失败，回退到 {product_id}: {err}")
+            analysis = step_analysis(
+                args.base, headers, args.doc, args.poll_timeout,
+                product_id=product_id,
+                title=args.req_title,
+            )
+            if product_note:
+                analysis["product_note"] = product_note
+                analysis["product_id"] = product_id
             analysis_artifacts = analysis.get("artifacts")
             plan["layers"]["flow-analysis"] = {
                 k: v for k, v in analysis.items() if k != "artifacts"}
