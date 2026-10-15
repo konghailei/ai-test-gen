@@ -2,7 +2,7 @@
 
 > 版本：**v4.0.0** | 日期：2026-10-15 | 状态：执行中（本轮自证）
 > 上游：`docs/TEST_PLAN-v4-archived.md`（v4.5 定稿，含阶段 1-19 全部内容，本文为其**增量完善**，不替代）
-> 载体需求文档：`docs/test-requirements/`（v1.0 → v1.9b 版本递进）
+> 载体需求文档：`docs/test-materials/test-requirements/`（v1.0 → v1.9b 版本递进）
 
 ---
 

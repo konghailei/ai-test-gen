@@ -78,8 +78,8 @@ KB 累积曲线成立（命中率随版本递增），剔坏留好、SSE 收尸�
 
 | 资产 | 路径 | 用途 |
 |---|---|---|
-| 三版本需求文档 | docs/dogfood-requirements/ | 后续版本回归验证的标准输入 |
+| 三版本需求文档 | docs/test-materials/dogfood-requirements/ | 后续版本回归验证的标准输入 |
 | 一条龙走查脚本 | _dogfood_tmp/phaseC_v30_all.py | 新版本自举验证模板（幂等，支持断点重跑） |
 | SSE 收尸 E2E 注入 | _dogfood_tmp/e2e_kill_sse.py | 断连场景标准验证脚本 |
-| KB 固定查询集 | docs/dogfood-requirements/README.md | 每次归档后的 KB 回归基线 |
+| KB 固定查询集 | docs/test-materials/dogfood-requirements/README.md | 每次归档后的 KB 回归基线 |
 | 三版本产物数据 | DB: PROD-75005-135 | 分层对比分析的数据源 |

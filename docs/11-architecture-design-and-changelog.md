@@ -1310,7 +1310,7 @@ LLM 语义检测问题（步骤②c）
 | [03-case-generation-flow.md](file:///e:/git-down/ai-test-gen/docs/03-case-generation-flow.md) | 用例生成流程 |
 | [04-output-format.md](file:///e:/git-down/ai-test-gen/docs/04-output-format.md) | 输出格式规范 |
 | [05-technical-selection.md](file:///e:/git-down/ai-test-gen/docs/05-technical-selection.md) | 技术选型 |
-| [06-e2e-test-report.md](file:///e:/git-down/ai-test-gen/docs/06-e2e-test-report.md) | E2E 测试报告 |
+| [06-e2e-test-report.md](file:///e:/git-down/ai-test-gen/archive/06-e2e-test-report.md) | E2E 测试报告（已归档：v2 时代早期报告，现行以 TEST_REPORT 系列为准） |
 | [07-internal-deployment.md](file:///e:/git-down/ai-test-gen/docs/07-internal-deployment.md) | 内部部署 |
 | [08-functional-points.md](file:///e:/git-down/ai-test-gen/docs/08-functional-points.md) | 功能点子系统 |
 | [09-requirement-analysis-pipeline.md](file:///e:/git-down/ai-test-gen/docs/09-requirement-analysis-pipeline.md) | 需求分析全链路（v2.2） |

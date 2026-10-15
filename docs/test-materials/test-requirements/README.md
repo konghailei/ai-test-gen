@@ -84,7 +84,7 @@ v1.9a（锁定 5 次）→ v1.9b（锁定 10 次，变更覆盖）
 ## 与 `backend/_e2e_tmp/docs/` 的关系
 
 - `backend/_e2e_tmp/docs/`：测试执行时实际使用的需求文档（已 gitignore，临时产物）
-- `docs/test-requirements/`：**正式归档**的多版本需求文档，纳入版本管理，便于：
+- `docs/test-materials/test-requirements/`：**正式归档**的多版本需求文档，纳入版本管理，便于：
   - 测试复现（任何人 clone 仓库即可重跑测试）
   - 文档评审（需求文档本身可被评审）
   - 历史追溯（版本演进链路清晰可查）

@@ -376,7 +376,7 @@ print(f'向量数: {len(v)}')
 | 03 | [测试用例生成流程](./docs/03-case-generation-flow.md) | GenAgent、ImpactAnalysisAgent、ReviewAgent、追溯矩阵、一致性、稳定性保障 |
 | 04 | [用例输出格式规范](./docs/04-output-format.md) | UTCF JSON + Markdown 输出、Gherkin/pytest 转换、覆盖率矩阵、追溯矩阵 |
 | 05 | [技术选型分析](./docs/05-technical-selection.md) | 全栈技术对比、稳定性组件选型、容量规划、性能基准 |
-| 06 | [端到端测试报告](./docs/06-e2e-test-report.md) | 49 项测试全部通过，含架构组件验证、问题修复记录 |
+| 06 | [端到端测试报告](./archive/06-e2e-test-report.md) | 49 项测试全部通过，含架构组件验证、问题修复记录（**已归档**：v2 时代早期报告，现行以 `TEST_REPORT*.md` + `docs/TEST_PLAN.md` 为准） |
 
 ---
 
@@ -417,7 +417,10 @@ ai-test-gen/
 ├── docker-compose.base.yml                # 基础设施 + 基础镜像构建
 ├── docker-compose.yml                     # 应用层（全部 8 个容器）
 ├── .dockerignore                          # 构建忽略清单
-├── docs/                                  # 架构文档（00-06）
+├── docs/                                  # 项目文档（架构 00-20 / 验证链 21-32 / 缺陷账本 / 测试计划）
+│   ├── todos/                             # 待办唯一权威入口（CURRENT-TODOS.md）
+│   └── test-materials/                    # 测试素材（test-requirements / dogfood-requirements）
+├── archive/                               # 历史归档（已完成快照 / v2 时代遗留 / 冗余副本）
 ├── templates/                             # 输入输出模板
 ├── docker/
 │   ├── postgres.Dockerfile                # PG 镜像（zhparser 可选）
