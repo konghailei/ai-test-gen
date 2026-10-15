@@ -168,3 +168,4 @@ _cleanup_log.txt
 _cleanup_total.tmp
 backend/tests/_verify_*.py
 dsh-plugins-recommend.md
+_dogfood_out/
