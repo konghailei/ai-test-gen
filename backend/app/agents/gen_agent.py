@@ -1056,6 +1056,12 @@ class GenAgent:
         if not embeddings or len(embeddings) != len(cases):
             return cases
 
+        # v3.5.10（docs/32 B-6 闸门1'）：删除前过结构护栏——同标题形态
+        # （sim=1.0）下角色只在 steps 里不同（登录身份不同），标题 embedding
+        # 完全分辨不出，必须比对两例全文的角色/实体/操作词集合，不一致跳过。
+        # 与 case_dedup._structural_guards 同一纯函数（口径统一，防漂移）。
+        from app.utils.case_dedup import _structural_guards
+
         # 计算余弦相似度，标记待移除的索引
         to_remove: set = set()
         for i in range(len(cases)):
@@ -1066,6 +1072,14 @@ class GenAgent:
                     continue
                 sim = self.cosine_similarity(embeddings[i], embeddings[j])
                 if sim >= threshold:
+                    ok, guard_reason = _structural_guards(cases[i], cases[j])
+                    if not ok:
+                        logger.debug(
+                            "[GenAgent/Dedup] L2 护栏保留变体: {} vs {}（{}）",
+                            str(cases[i].get("title"))[:20],
+                            str(cases[j].get("title"))[:20], guard_reason,
+                        )
+                        continue
                     # 保留置信度更高的
                     conf_i = cases[i].get("gen_metadata", {}).get("gen_confidence", 0.5)
                     conf_j = cases[j].get("gen_metadata", {}).get("gen_confidence", 0.5)

@@ -1385,3 +1385,48 @@ class VectorOutbox(Base):
         Index("idx_outbox_dispatch", "status", "next_retry_at", "created_at"),
         Index("idx_outbox_aggregate", "aggregate_type", "aggregate_id", "created_at"),
     )
+
+
+# ============================================================================
+# 27. 去重留痕表（dedup_removals，v3.5.10 docs/32 B-6 闸门3）
+# ============================================================================
+
+class DedupRemoval(Base):
+    """去重留痕表：被去重剔除/保留判定的可审计记录（docs/32 B-6 第 4 件套）。
+
+    背景（docs/29 P0）：语义去重误删不可逆且历史发生率 25-34%——被删用例直接
+    从内存消失，日志/SSE 里的 `semantic_dedup_removed` 只活到页面刷新。本表把
+    判定落库，让"误删"从不可逆事故降级为可纠错操作：
+    - decision="removed"：被合并剔除（removed_case_json 存完整用例，供一键恢复）；
+    - decision="kept"：闸门1 护栏拦截 / 闸门2 LLM 裁决非重复（reason 带命中维度
+      或 llm_distinct，审计"为什么没删"）。
+
+    恢复语义：restore 接口把 removed_case_json 写回 test_cases（新 ID 或原 ID）
+    并置 restored=True，与 error_cases 复活同型。
+    """
+    __tablename__ = "dedup_removals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    removal_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, comment="留痕 ID: DR-{时间戳}-{随机}")
+    task_id: Mapped[str] = mapped_column(String(64), default="", index=True, comment="关联生成任务 ID")
+    gen_batch_id: Mapped[str] = mapped_column(String(64), default="", index=True, comment="生成批次 ID")
+    req_id: Mapped[str] = mapped_column(String(64), default="", index=True, comment="关联需求 ID")
+    decision: Mapped[str] = mapped_column(String(16), default="removed", comment="removed（剔除）/ kept（保留判定）")
+    removed_id: Mapped[str] = mapped_column(String(64), default="", comment="被去重用例 ID（或标题快照）")
+    removed_title: Mapped[str] = mapped_column(String(256), default="", comment="被去重用例标题快照")
+    kept_id: Mapped[str] = mapped_column(String(64), default="", comment="保留代表用例 ID（或标题快照）")
+    kept_title: Mapped[str] = mapped_column(String(256), default="", comment="保留代表用例标题快照")
+    reason: Mapped[str] = mapped_column(String(512), default="", comment="判定依据（相似度/护栏命中维度/llm_distinct）")
+    removed_case_json: Mapped[dict] = mapped_column(JSON, default=dict, comment="被去重用例完整 JSON（一键恢复数据源）")
+    restored: Mapped[bool] = mapped_column(Boolean, default=False, index=True, comment="是否已恢复（误删复活）")
+    restored_case_id: Mapped[str] = mapped_column(String(64), default="", comment="恢复后生成的用例 ID")
+    restored_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="恢复时间"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+    __table_args__ = (
+        Index("idx_dedup_removal_task", "task_id", "decision", "created_at"),
+    )

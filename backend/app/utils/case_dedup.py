@@ -47,8 +47,18 @@ def _numbers(text: object) -> set[str]:
     v3.4.1 修复 L-9：先去前导零再比较。原实现下「第04次」与「第4次」的数字集合分别是
     {"04"} / {"4"}，数字护栏会直接短路判定为不同，近重复永远合并不掉。
     注意只归一前导零，不改变数字大小语义（"4" 与 "5" 仍视为不同边界值）。
+
+    v3.5.10（docs/32 B-6 第 3 件）：正则 \\d+ → \\d+(?:\\.\\d+)? —— 原实现把
+    「9.9MB」吃成 {"9"}，「9.9」与「9.5」的差异被吞掉、护栏失效（docs/29
+    实证误删形态）。整数去前导零、小数去尾随零（"9.90"→"9.9"，"04"→"4"）。
     """
-    return {str(int(n)) for n in re.findall(r"\d+", str(text or ""))}
+    out: set[str] = set()
+    for n in re.findall(r"\d+(?:\.\d+)?", str(text or "")):
+        try:
+            out.add(str(int(n)))
+        except ValueError:  # 小数：float 归一去尾随零（"9.90" → "9.9"）
+            out.add(str(float(n)))
+    return out
 
 
 def _norm(text: object) -> str:
@@ -107,21 +117,201 @@ def quality_rank(case: dict) -> tuple:
     )
 
 
-def is_near_duplicate(a: dict, b: dict) -> tuple[bool, str]:
+# ============================================================================
+# 闸门1：结构护栏（v3.5.10 docs/32 B-6 分层闸门第 1 层）
+# ============================================================================
+# 背景（docs/29 语义去重误删 25-34% + 2026-10-14 角色变体探针）：
+#   整例 JSON embedding 对"角色/实体/操作维度差异"不敏感——角色词在全文中
+#   占比过小，向量分辨不出（探针实测角色变体 sim 0.95-0.99 vs 真重复 0.97，
+#   犬牙交错，调阈值结构性失效）。只有文本层确定性比对拦得住。
+#
+# 设计原则（docs/32 §B-6）：确定性优先、宁可漏删不可误删。
+#   护栏方向是**宁可误拦（多保留）不漏拦（误删合并）**——误拦的代价是
+#   多几条重复用例（审阅台可见），漏拦的代价是角色覆盖永久缺口（不可逆）。
+# 六维（任一命中即拦，不合并）：
+#   ① 小数/数字口径 ② 角色词 ③ 实体词 ④ 操作词 ⑤ 否定/分支词 ⑥ 扩展名/单位
+# 纯函数、零成本、可单测——能用确定性手段拦的绝不进 LLM（闸门2 只裁窄带）。
+
+# 角色词表：静态兜底 + 调用方经 extra_role_words 注入 SRR user_roles 动态词
+# （docs/32：SRR user_roles 动态收集 + 静态兜底词表）。
+_ROLE_WORDS = (
+    "超级管理员", "管理员", "普通用户", "只读用户", "只读成员", "访客", "游客",
+    "匿名用户", "未登录用户", "注册用户", "作者", "审批人", "审核员", "审核人",
+    "操作员", "运维", "客服", "运营", "会员", "租户", "子账号", "主账号",
+    "admin", "guest", "author", "approver", "reviewer", "operator",
+)
+
+# 实体词表（产品/项目/模块是 docs/29 实证误删对；其余为常见域实体）。
+_ENTITY_WORDS = (
+    "产品", "项目", "模块", "订单", "商品", "文档", "需求", "知识库", "用例",
+    "报表", "任务", "工单", "权限", "账号", "文件", "目录", "标签", "分类",
+    "部门", "渠道", "库存", "支付", "退款", "菜单", "页面", "接口",
+)
+
+# 操作词族：同族=同义（创建≈新建，不拦），跨族=不同操作（创建 vs 编辑，拦）。
+_OPERATION_GROUPS: dict[str, tuple[str, ...]] = {
+    "create": ("创建", "新建", "新增", "添加", "建立", "注册"),
+    "update": ("编辑", "修改", "更新", "调整", "变更"),
+    "delete": ("删除", "移除", "清除", "作废", "注销"),
+    "query": ("查询", "搜索", "查找", "检索", "筛选"),
+    "export": ("导出", "下载"),
+    "import": ("上传", "导入"),
+    "login": ("登录", "登出", "退出登录"),
+    "enable": ("启用", "激活"),
+    "disable": ("禁用", "停用", "冻结", "锁定"),
+    "submit": ("提交", "送审", "发起"),
+    "approve": ("审批", "审核", "通过审批"),
+    # ⚠️ 刻意不含"驳回/拒绝"：它们更多以**预期结果**形态单侧出现
+    # （docs/29 实证真重复对「…提示剩余锁定时间」vs「…被拒绝并提示…」），
+    # 放操作族会把这类真重复误拦（漏删）。其"相反分支"语义由下方
+    # _BRANCH_PAIRS（通过/驳回、允许/拒绝）覆盖——只在正负两极
+    # 分别出现在两例时才拦，同侧出现不拦。
+}
+
+# 否定/分支对照对（正向词, 负向词）：两例分别命中相反一极 → 拦。
+_BRANCH_PAIRS = (
+    ("通过", "未通过"), ("成功", "失败"), ("允许", "拒绝"), ("正常", "异常"),
+    ("正确", "错误"), ("存在", "不存在"), ("可见", "不可见"), ("完整", "不完整"),
+    ("支持", "不支持"), ("包含", "不包含"), ("开启", "关闭"), ("启用", "禁用"),
+)
+
+_EXT_RE = re.compile(r"\.[a-zA-Z][a-zA-Z0-9]{1,7}")
+_UNIT_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(kb|mb|gb|tb|b|ms|s|秒|分钟|小时|天|次|条|%|％)", re.I
+)
+
+
+def _case_text(case: dict) -> str:
+    """护栏比对语料：title + description + preconditions + steps 全文本。
+
+    steps 必须拼入——探针实证"同标题、角色只在步骤里"（登录身份不同）形态
+    靠标题完全分辨不出，只能看步骤文本。
+    """
+    parts = [str(case.get(k) or "") for k in ("title", "description", "preconditions")]
+    for s in case.get("steps") or []:
+        if isinstance(s, dict):
+            parts.append(str(s.get("action") or ""))
+            parts.append(str(s.get("expected") or ""))
+        else:
+            parts.append(str(s))
+    for a in case.get("assertions") or []:
+        if isinstance(a, dict):
+            parts.append(str(a.get("message") or ""))
+    return "\n".join(parts)
+
+
+def _branch_hit(text: str, word: str, opposite: str) -> bool:
+    """分支词命中（先剔除反义长词再匹配，防"未通过"含"通过"的子串误判）。"""
+    return word in text.replace(opposite, "")
+
+
+def _word_set(text: str, words) -> set[str]:
+    return {w for w in words if w in text}
+
+
+def _op_groups(text: str) -> set[str]:
+    return {
+        g for g, ws in _OPERATION_GROUPS.items() if any(w in text for w in ws)
+    }
+
+
+def _structural_guards(
+    a: dict, b: dict, extra_role_words: "set[str] | None" = None
+) -> tuple[bool, str]:
+    """结构护栏（闸门1，纯函数）：六维任一命中即拦，不合并。
+
+    Returns:
+        (True, "")：护栏全过，可进入后续判定（LLM 窄带/合并）。
+        (False, "护栏拦截:<维度>…")：命中护栏，必须保留两条。
+
+    防误删方向刻意取"宁可误拦"：误拦=多留一条重复（可见、可去），
+    漏拦=角色/实体变体被合并（不可逆、覆盖永久缺口）。
+    """
+    ta, tb = _case_text(a), _case_text(b)
+
+    # ① 数字/小数口径（标题级，与 is_near_duplicate 既有护栏同口径）
+    na, nb = _numbers(a.get("title")), _numbers(b.get("title"))
+    if na != nb:
+        return False, f"护栏拦截:数字口径不同({sorted(na)} vs {sorted(nb)})"
+
+    # ② 角色词集合（SRR 动态词 + 静态兜底）
+    roles = set(_ROLE_WORDS) | set(extra_role_words or ())
+    ra, rb = _word_set(ta, roles), _word_set(tb, roles)
+    if ra != rb:
+        return False, f"护栏拦截:角色词不同({sorted(ra)} vs {sorted(rb)})"
+
+    # ③ 实体词集合
+    #    v3.5.10 微调：一侧无实体词（∅ = 无主张）不拦——那是详略差异不是
+    #    场景差异（docs/31 边界对「解析生成语义树节点数刚好400的HTML文件」
+    #    vs「语义树节点数边界」实证），放行给闸门2 兜底。**两侧非空的不等
+    #    一律拦**（含子集形态）：docs/29 #11 生产误删对就是 {文档} ⊂
+    #    {需求,文档} 的子集形态，放宽子集会回归误删，维持"集合不等即拦"。
+    ea, eb = _word_set(ta, _ENTITY_WORDS), _word_set(tb, _ENTITY_WORDS)
+    if ea and eb and ea != eb:
+        return False, f"护栏拦截:实体词不同({sorted(ea)} vs {sorted(eb)})"
+
+    # ④ 操作词族（同族同义不拦：创建≈新建；跨族主操作不同拦：创建 vs 编辑）
+    #    判定取「互不包含」而非「集合不等」：真重复对常单侧多提一个动作词
+    #    （docs/29 定标对「…触发账号锁定」vs「…登录失败触发账号锁定」，
+    #    集合不等会把这类真重复全部误拦、去重效力归零）。只有两侧各有
+    #    对方没有的操作族（真正的跨族操作）才拦；子集关系视为同场景细节
+    #    差异，放行给闸门2 LLM 窄带兜底。
+    oa, ob = _op_groups(ta), _op_groups(tb)
+    if oa and ob and not (oa <= ob or ob <= oa):
+        return False, f"护栏拦截:操作词不同({sorted(oa)} vs {sorted(ob)})"
+
+    # ⑤ 否定/分支词相反（同一对的正负两极分别出现在两例）
+    for pos, neg in _BRANCH_PAIRS:
+        pa, na_ = _branch_hit(ta, pos, neg), neg in ta
+        pb, nb_ = _branch_hit(tb, pos, neg), neg in tb
+        if (pa and nb_) or (na_ and pb):
+            return False, f"护栏拦截:分支词相反({pos}/{neg})"
+
+    # ⑥ 扩展名 / 单位
+    #    v3.5.10 微调：与④操作词同构取「互不包含才拦」——真重复对常单侧
+    #    多提单位/扩展名（docs/31 幂等对 [] vs ['次']、详述侧带单位），
+    #    集合不等会误拦；一侧为空/子集 = 无主张或细节差异，放行给闸门2。
+    #    真冲突（.docx vs .markdown、MB vs GB）两侧互不包含，照拦。
+    xa = set(m.group(0).lower() for m in _EXT_RE.finditer(ta))
+    xb = set(m.group(0).lower() for m in _EXT_RE.finditer(tb))
+    if xa and xb and not (xa <= xb or xb <= xa):
+        return False, f"护栏拦截:扩展名不同({sorted(xa)} vs {sorted(xb)})"
+    ua = {m.group(1).lower() for m in _UNIT_RE.finditer(ta)}
+    ub = {m.group(1).lower() for m in _UNIT_RE.finditer(tb)}
+    if ua and ub and not (ua <= ub or ub <= ua):
+        return False, f"护栏拦截:单位不同({sorted(ua)} vs {sorted(ub)})"
+
+    return True, ""
+
+
+def is_near_duplicate(
+    a: dict, b: dict, extra_role_words: "set[str] | None" = None
+) -> tuple[bool, str]:
     """判断两条用例是否近重复，返回 (是否重复, 依据说明)。
 
-    数字口径不同 → 直接判为不重复（它们测的是不同边界值，不是同一场景）。
+    判定链（v3.5.10 docs/32 B-6）：数字口径快检 → 相似度阈值 → 闸门1 结构护栏。
+    护栏命中（角色/实体/操作/分支/扩展名/单位任一维不同）→ 判不重复，
+    reason 携带命中维度（供留痕/探针验收，调用方仅在 dup=True 时消费 reason）。
     """
     na, nb = _numbers(a.get("title")), _numbers(b.get("title"))
     if na != nb:
         return False, ""
     t = title_similarity(a, b)
+    s = None
     if t >= TITLE_SIM_THRESHOLD:
+        s = -1.0  # 单标题条件达标，步骤不必再算
+    elif t >= TITLE_SIM_COMBINED:
+        s = step_similarity(a, b)
+        if s < STEP_SIM_COMBINED:
+            return False, ""
+    else:
+        return False, ""
+    ok, guard_reason = _structural_guards(a, b, extra_role_words=extra_role_words)
+    if not ok:
+        return False, guard_reason
+    if s == -1.0:
         return True, f"标题相似度={t:.2f}"
-    s = step_similarity(a, b)
-    if t >= TITLE_SIM_COMBINED and s >= STEP_SIM_COMBINED:
-        return True, f"标题相似度={t:.2f} 且步骤相似度={s:.2f}"
-    return False, ""
+    return True, f"标题相似度={t:.2f} 且步骤相似度={s:.2f}"
 
 
 # ============================================================================
@@ -145,6 +335,16 @@ def is_near_duplicate(a: dict, b: dict) -> tuple[bool, str]:
 #   判重从 586 对跌到 119 对，漏判 469 对真重复（详见下方版本史）。
 #   已回退整例 JSON（口径 e2），0.92 阈值继续有效（分布未变）。
 SEMANTIC_SIM_THRESHOLD = 0.92
+
+# v3.5.10 A 方案（2026-10-14 大哥拍板）：闸门2 窄带下探至 0.88。
+# 实证依据（docs/31 320 条生产口径二跑回放）：4 处跨分片真重复的 6 对
+# sim 落在 0.8988~0.9185（全部 <0.92 永远删不掉），而须保留边界对
+# 0.8935 起与之犬牙交错——阈值手段在此结构性失效。处置：sim ∈
+# [0.88, 0.92) 且护栏全过的对送闸门2 LLM 裁决，**默认保留，LLM 明确
+# 确认"同一场景"才删**（不对称默认值：≥0.92 维持现状判定链；<0.88
+# 不比较）。LLM 缺席/失败一律 fail-open 保留——窄带内误判的最坏后果
+# 是"该删的没删"（回到现状），永远不会误删。
+SEMANTIC_BAND_FLOOR = 0.88
 
 # 语义字段序列化口径版本（docs/27 E）。进向量缓存 key（B 方案）：
 # 改口径必须递增版本号，否则旧缓存会以旧口径向量冒充新口径结果。
@@ -177,29 +377,39 @@ def _semantic_text(case: dict) -> str:
 
 
 def semantic_near_duplicate(
-    a: dict, b: dict, sim: float | None = None
+    a: dict, b: dict, sim: float | None = None,
+    extra_role_words: "set[str] | None" = None,
+    threshold: float | None = None,
 ) -> tuple[bool, str]:
-    """语义级近重复判定（阈值 0.92 + 数字护栏）。
+    """语义级近重复判定（阈值 0.92 + 数字护栏 + 闸门1 结构护栏）。
 
     Args:
         a, b: 两条用例 dict。
         sim: 两例整例 JSON embedding 的余弦相似度（0~1）。None 时视为无信号，
              直接判不重复（调用方拿不到 embedding 时安全兜底）。
+        extra_role_words: SRR user_roles 动态角色词（叠加静态兜底词表）。
+        threshold: 覆盖默认阈值（定标/校准用；v3.5.10 修复：原 dedup_semantic
+            传入的 threshold 被本函数硬编码常量短路，从未生效）。
 
-    判定逻辑：
-        1. 数字集合不同 → 不重复（与 is_near_duplicate 同一护栏：不同边界值
-           不是同一场景，即使向量说很像）。
-        2. sim < 0.92 → 不重复。
-        3. 其余 → 重复（理由带相似度值，写入去重留痕）。
+    判定逻辑（v3.5.10 docs/32 B-6 分层闸门）：
+        1. sim 无信号 / < 阈值 → 不重复。
+        2. 数字集合不同 → 不重复（不同边界值不是同一场景，即使向量说很像）。
+        3. 闸门1 结构护栏（角色/实体/操作/分支/扩展名/单位）任一命中
+           → 不重复，reason 携带命中维度。
+        4. 全过 → 重复（理由带相似度值，写入去重留痕）。
+        注：闸门2 LLM 窄带裁决在 dedup_semantic 循环里（只对"即将删除的对"
+        触发），本函数保持纯确定性、可单测。
     """
-    if sim is None:
+    thr = threshold if threshold is not None else SEMANTIC_SIM_THRESHOLD
+    if sim is None or sim < thr:
         return False, ""
     na, nb = _numbers(a.get("title")), _numbers(b.get("title"))
     if na != nb:
         return False, ""
-    if sim >= SEMANTIC_SIM_THRESHOLD:
-        return True, f"语义相似度={sim:.4f}"
-    return False, ""
+    ok, guard_reason = _structural_guards(a, b, extra_role_words=extra_role_words)
+    if not ok:
+        return False, guard_reason
+    return True, f"语义相似度={sim:.4f}"
 
 
 # ============================================================================
@@ -382,6 +592,9 @@ def dedup_semantic(
     embed_func: "callable | None" = None,
     threshold: float | None = None,
     model_id: str = "",
+    llm_judge: "callable | None" = None,
+    extra_role_words: "set[str] | None" = None,
+    decision_log: "list | None" = None,
 ) -> tuple[list[dict], list[dict]]:
     """跨子轮语义去重（persist 前的安全网）。
 
@@ -397,6 +610,17 @@ def dedup_semantic(
     v3.5.8（docs/27 B）：向量经 _embed_cached 走进程内 LRU（model_id 绑定）。
     model_id 传 vector_store.dedup_model_id()（实际生效模型）；空 = 不缓存。
 
+    v3.5.10（docs/32 B-6 分层闸门）：
+        闸门1 结构护栏在 semantic_near_duplicate 内（纯确定性，六维任一命中
+        即保留）；闸门2 LLM 窄带裁决经 llm_judge 注入——只对"护栏全过且
+        sim≥0.92、即将删除的对"触发（每批通常 0-5 次），**fail-open 方向是
+        保留**（LLM 失败/异常 → 当作"非重复"保留，宁可漏删不可误删）。
+        None 时行为 = 只有闸门1（安全降级，单测环境不依赖 LLM）。
+        v3.5.10 A 方案（大哥拍板）：窄带下探至 SEMANTIC_BAND_FLOOR=0.88——
+        sim ∈ [0.88, 0.92) 且护栏全过的对也送闸门2，但**默认保留，LLM 明确
+        确认才删**（与 ≥0.92 带的"LLM 否决才留"形成不对称默认值）；LLM 缺席
+        （llm_judge=None）时该带一律保留。
+
     Args:
         cases: 待去重用例列表。
         embed_func: 文本→向量的函数（list[str] → list[vector]），
@@ -405,6 +629,12 @@ def dedup_semantic(
                     embedding 环境下行为安全。
         threshold: 覆盖默认阈值（定标/校准用）。
         model_id: 生效的 embed 模型标识（进缓存 key；空 = 模型未知，不缓存）。
+        llm_judge: 闸门2 裁决 callable（签名 ``(a, b) -> bool``，True=是重复
+            可合并）。只在"即将删除的对"上调用；返回 False/抛异常 → 保留。
+        extra_role_words: SRR user_roles 动态角色词（闸门1 词表叠加）。
+        decision_log: 可选审计输出列表。闸门1 拦截（reason 含命中维度）与
+            闸门2 裁决（llm_distinct / llm_duplicate:sim）逐对 append 记录，
+            供留痕落库（闸门3）消费；None 时不收集。
 
     Returns:
         (保留的用例列表, 被去掉的记录列表)
@@ -415,9 +645,22 @@ def dedup_semantic(
         return list(cases or []), []
     if embed_func is None:
         # 无 embedding 信号 → 退化为既有 3-gram 去重（安全兜底，不丢功能）
-        return dedup_near_duplicates(cases)
+        return dedup_near_duplicates(
+            cases, extra_role_words=extra_role_words, decision_log=decision_log
+        )
 
     from math import sqrt
+
+    def _passes_guards(x: dict, y: dict) -> tuple[bool, str]:
+        """数字护栏 + 闸门1 结构护栏全量判定（窄带路径专用）。
+
+        semantic_near_duplicate 在 sim < thr 时早退、不跑护栏——窄带候选
+        正落在该区间，需在送 LLM 前补判"护栏全过"。
+        """
+        nx, ny = _numbers(x.get("title")), _numbers(y.get("title"))
+        if nx != ny:
+            return False, f"护栏拦截:数字口径不同({sorted(nx)} vs {sorted(ny)})"
+        return _structural_guards(x, y, extra_role_words=extra_role_words)
 
     # v3.5.8（docs/27 C3）：序列化经 _semantic_text 唯一出口（当前口径 e2
     #   = 整例 JSON；e1 语义字段瘦身已定标否决，见版本史注释）。
@@ -446,7 +689,9 @@ def dedup_semantic(
     except Exception:  # noqa: BLE001
         # embedding 失败（含缓存层抛出的数量不符）→ 降级为 3-gram
         # （不能因为向量化抖动击穿去重环节）
-        return dedup_near_duplicates(cases)
+        return dedup_near_duplicates(
+            cases, extra_role_words=extra_role_words, decision_log=decision_log
+        )
     if len(vectors) != len(indexed):
         # 兜底：数量不符时 zip 会静默截断 → 下游 vec_by_id KeyError 击穿节点。
         # 与 embedding 抖动同一失败语义：降级 3-gram。
@@ -454,7 +699,9 @@ def dedup_semantic(
             "[DedupCache] embed 返回数量不符（请求 {} 返回 {}），降级 3-gram",
             len(indexed), len(vectors),
         )
-        return dedup_near_duplicates(cases)
+        return dedup_near_duplicates(
+            cases, extra_role_words=extra_role_words, decision_log=decision_log
+        )
 
     # 归一化余弦（embed_texts 产出可能未归一）
     def _norm_cos(va: list[float], vb: list[float]) -> float:
@@ -466,14 +713,85 @@ def dedup_semantic(
     kept: list[dict] = []
     kept_idx: list[int] = []
     removed: list[dict] = []
+
+    def _log_decision(record: dict) -> None:
+        if decision_log is not None:
+            decision_log.append(record)
+
     for i, case in order:
         dup_of = None
         for j in kept_idx:
             sim = _norm_cos(vec_by_id[i], vec_by_id[j])
-            dup, reason = semantic_near_duplicate(case, cases[j], sim=sim)
-            if dup:
-                dup_of = (cases[j], reason)
+            dup, reason = semantic_near_duplicate(
+                case, cases[j], sim=sim, extra_role_words=extra_role_words,
+                threshold=thr,
+            )
+            if not dup:
+                # 闸门1 拦截留痕（reason 非空 = 护栏命中维度）
+                if reason:
+                    _log_decision({
+                        "decision": "kept", "reason": reason,
+                        "removed": case.get("id") or case.get("title", ""),
+                        "removed_title": str(case.get("title", ""))[:120],
+                        "kept": cases[j].get("id") or cases[j].get("title", ""),
+                        "kept_title": str(cases[j].get("title", ""))[:120],
+                    })
+                    continue
+                # ── A 窄带（v3.5.10，SEMANTIC_BAND_FLOOR）────────────────
+                # sim ∈ [0.88, thr) 且护栏全过 → 闸门2 裁决，默认保留，
+                # LLM 明确确认"同一场景"才删；LLM 缺席/失败 fail-open 保留。
+                if llm_judge is None or not (SEMANTIC_BAND_FLOOR <= sim < thr):
+                    continue
+                ok_g, guard_reason = _passes_guards(case, cases[j])
+                if not ok_g:
+                    _log_decision({
+                        "decision": "kept", "reason": guard_reason,
+                        "removed": case.get("id") or case.get("title", ""),
+                        "removed_title": str(case.get("title", ""))[:120],
+                        "kept": cases[j].get("id") or cases[j].get("title", ""),
+                        "kept_title": str(cases[j].get("title", ""))[:120],
+                    })
+                    continue
+                try:
+                    band_dup = bool(llm_judge(case, cases[j]))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[DedupGuard] 窄带裁决异常，fail-open 保留: {}", str(e)[:120]
+                    )
+                    band_dup = False
+                if not band_dup:
+                    _log_decision({
+                        "decision": "kept", "reason": "llm_band_distinct",
+                        "removed": case.get("id") or case.get("title", ""),
+                        "removed_title": str(case.get("title", ""))[:120],
+                        "kept": cases[j].get("id") or cases[j].get("title", ""),
+                        "kept_title": str(cases[j].get("title", ""))[:120],
+                    })
+                    continue
+                dup_of = (cases[j], f"llm_band_duplicate:语义相似度={sim:.4f}")
                 break
+            # 闸门2：LLM 窄带裁决（只对"即将删除的对"触发）。
+            # fail-open：返回 False / 抛异常 / 超时 → 保留（宁可漏删不可误删）。
+            if llm_judge is not None:
+                try:
+                    is_dup = bool(llm_judge(case, cases[j]))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[DedupGuard] LLM 裁决异常，fail-open 保留: {}", str(e)[:120]
+                    )
+                    is_dup = False
+                if not is_dup:
+                    _log_decision({
+                        "decision": "kept", "reason": "llm_distinct",
+                        "removed": case.get("id") or case.get("title", ""),
+                        "removed_title": str(case.get("title", ""))[:120],
+                        "kept": cases[j].get("id") or cases[j].get("title", ""),
+                        "kept_title": str(cases[j].get("title", ""))[:120],
+                    })
+                    continue
+                reason = f"llm_duplicate:{reason}"
+            dup_of = (cases[j], reason)
+            break
         if dup_of is None:
             kept.append(case)
             kept_idx.append(i)
@@ -492,8 +810,15 @@ def dedup_semantic(
     return ordered, removed
 
 
-def dedup_near_duplicates(cases: list[dict]) -> tuple[list[dict], list[dict]]:
+def dedup_near_duplicates(
+    cases: list[dict],
+    extra_role_words: "set[str] | None" = None,
+    decision_log: "list | None" = None,
+) -> tuple[list[dict], list[dict]]:
     """批内近重复去重。
+
+    v3.5.10（docs/32 B-6）：与 dedup_semantic 同型挂闸门1 结构护栏
+    （is_near_duplicate 内），护栏拦截经 decision_log 留痕（reason 含命中维度）。
 
     Returns:
         (保留的用例列表, 被去掉的记录列表[{'removed','kept','reason'}])
@@ -506,10 +831,19 @@ def dedup_near_duplicates(cases: list[dict]) -> tuple[list[dict], list[dict]]:
     for _, case in order:
         dup_of = None
         for rep in kept:
-            dup, reason = is_near_duplicate(case, rep)
-            if dup:
-                dup_of = (rep, reason)
-                break
+            dup, reason = is_near_duplicate(case, rep, extra_role_words=extra_role_words)
+            if not dup:
+                if reason and decision_log is not None:
+                    decision_log.append({
+                        "decision": "kept", "reason": reason,
+                        "removed": case.get("id") or case.get("title", ""),
+                        "removed_title": str(case.get("title", ""))[:120],
+                        "kept": rep.get("id") or rep.get("title", ""),
+                        "kept_title": str(rep.get("title", ""))[:120],
+                    })
+                continue
+            dup_of = (rep, reason)
+            break
         if dup_of is None:
             kept.append(case)
         else:

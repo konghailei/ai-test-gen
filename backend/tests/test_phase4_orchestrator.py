@@ -932,12 +932,16 @@ async def test_review_supplement_loop(result: TestResult):
         **REVIEW_REPORT,
         "should_supplement": True,
         "supplement_hints": ["验证码错误分支"],
+        # v3.5.10（docs/32 O-1）：补前 2 个未覆盖要点
+        "point_coverage": {"uncovered": [{"id": "P-1"}, {"id": "P-2"}]},
     }
     second_report = {
         **REVIEW_REPORT,
         "total_cases": 2,
         "passed_cases": 2,
         "should_supplement": True,
+        # 补后剩 1 个未覆盖要点
+        "point_coverage": {"uncovered": [{"id": "P-2"}]},
     }
     reviewed_cases = [{**GEN_CASES[0], "confidence": 0.8}]
     supplement_case = {
@@ -975,6 +979,8 @@ async def test_review_supplement_loop(result: TestResult):
     result.assert_eq("补生成调用 1 次", gen_mock.await_count, 1)
     result.assert_eq("最终报告使用第二次审核", update["review_result"], second_report)
     result.assert_eq("补生成轮次=1", update["supplement_iteration"], 1)
+    result.assert_eq("补生成效果 before/after 可读（uncovered 2→1）",
+                     update.get("supplement_effect"), {"before": 2, "after": 1})
     result.assert_eq("最终回流使用第二次审核用例", update["reviewed_cases"], reviewed_cases + [supplement_case])
     result.assert_eq("知识库回流调用 1 次", persist_mock.await_count, 1)
     result.assert_eq("知识库回流使用最终报告", persist_mock.await_args.args[2], second_report)
@@ -1000,6 +1006,8 @@ async def test_review_supplement_failure_keeps_cases(result: TestResult):
         **REVIEW_REPORT,
         "should_supplement": True,
         "supplement_hints": ["验证码错误分支"],
+        # v3.5.10（docs/32 O-1）：补前 2 个未覆盖要点（失败路径 after=before）
+        "point_coverage": {"uncovered": [{"id": "P-1"}, {"id": "P-2"}]},
     }
     reviewed_cases = [{**GEN_CASES[0], "confidence": 0.8}]
     review_mock = AsyncMock(side_effect=[(first_report, reviewed_cases)])
@@ -1034,6 +1042,8 @@ async def test_review_supplement_failure_keeps_cases(result: TestResult):
         return
     result.assert_eq("补生成失败后仍保留主用例集", update["reviewed_cases"], reviewed_cases)
     result.assert_eq("补生成轮次仍记为 1（不重试）", update["supplement_iteration"], 1)
+    result.assert_eq("补生成失败时 effect 如实透出（用例集未变 after=before）",
+                     update.get("supplement_effect"), {"before": 2, "after": 2})
     result.assert_true("报告标记 supplement_failed",
                        update["review_result"].get("supplement_failed") is True)
     result.assert_true("报告标记 supplement_exhausted（前端不再期待补生成）",

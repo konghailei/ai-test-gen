@@ -97,6 +97,8 @@ async def init_db() -> None:
         AdminNotification,
         # v3.4: 向量库写入出箱（PG→Milvus 事务性 outbox，docs/15 §4.4）
         VectorOutbox,
+        # v3.5.10: 去重留痕（docs/32 B-6 闸门3，误删可审计可恢复）
+        DedupRemoval,
     )
     from app.db.seed import seed_patterns, seed_admin_user
 

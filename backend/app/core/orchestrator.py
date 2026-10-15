@@ -162,6 +162,12 @@ class PipelineState(TypedDict, total=False):
     # v3.5.7（P2-B）：共享规则数值保真报告（done 节点产出 → done 事件透出）。
     # 同上：未声明会被 LangGraph 静默过滤。
     value_fidelity: dict
+    # v3.5.10（docs/32 O-1）：补生成前后未覆盖要点数对比（review 节点产出 → done 事件透出）。
+    #   before = 补生成触发时 point_coverage.uncovered 数；
+    #   after  = 补生成+二次审核后的 uncovered 数（补生成失败时 = before，用例集未变）。
+    #   目的：让「补了没效果」（before==after）与「只补一轮的设计上限」可区分。
+    # ⚠️ 必须显式声明（同 consistency_check），否则被 StateGraph 静默过滤。
+    supplement_effect: dict
 
     # 控制流
     clarify_iteration: int
@@ -1545,7 +1551,23 @@ class Orchestrator:
         # 各自去重，跨通道只有完全同名能被拦住）。实测一次 56 条里有 22 条落在重复簇里，
         # 直接推高用例库冗余。阈值偏保守（宁可漏报不误删），命中记录写进日志与 done 事件。
         from app.utils.case_dedup import dedup_near_duplicates
-        cases, dedup_removed = dedup_near_duplicates(cases)
+        # v3.5.10（docs/32 B-6）：批内 3-gram 去重同型挂闸门1 结构护栏
+        # （角色/实体/操作/分支/扩展名/单位），护栏拦截经 decision_log 留痕。
+        from app.core.dedup_judge import collect_role_words
+        _dedup_role_words = collect_role_words(srr)
+        _dedup_decisions: list[dict] = []
+        # v3.5.10（docs/32 B-6 闸门3）：去重前快照全量用例（key 口径与
+        #   removed 记录一致：id or title）——removed 记录自身不带 case_json，
+        #   一键恢复的数据源靠这张映射兜底。
+        _dedup_case_by_key: dict = {
+            str(c.get("id") or c.get("title", "")): c
+            for c in cases if isinstance(c, dict)
+        }
+        cases, dedup_removed = dedup_near_duplicates(
+            cases,
+            extra_role_words=_dedup_role_words,
+            decision_log=_dedup_decisions,
+        )
         if dedup_removed:
             logger.info(
                 "[Orchestrator] 批内近重复去重: 去掉 {} 条（保留 {} 条）。示例: {}",
@@ -1601,11 +1623,21 @@ class Orchestrator:
              "cases": len(cases), "est_seconds": _dedup_est_sec},
         )
         # bge 推理是同步 CPU 调用，按 GenAgent 先例用 to_thread 包装（避免阻塞事件循环）
+        # v3.5.10（docs/32 B-6）：语义去重挂全量闸门链——
+        #   闸门1 结构护栏（is_near_duplicate 内，同批内 3-gram 口径）；
+        #   闸门2 LLM 窄带裁决（只对"护栏全过 + sim≥阈值、即将删除的对"触发，
+        #   fail-open 保留）；闸门1/2 的 kept 判定经 decision_log 留痕。
+        #   llm_judge 是同步桥接（make_sync_judge 调度回主循环），to_thread
+        #   工作线程调用时主循环仍空闲可执行裁决协程。
+        from app.core.dedup_judge import make_sync_judge
         cases, semantic_removed = await asyncio.to_thread(
             dedup_semantic, cases, embed_func=_embed_gen,
             threshold=settings.DEDUP_SEMANTIC_THRESHOLD,
             # docs/27 B：model_id 进缓存 key（实际生效模型；回退时是 global-fallback）
             model_id=_vs_gen.dedup_model_id() if _embed_gen else "",
+            llm_judge=make_sync_judge(asyncio.get_running_loop()),
+            extra_role_words=_dedup_role_words,
+            decision_log=_dedup_decisions,
         )
         await _emit_gen(
             f"语义去重完成：去掉 {len(semantic_removed)} 条（保留 {len(cases)} 条）",
@@ -1622,6 +1654,22 @@ class Orchestrator:
                 ),
             )
             state["semantic_dedup_removed"] = semantic_removed
+        # v3.5.10（docs/32 B-6 闸门3）：去重判定留痕落库（批内 3-gram + 语义去重
+        #   的 removed 记录 + 闸门1/2 的 kept 判定）——误删从不可逆事故降级为
+        #   可纠错操作（dedup_removals 表 + /api/dedup-removals/{id}/restore 一键恢复）。
+        #   落库失败只记日志，绝不阻断生成主流程。
+        try:
+            from app.core.dedup_trace import build_removal_records, save_dedup_records
+            _dedup_records = build_removal_records(
+                list(dedup_removed) + list(semantic_removed),
+                _dedup_decisions,
+                task_id=task_id,
+                req_id=req_id,
+                case_by_key=_dedup_case_by_key,
+            )
+            await save_dedup_records(_dedup_records)
+        except Exception as tr_e:  # noqa: BLE001
+            logger.warning("[Orchestrator] 去重留痕落库失败（不阻断）: {}", str(tr_e)[:150])
         # v3.4（docs/15 §4.1 / P0-2）：合同校验**只标记不中断**。
         # 空集/畸形用例必须走完 review → done，由发布策略判 blocked / awaiting_human_review；
         # 在此抛异常会让前端连 done 事件都拿不到（"0 用例不得 completed"是**终态**要求，
@@ -1824,6 +1872,9 @@ class Orchestrator:
             _degraded.append("review_llm_failed")
         if report.get("should_supplement") and not report.get("review_degraded") and supplement_iteration < 1:
             hints = report.get("supplement_hints", []) or []
+            # v3.5.10（docs/32 O-1）：补前 uncovered 基线——必须在这里取（二次 review()
+            # 返回全新 report 会覆盖，写后取就丢了）。
+            _uncovered_before = len((report.get("point_coverage") or {}).get("uncovered") or [])
             logger.info(
                 "[Orchestrator] Review 建议补生成，执行第{}次补生成: hints={}",
                 supplement_iteration + 1,
@@ -1934,10 +1985,25 @@ class Orchestrator:
                      "cases": len(merged_cases), "est_seconds": _rdedup_est_sec},
                 )
                 # bge 推理是同步 CPU 调用，用 to_thread 包装（与 GenAgent 同一先例）
+                # v3.5.10（docs/32 B-6）：与 generate 节点对称挂全量闸门链
+                #   （闸门1 结构护栏 / 闸门2 LLM 窄带裁决 fail-open / kept 留痕）。
+                from app.core.dedup_judge import (
+                    collect_role_words as _collect_role_words,
+                    make_sync_judge,
+                )
+                _rv_role_words = _collect_role_words(srr)
+                _rv_decisions: list[dict] = []
+                _rv_case_by_key = {
+                    str(c.get("id") or c.get("title", "")): c
+                    for c in merged_cases if isinstance(c, dict)
+                }
                 merged_cases, _sem_removed = await asyncio.to_thread(
                     dedup_semantic, merged_cases, embed_func=_embed,
                     threshold=settings.DEDUP_SEMANTIC_THRESHOLD,
                     model_id=_vs.dedup_model_id() if _embed else "",
+                    llm_judge=make_sync_judge(asyncio.get_running_loop()),
+                    extra_role_words=_rv_role_words,
+                    decision_log=_rv_decisions,
                 )
                 await _emit_dedup_rv(
                     f"语义去重完成：去掉 {len(_sem_removed)} 条（保留 {len(merged_cases)} 条）",
@@ -1950,8 +2016,25 @@ class Orchestrator:
                         len(_sem_removed), len(merged_cases),
                         "; ".join(
                             f"{r['removed_title'][:24]} ≈ {r['kept_title'][:24]}（{r['reason']}）"
-                            for r in _sem_removed[:3]
-                        ),
+                        for r in _sem_removed[:3]
+                    ),
+                )
+                # v3.5.10（docs/32 B-6 闸门3）：补生成合并点与主汇总点对称留痕落库
+                #   （removed 带完整用例可一键恢复；kept 带护栏/LLM 保留判定）。
+                try:
+                    from app.core.dedup_trace import (
+                        build_removal_records, save_dedup_records,
+                    )
+                    await save_dedup_records(build_removal_records(
+                        _sem_removed, _rv_decisions,
+                        task_id=state.get("task_id", ""),
+                        req_id=req_id,
+                        case_by_key=_rv_case_by_key,
+                    ))
+                except Exception as tr_e:  # noqa: BLE001
+                    logger.warning(
+                        "[Orchestrator] 补生成去重留痕落库失败（不阻断）: {}",
+                        str(tr_e)[:150],
                     )
                 report, reviewed_cases = await review_agent.review(
                     srr, merged_cases, functional_points=functional_points
@@ -1960,6 +2043,11 @@ class Orchestrator:
                 # 全新 report，先写后 review 会被整体覆盖（标记到不了 done 事件）。
                 if _sem_removed:
                     report["semantic_dedup_removed"] = _sem_removed
+                # v3.5.10（docs/32 O-1）：补生成效果对比（同上必须在 review() 之后写）。
+                report["supplement_effect"] = {
+                    "before": _uncovered_before,
+                    "after": len((report.get("point_coverage") or {}).get("uncovered") or []),
+                }
                 supplement_iteration = 1
                 # v3.1.3: 二次 review 后仍建议补生成 → 标记已达上限（补生成最多 1 次），
                 # 避免前端把 should_supplement=True 误解为"还会再补"
@@ -1970,6 +2058,13 @@ class Orchestrator:
                 report["supplement_failed"] = True
                 report["supplement_error"] = str(e)[:300]
                 report["supplement_exhausted"] = True
+                # v3.5.10（docs/32 O-1）：补生成失败 → 用例集未变（保留主用例集），
+                # after=before 是确定性事实（calc_point_coverage 同输入同输出）；
+                # 「为何没变」由 supplement_failed 标记解释。
+                report["supplement_effect"] = {
+                    "before": _uncovered_before,
+                    "after": _uncovered_before,
+                }
                 _degraded.append("supplement_failed")
                 logger.error(
                     "[Orchestrator] ⚠️ 补生成失败，保留主用例集 {} 条继续走审核/入库"
@@ -1980,6 +2075,12 @@ class Orchestrator:
         # Decide BEFORE any write, then re-evaluate inside persist_to_kb.
         if report.get("review_degraded"):
             _degraded.append("review_llm_failed")
+        # v3.5.10（docs/32 B-2 / F1）：分片审核部分失败同样要进 degraded_flags
+        # （与 publication_partial_block 同型），SSE 前端红条可见、随 done 事件
+        # 透出。注意必须在这里（最终 report 之后）判定——补生成分支会用
+        # review() 的全新 report 整体覆盖（MEMORY 教训：标记写早了会被覆盖）。
+        if report.get("review_shard_partial_failure"):
+            _degraded.append("review_shard_partial_failure")
         _degraded = list(dict.fromkeys(_degraded))
         publication_context = {
             "gate_result": state.get("gate_result"),
@@ -2091,6 +2192,8 @@ class Orchestrator:
             "reviewed_cases": reviewed_cases,
             "kb_flowback": kb_result,
             "supplement_iteration": supplement_iteration,
+            # v3.5.10（docs/32 O-1）：补生成效果对比透传到 state（done 事件消费）
+            "supplement_effect": report.get("supplement_effect") or {},
             "degraded_flags": _degraded,
             "publication": publication,
             "failed_subtasks": state.get("failed_subtasks") or [],
@@ -2509,6 +2612,8 @@ class Orchestrator:
                                 event["review_blocked"] = rr.get("blocked_cases", 0)
                                 event["should_supplement"] = rr.get("should_supplement", False)
                                 event["supplement_iteration"] = final_state.get("supplement_iteration", 0)
+                                # v3.5.10（docs/32 O-1）：补生成前后 uncovered 对比
+                                event["supplement_effect"] = final_state.get("supplement_effect", {})
                                 event["avg_confidence"] = rr.get("avg_confidence", 0.0)
                                 event["point_coverage"] = rr.get("point_coverage", {})
 
@@ -2618,6 +2723,9 @@ class Orchestrator:
                 regression_reuse_summary=final_state.get("regression_reuse_summary", {}),
                 manual_action_required=manual_action_required,
                 supplement_iteration=final_state.get("supplement_iteration", 0),
+                # v3.5.10（docs/32 O-1）：补生成效果 {before, after}（uncovered 要点数），
+                # 空 dict = 本轮未触发补生成
+                supplement_effect=final_state.get("supplement_effect", {}),
                 duration_ms=int(duration * 1000),
                 publication=final_state.get("publication", {}),
                 failed_subtasks=final_state.get("failed_subtasks", []),
