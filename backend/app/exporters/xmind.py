@@ -19,6 +19,14 @@ from __future__ import annotations
 import io, json, re, uuid, zipfile
 from datetime import datetime, timezone
 
+from app.core.case_type_taxonomy import (
+    GROUP_LABEL,
+    case_type_detail_label,
+    case_type_group,
+    group_members,
+    group_sort_key,
+)
+
 
 def _id() -> str:
     """生成 24 字符 hex ID（与 XMind 标准兼容，类 ObjectId 格式）。"""
@@ -51,19 +59,33 @@ def _attach_children(parent: dict, kids: list[dict]) -> dict:
 
 
 def _case_type_label(t: str) -> str:
-    """用例类型转中文标签。
+    """用例细分类型中文标签（标题前缀用）。
 
-    v3.2: 与前端 XMind 编辑页（XMindEditPage.TYPE_LABELS）保持一致，
-    保证导出的 .xmind 打开后与页面上的分组名完全相同。
+    v3.5.11：原私有映射表删除，收敛到 app.core.case_type_taxonomy——
+    历史 5 处映射各自为政已漂移（"边界值" vs "边界测试"、markdown 缺 regression），
+     taxonomy 是唯一权威（docs/04 类型体系定稿）。
+    空 type（脏数据缺字段）返回空串 → 前缀省略（沿用 v3.2 契约：
+    "优先级/类型缺失时自动省略对应标签"，裸标题回退为用例 ID）。
     """
-    labels = {
-        "functional": "功能", "boundary": "边界值", "exception": "异常",
-        "security": "安全", "performance": "性能", "regression": "回归",
-        "integration": "集成", "ui": "UI", "api": "接口", "data": "数据",
-        "exploratory": "探索性",  # v3.1.3 P2: 与前端 caseNote.ts 对齐
-        "other": "其他",
-    }
-    return labels.get(t, t)
+    if not (t or "").strip():
+        return ""
+    return case_type_detail_label(t)
+
+
+def _group_node_label(g: str) -> str:
+    """分组节点显示名（单一来源 taxonomy）。"""
+    return GROUP_LABEL.get(g, g)
+
+
+def _detail_sort_key(t: str) -> tuple[int, str]:
+    """组内细分排序键（按 taxonomy 组内顺序）。"""
+    g = case_type_group(t)
+    members = group_members(g)
+    key = (t or "").strip().lower()
+    try:
+        return (members.index(key), "")
+    except ValueError:
+        return (len(members), key)
 
 
 def _fallback_req_title(rid: str) -> str:
@@ -71,12 +93,7 @@ def _fallback_req_title(rid: str) -> str:
     return "未分类需求" if rid in ("未知", "未分类", "") else f"需求 {rid}"
 
 
-# 用例类型排序（功能→边界→异常→…→其他），与前端思维导图分组顺序一致
-_TYPE_ORDER: tuple[str, ...] = (
-    "functional", "boundary", "exception", "security", "performance",
-    "regression", "integration", "ui", "api", "data", "exploratory", "other",
-)
-
+# 分组排序已迁移至 app.core.case_type_taxonomy.GROUP_ORDER（v3.5.11）
 # 用例状态中文标签
 _STATUS_LABELS: dict[str, str] = {
     "draft": "草稿", "reviewed": "已审核", "approved": "已通过", "rejected": "已驳回",
@@ -87,11 +104,9 @@ _LOGIC_RIGHT = "org.xmind.ui.logic.right"
 
 
 def _type_sort_key(t: str) -> tuple[int, str]:
-    """类型排序键：已知类型按 _TYPE_ORDER 顺序，未知类型排在最后（按字母序）。"""
-    try:
-        return (_TYPE_ORDER.index(t), "")
-    except ValueError:
-        return (len(_TYPE_ORDER), t)
+    """分组排序键：按 taxonomy GROUP_ORDER 顺序，未知分组排最后（按字母序）。"""
+    g = case_type_group(t)
+    return (group_sort_key(g), g)
 
 
 def _build_case_node(c: dict, include_details: bool) -> dict:
@@ -153,12 +168,19 @@ def _build_case_node(c: dict, include_details: bool) -> dict:
 
 
 def _group_by_type(cases: list[dict]) -> list[tuple[str, list[dict]]]:
-    """按用例类型分组，返回 [(type, cases)]，顺序与前端思维导图一致。"""
+    """按展示分组聚合用例，返回 [(group_key, cases)]，顺序与前端思维导图一致。
+
+    v3.5.11（docs/04 类型体系定稿）：由"按细分 type 分组"改为"按 taxonomy
+    分组聚合"——boundary/exception/exploratory 归入功能测试组、integration
+    更名场景组；组内按细分顺序排，细分信息经用例标题前缀保留不丢。
+    """
     groups: dict[str, list[dict]] = {}
     for c in cases:
-        t = (c.get("type") or "").strip() or "other"
-        groups.setdefault(t, []).append(c)
-    return sorted(groups.items(), key=lambda kv: _type_sort_key(kv[0]))
+        g = case_type_group((c.get("type") or "").strip())
+        groups.setdefault(g, []).append(c)
+    for g in groups:
+        groups[g].sort(key=lambda c: _detail_sort_key(c.get("type") or ""))
+    return sorted(groups.items(), key=lambda kv: group_sort_key(kv[0]))
 
 
 def export_to_xmind(cases: list[dict], project_name: str = "", include_details: bool = True) -> bytes:
@@ -235,7 +257,7 @@ def export_to_xmind(cases: list[dict], project_name: str = "", include_details: 
             # v3.2: 增加「应用类型」层，与前端思维导图（需求→功能点→类型→用例）对齐
             type_nodes: list[dict] = []
             for type_name, type_cases in _group_by_type(fp_cases):
-                type_node = _topic(_case_type_label(type_name))
+                type_node = _topic(_group_node_label(type_name))
                 _attach_children(
                     type_node,
                     [_build_case_node(c, include_details) for c in type_cases],
@@ -447,7 +469,7 @@ def export_to_xmind_xml(cases: list[dict], project_name: str = "", include_detai
             # v3.2: 「应用类型」层，与前端思维导图（需求→功能点→类型→用例）对齐
             type_nodes: list[Element] = []
             for type_name, type_cases in _group_by_type(fp_cases):
-                type_node = _xtopic(_case_type_label(type_name))
+                type_node = _xtopic(_group_node_label(type_name))
                 _xchildren(type_node, [_build_xcase(c, include_details) for c in type_cases])
                 type_nodes.append(type_node)
             if type_nodes:

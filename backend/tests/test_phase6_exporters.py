@@ -175,10 +175,10 @@ def test_markdown_exporter() -> None:
     check("最简用例无前置条件（不报错）", "前置条件" not in md or "**前置条件:**" not in md)
     check("最简用例无清理操作", "清理操作" not in md)
 
-    # 1.4 多用例按类型分组
+    # 1.4 多用例按类型分组（v3.5.11：taxonomy 分组，boundary 归功能组）
     md = export_markdown([FULL_CASE, MINIMAL_CASE])
     check("多类型分组含功能测试", "功能测试用例" in md)
-    check("多类型分组含边界值测试", "边界值测试用例" in md)
+    check("边界用例归入功能组（复合标签保留细分）", "功能测试·边界值" in md)
     check("覆盖率总计为 2", "| **总计** | **2** |" in md)
 
     # 1.5 表格竖线转义

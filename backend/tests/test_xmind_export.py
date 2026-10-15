@@ -7,6 +7,9 @@
 
 本文件锁定上述修复，防止回归。
 
+v3.5.11（docs/04 类型体系定稿）：类型层由"细分 type 节点"改为 taxonomy
+**展示分组节点**（功能测试/场景测试/…），细分信息保留在用例标题前缀。
+
 运行：
     python backend/tests/test_xmind_export.py
     pytest backend/tests/test_xmind_export.py -q
@@ -127,7 +130,12 @@ def test_official_fields():
 
 
 def test_layer_matches_frontend():
-    """层级须与前端思维导图一致：项目→需求→功能点→【应用类型】→用例。"""
+    """层级须与前端思维导图一致：项目→需求→功能点→【展示分组】→用例。
+
+    v3.5.11（docs/04 类型体系定稿）：类型层由细分 type 节点改为 taxonomy
+    展示分组节点——functional/exception 同属"功能测试"组共用一个节点；
+    细分信息经用例标题前缀（[P0][功能] / [P1][异常]）保留不丢。
+    """
     content = _read_zip(export_to_xmind(CASES, project_name="Demo 项目"), "content.json")
     root = content[0]["rootTopic"]
     titles = _titles(root)
@@ -142,10 +150,12 @@ def test_layer_matches_frontend():
 
     fp_node = next(c for c in req_node["children"]["attached"] if c["title"] == "登录流程")
     types = _kids(fp_node)
-    assert "功能" in types and "异常" in types        # 应用类型层
-    # 用例挂在类型节点下（5 层结构）
-    type_node = next(c for c in fp_node["children"]["attached"] if c["title"] == "功能")
-    assert any("[P0][功能] 正常登录验证" == k for k in _kids(type_node))
+    assert types == ["功能测试"]                      # functional+exception 聚合为一组
+    # 用例挂在分组节点下（5 层结构），标题前缀保留细分
+    type_node = next(c for c in fp_node["children"]["attached"] if c["title"] == "功能测试")
+    kids = _kids(type_node)
+    assert "[P0][功能] 正常登录验证" in kids
+    assert "[P1][异常] 密码错误提示" in kids
 
 
 def test_case_detail_content():
@@ -202,8 +212,8 @@ def test_xmind8_xml():
     assert "&amp;" in xml and "&lt;" in xml
     # 布局：逻辑图向右
     assert 'structure-class="%s"' % LOGIC_RIGHT in xml
-    # 应用类型层 + 优先级
-    assert "<title>功能</title>" in xml
+    # v3.5.11: 类型层为展示分组节点（功能测试），用例标题前缀保留细分
+    assert "<title>功能测试</title>" in xml
     assert "[P0][功能] 正常登录验证" in xml
     # well-formed
     ET.fromstring(xml)

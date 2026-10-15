@@ -24,22 +24,19 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.core.case_type_taxonomy import (
+    GROUP_LABEL,
+    case_type_composite_label,
+    case_type_group,
+    group_members,
+    group_sort_key,
+)
 from app.utils.logger import logger
 
 
 # ============================================================================
-# 类型中文名映射（用于分组标题）
+# 类型中文名映射已迁移至 app.core.case_type_taxonomy（v3.5.11，单一权威）
 # ============================================================================
-
-_TYPE_CN_LABEL: dict[str, str] = {
-    "functional": "功能测试",
-    "boundary": "边界值测试",
-    "exception": "异常测试",
-    "security": "安全测试",
-    "performance": "性能测试",
-    "integration": "集成测试",
-    "exploratory": "探索性测试",
-}
 
 
 # ============================================================================
@@ -100,29 +97,37 @@ def export_markdown(cases: list[dict]) -> str:
     # ========================================================================
     lines.append("## 覆盖率概览")
     lines.append("")
-    lines.append("| 类型 | 数量 |")
+    lines.append("| 测试类型 | 数量 |")
     lines.append("|------|------|")
+    # v3.5.11：按 taxonomy 分组计数（boundary/exception/exploratory 归功能组）
     type_counts: dict[str, int] = {}
     for case in cases:
-        typ = case.get("type", "unknown")
-        type_counts[typ] = type_counts.get(typ, 0) + 1
-    for typ, count in type_counts.items():
-        lines.append(f"| {_TYPE_CN_LABEL.get(typ, typ)} | {count} |")
+        grp = case_type_group(case.get("type", ""))
+        type_counts[grp] = type_counts.get(grp, 0) + 1
+    for grp in sorted(type_counts, key=group_sort_key):
+        lines.append(f"| {GROUP_LABEL.get(grp, grp)} | {type_counts[grp]} |")
     lines.append(f"| **总计** | **{len(cases)}** |")
     lines.append("")
     lines.append("---")
     lines.append("")
 
     # ========================================================================
-    # 按类型分组输出用例
+    # 按测试类型分组输出用例（v3.5.11：按 taxonomy 分组，组内按细分排序）
     # ========================================================================
-    cases_by_type: dict[str, list[dict]] = {}
+    cases_by_group: dict[str, list[dict]] = {}
     for case in cases:
-        typ = case.get("type", "unknown")
-        cases_by_type.setdefault(typ, []).append(case)
+        grp = case_type_group(case.get("type", ""))
+        cases_by_group.setdefault(grp, []).append(case)
 
-    for typ, group_cases in cases_by_type.items():
-        type_label = _TYPE_CN_LABEL.get(typ, typ)
+    for grp in sorted(cases_by_group, key=group_sort_key):
+        members = group_members(grp)
+
+        def _detail_key(c: dict, _members: tuple[str, ...] = members) -> tuple[int, str]:
+            t = (c.get("type") or "").strip().lower()
+            return (_members.index(t) if t in _members else len(_members), c.get("id") or "")
+
+        group_cases = sorted(cases_by_group[grp], key=_detail_key)
+        type_label = GROUP_LABEL.get(grp, grp)
         lines.append(f"## {type_label}用例")
         lines.append("")
 
@@ -180,7 +185,7 @@ def _append_case_markdown(lines: list[str], case: dict) -> None:
     # 元信息行
     tags_str = " ".join(f"`{t}`" for t in tags) if tags else "—"
     conf_str = f"{int(conf * 100)}%" if isinstance(conf, (int, float)) else "N/A"
-    lines.append(f"**类型**: {_TYPE_CN_LABEL.get(typ, typ)} | **优先级**: {priority} | **标签**: {tags_str}  ")
+    lines.append(f"**类型**: {case_type_composite_label(typ)} | **优先级**: {priority} | **标签**: {tags_str}  ")
     lines.append(f"**追溯**: {req} | **置信度**: {conf_str}" + (f" | **参考模式**: {source_pattern}" if source_pattern else ""))
     lines.append("")
 
