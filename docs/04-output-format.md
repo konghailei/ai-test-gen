@@ -90,7 +90,8 @@
         },
         "type": {
           "type": "string",
-          "enum": ["functional", "boundary", "exception", "security", "performance", "integration", "exploratory"]
+          "enum": ["functional", "boundary", "exception", "security", "performance", "integration", "exploratory", "regression"],
+          "description": "用例细分类型（8 值，LLM 契约/DB 永不变）；展示分组映射见 §2.2"
         },
         "priority": {
           "type": "string",
@@ -180,7 +181,56 @@
 }
 ```
 
-### 2.2 完整示例
+### 2.2 用例类型分类体系（细分 type → 展示分组）
+
+> v3.5.11 定稿（2026-10-15）。**LLM 输出契约与 DB 中的 `type` 是细分值（8+2），永不变**；
+> 对外展示（前端显示 / XMind / Markdown 导出）统一收敛为"分组口径"，
+> 由**单一权威映射**驱动，禁止各处再写映射表。
+
+#### 2.2.1 细分 type 全集与归属分组
+
+| 细分 type | 含义 | 归属分组 |
+|-----------|------|---------|
+| `functional` | 功能测试（主流程 / 等价类划分） | 功能测试 |
+| `boundary` | 边界值分析 | 功能测试 |
+| `exception` | 错误推测 / 负面测试 | 功能测试 |
+| `exploratory` | 探索性测试 | 功能测试 |
+| `integration` | 跨功能点业务场景 / 流程 | 场景测试 |
+| `security` | 安全测试 | 安全测试 |
+| `performance` | 性能测试 | 性能测试 |
+| `regression` | 回归测试 | 回归测试 |
+| `ui` / `api` / `data` | v2 时代手工录入遗留细分 | 界面 / 接口 / 数据测试 |
+| 未知值 | 历史脏数据 | 其他 |
+
+设计理由：
+
+- **功能测试组含 boundary / exception / exploratory**：经典理论中三者本就是功能
+  测试的**设计技术与风格**（边界值分析、错误推测法、探索性测试），归入功能组
+  不丢信息；内部保留细分，是因为"技术覆盖矩阵"要按设计技术度量
+  （doc-13 §183-184："exception 或 security 用例 > 0"即判定错误推测法覆盖）。
+- **integration 展示更名"场景测试"**：该值实际语义是跨 FP 业务场景/流程
+  （orchestrator 跨 FP 通道归一化产出），并非经典"模块接口集成测试"。
+- **regression 独立分组**：按测试目的（防回归）而非质量特性划分，与功能测试正交。
+- 未知 type 归"其他"组，前端/导出不显示英文原值。
+
+#### 2.2.2 单一权威映射与消费方
+
+```
+backend/app/core/case_type_taxonomy.py   # 权威定义（TYPE_GROUP / GROUP_LABEL / DETAIL_LABEL / ...）
+frontend/src/utils/caseType.ts           # TS 镜像（同构同序，两边单测锁定）
+```
+
+| 消费方 | 用法 |
+|--------|------|
+| 前端列表 / 详情 / 筛选徽章 | `caseTypeCompositeLabel()`：组内多细分显示"功能测试·边界值"，代表值直接显示组名 |
+| XMind 导出 | 分组节点 = 组名；组内按细分排序 |
+| Markdown 导出 | 覆盖率概览表与用例章节按分组输出；单条用例元信息行用复合标签 |
+| 覆盖率探针（v3.5.11） | `calc_point_coverage` 新增 `group_case_distribution` / `covered_point_groups` / `points_without_functional_group`：**主口径不变**（要点被任一用例覆盖即计 covered），增量呈现"覆盖手段结构"——一条要点只被功能组细分手段（边界/异常/探索）覆盖 vs 有 functional 组主流程用例覆盖，质量含义不同，旧口径不可见此事 |
+
+**演进背景**：历史上 5 处映射各自为政已漂移（"边界值" vs "边界测试"、
+markdown 导出缺 regression），v3.5.11 收敛为"后端权威模块 + 前端 TS 镜像"。
+
+### 2.3 完整示例
 
 ```json
 {
@@ -861,14 +911,15 @@ AI 生成 → Markdown(人工 Review) → 签字确认 → JSON(归档) → 测�
 
 ## 覆盖率概览
 
-| 类型 | 数量 |
+| 测试类型 | 数量 |
 |------|------|
-| 功能测试 | 4 |
-| 边界值测试 | 3 |
-| 异常测试 | 2 |
+| 功能测试 | 9 |
 | 安全测试 | 2 |
 | 性能测试 | 1 |
 | **总计** | **12** |
+
+> 注：概览表按**分组**计数（功能测试 = functional + boundary + exception + exploratory，
+> 映射见 §2.2）；场景测试、回归测试等组有用例时同表列出。
 
 ---
 
@@ -876,7 +927,7 @@ AI 生成 → Markdown(人工 Review) → 签字确认 → JSON(归档) → 测�
 
 ### TC-AUTH-0001-0001: 正常登录流程验证
 
-**优先级**: P0 | **标签**: `smoke` `regression`
+**类型**: 功能测试 | **优先级**: P0 | **标签**: `smoke` `regression`
 
 **前置条件:**
 - 测试账号已在系统中注册
@@ -905,11 +956,9 @@ AI 生成 → Markdown(人工 Review) → 签字确认 → JSON(归档) → 测�
 
 ---
 
-## 边界值测试用例
-
 ### TC-AUTH-0001-0003: 密码长度边界值测试
 
-**优先级**: P2
+**类型**: 功能测试·边界值 | **优先级**: P2
 
 **测试步骤:**
 
