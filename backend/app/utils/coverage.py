@@ -13,6 +13,8 @@ from __future__ import annotations
 import math
 import re
 
+from app.core.case_type_taxonomy import case_type_group
+
 # 用例文本中的要点 ID（方括号形式为权威格式）
 # v3.4.5（缺陷 D）：白名单加入 5 类扩展要点类型——collect_points 已把它们纳入
 # 分母，提取正则若不认这些 ID，用例标注了也提取不出来 → 恒判"未覆盖" →
@@ -572,6 +574,12 @@ def calc_point_coverage(srr: dict, functional_points: list[dict], cases: list[di
     heuristic_ids: set[str] = set()
     invalid_ids: list[str] = []
     cases_with_valid_ids = 0
+    # v3.5.11（docs/04 类型体系定稿）：分组维度覆盖探针。主口径不变（要点被任一
+    # 用例覆盖即计 covered——boundary 用例覆盖规则要点是完全正当的覆盖），增量
+    # 呈现"覆盖手段结构"：一条要点只被功能组细分手段（边界/异常/探索）覆盖 vs
+    # 有 functional 组主流程用例覆盖，质量含义不同，旧口径不可见此事。
+    group_case_dist: dict[str, int] = {}
+    point_groups: dict[str, set[str]] = {}
 
     for c in case_list:
         ids = extract_point_ids(c)
@@ -588,6 +596,11 @@ def calc_point_coverage(srr: dict, functional_points: list[dict], cases: list[di
         if valid:
             cases_with_valid_ids += 1
             covered_ids |= valid
+            # 分组探针：只统计"有效计入覆盖"的用例（heuristic 不进）
+            _g = case_type_group(c.get("type"))
+            group_case_dist[_g] = group_case_dist.get(_g, 0) + 1
+            for _pid in valid:
+                point_groups.setdefault(_pid, set()).add(_g)
 
     annotation_rate = round(cases_with_valid_ids / case_count, 3) if case_count else 0.0
     mapping_based = (
@@ -639,4 +652,13 @@ def calc_point_coverage(srr: dict, functional_points: list[dict], cases: list[di
         ],
         "case_count": case_count,
         "point_stats": stats,
+        # v3.5.11：分组维度探针（主口径不变，增量呈现覆盖手段结构）
+        "group_case_distribution": group_case_dist,
+        "covered_point_groups": {
+            pid: sorted(gs) for pid, gs in sorted(point_groups.items())
+        },
+        "points_without_functional_group": sorted(
+            pid for pid in covered_ids
+            if "functional" not in point_groups.get(pid, set())
+        ),
     }

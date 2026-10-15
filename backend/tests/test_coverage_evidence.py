@@ -349,3 +349,54 @@ def test_normalize_prefixed_bare_id_in_structured_field_rescued():
     assert fixed == 1
     assert cases[0]["covered_point_ids"] == ["happy_path.1", f"{fp_id}.rule.1"]
 
+
+
+# ============================================================================
+# v3.5.11：分组维度覆盖探针（docs/04 类型体系定稿）
+# 主口径不变（要点被任一用例覆盖即计 covered），增量呈现"覆盖手段结构"。
+# ============================================================================
+
+def test_group_probes_record_coverage_structure():
+    """功能组主流程 + 边界手段 → 分组探针记录手段结构，主口径不变。"""
+    srr = _srr(2)
+    cases = [
+        # happy_path.1：functional 主流程覆盖
+        {"type": "functional", "covered_point_ids": ["happy_path.1"]},
+        # happy_path.2：仅 boundary 手段覆盖（无 functional 组用例）→ 探针应点名
+        {"type": "boundary", "covered_point_ids": ["happy_path.2"]},
+    ]
+    r = calc_point_coverage(srr, [], cases)
+    # 主口径不受影响
+    assert r["covered_points"] == 2
+    assert r["group_case_distribution"] == {"functional": 2}  # boundary 归功能组
+    assert r["covered_point_groups"]["happy_path.1"] == ["functional"]
+    assert r["covered_point_groups"]["happy_path.2"] == ["functional"]
+    # boundary 也归 functional 组 → 不会被点名（设计使然：组内手段不区分）
+    assert r["points_without_functional_group"] == []
+
+
+def test_group_probes_flag_non_functional_only_coverage():
+    """仅 security/performance 手段覆盖的要点 → points_without_functional_group 点名。"""
+    srr = _srr(2)
+    cases = [
+        {"type": "security", "covered_point_ids": ["happy_path.1"]},
+        {"type": "performance", "covered_point_ids": ["happy_path.2"]},
+    ]
+    r = calc_point_coverage(srr, [], cases)
+    assert r["group_case_distribution"] == {"security": 1, "performance": 1}
+    assert r["points_without_functional_group"] == ["happy_path.1", "happy_path.2"]
+
+
+def test_group_probes_ignore_heuristic_mapping():
+    """heuristic 回填用例不进分组统计（与主口径一致：不计覆盖分子）。"""
+    srr = _srr(1)
+    cases = [{"type": "boundary", "covered_point_ids": ["happy_path.1"],
+              "mapping_source": "heuristic",
+              "gen_metadata": {"notes": "覆盖: [happy_path.1]"}}]
+    r = calc_point_coverage(srr, [], cases)
+    # 主口径与本探针一致：heuristic 只登记、不占覆盖分子
+    assert r["covered_points"] == 0
+    assert r["heuristic_point_ids"] == ["happy_path.1"]
+    assert r["group_case_distribution"] == {}
+    assert r["covered_point_groups"] == {}
+    assert r["points_without_functional_group"] == []
