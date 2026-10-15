@@ -3,7 +3,7 @@ import { useSearchParams, Link } from 'react-router-dom'
 import MindMap from 'simple-mind-map'
 import Drag from 'simple-mind-map/src/plugins/Drag.js'
 import Select from 'simple-mind-map/src/plugins/Select.js'
-import { ArrowLeft, Save, Loader2, RefreshCw, FileText, Layers, ChevronsDownUp, ChevronsUpDown, Pencil } from 'lucide-react'
+import { ArrowLeft, Save, Loader2, RefreshCw, FileText, Layers, ChevronsDownUp, ChevronsUpDown, Pencil, Undo2, Redo2, Maximize2, Minimize2 } from 'lucide-react'
 import { testCases as tcApi, requirements as reqApi, products as prodApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import CaseEditDialog from '../components/CaseEditDialog'
@@ -61,6 +61,24 @@ interface NoteState {
 MindMap.usePlugin(Drag)
 MindMap.usePlugin(Select)
 
+/**
+ * 草稿指纹（v3.5.12）：只取"用户可见语义"字段做结构化投影再序列化。
+ * 不能直接 JSON 比对整棵树 —— 库内部 uid 每次渲染都会重生成，
+ * 同一份内容在两次会话里的原始 JSON 必然不同，会把"无改动"误判成"有草稿"。
+ */
+function draftFingerprint(tree: any): string {
+  const norm = (n: any): any => ({
+    text: n?.data?.text ?? '',
+    kind: n?.data?.kind ?? '',
+    caseId: n?.data?.caseId ?? '',
+    type: n?.data?.type ?? '',
+    group: n?.data?.group ?? '',
+    note: String(n?.data?.note ?? '').trim(),
+    children: (n?.children || []).map(norm),
+  })
+  try { return JSON.stringify(norm(tree)) } catch { return '' }
+}
+
 export default function XMindEditPage() {
   const { selectedProductId } = useProduct()
   const [searchParams] = useSearchParams()
@@ -69,6 +87,13 @@ export default function XMindEditPage() {
 
   const containerRef = useRef<HTMLDivElement>(null)
   const meRef = useRef<any>(null)
+  // v3.5.12 全屏编辑：整页进全屏（保留页头保存/撤销/重做，只把画布撑满）
+  const pageRef = useRef<HTMLDivElement>(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  // 撤销/重做可用性（由库 back_forward 事件驱动，不能靠猜）
+  const [histState, setHistState] = useState({ canBack: false, canForward: false })
+  // 本地草稿最近落盘时间（仅提示"草稿存在"，不代表已写入系统）
+  const [draftAt, setDraftAt] = useState(0)
   // 最新用例数据（事件回调/保存时读取，避免闭包过期）
   const casesRef = useRef<TestCase[]>([])
   // 数据库基线（最近一次从库中加载/经弹窗确认写入的状态）。
@@ -198,6 +223,150 @@ export default function XMindEditPage() {
     return root
   }, [cases, reqs, selectedProject])
 
+  // ==========================================================================
+  // v3.5.12：全屏编辑 / 撤销重做 / 本地草稿（防意外退出丢改动）
+  // ==========================================================================
+
+  // ---- 本地草稿（localStorage，不写库；点「保存」才是正式写入系统）----
+  const draftKeyRef = useRef('')
+  draftKeyRef.current = `aitg-xmind-draft:${productId || 'p'}:${projectId || 'p'}`
+  const draftTimerRef = useRef<number | null>(null)
+
+  const readDraft = useCallback((): { savedAt: number; tree: any; fp: string } | null => {
+    try {
+      const raw = localStorage.getItem(draftKeyRef.current)
+      if (!raw) return null
+      const obj = JSON.parse(raw)
+      return obj && obj.tree ? obj : null
+    } catch { return null }
+  }, [])
+
+  const writeDraft = useCallback(() => {
+    const me = meRef.current
+    if (!me) return
+    try {
+      const tree = me.getData()
+      if (!tree) return
+      localStorage.setItem(draftKeyRef.current, JSON.stringify({
+        savedAt: Date.now(), tree, fp: draftFingerprint(tree),
+      }))
+      setDraftAt(Date.now())
+    } catch { /* 配额超限等：静默降级，绝不打断编辑 */ }
+  }, [])
+
+  const clearDraft = useCallback(() => {
+    try { localStorage.removeItem(draftKeyRef.current) } catch { /* noop */ }
+    setDraftAt(0)
+  }, [])
+
+  // 编辑动作密集（拖拽/连击），草稿落盘做 1.2s 防抖
+  const scheduleDraft = useCallback(() => {
+    if (draftTimerRef.current) window.clearTimeout(draftTimerRef.current)
+    draftTimerRef.current = window.setTimeout(() => {
+      draftTimerRef.current = null
+      writeDraft()
+    }, 1200)
+  }, [writeDraft])
+
+  // ---- 撤销 / 重做 ----
+  const refreshHist = useCallback(() => {
+    const cmd = meRef.current?.command
+    if (!cmd) return
+    const i = typeof cmd.activeHistoryIndex === 'number' ? cmd.activeHistoryIndex : 0
+    const len = Array.isArray(cmd.history) ? cmd.history.length : 0
+    setHistState({ canBack: i > 0, canForward: i < len - 1 })
+  }, [])
+
+  const applyHistory = useCallback((dir: 'back' | 'forward') => {
+    const me = meRef.current
+    const cmd = me?.command
+    if (!me || !cmd) return
+    // 本 fork 的 back()/forward() 只移动历史指针并返回数据，**不重渲染**
+    //（上游 Ctrl+Z 绑定在此 fork 已移除，全库无任何调用方），
+    // 且期间必须 pause：否则后续 addHistory 会把回退结果再压入历史栈，撤销栈塌成单点。
+    cmd.pause()
+    try {
+      const data = dir === 'back' ? cmd.back() : cmd.forward()
+      if (!data) return
+      me.renderer?.setData?.(data)
+      me.render?.()
+    } catch { /* noop */ } finally {
+      cmd.recovery()
+    }
+    // 节点实例已被重建：按实例索引的备注草稿全部失效，必须清掉（防误提交到新节点）
+    pendingNotesRef.current.clear()
+    refreshHist()
+    scheduleDraft()
+  }, [refreshHist, scheduleDraft])
+
+  // ---- 全屏 ----
+  const toggleFullscreen = useCallback(() => {
+    const el = pageRef.current
+    if (!el) return
+    const docAny = document as any
+    if (docAny.fullscreenElement || docAny.webkitFullscreenElement) {
+      const exit = docAny.exitFullscreen || docAny.webkitExitFullscreen
+      exit?.call(document)
+      return
+    }
+    const elAny = el as any
+    const req = elAny.requestFullscreen || elAny.webkitRequestFullscreen
+    // 库自带的 fullScreen() 用的是已废弃的 requestFullScreen 别名，现代浏览器会静默失效，故自己调标准 API
+    if (typeof req !== 'function') { setIsFullscreen(true); return }
+    try {
+      const p = req.call(el)
+      // 被拒（iframe 无 allow-fullscreen / 非用户手势）→ 退回 CSS 沉浸模式，功能不失效
+      if (p && typeof p.catch === 'function') p.catch(() => setIsFullscreen(true))
+    } catch { setIsFullscreen(true) }
+  }, [])
+
+  const exitFullscreen = useCallback(() => {
+    const docAny = document as any
+    if (docAny.fullscreenElement || docAny.webkitFullscreenElement) {
+      const exit = docAny.exitFullscreen || docAny.webkitExitFullscreen
+      exit?.call(document)
+    } else {
+      setIsFullscreen(false)
+    }
+  }, [])
+
+  // 同步原生全屏状态：用户按 ESC / F11 退出时，按钮状态也要跟着回退
+  useEffect(() => {
+    const docAny = document as any
+    const sync = () => setIsFullscreen(!!docAny.fullscreenElement || !!docAny.webkitFullscreenElement)
+    const onKey = (e: KeyboardEvent) => {
+      // CSS 沉浸模式没有原生 ESC 事件，需自己兜底退出
+      if (e.key === 'Escape' && !docAny.fullscreenElement && !docAny.webkitFullscreenElement) {
+        setIsFullscreen(false)
+      }
+    }
+    document.addEventListener('fullscreenchange', sync)
+    document.addEventListener('webkitfullscreenchange', sync)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('fullscreenchange', sync)
+      document.removeEventListener('webkitfullscreenchange', sync)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  // 全屏切换后画布重算尺寸（库不监听 window resize，容器高度变了必须显式调）
+  useEffect(() => {
+    if (!meRef.current) return
+    const t = window.setTimeout(() => {
+      // 容器宽高为 0 时库会抛错（getElRectInfo），吞掉即可：下一帧自然重试
+      try { meRef.current?.resize?.() } catch { /* noop */ }
+    }, 60)
+    return () => window.clearTimeout(t)
+  }, [isFullscreen])
+
+  // 窗口拉大拉小跟随自适应（顺手修：原先画布完全不跟手）
+  useEffect(() => {
+    const onResize = () => { try { meRef.current?.resize?.() } catch { /* noop */ } }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
   // 初始化 simple-mind-map（仅 loading 完成 + treeVersion 变化时重建；
   // 弹窗编辑单条用例走 setData 局部更新，不触发重建）
   useEffect(() => {
@@ -261,9 +430,9 @@ export default function XMindEditPage() {
     const onNoteClick = (node: any) => {
       openCaseEditRef.current?.(node)
     }
-    // 拖拽改型同步（B-2）：拖拽到别的类型分支 = 位置即意图，
-    // 拖拽结束时把用例节点的 type 元数据同步为所在分支类型；
-    // 保存时优先读节点元数据，避免表单弹窗改的类型被分支推断回退
+    // 拖拽改型同步（B-2 + v3.5.11 分组节点）：拖到别的类型分组 = 位置即意图，
+    // 拖拽结束时把用例节点的细分 type 同步为所在分组代表细分；
+    // 保存时优先读节点元数据，避免表单弹窗改的类型被分组推断回退
     let dragNode: any = null
     const onNodeMousedown = (node: any) => { dragNode = node }
     const onNodeDragend = () => {
@@ -277,7 +446,9 @@ export default function XMindEditPage() {
         while (p) {
           const pd: XNodeData = p.getData?.() || {}
           if (pd.kind === 'type') {
-            if ((pd.type || '') !== (d.type || '')) n.setData?.({ type: pd.type || '' })
+            // 类型节点现按分组组织（data.group）；旧树/手建节点回退读 data.type
+            const branchType = pd.group ? caseTypeGroupRepresentative(pd.group) : (pd.type || '')
+            if (branchType !== (d.type || '')) n.setData?.({ type: branchType })
             return
           }
           if (pd.kind === 'fp' || pd.kind === 'req' || pd.kind === 'root') return
@@ -291,8 +462,42 @@ export default function XMindEditPage() {
     me.on('node_mousedown', onNodeMousedown)
     me.on('node_dragend', onNodeDragend)
 
+    // v3.5.12：编辑即落本地草稿（防意外退出）；撤销/重做可用性跟随历史指针
+    const onDataChange = () => { scheduleDraft(); refreshHist() }
+    me.on('data_change', onDataChange)
+    me.on('back_forward', refreshHist)
+    refreshHist()
+
     // 居中显示
     try { me.view?.setViewCenter?.() } catch { /* noop */ }
+
+    // v3.5.12 本地草稿恢复：与库内基线指纹一致 → 视为无改动，静默清理；
+    // 不一致才问用户（草稿只在浏览器本机，未点「保存」从未写库）
+    const draft = readDraft()
+    if (draft) {
+      let same = false
+      try { same = !!draft.fp && draft.fp === draftFingerprint(me.getData()) } catch { same = false }
+      if (same) {
+        clearDraft()
+      } else {
+        const when = new Date(draft.savedAt).toLocaleString()
+        if (window.confirm(
+          `检测到 ${when} 的本地草稿。\n\n` +
+          `· 草稿只存在本机浏览器，尚未写入系统用例\n` +
+          `· 点「保存」才会正式写库\n\n` +
+          `恢复草稿继续编辑？取消 = 丢弃草稿，以系统数据为准。`
+        )) {
+          try {
+            me.setData(draft.tree)
+            setDraftAt(draft.savedAt)
+            refreshHist()
+            setSaveMsg(`已恢复 ${when} 的本地草稿，确认无误后点「保存」写入系统`)
+          } catch { clearDraft() }
+        } else {
+          clearDraft()
+        }
+      }
+    }
 
     return () => {
       me.off('node_contextmenu', onNodeContextmenu)
@@ -300,6 +505,8 @@ export default function XMindEditPage() {
       me.off('node_note_click', onNoteClick)
       me.off('node_mousedown', onNodeMousedown)
       me.off('node_dragend', onNodeDragend)
+      me.off('data_change', onDataChange)
+      me.off('back_forward', refreshHist)
       if (meRef.current) { try { meRef.current.destroy() } catch { /* noop */ } ; meRef.current = null }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -336,7 +543,9 @@ export default function XMindEditPage() {
     while (p) {
       const pd: XNodeData = p.getData?.() || {}
       if (!reqId && pd.reqId) reqId = pd.reqId
-      if (!branchType && pd.kind === 'type') branchType = pd.type || ''
+      if (!branchType && pd.kind === 'type') {
+        branchType = pd.group ? caseTypeGroupRepresentative(pd.group) : (pd.type || '')
+      }
       if (!fp && pd.kind === 'fp') fp = pd.fp || ''
       if (pd.kind === 'req' || pd.kind === 'root') break
       p = p.parent
@@ -372,7 +581,8 @@ export default function XMindEditPage() {
   useEffect(() => { openCaseEditRef.current = openCaseEdit }, [openCaseEdit])
 
   // 把用例节点移动到功能点下对应类型的分支（类型变化后保持树与数据一致）
-  // 目标类型分支不存在时不强行创建分支：保存后整树重建会落到正确位置
+  // v3.5.11：类型节点按分组组织 → 按 newType 所属分组定位目标分支；
+  // 目标分组分支不存在时不强行创建：保存后整树重建会落到正确位置
   const moveNodeToType = useCallback((node: any, newType: string) => {
     const me = meRef.current
     if (!node || !me || !newType) return
@@ -380,8 +590,10 @@ export default function XMindEditPage() {
       const typeNode = node.parent
       const fpNode = typeNode?.parent
       if (!fpNode) return
+      const targetGroup = caseTypeGroup(newType)
       const target = fpNode.children?.find(
-        (ch: any) => ch.getData?.()?.kind === 'type' && ch.getData?.()?.type === newType
+        (ch: any) => ch.getData?.()?.kind === 'type' &&
+          (ch.getData?.()?.group || '') === targetGroup
       )
       if (target && target !== typeNode) me.execCommand('MOVE_NODE_TO', node, target)
     } catch { /* 移动失败不影响数据，保存后重建树即可 */ }
@@ -660,6 +872,9 @@ export default function XMindEditPage() {
       )
       // 备注解析结果已入库，清空缓存（避免下次保存重复提交）
       pendingNotesRef.current.clear()
+      // v3.5.12：全部写库成功才算正式落库，本地草稿随之作废；
+      // 部分失败时**保留草稿**——下面会重拉库内状态，未写进去的部分还能恢复
+      if (failCount === 0) clearDraft()
       // 通知其他标签页（用例列表页）刷新，保证列表与导图一致
       notifyCasesChanged()
       // 无论成败都重拉数据并重建树：失败时也必须让导图回到与库一致的状态，
@@ -679,6 +894,8 @@ export default function XMindEditPage() {
   // 重载
   const handleReload = useCallback(async () => {
     await load()
+    // 刷新 = 用户明确放弃当前改动，本地草稿同步作废（否则刷新后又提示恢复旧草稿）
+    clearDraft()
   }, [load])
 
   useEffect(() => { load() }, [load])
@@ -710,20 +927,55 @@ export default function XMindEditPage() {
   )
 
   return (
-    <div className="space-y-4">
+    // v3.5.12：整页进全屏（页头保留 → 全屏里依然能撤销/重做/保存）；
+    // 全屏 API 不可用时退回 CSS 沉浸模式（fixed inset-0），功能不失效
+    <div
+      ref={pageRef}
+      className={isFullscreen
+        ? 'fixed inset-0 z-[1000] flex flex-col gap-3 p-3 overflow-hidden'
+        : 'space-y-4'}
+      style={isFullscreen ? { background: 'var(--background)' } : undefined}
+    >
       {/* 顶栏 */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-3">
           <h1 className="page-title flex items-center gap-2"><FileText className="w-5 h-5" />XMind 思维导图编辑</h1>
           <span className="badge text-xs" style={{ background: 'rgba(0, 122, 255, 0.08)', color: 'var(--brand-500)' }}>
             {selectedProject?.name || projectId || '未选择项目'}
           </span>
           <span className="text-sm" style={{ color: 'var(--foreground-tertiary)' }}>{cases.length} 个用例</span>
+          {draftAt > 0 && (
+            <span
+              className="text-xs"
+              style={{ color: 'var(--foreground-tertiary)' }}
+              title="本地草稿只存在本机浏览器，点「保存」才写入系统"
+            >本地草稿 {new Date(draftAt).toLocaleTimeString()}</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {expandBtns}
-          <Link to="/testcases" className="btn-secondary flex items-center gap-2"><ArrowLeft className="w-4 h-4" />返回测试用例</Link>
+          {/* 撤销 / 重做：库无 Ctrl+Z 绑定（上游已移除），走 command.back/forward */}
+          <button
+            onClick={() => applyHistory('back')}
+            disabled={!histState.canBack}
+            className="btn-secondary flex items-center gap-1.5 disabled:opacity-40"
+            title="撤销（回退一步）"
+          ><Undo2 className="w-4 h-4" />回退</button>
+          <button
+            onClick={() => applyHistory('forward')}
+            disabled={!histState.canForward}
+            className="btn-secondary flex items-center gap-1.5 disabled:opacity-40"
+            title="重做（前进一步）"
+          ><Redo2 className="w-4 h-4" />前进</button>
+          {!isFullscreen && (
+            <Link to="/testcases" className="btn-secondary flex items-center gap-2"><ArrowLeft className="w-4 h-4" />返回测试用例</Link>
+          )}
           <button onClick={handleReload} disabled={loading || saving} className="btn-ghost flex items-center gap-2"><RefreshCw className="w-4 h-4" />刷新</button>
+          <button
+            onClick={isFullscreen ? exitFullscreen : toggleFullscreen}
+            className="btn-secondary flex items-center gap-2"
+            title={isFullscreen ? '退出全屏（ESC）' : '全屏编辑（沉浸式，ESC 退出）'}
+          >{isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}{isFullscreen ? '退出全屏' : '全屏'}</button>
           <button onClick={handleSave} disabled={saving || loading || cases.length === 0} className="btn-primary flex items-center gap-2 disabled:opacity-50">
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}保存
           </button>
@@ -732,7 +984,7 @@ export default function XMindEditPage() {
 
       {/* 提示条 */}
       {(saveMsg || err) && (
-        <div className="card px-4 py-2.5 flex items-center gap-2 text-sm"
+        <div className="card px-4 py-2.5 flex items-center gap-2 text-sm flex-shrink-0"
           style={(err || saveFail)
             ? { background: 'rgba(255, 59, 48, 0.08)', color: 'var(--state-error)', border: '1px solid rgba(255, 59, 48, 0.35)' }
             : { background: 'rgba(52, 199, 89, 0.08)', color: 'var(--state-success)' }}>
@@ -744,8 +996,13 @@ export default function XMindEditPage() {
       {/* 容器 div 始终渲染（loading/空态用 overlay 覆盖）：
           若条件渲染卸载容器，simple-mind-map 的 destroy/DOM 操作会因父节点
           已被 React 移除而抛 removeChild NotFoundError，导致 React 崩溃白屏 */}
-      <div className="card relative">
-        <div ref={containerRef} style={{ width: '100%', height: '74vh', minHeight: '600px' }} />
+      <div className={isFullscreen ? 'card relative flex-1 min-h-0 flex flex-col overflow-hidden' : 'card relative'}>
+        <div
+          ref={containerRef}
+          style={isFullscreen
+            ? { width: '100%', flex: 1, minHeight: 0 }
+            : { width: '100%', height: '74vh', minHeight: '600px' }}
+        />
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center gap-3 bg-white/80 backdrop-blur-[1px]">
             <Loader2 className="w-5 h-5 animate-spin" style={{ color: 'var(--brand-500)' }} />加载用例...
@@ -760,11 +1017,13 @@ export default function XMindEditPage() {
         )}
       </div>
 
-      {/* 操作说明 */}
-      {!loading && cases.length > 0 && (
-        <div className="card px-4 py-2.5 text-xs" style={{ color: 'var(--foreground-tertiary)' }}>
+      {/* 操作说明（全屏时隐藏，把屏幕全留给导图） */}
+      {!isFullscreen && !loading && cases.length > 0 && (
+        <div className="card px-4 py-2.5 text-xs flex-shrink-0" style={{ color: 'var(--foreground-tertiary)' }}>
           编辑说明：双击节点可编辑标题；Tab 新增子节点、Enter 新增同级节点、Delete 删除节点；右键节点可插入/删除节点；
           节点左侧圆点可折叠/展开；画布支持拖动和滚轮缩放；可拖拽节点调整层级。
+          「回退/前进」撤销重做，「全屏」进入沉浸式编辑（ESC 退出）；
+          编辑过程自动存本地草稿（只在本机浏览器，防意外退出），点「保存」才写入系统。
           右键用例节点选「编辑用例详情」可用表单编辑优先级/描述/前置条件/测试步骤，保存后立即写回系统用例；
           选「编辑备注（文本）」可直接按格式改备注文本（改步骤/前置条件最快捷），格式有误会逐行提示、无法保存。
           修改备注或树结构后点击「保存」一次性写回系统用例（新增/更新/删除）。
@@ -817,6 +1076,17 @@ export default function XMindEditPage() {
           <button className="block w-full text-left px-3 py-1.5 hover:bg-black/5 text-red-500" onClick={() => execMenu('REMOVE_NODE')}>
             删除节点 <span className="opacity-50 ml-2">Delete</span>
           </button>
+          <div className="my-1 border-t" style={{ borderColor: 'var(--panel-border-color, #eee)' }} />
+          <button
+            className="block w-full text-left px-3 py-1.5 hover:bg-black/5 disabled:opacity-40"
+            disabled={!histState.canBack}
+            onClick={() => { applyHistory('back'); setMenu(null) }}
+          >回退一步</button>
+          <button
+            className="block w-full text-left px-3 py-1.5 hover:bg-black/5 disabled:opacity-40"
+            disabled={!histState.canForward}
+            onClick={() => { applyHistory('forward'); setMenu(null) }}
+          >前进一步</button>
           <div className="my-1 border-t" style={{ borderColor: 'var(--panel-border-color, #eee)' }} />
           <button className="block w-full text-left px-3 py-1.5 hover:bg-black/5" onClick={() => execMenu('EXPAND_ALL')}>全部展开</button>
           <button className="block w-full text-left px-3 py-1.5 hover:bg-black/5" onClick={() => execMenu('UNEXPAND_ALL')}>全部收起</button>
