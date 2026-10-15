@@ -135,6 +135,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("[LlmExecutor] 启动失败（LLM 将退化为同线程执行）: {}", str(e)[:150])
 
+    # v4.0.2：服务器资源感知 + 生成并发控制。
+    # 系统是平台（多人同时点生成），无资源约束时 N×FP并发 个本地模型推理同时开跑
+    # 会互相抢 CPU/GIL。这里启动 CPU 采样线程，并按核数推导并发生成上限。
+    try:
+        from app.core.resource_guard import resource_guard
+        resource_guard.start()
+    except Exception as e:
+        logger.warning("[ResourceGuard] 启动失败（并发控制退化为不限制）: {}", str(e)[:150])
+
     # v3.3（N5-c 根治）：启动知识库维护周期任务。
     # 对账自愈 PG 向量化状态 ↔ Milvus 实际向量（只新增不删除），并报告孤儿向量。
     try:
@@ -166,6 +175,11 @@ async def lifespan(app: FastAPI):
 
     # ===== 关闭阶段 =====
     logger.info("AI测试用例生成系统 正在关闭...")
+    try:
+        from app.core.resource_guard import resource_guard
+        resource_guard.stop()
+    except Exception as e:
+        logger.warning("[ResourceGuard] 停止失败: {}", str(e)[:150])
     try:
         from app.core.llm_executor import llm_executor
         llm_executor.shutdown()
@@ -419,6 +433,13 @@ async def health_check() -> ApiResponse:
     except Exception as e:  # noqa: BLE001
         _llm_exec_stats = {"enabled": False, "error": str(e)[:120]}
 
+    # v4.0.2：并发生成负载快照（只读内存计数，不碰 /proc——探活端点要保持轻量）
+    try:
+        from app.core.resource_guard import resource_guard
+        _resource_brief = resource_guard.health_brief()
+    except Exception as e:  # noqa: BLE001
+        _resource_brief = {"error": str(e)[:120]}
+
     return ApiResponse(
         success=True,
         message="ok",
@@ -433,6 +454,7 @@ async def health_check() -> ApiResponse:
             "vector_store": os.getenv("VECTOR_STORE", "milvus"),
             "event_loop": _loop_stats,
             "llm_executor": _llm_exec_stats,
+            "generation_load": _resource_brief,
             "vector_db": {
                 "connected": vs_status["connected"],
                 "error": vs_status["error"],

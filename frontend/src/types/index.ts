@@ -468,6 +468,62 @@ export interface HealthStatus {
     collections: Record<string, number>
     error: string
   }
+  /** v4.0.1：事件循环卡顿指标（生成期是否仍在阻塞） */
+  event_loop?: {
+    enabled: boolean
+    max_lag_ms: number
+    lag_warn_count: number
+    lag_error_count: number
+    last_lag_ms: number
+    [k: string]: unknown
+  }
+  /** v4.0.1：LLM 专用执行线程状态 */
+  llm_executor?: { enabled: boolean; isolated_loop?: boolean; [k: string]: unknown }
+  /** v4.0.2：并发生成负载（轻量，随探活返回） */
+  generation_load?: {
+    cpu_logical_cores: number
+    cpu_physical_cores: number
+    inference_slots: number
+    task_ceiling: number
+    active_tasks: number
+    waiting_tasks: number
+  }
+}
+
+/** v4.0.2：服务器资源与生成并发快照（GET /api/observability/system-resources） */
+export interface SystemResources {
+  cpu: {
+    logical_cores: number
+    physical_cores: number
+    cpu_limit: number
+    usage_percent: number | null
+    usage_percent_avg: number | null
+    load_1m: number | null
+    load_5m: number | null
+    load_15m: number | null
+  }
+  memory: {
+    total_mb: number
+    available_mb: number
+    available_ratio: number | null
+    source: string
+  }
+  inference_slots: number
+  sampled_at: string
+  sampler_error: string
+  generation: {
+    active: number
+    waiting: number
+    ceiling: number
+    active_task_ids: string[]
+    admitted_total: number
+    rejected_total: number
+    max_wait_ms: number
+    last_wait_ms: number
+    last_reject_reason: string
+  }
+  event_loop?: { enabled: boolean; max_lag_ms: number; lag_warn_count: number; lag_error_count: number; [k: string]: unknown }
+  llm_executor?: { enabled: boolean; [k: string]: unknown }
 }
 
 export interface KbFlowback {

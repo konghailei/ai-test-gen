@@ -10,6 +10,8 @@ agent_name/req_id/duration/token_usage/success）——本模块把它们串成 
 """
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy import select
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -21,6 +23,49 @@ from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["可观测性"])
+
+
+# ============================================================================
+# 服务器资源与生成并发（v4.0.2，首页仪表盘资源监控的数据源）
+# ============================================================================
+
+@router.get("/system-resources", response_model=ApiResponse, dependencies=[Depends(get_current_user)])
+async def system_resources() -> ApiResponse:
+    """服务器资源 + 并发生成负载快照（首页仪表盘轮询）。
+
+    为什么要单独一个端点而不是塞进 /api/health：health 是**探活**端点，
+    可能被负载均衡/前端以秒级频率打；资源快照要读 /proc（虽在后台线程采样，
+    仍带一次锁竞争），放探活链路上不合适。这里 10s 一刷，运维与用户都能看。
+
+    返回：
+        cpu / memory：服务器真实容量与当前负载
+        inference_slots：本地模型推理可用的核份额（并发的预算来源）
+        generation：当前并发生成任务数 / 排队数 / 准入统计
+        event_loop / llm_executor：S1 治理后的两块指标（判断是否还在阻塞）
+    """
+    from app.core.resource_guard import resource_guard
+
+    # 快照本身只读内存缓存；但 stats() 里 cpu_limit() 会读 cgroup 文件，
+    # 仍按纪律丢进线程，避免在事件循环里做同步 IO。
+    stats = await asyncio.to_thread(resource_guard.stats)
+
+    try:
+        from app.core.loop_watchdog import loop_watchdog
+        loop_stats = loop_watchdog.stats()
+    except Exception as e:  # noqa: BLE001
+        loop_stats = {"enabled": False, "error": str(e)[:120]}
+
+    try:
+        from app.core.llm_executor import llm_executor
+        llm_stats = llm_executor.stats()
+    except Exception as e:  # noqa: BLE001
+        llm_stats = {"enabled": False, "error": str(e)[:120]}
+
+    return ApiResponse(success=True, message="ok", data={
+        **stats,
+        "event_loop": loop_stats,
+        "llm_executor": llm_stats,
+    })
 
 
 # ============================================================================

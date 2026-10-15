@@ -9,7 +9,7 @@ import type {
   ReqVersionSummary, ReqVersionDetail,
   LLMCallLogItem, LLMCallLogDetail, OperationLogItem,
   RequirementRevision,
-  DependencyVersion, DependencyVersionDetail, VersionDiff, KbProject,
+  DependencyVersion, DependencyVersionDetail, VersionDiff, KbProject, SystemResources,
 } from '../types'
 
 const BASE = '/api'
@@ -1227,4 +1227,12 @@ export async function apiPut<T = any>(url: string, body?: any): Promise<T> {
 
 export async function apiDelete<T = any>(url: string): Promise<T> {
   return request<T>(url, { method: 'DELETE' })
+}
+
+// ============================================================
+// 可观测性：服务器资源与生成并发（v4.0.2）
+// ============================================================
+export const observability = {
+  /** 服务器资源 + 并发生成负载快照（首页仪表盘 10s 轮询） */
+  systemResources: () => request<SystemResources>('/observability/system-resources'),
 }

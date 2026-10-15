@@ -164,6 +164,36 @@ class Settings(BaseSettings):
     """
     GEN_FP_CONCURRENCY: int = 3
 
+    # ========== 资源感知的全局生成并发（v4.0.2） ==========
+    """全局并发生成任务的**硬上限**（跨所有需求/用户）。
+
+    背景：`reserve_generation_slot` 只做「同一 req_id 互斥」，orchestrator 的
+    `_gen_sem` 只限「单任务内 FP 并发」——两道闸都**不看服务器还能吃多少**。
+    N 个用户同时点生成 = N × FP并发 个本地模型推理（bge / CrossEncoder）同时
+    开跑，实测会把事件循环拖到秒级（看门狗 warn 级卡顿即此形态）。
+    v4.0.2 起由 `core/resource_guard.py` 按 CPU 核数推导实时上限，本字段只是
+    防误配的硬顶（如 8 核推导出 3，这里至多放到 3）。
+
+    推导口径：`min(max(1, 物理核-1), 本字段)`，再按 CPU/内存负载降级。
+    """
+    GEN_TASK_CONCURRENCY_MAX: int = 4
+
+    """CPU 10s 平均使用率达到该百分比且 1 分钟负载超过物理核 → 并发预算降一档。"""
+    CPU_OVERLOAD_PERCENT: float = 85.0
+
+    """可用内存占比低于该值 → 并发预算压到 1（防 OOM Kill，那比慢更致命）。"""
+    MEM_LOW_RATIO: float = 0.15
+
+    """排队等待资源释放的最长秒数；超过则返回"系统繁忙"让用户稍后再试。
+
+    生成本身要 20-50 分钟，等 5 分钟资源完全可接受；但不设上限会让用户
+    对着一个永远不动的页面干等，故必须有一个"明确失败"的边界。
+    """
+    GEN_RESOURCE_WAIT_TIMEOUT_S: float = 300.0
+
+    """同时排队者上限；超过直接拒绝，防止请求无限堆积把连接池也占满。"""
+    GEN_RESOURCE_MAX_WAITERS: int = 8
+
     # ========== 任务看门狗配置（v3.3 新增） ==========
     """是否启用分析任务看门狗。
 

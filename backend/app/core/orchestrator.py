@@ -1323,6 +1323,23 @@ class Orchestrator:
                 gen_fp_conc = await _get_conc(_s)
         except Exception as e:
             logger.warning("[Orchestrator] 读取生成并发配置失败（用默认 3）: {}", str(e)[:100])
+        # v4.0.2：把用户配置的 FP 并发度收敛到**当前资源预算**内。
+        # 此前这里只看 kb_settings（1-5），完全不看服务器还能吃多少——多人同时
+        # 生成时 N×FP并发 个本地模型推理（bge/CrossEncoder）同时开跑，实测把
+        # 事件循环拖到秒级（loop_watchdog warn 卡顿即此形态）。
+        # resource_guard 口径：`slots // 活跃任务数`，**单任务时等于不收敛**
+        # （与 v3.5.5 以来行为一致，无回归）；多任务时自动平分推理份额。
+        try:
+            from app.core.resource_guard import resource_guard as _rg
+            _eff = _rg.clamp_fp_concurrency(gen_fp_conc)
+            if _eff != gen_fp_conc:
+                logger.info(
+                    "[Orchestrator] FP 并发度按资源预算收敛: {} → {}（推理份额={}, 活跃生成任务={}）",
+                    gen_fp_conc, _eff, _rg.task_ceiling(), _rg.active_tasks(),
+                )
+            gen_fp_conc = _eff
+        except Exception as e:  # noqa: BLE001 - 资源守卫故障不阻断生成（fail-open）
+            logger.debug("[Orchestrator] 资源预算收敛跳过（用配置值）: {}", str(e)[:100])
         _pending_fps = [fp for fp in fp_list if fp.get("id") not in completed_fps]
         logger.info("[Orchestrator] FP 并发度={}（pending FP={} 个）", gen_fp_conc, len(_pending_fps))
 

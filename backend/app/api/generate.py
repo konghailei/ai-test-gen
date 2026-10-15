@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -338,7 +339,136 @@ async def generate_test_cases(
         # 我们通过 finally 兜底；这里也先注入一个 is_disconnected 轮询。
         last_disconnect_check = 0.0
 
+        # v4.0.2：全局资源准入门。
+        # 系统是平台，多人可能同时点生成。`reserve_generation_slot` 只防"同一需求
+        # 双跑"，orchestrator 的 `_gen_sem` 只限"单任务内 FP 并发"，都不看服务器
+        # 还能吃多少 → N 个用户同时生成 = N×FP并发 个本地模型推理同时开跑，
+        # 实测把事件循环拖到秒级。这里按 CPU 核数定限额，资源不足就**排队等待
+        # 释放**（用户明确要求的行为），并把排队状态通过 SSE 告诉前端。
+        _gate_admitted = False
+        _acq_task: asyncio.Task | None = None
+        _rg = None
+        _slot: dict = {}
+
+        def _client_gone() -> bool:
+            """排队期间检测客户端是否已离开（避免用户关了页面还白等一个槽位）。"""
+            try:
+                return bool(request.is_disconnected())
+            except Exception:  # noqa: BLE001
+                return False
+
+        # 说明：资源准入与流水线共用下面这一个 try/finally。
+        # 不能把准入放在 finally 之外——那样「排队超时提前 return」会绕过槽位
+        # 归还逻辑；同理也不能让 CancelledError 从准入段裸抛出去。
         try:
+            try:
+                from app.core.resource_guard import resource_guard as _rg
+                # 快路径：有空位立即进（单用户场景零开销，不建任务不排队）
+                _gate_admitted = _rg.gate.try_acquire(task_id)
+            except Exception as e:  # noqa: BLE001 - 守卫故障不得阻断生成（fail-open）
+                logger.warning(
+                    "[API/generate] 资源准入门异常（按无限制放行）: task_id={}, err={}",
+                    task_id, repr(e)[:150],
+                )
+                _gate_admitted = True
+
+            if not _gate_admitted:
+                # 需要排队：先告知前端，再边等边推心跳（否则用户对着一个
+                # 完全不动的页面，根本不知道是在排队还是卡死了）
+                _q_started = time.monotonic()
+
+                def _queued_event(elapsed_s: int, position: int) -> dict:
+                    return {
+                        "event": "message",
+                        "data": json.dumps({
+                            "stage": "queued",
+                            "message": (
+                                f"系统资源紧张，已进入排队（第 {position} 位，已等待 {elapsed_s} 秒）"
+                                f"——正在等待其它生成任务释放资源，请勿关闭页面"
+                            ),
+                            "progress": 0,
+                            "req_id": req.req_id,
+                            "queue_position": position,
+                            "queue_elapsed_s": elapsed_s,
+                            "ceiling": _rg.task_ceiling(),
+                        }, ensure_ascii=False),
+                    }
+
+                try:
+                    _pos = _rg.gate.waiting_count + 1
+                    _ceil = _rg.task_ceiling()
+                    logger.info(
+                        "[API/generate] 生成任务进入资源排队: task_id={}, 排队位={}, 并发上限={}",
+                        task_id, _pos, _ceil,
+                    )
+                    yield _queued_event(0, _pos)
+                    _acq_task = asyncio.create_task(
+                        _rg.gate.acquire(task_id, abort_check=_client_gone),
+                        name=f"resource-gate-{task_id}",
+                    )
+                    while True:
+                        _done, _ = await asyncio.wait({_acq_task}, timeout=5.0)
+                        if _acq_task in _done:
+                            _slot = _acq_task.result()
+                            break
+                        yield _queued_event(
+                            int(time.monotonic() - _q_started), _rg.gate.waiting_count + 1,
+                        )
+                except asyncio.CancelledError:
+                    # 排队期间客户端断连/服务关闭：取消排队任务；若它恰好已拿到
+                    # 槽位，由下面 finally 的孤儿兜底归还。
+                    if _acq_task is not None:
+                        _acq_task.cancel()
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "[API/generate] 资源排队异常（按无限制放行）: task_id={}, err={}",
+                        task_id, repr(e)[:150],
+                    )
+                    _slot = {"admitted": True, "reason": "guard_error", "waited_ms": 0.0}
+                    _gate_admitted = True
+
+                if not _gate_admitted and not _slot.get("admitted"):
+                    _reason = str(_slot.get("reason") or "")
+                    _detail = {
+                        "wait_timeout": (
+                            f"系统资源紧张，排队 {int(_slot.get('waited_ms', 0) / 1000)} 秒"
+                            f"仍未获得资源，请稍后重试（可先取消其它进行中的生成任务）"
+                        ),
+                        "queue_full": (
+                            f"当前排队任务过多（第 {int(_slot.get('queue_position', 0))} 位），"
+                            f"请稍后重试或先取消其它进行中的生成任务"
+                        ),
+                        "client_gone": "客户端已断开，取消排队",
+                    }.get(_reason, f"未能获得生成资源（{_reason or 'unknown'}）")
+                    logger.warning(
+                        "[API/generate] 资源准入未通过: task_id={}, reason={}, waited_ms={}",
+                        task_id, _reason, _slot.get("waited_ms"),
+                    )
+                    await _update_gen_task(
+                        status="failed", phase="generate",
+                        error=f"resource_gate: {_reason}",
+                        message=_detail,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "stage": "error",
+                            "message": _detail,
+                            "progress": 100,
+                            "req_id": req.req_id,
+                            "error_kind": "resource_unavailable",
+                        }, ensure_ascii=False),
+                    }
+                    return
+                _gate_admitted = True
+                if _slot.get("waited_ms"):
+                    logger.info(
+                        "[API/generate] 排队后获得生成资源: task_id={}, waited_ms={}, ceiling={}",
+                        task_id, _slot.get("waited_ms"), _slot.get("ceiling"),
+                    )
+
             async for event in orchestrator.run_pipeline(
                 raw_requirement=raw_text,
                 srr_json=srr_json if has_srr else None,
@@ -534,6 +664,32 @@ async def generate_test_cases(
                 "data": json.dumps(error_event, ensure_ascii=False),
             }
         finally:
+            # v4.0.2：归还资源槽位。**必须同步归还**——本 finally 在客户端断连时
+            # 处于已取消作用域（uvicorn 取消 SSE 任务），任何 await 都会立刻再抛
+            # CancelledError；用 async release 会导致槽位永久泄漏、后续所有生成
+            # 任务无限排队。故 resource_guard.GenerationGate.release() 是同步方法。
+            if _rg is not None and (_gate_admitted or _acq_task is not None):
+                # 孤儿兜底：排队任务在生成器被关闭前后恰好拿到了槽位，也必须归还，
+                # 否则那个槽位谁都不会再释放。
+                if _acq_task is not None and not _acq_task.done():
+                    _acq_task.cancel()
+                if not _gate_admitted and _acq_task is not None \
+                        and _acq_task.done() and not _acq_task.cancelled():
+                    try:
+                        if _acq_task.result().get("admitted"):
+                            _gate_admitted = True
+                    except Exception:  # noqa: BLE001
+                        pass
+                if _gate_admitted:
+                    try:
+                        _rg.gate.release(task_id)
+                        logger.info("[API/generate] 已归还生成资源槽位: task_id={}", task_id)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "[API/generate] 归还资源槽位失败（槽位可能泄漏）: task_id={}, err={}",
+                            task_id, repr(e)[:150],
+                        )
+
             # v3.5.3：不再在 finally 里 await is_disconnected()——取消路径下
             # 该 await 会立即再抛 Cancelled，导致清理代码自身被掐断（原缺陷根因）。
             # 取消路径的收尸已由 except CancelledError 分支的 create_task 完成；

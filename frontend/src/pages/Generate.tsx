@@ -69,6 +69,8 @@ export default function Generate() {
   const [error, setError] = useState('')
   // v3.5.6: LLM 供应商等待重试提示（非 null 时显示红色横条）
   const [waitRetryNotice, setWaitRetryNotice] = useState<{ message: string; level: string; attempt: number; total_retries: number; remain_sec?: number } | null>(null)
+  // v4.0.2：资源排队状态（stage=queued 事件）
+  const [queueNotice, setQueueNotice] = useState<{ queue_position?: number; queue_elapsed_s?: number; ceiling?: number } | null>(null)
   // v3.5.6: 重试倒计时剩余秒数（null = 不显示倒计时）
   const [countdownSec, setCountdownSec] = useState<number | null>(null)
   const countdownTimerRef = useRef<number | null>(null)
@@ -181,6 +183,7 @@ export default function Generate() {
     setDone(false)
     setError('')
     setSubtasks([])
+    setQueueNotice(null)
 
     const ctrl = generateCases(
       selectedReq,
@@ -189,6 +192,14 @@ export default function Generate() {
         if (e.stage) setCurrentStage(e.stage)
         if (e.progress !== undefined) setProgress(e.progress)
         if (e.message) setMessage(e.message)
+        // v4.0.2：资源排队（stage=queued）——服务器 CPU 预算已满，等待释放
+        if (e.stage === 'queued') {
+          setQueueNotice({
+            queue_position: e.queue_position as number | undefined,
+            queue_elapsed_s: e.queue_elapsed_s as number | undefined,
+            ceiling: (e as any).ceiling as number | undefined,
+          })
+        }
         // v3.1.3：细粒度 FP 进度卡片（generate 阶段的 subtasks 快照）
         if (e.stage === 'generate' && Array.isArray(e.subtasks)) {
           setSubtasks(e.subtasks as FSSubtask[])
@@ -256,6 +267,7 @@ export default function Generate() {
         }
         if (e.stage === 'done' || e.stage === 'error') {
           setWaitRetryNotice(null)
+          setQueueNotice(null)
           setCountdownSec(null)
           if (countdownTimerRef.current) { clearInterval(countdownTimerRef.current); countdownTimerRef.current = null }
         }
@@ -542,6 +554,29 @@ export default function Generate() {
                 </div>
               )
             })}
+          </div>
+        </div>
+      )}
+
+      {/* v4.0.2: 资源排队提示（服务器 CPU 预算已满，等待其它生成任务释放） */}
+      {queueNotice && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3">
+          <Loader2 className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5 animate-spin" />
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-medium text-amber-800">
+                系统资源紧张，已进入排队
+              </p>
+              {queueNotice.queue_elapsed_s != null && (
+                <span className="text-xs font-mono font-semibold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
+                  已等待 {queueNotice.queue_elapsed_s}s
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-amber-600 mt-0.5">
+              正在等待其它生成任务释放服务器资源（并发上限 {queueNotice.ceiling ?? '—'} 个）。
+              队列位置会实时刷新，请勿关闭页面——获得资源后将自动开始生成。
+            </p>
           </div>
         </div>
       )}
