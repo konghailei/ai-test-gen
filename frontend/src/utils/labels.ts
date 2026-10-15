@@ -2,6 +2,8 @@
  * SRR / FP 字段类型标签中文映射。
  */
 
+import { caseTypeCompositeLabel } from './caseType'
+
 // 业务规则类型
 const BR_TYPE_LABELS: Record<string, string> = {
   validation: '校验',
@@ -118,21 +120,10 @@ export function dataTypeLabel(type: string): string {
   return DATA_TYPE_LABELS[type.toLowerCase()] || type
 }
 
-// 测试用例类型
-const CASE_TYPE_LABELS: Record<string, string> = {
-  functional: '功能测试',
-  boundary: '边界测试',
-  exception: '异常测试',
-  security: '安全测试',
-  performance: '性能测试',
-  regression: '回归测试',
-  integration: '集成测试',
-  ui: '界面测试',
-  api: '接口测试',
-  data: '数据测试',
-}
-
-/** 获取测试用例类型的中文名 */
+/**
+ * 测试用例类型中文名（v3.5.11：收敛到 caseType.ts 镜像，复合标签保留细分信息）。
+ * 删除本地映射表——历史上与后端 5 处映射各自为政已漂移。
+ */
 export function caseTypeLabel(type: string): string {
-  return CASE_TYPE_LABELS[type] || type
+  return caseTypeCompositeLabel(type)
 }

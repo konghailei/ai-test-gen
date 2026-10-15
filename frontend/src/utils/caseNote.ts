@@ -25,21 +25,15 @@
  */
 
 import type { TestCase } from '../types'
+import { DETAIL_LABEL } from './caseType'
 
-/** 用例类型 → 中文标签（与 XMind 编辑页、后端 XMind 导出保持一致） */
+/**
+ * 用例类型 → 中文标签（XMind 备注用；单一来源 caseType.ts 的 DETAIL_LABEL，
+ * 与后端 taxonomy 对齐）。备注空间取细分短标签，归属组由前端徽章/导出呈现。
+ */
 export const CASE_TYPE_LABELS: Record<string, string> = {
-  functional: '功能',
-  boundary: '边界值',
-  exception: '异常',
-  security: '安全',
-  performance: '性能',
-  regression: '回归',
-  integration: '集成',
-  ui: 'UI',
-  api: '接口',
-  data: '数据',
-  exploratory: '探索性',
-  other: '其他',
+  ...DETAIL_LABEL,
+  integration: '集成', // 备注历史形态兼容（taxonomy 展示名为"跨功能点场景"）
 }
 
 /** 中文标签 → 用例类型（反查，用于解析备注） */
