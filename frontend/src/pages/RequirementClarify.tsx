@@ -1328,7 +1328,7 @@ function QuestionCard({ question: q, answer, isSkipped, onAnswer, onSkip, onUseD
               color: 'var(--brand-500)',
               borderRadius: 'calc(var(--radius) * 0.5)',
             }}
-            title="使用建议答案"
+            title="使用建议答案（由 AI 依上下文推断，请确认无误后再提交）"
           >
             <Wand2 className="w-3 h-3" /> 建议答案
           </button>

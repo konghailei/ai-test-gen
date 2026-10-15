@@ -31,6 +31,8 @@ from app.core.exceptions import (
     LLMNoProviderAvailable,
     LLMRetryExhausted,
 )
+# v4.0.1（S1 根因修复）：LLM 调用在专用执行线程上跑（隔离第三方库的 CPU 开销）
+from app.core.llm_executor import llm_executor
 from app.utils.logger import logger
 
 # LiteLLM 全局配置：关闭非必要遥测，降低噪声
@@ -480,9 +482,19 @@ class LLMClient:
                 attempted += 1
                 last_provider_key = prov["key"]
                 try:
-                    content, usage, model_used = await self._call_with_retry(
-                        prov, messages, temperature, response_format, max_tokens,
-                        deadline=deadline, first_response_timeout=first_resp_timeout,
+                    # v4.0.1（S1 根因修复）：整次尝试（取流 + 逐 chunk 消费 + 重试退避 +
+                    # 非流式回退）提交到 **LLM 专用执行线程**执行。
+                    # 根因：litellm 的 StreamingHandler 会在事件循环所在线程里做纯 Python
+                    # 流处理，流结束时还**无条件** `stream_chunk_builder(chunks=全部chunk)`
+                    # 组装完整响应（思考模式下 chunk 数万），实测占住事件循环 1.5-6s
+                    # （看门狗阻塞窗口采样证据，docs/TEST_PLAN.md §K.1c）。
+                    # 该开销在 `await gen.__anext__()` 内部，无法用 to_thread 单点隔离，
+                    # 故把"消费整条流"整体搬到主循环之外（见 app/core/llm_executor.py）。
+                    content, usage, model_used = await llm_executor.run(
+                        self._call_with_retry(
+                            prov, messages, temperature, response_format, max_tokens,
+                            deadline=deadline, first_response_timeout=first_resp_timeout,
+                        )
                     )
                     self._breaker.record_success()
                     self._provider_failures.pop(prov["key"], None)

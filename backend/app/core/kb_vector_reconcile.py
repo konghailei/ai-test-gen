@@ -209,34 +209,42 @@ async def scan_orphan_vectors(coll_key: str = "requirements") -> dict[str, Any]:
 
     from app.db.milvus_store import vector_store
 
-    vector_store._ensure_connected()
-    coll = vector_store._get_collection(coll_key)
-    recs: list[tuple[str, dict]] = []
-    for page in range(_MAX_PAGES):
-        try:
-            res = coll.query(expr="", output_fields=["id", "metadata"],
-                             limit=_PAGE, offset=page * _PAGE)
-        except Exception:  # noqa: BLE001
-            break
-        if not res:
-            break
-        recs.extend((str(r["id"]), r.get("metadata") or {}) for r in res)
-        if len(res) < _PAGE:
-            break
+    # v4.0.1（S1 从根治理）：建连 + 集合加载 + N 页 query 是**整段同步链路**，
+    # 原实现在事件循环里直调（`_ensure_connected()` / `_get_collection()` / `coll.query()`）
+    # → 每轮小时级维护都会阻塞所有请求。改为整段收进同步函数交给线程执行，
+    # 而不是逐点包裹（逐点包裹天然易漏，这正是 S1 的成因）。
+    def _scan_sync() -> tuple[int, list[str]]:
+        vector_store._ensure_connected()
+        coll = vector_store._get_collection(coll_key)
+        recs: list[tuple[str, dict]] = []
+        for page in range(_MAX_PAGES):
+            try:
+                res = coll.query(expr="", output_fields=["id", "metadata"],
+                                 limit=_PAGE, offset=page * _PAGE)
+            except Exception:  # noqa: BLE001
+                break
+            if not res:
+                break
+            recs.extend((str(r["id"]), r.get("metadata") or {}) for r in res)
+            if len(res) < _PAGE:
+                break
 
-    orphans: list[str] = []
-    for vid, meta in recs:
-        base = vid[len(_FP_PREFIX):] if vid.startswith(_FP_PREFIX) else vid
-        if any(vid in ids or base in ids for ids in valid.values()):
-            continue
-        vtype = (meta or {}).get("type", "")
-        if not vtype or vtype == "unknown":
-            continue   # 无法归类的保守不删
-        orphans.append(vid)
+        orphans: list[str] = []
+        for vid, meta in recs:
+            base = vid[len(_FP_PREFIX):] if vid.startswith(_FP_PREFIX) else vid
+            if any(vid in ids or base in ids for ids in valid.values()):
+                continue
+            vtype = (meta or {}).get("type", "")
+            if not vtype or vtype == "unknown":
+                continue   # 无法归类的保守不删
+            orphans.append(vid)
+        return len(recs), orphans
+
+    vector_count, orphans = await asyncio.to_thread(_scan_sync)
 
     return {
         "collection": coll_key,
-        "vector_count": len(recs),
+        "vector_count": vector_count,
         "orphan_count": len(orphans),
         "orphan_ids": orphans[:500],
         "orphan_ids_truncated": len(orphans) > 500,

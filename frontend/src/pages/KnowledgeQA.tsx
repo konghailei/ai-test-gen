@@ -39,6 +39,13 @@ import type { KbQAReference, Module } from '../types'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
+/**
+ * v4.0.1（S8 修复）：知识问答单次提问的最大字符数。
+ * 需求：「提问长度上限 500 字：超出时前端输入框禁止继续输入并提示」。
+ * 与后端 `api_schemas.KB_QA_MAX_QUESTION_LEN` 同口径（前端拦截 + 后端二次防御）。
+ */
+const KB_QA_MAX_QUESTION_LEN = 500
+
 interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -51,7 +58,7 @@ interface ChatMessage {
   correctedContent?: string
   correctionNotes?: string
   isFollowUp?: boolean
-  kbStatus?: { search_ok: boolean; error: string; total: number }
+  kbStatus?: { search_ok: boolean; error: string; total: number; filtered_low_score?: number }
   // v3.4（docs/15 §4.9）：claims 证据链——逐条结论挂来源 ID
   claims?: { claim: string; source_ids: string[] }[]
   answerStatus?: 'ok' | 'failed'
@@ -504,6 +511,17 @@ export default function KnowledgeQA() {
                             知识库中暂无已归档的需求或测试用例。请先归档需求后再进行问答，以获得更准确的参考。
                           </span>
                         </div>
+                      ) : (msg.kbStatus.filtered_low_score || 0) > 0 && (!msg.sources || msg.sources.length === 0) ? (
+                        /* v4.0.1（S6）：检索到内容但全部低于相关度门槛 → 明确告知，
+                           避免出现「有参考来源列表却答未找到」的自相矛盾展示。 */
+                        <div className="mt-3 flex items-start gap-2 text-xs rounded-md px-3 py-2"
+                          style={{ color: 'var(--foreground-tertiary)', background: 'var(--background-muted)' }}>
+                          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                          <span>
+                            检索到的内容与本次提问相关度过低（已过滤 {msg.kbStatus.filtered_low_score} 条），
+                            未作为参考来源展示。建议换用更贴近需求原文的关键词重新提问。
+                          </span>
+                        </div>
                       ) : null
                     )}
 
@@ -580,16 +598,37 @@ export default function KnowledgeQA() {
             </div>
           )}
           <div className="flex items-end gap-2">
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              rows={2}
-              className="flex-1 resize-none input-field text-sm"
-              placeholder={activeRecordId ? '继续追问...' : '输入你的问题（Enter 发送，Shift+Enter 换行）'}
-              disabled={loading}
-            />
+            <div className="flex-1">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                rows={2}
+                maxLength={KB_QA_MAX_QUESTION_LEN}
+                className="w-full resize-none input-field text-sm"
+                placeholder={activeRecordId ? '继续追问...' : '输入你的问题（Enter 发送，Shift+Enter 换行）'}
+                disabled={loading}
+              />
+              {/* v4.0.1（S8）：字数计数 + 超限提示（maxLength 已在输入层拦截，此处给可见反馈） */}
+              <div className="flex justify-end items-center gap-2 mt-1">
+                {input.length >= KB_QA_MAX_QUESTION_LEN && (
+                  <span className="text-[10px]" style={{ color: 'var(--state-warning)' }}>
+                    提问不能超过 {KB_QA_MAX_QUESTION_LEN} 字
+                  </span>
+                )}
+                <span
+                  className="text-[10px] tabular-nums"
+                  style={{
+                    color: input.length >= KB_QA_MAX_QUESTION_LEN
+                      ? 'var(--state-warning)'
+                      : 'var(--foreground-quaternary)',
+                  }}
+                >
+                  {input.length}/{KB_QA_MAX_QUESTION_LEN}
+                </span>
+              </div>
+            </div>
             {loading ? (
               <button onClick={cancelStreaming} className="btn-secondary text-sm flex items-center gap-1">
                 <Loader2 className="w-4 h-4 animate-spin" /> 停止

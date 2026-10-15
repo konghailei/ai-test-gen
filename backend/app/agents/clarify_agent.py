@@ -1272,7 +1272,7 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
                         "category": (_orig_llm_q or {}).get("category", "completeness"),
                         "question": question_text or q_data["question"],
                         "context": (_orig_llm_q or {}).get("context", "") or q_data["context"],
-                        "default_answer": qa.get("missing_desc", ""),
+                        "default_answer": "",  # v4.0.1（S2）：missing_desc 是描述不是答案，不得冒充建议答案
                         "input_type": (_orig_llm_q or {}).get("input_type", q_data["input_type"]),
                         "options": (_orig_llm_q or {}).get("options", []) or q_data["options"],
                     })
@@ -1285,7 +1285,7 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
                         # 优先使用 KB 查询时生成的问题（LLM 版），降级时使用模板问题
                         "question": question_text or q_data["question"],
                         "context": q_data["context"],
-                        "default_answer": qa.get("missing_desc", ""),
+                        "default_answer": "",  # v4.0.1（S2）：missing_desc 是描述不是答案，不得冒充建议答案
                         "input_type": q_data["input_type"],
                         "options": q_data["options"],
                     })

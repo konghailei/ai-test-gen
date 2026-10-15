@@ -40,11 +40,31 @@
 | SSE 断开后 | 任务转终态（interrupted/failed），不长期占并发槽位 |
 
 ### A.4 实测基线（2026-10-15）
+#### 修复前（v4.0.0）
 - ❌ health 无响应（curl 返回 000）
 - ❌ login ReadTimeout（20s）
 - ❌ cancel HTTP 000
 - ✅ SSE 断开 → 任务转 `interrupted`，API 立即恢复 200
-- **结论**：阻塞根因待定位（疑似 uvicorn 单事件循环被同步 LLM 调用占用）；断开 SSE 可作为"紧急逃生"手段，但 cancel 端点实际不可用属缺陷
+
+#### 中间态（v4.0.1 只补了未被隔离的同步调用后）
+- ✅ cancel 可达（144-451ms）→ 证明"未隔离同步调用"确为成因之一
+- ❌ health max **10008ms**（2 次探测失败）、login max **15017ms**（1-2 次失败）
+- ⚠️ 看门狗记录 max_lag **6060ms**、error 级 6 次
+- **结论**：仍存在**未知**阻塞源——继续靠"端点超时现象倒推"已走不通（见 §K.1c）
+
+#### 根因修复后（v4.0.1 最终，§K.1c）
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| health max（标准 <2s） | 10008ms / 失败 2 次 | **1654ms / 失败 0 次** ✅ |
+| login max（标准 <5s） | 15017ms / 失败 1 次 | **1512ms / 失败 0 次** ✅ |
+| cancel 可达 | 200（254ms） | **254ms** ✅ |
+| 事件循环 max_lag | 6060ms | **2173ms** |
+| error 级阻塞（>3s） | 6 次 | **0 次** |
+
+**§A.3 三条验收标准全部通过。**
+残留 0.5-2.2s 级 warn 级卡顿（9 次）性质为**并发 FP 生成期本地模型推理的 CPU/GIL 争抢**
+（挂起协程摘要显示主要停在 `_gen_sem` 信号量与 `gen_agent.generate`），属容量层面，
+后续可按"限制并发推理数 / 限制 torch 线程数"单独优化。
 
 ---
 
@@ -129,15 +149,15 @@
 
 | 编号 | 缺陷 | 级别 | 证据 | 状态 |
 |------|------|------|------|---------------|
-| S1 | 长耗时生成期间其他 API 端点不可用（health/login/cancel 均超时） | P1 | §A.4 | 待定位（疑似单事件循环阻塞） |
-| S2 | 系统 `default_answer` 为伪答案（复述问题不含决策） | P1 | §C.1 | 建议改为"留空强制用户填写"或标注"此答案不含决策" |
-| S3 | FP 未分配模块时 approve 报 409，前端缺引导 | P2 | §D | 建议上传后自动分配默认模块 |
-| S4 | 断开 SSE 可中断任务但 cancel 端点在生成期不可达 | P2 | §A.4 | 与 S1 同根 |
-| **S5** | **FP 提取漏项**：v1.0 文档 §3.3 明确"敏感词校验分三级"，但仅提取出 3 个 FP（查看版本列表/图片附件上传/手动标记重要版本），**敏感词校验未被提取为 FP** | P1 | §G.1 | 待处置：影响 KB 召回（该规则只能靠 SRR 级召回，被噪声挤掉） |
-| **S6** | **KB 问答对已归档内容答"未找到"且来源自相矛盾**：`敏感词校验规则是什么？分几级？` 返回 **8 条 sources**（全是噪声，相似度 0.43-0.47）+ 答案 `知识库中未找到相关内容` | P1 | §G.2 | 待处置：应按相似度阈值过滤 sources；无有效命中时不应返回来源 |
-| S7 | FP 的 `vectorization_status` 为 `None`（需求级为 `completed`），FP 向量状态未回写 | P3 | §G.1 | 观测性问题，不影响检索 |
-| **S8** | **知识问答输入框无长度限制**：需求 2.1 要求"提问上限 500 字，超出禁止继续输入"，实际 textarea 无 `maxlength`，可输入 501+ 字 | P1 | §I #42 | 待修复（前端加 maxLength + 提示） |
-| **S9** | **检索结果未做敏感信息脱敏**：需求 §3 要求密钥/token 脱敏，实际答案原样回显手机号等 PII | P1 | §I #35 | 待修复（检索层脱敏 + 用例范围同步收敛） |
+| S1 | 长耗时生成期间其他 API 端点不可用（health/login/cancel 均超时） | P1 | §A.4 | ✅ **已根治（v4.0.1）**：真根因 = litellm 在事件循环内做流处理/`stream_chunk_builder`（§K.1c），已用专用执行线程隔离；§A.3 三条验收全部通过 |
+| S2 | 系统 `default_answer` 为伪答案（复述问题不含决策） | P1 | §C.1 | ✅ **已修复（v4.0.1）** 见 §K.2 |
+| S3 | FP 未分配模块时 approve 报 409，前端缺引导 | P2 | §D | ✅ **不成立**：前端 `FPSRRViewer` 已有前置校验与友好提示，见 §K.5 |
+| S4 | 断开 SSE 可中断任务但 cancel 端点在生成期不可达 | P2 | §A.4 | ✅ 与 S1 同根，已随 S1 修复 |
+| **S5** | **FP 提取漏项**：v1.0 文档 §3.3 明确"敏感词校验分三级"，但仅提取出 3 个 FP，敏感词校验未被提取为 FP | P1 | §G.1 | ⚠️ **判定非缺陷（设计粒度如此）**，真实问题在召回侧，见 §K.4 |
+| **S6** | **KB 问答对已归档内容答"未找到"且来源自相矛盾**（8 条 0.43-0.47 噪声来源 + 答案"未找到"） | P1 | §G.2 | ✅ **已修复（v4.0.1）** 见 §K.3 |
+| S7 | FP 的 `vectorization_status` 为 `None`（需求级为 `completed`） | P3 | §G.1 | 观测性问题，不影响检索（维持） |
+| **S8** | **知识问答输入框无长度限制**（需求 2.1 要求 500 字上限） | P1 | §I #42 | ✅ **已修复（v4.0.1）** 见 §K.6 |
+| **S9** | **检索结果未做敏感信息脱敏**（需求 §3 要求密钥/token 脱敏） | P1 | §I #35 | ✅ **已修复（v4.0.1）** 见 §K.7 |
 
 ---
 
@@ -238,3 +258,186 @@
 | 阶段 7 v1.9a/v1.9b（版本变更覆盖） | 同上 | 同上；这是**验证"按最新版本回答"的核心场景，优先级最高** |
 | 阶段 4 多用户并行 / 权限矩阵 | 本轮聚焦单链路 | 按 v4 计划执行 |
 | §B 用例编辑与展示验证（XMind） | 已由 `_verify_xmind_fullscreen.py` 36/36 覆盖（见 v3.5.12 验证），但**未用本轮新生成的 64 条用例做走查** | 补：验证 XMind 保存后 `case_json.notes` 要点标注是否保留（关联 U9） |
+
+---
+
+## §K 缺陷全局复核与修复（v4.0.1，2026-10-15）
+
+> 方法：对 S1-S9 逐条**回到代码层定位根因**（而非只看现象），确认「是否真实存在」，存在的按最小影响面修复，
+> 并用「单元测试 + 真实端到端」双轨验证。**回归全绿 ≠ 功能可用**，故每条修复都补了实机证据。
+
+### K.1 S1/S4 生成期 API 阻塞 —— 根因确认为**未隔离的同步调用**（已修复）
+
+**排查过程**（先排除再定位，避免误判为"uvicorn 单事件循环通病"）：
+
+| 嫌疑 | 结论 |
+|------|------|
+| LLM 调用同步阻塞 | ❌ 排除：`llm_client.call` 用 `litellm.acompletion`（原生异步），有首响应/空闲双超时 |
+| SSE 生成器同步驱动 | ❌ 排除：`generate.py` 是纯 `async for` + `is_disconnected()` 轮询；orchestrator 用 `graph.astream` |
+| `time.sleep` / `requests` / `subprocess` | ❌ 不存在（全仓库扫描无命中） |
+| **`vector_store.*` 同步调用未包 `to_thread`** | ✅ **命中** |
+
+**根因**：`vector_store` 是**同步**实现——`_ensure_connected()`（首次连接）+ `_embed()`（bge 本地 CPU 推理，
+首次调用还会**同步懒加载模型**）+ `collection.search()`（gRPC）。项目多数调用点已按先例用 `asyncio.to_thread`
+包裹，但生成链路的 impact 节点漏了：
+
+- `agents/impact_agent.py:746`——`search_similar_requirements(...)` 直调，且位于 `for ... [:10]` 循环内
+  → 最多 10 次「同步 embed + Milvus 检索」，首次还叠加模型懒加载（数十秒）→ 事件循环被占住
+  → 生成期间 `/api/health`、`/auth/login`、任务 `cancel` 全部超时；SSE 断开使生成协程被取消后才恢复。
+
+**修复**：3 处按项目先例改为 `await asyncio.to_thread(...)`
+`impact_agent.py`（生成路径）、`api/knowledge.py`（`revectorize_missing` 的 `get_all_requirements`、
+两处 `_dispatch_embedding_task`——其 Celery 不可用降级分支会**同步加载模型**）。
+
+#### K.1b S1 从根治理（v4.0.1 追加，大哥指令"从根上解决"）
+
+**为什么"再补几个 to_thread"不算从根解决**：S1 的成因不是某一行写错，而是**机制脆弱**——
+`vector_store` 是同步实现（Milvus gRPC + 本地 bge/CrossEncoder CPU 推理），
+依赖"每个调用点都记得包 to_thread"。人一定会漏（`impact_agent` 就漏了）。
+更关键的是：**实测 20s 量级超时无法用已定位的单点（约 2s）完全解释**，
+说明还有未暴露的阻塞源——继续靠"端点超时现象倒推"是走不出的。故按三层治理：
+
+| 层 | 交付 | 作用 |
+|---|------|------|
+| **① 补齐** | 剩余 4 处同步 Milvus 调用全部隔离：`case_governance._scan_duplicates`、`seed.seed_patterns`、`kb_vector_reconcile.scan_orphan_vectors`（整段同步链路收进 `_scan_sync()` 后整体 to_thread）、`vector_outbox.reconcile_cases`（收进 `_list_vector_ids()`） | 消除已知阻塞点 |
+| **② 可观测** | 新增 `app/core/loop_watchdog.py`：事件循环卡顿看门狗（采样 100ms，warn 0.5s / error 3s），**超阈值即采样全线程 Python 调用栈**（同步阻塞调用必然出现在某个线程栈上，一次定位）；指标经 `/api/health` 的 `data.event_loop` 透出 | 把"靠现象倒推"变成"一次定位"；后续回归**可测量** |
+| **③ 防复发** | 新增 `backend/tests/test_no_blocking_sync_calls.py`：AST 守卫（unit 层，CI 拦截）。规则：`app/` 下任何 `async def` 内禁止裸调 `vector_store.*` / `reranker.*`；且**禁止裸调"自身含同步阻塞调用的嵌套助手"**（最隐蔽形态）。守卫自带**合成源码自验**用例，防止"守卫悄悄失效却全绿" | 从源头不可再引入 |
+
+**量化指标**：`/api/health → data.event_loop.max_lag_ms`。
+空闲基线实测 **2.0 ms**（0 warn / 0 error）。
+
+**已知边界（有意不覆盖）**：GIL 级 CPU 争抢不属守卫范围（由 ② 的运行时栈采样定位）；
+同步 `def` 内部的调用不做静态检查（其调用方负责隔离，且规则 ③ 已覆盖"从 async 直调同步助手"这一实际风险路径）。
+
+#### K.1c S1 真正根因：litellm 在事件循环里做流处理（v4.0.1 定论）
+
+**怎么找到的**：K.1b 第 ② 层的看门狗在实盘生成中记录到 max_lag **6060ms / error 6 次**，
+但主线程栈上只有看门狗自己——**"事后采样"看不到已结束的阻塞**。
+于是给看门狗补了**独立采样线程 + 环形缓冲**（20Hz 留存事件循环所在线程的栈），
+阻塞发生时把"阻塞窗口内"的样本打出来。**第一次复跑即命中**：
+
+```
+  ── ① 阻塞窗口内事件循环在执行什么（采样线程 20Hz 留存，重复已折叠）──
+  File "/app/app/core/llm_client.py", line 1283, in _call_with_retry
+    _chunk = await _aio_llm.wait_for(
+  File "/usr/local/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+  File ".../litellm/litellm_core_utils/streaming_handler.py", line 1677, in __anext__
+    complete_streaming_response = litellm.stream_chunk_builder(
+  File ".../litellm/main.py", line 5379, in stream_chunk_builder
+    response = processor.build_base_response(chunks)
+  File ".../litellm_core_utils/streaming_chunk_builder_utils.py", line 70, in build_base_response
+    if hasattr(chunk["choices"][0], "finish_reason"):
+```
+
+**根因**：litellm 1.57.4 的 `StreamingHandler.__anext__` 在
+`except (StopAsyncIteration, StopIteration)` 分支里**无条件**调用
+`litellm.stream_chunk_builder(chunks=self.chunks, messages=self.messages)`
+组装"完整响应"（仅为写日志/取 usage）。思考模式下 chunk 数可达数万，
+该函数逐 chunk 做 pydantic 属性访问 → **纯 Python CPU，占住事件循环 1.5-6s**，每次 LLM 调用都会发生。
+
+**为什么之前的修法都治不了它**：该开销发生在 `await gen.__anext__()` **内部**，
+业务代码层面加 `asyncio.to_thread` 无法隔离"库内部在循环里跑的同步代码"。
+
+**修复**：新增 `app/core/llm_executor.py`——**LLM 专用常驻执行线程 + 常驻事件循环**；
+`llm_client.call()` 把每次尝试（`_call_with_retry`，含取流/逐 chunk 消费/重试退避/非流式回退）
+整段提交到该线程，API 侧只 `await wrap_future(run_coroutine_threadsafe(...))`。
+用"常驻"而非每次 `asyncio.run`：litellm/openai 的 `AsyncClient` 缓存绑定首个事件循环的连接池，
+反复新建/关闭 loop 会触发 "Event loop is closed / attached to a different loop"。
+
+**效果**：§A.3 三条验收标准由"未达标"变为**全部通过**（health 10008ms→1654ms，
+login 15017ms→1512ms，error 级阻塞 6 次→**0 次**）。
+
+### K.2 S2 `default_answer` 伪答案 —— **提示词设计缺陷 + 代码回填**双根因（已修复）
+
+**根因（两处，缺一不可）**：
+1. `prompts/clarify_agent.py` 强制「**每个问题的 default_answer 不能为空**」，同时又禁止「编造原文不存在的具体数值」
+   → 模型被逼在"必须填"与"不许编"之间产出**复述问题的空话**（实测证据正是这类文本）。
+2. `clarify_kb.py` / `clarify_agent.py` / `clarify_question_gen.py` 共 **5 处**用 `missing_desc`
+   （"缺什么"的描述）回填 `default_answer` → KB 未命中的问题必然带一个伪答案。
+
+**修复**：
+- 提示词改为「**允许为空**；能推出具体值才给；推不出必须留空 `""`；**严禁复述问题充当答案**」（伪答案明确定义 + 后果说明）；
+- 5 处 `missing_desc` 回填一律改为 `""`（保留 `context` 不变）；
+- 前端「建议答案」按钮补 tooltip：「由 AI 依上下文推断，请确认无误后再提交」。
+- 现有测试对空 `default_answer` 已有兜底（回落 options[0] / 通用答案），不破坏调用方。
+
+### K.3 S6 KB 来源噪音 —— **检索结果无相关度下限**（已修复）
+
+**根因**：`_stream_qa_answer` 把检索结果**无条件截 top-8** 当参考来源，没有任何相关度门槛
+（`config.MATCH_SIMILARITY_THRESHOLD` 虽已声明但**全项目无消费方**——典型"假配置"）；
+Milvus 用 COSINE 度量，未覆盖的提问同样返回 top-8，其相似度落在 0.43-0.47（噪声），
+而 LLM 读了这些文档后正确判断"无相关内容"→ 前端于是「展示参考来源」却「答未找到」，自相矛盾。
+
+**修复**：
+- 新增 `config.KB_QA_MIN_SIMILARITY = 0.50`（依据实测：强相关 0.746 / 噪声 0.43-0.47，取中间值；
+  置 0 可回退）。`_filter_by_relevance()` 在 enrich 前过滤，`kb_status` 透出 `filtered_low_score`。
+- **关键约束**：只对**向量路**结果设门槛。BM25 路的 `similarity` 是 PG `ts_rank`（量纲不可比、
+  数值天然极小），若一并过滤会在「Milvus 不可用 → 仅 PG 降级」（需求 §7 明确要求可用）时把结果滤空。
+  为此在 `hybrid_search._rrf_fuse` 增加 `_score_kind` 来源标记（纯增量，不影响既有消费方），
+  用例直检路径同样标记。
+- 前端新增分支：全部被滤除时明确提示「相关度过低已过滤 N 条」，闭合自相矛盾体验。
+
+**实测（真实 API）**：`敏感词校验规则是什么？分几级？` 来源数 **8 → 1**（过滤 7 条，
+`filtered_low_score=7`）；强相关提问 `附件图片上传规则` 保留 6 条（0.58-0.71，**零误伤**）。
+
+### K.4 S5 FP 提取"漏项" —— **判定非缺陷**（设计粒度如此），真实问题在召回侧
+
+`prompts/fp_agent.py` 的粒度规则 3 明确规定「**表单/字段校验不独立**——校验规则属于所属 FP 的
+business_rules / data_constraints，不单独抽为 FP」。因此「敏感词校验分三级」被归入**图片附件上传** FP
+的内部规则，而不是独立 FP——这是**既定设计**，不是漏提；且该规则文本确实进入了向量（可由 FP 级召回）。
+
+真正的问题在**检索侧**：该内容对提问的余弦相似度仅 0.44，属弱相关区间 →
+K.3 修复后不再表现为"噪声来源 + 答未找到"的自相矛盾，但**命中率**本身受限于
+「一篇 FP 向量承载多个规则」的切分粒度，属 embedding / 文档切分层面的已知局限，需专项优化（不在本轮范围）。
+
+### K.5 S3 FP 模块引导 —— **判定不成立**
+
+`frontend/src/components/FPSRRViewer.tsx:205-228` 已有：审核前**前置校验** `module_id`/`modules` 为空时
+直接弹「功能点「X」未分配模块，请先点击编辑按钮选择对应模块后再审核通过」，并**兜住 409** 显示后端文案。
+自证驱动是**脚本直调 API**，才只见 409——属预期行为。
+（"上传后自动分配默认模块"是产品选择，非缺陷修复项，未采纳。）
+
+### K.6 S8 提问长度上限 —— 已修复（前端拦截 + 后端同口径防御）
+
+- 前端 `KnowledgeQA.tsx`：`textarea` 加 `maxLength=500`，并显示 `n/500` 计数与「提问不能超过 500 字」提示；
+- 后端 `api_schemas.py` 新增 `KB_QA_MAX_QUESTION_LEN = 500`，`KbQAAskRequest` / `KbQACharRequest`
+  由 `max_length=10000` 收紧为 500（绕过前端直调 API 同样拒绝）。
+
+**实测**：501 字提问 → **HTTP 422**。
+
+### K.7 S9 敏感信息脱敏 —— 已修复（新增统一脱敏层）
+
+- 新增 `app/utils/redact.py`：密钥/token（`sk-*`、JWT、`Bearer`、`key=value` 形式的
+  api_key/token/secret/password）为**需求硬要求**；并覆盖 PII 超集（手机号/身份证/邮箱，可关）；
+  提供 `redact_sources` / `redact_claims`（只动展示字段，不破坏 `id/type/similarity` 契约）。
+- 接入点：`_stream_qa_answer`（**回答正文 + claims + 来源**，展示与落库同口径）、追问 `/chat`。
+- 开关：`KB_REDACT_SENSITIVE`（总开关）、`KB_REDACT_PII`（PII 子开关）。
+
+**实测**：问"检索结果敏感信息脱敏规则"→ 答案中**未脱敏手机号 0 处**，输出 `138****8000`。
+
+### K.8 用例侧问题（U1-U9）—— 本轮不改，属独立需求
+
+U1（跨 FP 冗余）/U2（臆造接口）/U3（步骤不可执行）/U6（UI 形态假设错）等的共同根因是
+**生成器不知道系统的真实接口与 UI 形态**，需要新增"可执行性校验"环节（接口白名单、UI 控件真实性、
+破坏性操作标记、需求范围校验）——这是**功能增强**而非缺陷修复，改动面涉及生成链路与 prompt 体系，
+需单独评估与定标，不在本轮"修复已发现问题"范围内。
+（U1 的语义去重阈值 0.92 曾因放宽而误删，**不得**为降冗余而随手调低。）
+
+### K.9 验证矩阵
+
+| 验证 | 手段 | 结果 |
+|------|------|------|
+| 单元测试（全量） | `docker exec ai-test-gen-api python -m pytest tests -q` | **362 passed / 1 skipped** |
+| 新增单测（脱敏） | `tests/test_redact_sensitive.py` | 14 passed |
+| 新增单测（相关度门槛） | `tests/test_kbqa_relevance_filter.py` | 6 passed |
+| 新增单测（长度上限） | `tests/test_kbqa_question_length.py` | 6 passed |
+| 新增单测（阻塞守卫） | `tests/test_no_blocking_sync_calls.py` | 6 passed（含守卫自验；app/ 基线已清零） |
+| 新增单测（看门狗） | `tests/test_loop_watchdog.py` | 7 passed（含采样线程取证、空闲线程过滤） |
+| 新增单测（LLM 执行器） | `tests/test_llm_executor.py` | 6 passed（含"重 CPU 不阻塞调用方循环"这条 S1 核心断言） |
+| 前端类型 | `tsc --noEmit` | 通过（0 error） |
+| S8 真实 API | 501 字提问 | HTTP 422 |
+| S6 真实 API | 原失败问题来源数 | 8 → 1（过滤 7） |
+| S9 真实 API | 脱敏后答案 | 明文手机号 0 处 |
+| 看门狗实盘 | `/api/health → data.event_loop` | 已启动，空闲 `max_lag_ms = 2.0`，0 warn / 0 error |
+| **S1 真实生成压测** | `_e2e_tmp/_verify_s1.py`（DevBlog 17 FP，边生成边探端点） | §A.3 **三条验收全部通过**（见 §A.4） |
+| LLM 执行器实盘 | `/api/health → data.llm_executor` | `enabled: true, isolated_loop: true`；KB 问答冒烟通过 |

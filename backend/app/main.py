@@ -118,6 +118,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("[Watchdog] 启动失败（不影响启动）: {}", str(e)[:150])
 
+    # v4.0.1（S1 从根治理）：事件循环卡顿看门狗。
+    # 生成期"其他端点全部超时"的根因是同步调用占住事件循环；此监控在卡顿发生时
+    # 直接采样全线程栈，把"靠现象倒推"变成"一次定位"，并让后续回归可测量。
+    try:
+        from app.core.loop_watchdog import loop_watchdog
+        loop_watchdog.start()
+    except Exception as e:
+        logger.warning("[LoopWatchdog] 启动失败（不影响启动）: {}", str(e)[:150])
+
+    # v4.0.1（S1 根因修复）：LLM 专用执行线程。
+    # 把 litellm 的流处理/stream_chunk_builder 等 CPU 开销从 API 事件循环隔离出去。
+    try:
+        from app.core.llm_executor import llm_executor
+        llm_executor.ensure_started()
+    except Exception as e:
+        logger.warning("[LlmExecutor] 启动失败（LLM 将退化为同线程执行）: {}", str(e)[:150])
+
     # v3.3（N5-c 根治）：启动知识库维护周期任务。
     # 对账自愈 PG 向量化状态 ↔ Milvus 实际向量（只新增不删除），并报告孤儿向量。
     try:
@@ -149,6 +166,16 @@ async def lifespan(app: FastAPI):
 
     # ===== 关闭阶段 =====
     logger.info("AI测试用例生成系统 正在关闭...")
+    try:
+        from app.core.llm_executor import llm_executor
+        llm_executor.shutdown()
+    except Exception as e:
+        logger.warning("[LlmExecutor] 停止失败: {}", str(e)[:150])
+    try:
+        from app.core.loop_watchdog import loop_watchdog
+        await loop_watchdog.stop()
+    except Exception as e:
+        logger.warning("[LoopWatchdog] 停止失败: {}", str(e)[:150])
     try:
         from app.core.task_watchdog import stop_task_watchdog
         await stop_task_watchdog()
@@ -378,6 +405,20 @@ async def health_check() -> ApiResponse:
     """
     vs_status = await asyncio.to_thread(_check_vector_store)
 
+    # v4.0.1（S1 从根治理）：透出事件循环卡顿指标——生成期是否仍在阻塞变成**可测量**的
+    try:
+        from app.core.loop_watchdog import loop_watchdog
+        _loop_stats = loop_watchdog.stats()
+    except Exception as e:  # noqa: BLE001
+        _loop_stats = {"enabled": False, "error": str(e)[:120]}
+
+    # v4.0.1（S1 根因修复）：透出 LLM 执行线程状态（是否已与 API 循环隔离）
+    try:
+        from app.core.llm_executor import llm_executor
+        _llm_exec_stats = llm_executor.stats()
+    except Exception as e:  # noqa: BLE001
+        _llm_exec_stats = {"enabled": False, "error": str(e)[:120]}
+
     return ApiResponse(
         success=True,
         message="ok",
@@ -390,6 +431,8 @@ async def health_check() -> ApiResponse:
             "cold_start_mode": (not vs_status["kb_unavailable"]) and vs_status["kb_empty"],
             "db_type": "postgresql",
             "vector_store": os.getenv("VECTOR_STORE", "milvus"),
+            "event_loop": _loop_stats,
+            "llm_executor": _llm_exec_stats,
             "vector_db": {
                 "connected": vs_status["connected"],
                 "error": vs_status["error"],

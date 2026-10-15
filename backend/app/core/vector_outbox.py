@@ -300,7 +300,7 @@ async def reconcile_cases(*, limit: int = 500, requeue_missing: bool = True,
             await session.commit()
 
         # ② 孤儿/陈旧：向量库有、PG 无（或已 rejected）→ 默认只报告
-        try:
+        def _list_vector_ids() -> set[str]:
             base = vector_store._get_collection("test_cases")
             base.load()
             # ⚠️ doc_type / product_id 等都在 `metadata` 这个 JSON 字段里，
@@ -308,7 +308,12 @@ async def reconcile_cases(*, limit: int = 500, requeue_missing: bool = True,
             # "field doc_type not exist"）。
             sample = base.query(expr='metadata["doc_type"] == "test_case"',
                                 output_fields=["id"], limit=limit)
-            vector_ids = {r["id"] for r in sample}
+            return {r["id"] for r in sample}
+
+        # v4.0.1（S1 从根治理）：集合加载 + query 是**同步** Milvus 链路，
+        # 原实现在事件循环里直调会阻塞所有请求；整段交给线程执行。
+        try:
+            vector_ids = await asyncio.to_thread(_list_vector_ids)
         except Exception as e:  # noqa: BLE001
             logger.warning("[VectorOutbox/对账] 向量清单查询失败（跳过孤儿检查）: {}", str(e)[:120])
             vector_ids = set()

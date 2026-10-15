@@ -1851,7 +1851,7 @@ class ClarifyQuestionGenMixin:
                     "category": "completeness",
                     "question": question_text,
                     "context": q_data["context"],
-                    "default_answer": qa.get("missing_desc", ""),
+                    "default_answer": "",  # v4.0.1（S2）：missing_desc 是描述不是答案，不得冒充建议答案
                     "input_type": q_data["input_type"],
                     "options": q_data["options"],
                 })

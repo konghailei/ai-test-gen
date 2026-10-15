@@ -25,6 +25,7 @@ FP BFS 仅在需求分析侧使用。本 Agent 的 analyze() 仅从确认条目�
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import deque
 from typing import Any
@@ -743,7 +744,14 @@ class ImpactAnalysisAgent:
             if fp_status_map.get(fid) != "archived":
                 continue
             try:
-                kb_hits = vector_store.search_similar_requirements(
+                # v4.0.1（S1 修复）：向量检索是**同步**实现——内部 `_ensure_connected()`
+                # + `_embed()`（bge 本地 CPU 推理，首次调用还会同步懒加载模型）
+                # + Milvus gRPC `collection.search()` 全部阻塞。
+                # 生成期本节点在事件循环里最多循环 10 次（`[:10]`），原实现直接同步调用
+                # → 事件循环被占住数十秒：生成期间 /api/health、/auth/login、任务 cancel
+                # 全部超时（TEST_PLAN v4.0.0 §A 实测）。按项目既有先例用 to_thread 隔离。
+                kb_hits = await asyncio.to_thread(
+                    vector_store.search_similar_requirements,
                     query=f"{fp_info['fp_name']} 功能 规格 规则",
                     doc_type="functional_point",
                     status="archived",

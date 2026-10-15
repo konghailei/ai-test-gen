@@ -115,7 +115,7 @@ class ClarifyKbMixin:
                     "auto_filled": False,
                     "input_type": "text",
                     "options": [],
-                    "default_answer": q.get("missing_desc", ""),
+                    "default_answer": "",  # v4.0.1（S2）：missing_desc 是"缺什么"的描述，不是答案，不得冒充建议答案
                     "duration_ms": int((time.time() - _t_q) * 1000),
                 })
                 continue

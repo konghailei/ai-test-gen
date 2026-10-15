@@ -840,7 +840,11 @@ async def reverctorize_requirement(entry_id: str, session: AsyncSession = Depend
     record.vectorization_error = None
     await session.commit()
 
-    queued = _dispatch_embedding_task(record.id, record.srr_json or {}, meta)
+    # v4.0.1（S1 同类修复）：_dispatch_embedding_task 是**同步**函数——Celery 不可用时
+    # 其降级分支会真正加载嵌入模型并同步写 Milvus（阻塞数十秒），故用 to_thread 隔离。
+    queued = await asyncio.to_thread(
+        _dispatch_embedding_task, record.id, record.srr_json or {}, meta
+    )
     return ApiResponse(
         success=True,
         message="已重新派发向量化任务（异步）" if queued else "向量化任务派发失败：请检查 Celery 是否运行或嵌入模型是否就绪",
@@ -860,7 +864,10 @@ async def reverctorize_missing(session: AsyncSession = Depends(get_session)) -> 
     # 极端超量时仅会多派发已向量化项，幂等无害）。
     vectorized_ids: set[str] = set()
     try:
-        all_reqs = vector_store.get_all_requirements(None, 16384)
+        # v4.0.1（S1 同类修复）：get_all_requirements 是**同步** Milvus 查询
+        # （一次性拉取最多 16384 条），在 async 端点里直调会阻塞事件循环。
+        # 与 milvus_store 其它调用点一致，用 to_thread 隔离。
+        all_reqs = await asyncio.to_thread(vector_store.get_all_requirements, None, 16384)
         vectorized_ids = {r["id"] for r in all_reqs}
     except Exception as e:
         logger.warning("[API/knowledge] 获取向量库列表失败: {}", str(e)[:100])
@@ -876,7 +883,9 @@ async def reverctorize_missing(session: AsyncSession = Depends(get_session)) -> 
             continue
         project_version = await _project_version(session, r.project_id)
         meta = _build_requirement_kb_meta(r, project_version)
-        if _dispatch_embedding_task(r.id, r.srr_json or {}, meta):
+        # v4.0.1（S1 同类修复）：同步派发（Celery 不可用时降级为同步加载模型+写 Milvus），
+        # 必须 to_thread 隔离——本循环会遍历全部已归档需求，阻塞代价随规模放大。
+        if await asyncio.to_thread(_dispatch_embedding_task, r.id, r.srr_json or {}, meta):
             r.vectorization_status = "processing"
             r.vectorization_error = None
             queued += 1

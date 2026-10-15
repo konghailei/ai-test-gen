@@ -135,6 +135,51 @@ def _cases_archived_only() -> bool:
         return True
 
 
+def _filter_by_relevance(kb_sources: list[dict]) -> tuple[list[dict], int]:
+    """按相关度门槛过滤检索结果（v4.0.1 / 缺陷 S6）。
+
+    根因：原实现把检索结果**无条件截 top-8** 当作「参考来源」返回，任何弱相关/
+    未覆盖的提问都会带出 8 条低分噪声（实测 0.43-0.47），而答案正文却是
+    「知识库中未找到相关内容」——前端展示「参考来源」却无有效内容，自相矛盾。
+
+    口径说明：
+      - Milvus 使用 COSINE 度量，`similarity` 即余弦相似度，与阈值同量纲；
+      - **BM25 降级路的结果不作门槛过滤**：其 `similarity` 是 PG `ts_rank`
+        （量纲与余弦不可比，且数值天然很小），而需求明确要求「Milvus 不可用时
+        降级为仅基于 PostgreSQL 的结果」。用标签 `_score_kind` 区分来源，
+        只对向量路（`vector`，含缺省）施加门槛。
+      - 门槛值见 `settings.KB_QA_MIN_SIMILARITY`（≤0 表示不过滤，可回退旧行为）。
+
+    Returns:
+        (过滤后的列表, 被滤掉的条数)
+    """
+    try:
+        from app.config import settings
+        threshold = float(getattr(settings, "KB_QA_MIN_SIMILARITY", 0.0) or 0.0)
+    except Exception:  # noqa: BLE001
+        threshold = 0.0
+    if threshold <= 0:
+        return kb_sources, 0
+
+    kept: list[dict] = []
+    dropped = 0
+    for s in kb_sources:
+        kind = s.get("_score_kind") or "vector"
+        if kind != "vector":
+            # BM25 / PG 降级路：无余弦口径可比，保留（只要检索层返回了它）
+            kept.append(s)
+            continue
+        try:
+            score = float(s.get("similarity") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if score >= threshold:
+            kept.append(s)
+        else:
+            dropped += 1
+    return kept, dropped
+
+
 def _effective_date(*candidates) -> str:
     """取第一个非空日期作为"可比较日期"（B6-3）。
 
@@ -552,10 +597,26 @@ async def _stream_qa_answer(
     # kb_sources 已按 RRF + 时间衰减 + CrossEncoder 排序，直接截取 top 8
     kb_sources = kb_sources[:8]
 
+    # v4.0.1（S6 修复）：相关度门槛——低于阈值的弱相关来源不再进入「参考来源」
+    # 与 Prompt 上下文（原实现无下限 → 未覆盖提问也返回 8 条 0.43-0.47 噪声，
+    # 与答案正文「未找到」自相矛盾）。
+    kb_sources, _dropped_low_score = _filter_by_relevance(kb_sources)
+    if kb_status is not None:
+        kb_status["filtered_low_score"] = _dropped_low_score
+
     # 丰富来源信息（查询产品名+标题），同时过滤孤儿向量
     # v3.4.1 修复 M-8：用独立短 session，不再借用请求级 session
     async with async_session() as enrich_session:
         reference_sources = await _enrich_sources(kb_sources, enrich_session)
+
+    # v4.0.1（S9 修复）：来源展示文本脱敏（title/summary 会被前端渲染）
+    from app.utils.redact import (
+        redact, redact_claims, redact_enabled, redact_pii_enabled, redact_sources,
+    )
+    _do_redact = redact_enabled()
+    _do_pii = redact_pii_enabled()
+    if _do_redact:
+        reference_sources = redact_sources(reference_sources, include_pii=_do_pii)
 
     # 发送来源信息作为第一条事件（保持数组格式，前端兼容）
     yield {
@@ -593,6 +654,11 @@ async def _stream_qa_answer(
         full_answer, claims = _split_claims(
             answer, {s["id"] for s in reference_sources if isinstance(s, dict) and s.get("id")}
         )
+        # v4.0.1（S9 修复）：回答正文与证据引用脱敏后再展示**并落库**——
+        # 保证「展示口径 = 持久化口径」，避免纠错/历史/归档链路把明文再带出去。
+        if _do_redact:
+            full_answer = redact(full_answer, include_pii=_do_pii)
+            claims = redact_claims(claims, include_pii=_do_pii)
         yield {"event": "chunk", "data": full_answer}
     except Exception as e:
         logger.error("[API/knowledge-qa] LLM 调用失败: {}", str(e)[:200])
@@ -732,6 +798,9 @@ async def kqa_ask(
         )
         for r in case_results:
             r["type"] = "test_case"
+            # v4.0.1（S6）：用例走 vector_store 直检，similarity 是 COSINE 余弦，
+            # 显式标记来源，使相关度门槛对其生效（与 hybrid_search 的标记同口径）。
+            r["_score_kind"] = "vector"
             if not any(s.get("id") == r.get("id") and s.get("type") == "test_case" for s in kb_sources):
                 kb_sources.append(r)
     except Exception as e:
@@ -856,6 +925,12 @@ async def kqa_chat(
     except Exception as e:
         logger.error("[API/knowledge-qa] 追问 LLM 调用失败: {}", str(e)[:200])
         answer = "抱歉，AI 分析服务暂时不可用，请稍后重试。错误：" + str(e)[:100]
+
+    # v4.0.1（S9 修复）：追问回答同样脱敏——首轮回答已脱敏，追问若不脱敏
+    # 会把明文再带回对话历史与前端（口径必须一致）。
+    from app.utils.redact import redact, redact_enabled, redact_pii_enabled
+    if redact_enabled():
+        answer = redact(answer, include_pii=redact_pii_enabled())
 
     # 4. 更新对话历史
     try:

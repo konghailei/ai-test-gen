@@ -200,7 +200,9 @@ async def _scan_duplicates(
         rows = (await s.execute(stmt.limit(sample))).all()
 
     from app.db.milvus_store import vector_store
-    vector_store._ensure_connected()
+    # v4.0.1（S1 从根治理）：同步 Milvus 调用一律不得在事件循环里直调。
+    # 首次调用会真正建连 + `_ensure_collections()`（RPC），故同样隔离。
+    await asyncio.to_thread(vector_store._ensure_connected)
 
     pairs, sims = [], []
     for cid, title, cj in rows:

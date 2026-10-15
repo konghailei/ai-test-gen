@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from app.db.database import async_session
 from app.db.models import TestPattern
 from app.db.milvus_store import vector_store
@@ -256,7 +258,10 @@ async def seed_patterns() -> None:
 
             # 同步入向量库（向量库 upsert 天然幂等）
             try:
-                vector_store.add_pattern(
+                # v4.0.1（S1 从根治理）：add_pattern 是同步 Milvus 写（含建连/集合加载），
+                # 在事件循环里直调会阻塞启动；与项目其它调用点一致用 to_thread 隔离。
+                await asyncio.to_thread(
+                    vector_store.add_pattern,
                     pattern_id=pattern_id_str,
                     name=pattern["name"],
                     pattern_json=pattern["pattern_json"],

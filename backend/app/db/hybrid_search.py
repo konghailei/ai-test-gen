@@ -304,8 +304,12 @@ class HybridSearcher:
         scores: dict[str, float] = {}
         items: dict[str, dict] = {}
 
+        # v4.0.1：标记分数来源。KB 问答的相关度门槛（COSINE 余弦）只能作用于
+        # 向量路结果；BM25 路的 `similarity` 是 PG `ts_rank`，量纲不可比且天然很小，
+        # 若一并过滤会在「Milvus 不可用 → 仅 BM25 降级」时把可用结果全部滤空。
         for rank, item in enumerate(vector_results):
             item_id = item["id"]
+            item["_score_kind"] = "vector"
             scores[item_id] = scores.get(item_id, 0) + 1.0 / (self.RRF_K + rank + 1)
             items[item_id] = item
 
@@ -313,6 +317,7 @@ class HybridSearcher:
             item_id = item["id"]
             scores[item_id] = scores.get(item_id, 0) + 1.0 / (self.RRF_K + rank + 1)
             if item_id not in items:
+                item["_score_kind"] = "bm25"
                 items[item_id] = item
 
         fused = [

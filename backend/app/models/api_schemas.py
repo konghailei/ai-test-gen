@@ -8,6 +8,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+# 知识问答单次提问/追问的最大字符数（v4.0.1 S8）。
+# 对齐需求「提问长度上限 500 字：超出时前端输入框禁止继续输入并提示」——
+# 前端 maxLength 拦截，后端此处做**同等口径的二次防御**（绕过前端直接调 API
+# 时同样拒绝），避免超长输入进入检索/Prompt 构造链路。
+KB_QA_MAX_QUESTION_LEN = 500
+
+
 # ============================================================================
 # 通用响应
 # ============================================================================
@@ -280,7 +287,7 @@ class KnowledgeStats(BaseModel):
 
 class KbQAAskRequest(BaseModel):
     """知识问答提问请求。"""
-    question: str = Field(..., min_length=1, max_length=10000, description="用户问题")
+    question: str = Field(..., min_length=1, max_length=KB_QA_MAX_QUESTION_LEN, description="用户问题（≤500 字）")
     product_id: str | None = Field(default=None, max_length=64, description="产品 ID（可选，用于产品隔离）")
     modules: list[str] | None = Field(default=None, description="按模块过滤（多选，可选，仅在所选模块范围内问答）")
 
@@ -296,7 +303,7 @@ class KbQAAskResponse(BaseModel):
 class KbQACharRequest(BaseModel):
     """知识问答追问请求。"""
     record_id: str = Field(..., description="原始问答记录 ID")
-    question: str = Field(..., min_length=1, max_length=10000, description="追问内容")
+    question: str = Field(..., min_length=1, max_length=KB_QA_MAX_QUESTION_LEN, description="追问内容（≤500 字）")
 
 
 class KbQACorrectRequest(BaseModel):
