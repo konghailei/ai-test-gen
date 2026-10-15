@@ -65,6 +65,7 @@ class GenAgent:
         coverage_gaps: list[dict] | None = None,
         fp_scope: dict | None = None,
         global_srr: dict | None = None,
+        shared_rules: list | None = None,
     ) -> list[dict]:
         """GenAgent 主入口：按功能点分片/批量生成测试用例。
 
@@ -90,6 +91,10 @@ class GenAgent:
             global_srr: v3.1.3 全局/跨功能点通道——仅注入总 SRR 的跨功能点/共享规则/顶层
                 数据约束（不起整段全量 SRR），用于"跨功能点/集成"用例的独立生成，
                 避免跨 FP 组合用例因按 FP 拆分而丢失。
+            shared_rules: v4.1.1——跨 FP 共享业务规则（总 SRR 的
+                `cross_fp_interactions.shared_business_rules`）。FP 分片生成时，子 SRR
+                不含该块，须由编排层从总 SRR 显式传入，否则「登录失败锁定 30 分钟」
+                这类全局规则不会进入 FP 用例的生成上下文（数值保真要求落空）。
 
         Returns:
             list[dict]: UTCF 用例列表，每个用例为字典格式
@@ -340,6 +345,13 @@ class GenAgent:
             _fp_effective = []
 
         gen_min_cases, est_total_points = calc_min_cases(_srr_effective, _fp_effective)
+        # v4.1.1：FP 分片通道下，共享规则取自编排层传入的总 SRR（子 SRR 不含该块）；
+        # 全局/集成通道与全量通道仍由 build_user_prompt 自行从 srr 读取（传 None 回退）。
+        _shared_rules = shared_rules
+        if _shared_rules is None and isinstance(_srr_effective, dict):
+            _cfi = _srr_effective.get("cross_fp_interactions") or {}
+            if isinstance(_cfi, dict):
+                _shared_rules = _cfi.get("shared_business_rules") or []
         user_prompt = prompts.build_user_prompt(
             srr=_srr_effective,
             few_shot_cases=few_shot_cases or None,
@@ -350,6 +362,7 @@ class GenAgent:
             coverage_gaps=coverage_gaps or None,
             regression_anchors=historical_regression or None,
             min_cases=gen_min_cases,
+            shared_rules=_shared_rules,
         )
         logger.info("[GenAgent] 动态数量下限: min_cases={}, 要点总数={}", gen_min_cases, est_total_points)
         logger.debug("[GenAgent] Prompt 构建完成: len={}", len(user_prompt))

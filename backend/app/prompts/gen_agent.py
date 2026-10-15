@@ -20,6 +20,43 @@ import json
 from app.utils.coverage import calc_min_cases
 
 # ============================================================================
+# v4.1.1：生成 prompt 的 SRR 净化（修复「用例生成退化为针对原文」）
+# ---------------------------------------------------------------------------
+# SRR 落库时携带一批「内部/编排用」字段（下划线前缀）：_raw_text（需求原文
+# 全文）、_clarify_history、_clarify_state、_kb_query_logs、_version_history…。
+# 其中 **_raw_text 是原文全文**——一旦随 `json.dumps(srr)` 注入生成 prompt，
+# 生成就实质退化为「照抄原文写用例」：
+#   - 与 `orchestrator._parse_node` 的设计约定相悖
+#     （“生成用例必须使用已确认的 SRR，不允许回退到重新解析原始文本”）；
+#   - 稀释结构化字段（FP / flows / rules）在 prompt 中的权重；
+#   - 把与本次生成无关的正文一并塞进上下文（全量通道 prompt 12K~52K 的主因）。
+#
+# 净化规则：丢弃所有下划线前缀键 + 显式原文载体键；其余字段原样保留。
+#   · 下划线前缀 = 编排/内部字段（_raw_text / _clarify_* / _kb_query_logs …）
+#   · additional_details = v2.40 已废弃字段，历史 SRR 里装的是**需求原文全文**
+#     （req_agent 现已显式 pop 掉），必须一并剥离，否则老需求仍退化为原文生成。
+# ============================================================================
+
+_INTERNAL_SRR_KEYS = frozenset(
+    {"raw_text", "raw_requirement", "supplementary_text", "additional_details"}
+)
+
+
+def sanitize_srr_for_generation(srr: dict) -> dict:
+    """剔除 SRR 中内部/原文载体字段，返回仅含结构化需求的副本（不修改入参）。
+
+    仅过滤键名，不改动任何取值结构 —— 保证生成侧只依赖结构化 SRR，
+    与需求分析侧（澄清/审核仍需 _raw_text）解耦。
+    """
+    if not isinstance(srr, dict):
+        return srr
+    return {
+        k: v
+        for k, v in srr.items()
+        if not (isinstance(k, str) and k.startswith("_")) and k not in _INTERNAL_SRR_KEYS
+    }
+
+# ============================================================================
 # 系统指令
 # ============================================================================
 
@@ -594,6 +631,7 @@ def build_user_prompt(
     coverage_gaps: list[dict] | None = None,
     regression_anchors: list[dict] | None = None,
     min_cases: int | None = None,
+    shared_rules: list | None = None,
 ) -> str:
     """构建 GenAgent 的用户指令。
 
@@ -647,7 +685,10 @@ def build_user_prompt(
     if functional_points:
         # v2.34: 注入总 SRR 的跨 FP 共享规则，供 LLM 生成跨 FP 集成用例参考
         cfi = srr.get("cross_fp_interactions") or {} if isinstance(srr, dict) else {}
-        shared_rules = cfi.get("shared_business_rules", []) or []
+        # v4.1.1：FP 分片生成时 srr 是该 FP 的子 SRR（不含 cross_fp_interactions），
+        # 跨 FP 共享规则需由编排层从「总 SRR」显式传入 shared_rules；未传时回退
+        # 从当前 srr 读取（全局/集成通道与全量通道走这条兼容路径）。
+        shared_rules = shared_rules if shared_rules is not None else (cfi.get("shared_business_rules", []) or [])
         fp_brief = [
             {
                 "id": fp.get("id", ""),
@@ -814,7 +855,11 @@ def build_user_prompt(
         }
         _srr_inject = json.dumps(_srr_slim, ensure_ascii=False, indent=2)
     else:
-        _srr_inject = json.dumps(srr, ensure_ascii=False, indent=2)
+        # v4.1.1：净化后再注入——剔除 _raw_text 等内部字段，确保生成严格以
+        # 结构化 SRR 为依据，而非退化为「照抄需求原文」。
+        _srr_inject = json.dumps(
+            sanitize_srr_for_generation(srr), ensure_ascii=False, indent=2
+        )
 
     return f"""请根据以下需求，生成完整的测试用例集。
 

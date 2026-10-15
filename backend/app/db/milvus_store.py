@@ -236,6 +236,121 @@ def _safe_id(value: str, field: str) -> str:
     return value
 
 
+# ===========================================================================
+# v4.1.1 修复 T4：SRR 跨功能点交互（cross_fp_interactions）→ 向量文本片段
+# ---------------------------------------------------------------------------
+# 背景：v2.34 把「跨 FP 共享业务规则」从顶层 `business_rules` 迁移到
+# `cross_fp_interactions.shared_business_rules`，但 `_srr_to_text` 仍只读已被
+# 移除的顶层字段并完全忽略 CFI 块 —— 结果「登录连续失败 5 次锁定账号 30 分钟」
+# 这类权限/安全规则永不进入 L0 向量，知识问答检索命中率塌陷（Q2 实测 top-1
+# 相似度仅 0.3896，低于 0.50 阈值）。
+#
+# 这里把 CFI 的四个子块渲染为可嵌入文本；纯函数、无外部依赖，便于单测。
+# ===========================================================================
+
+def srr_rule_text(item: Any) -> str:
+    """把一条规则/条目（dict 或标量）渲染成可读文本。"""
+    if isinstance(item, dict):
+        for key in ("rule_desc", "rule", "description", "contract_desc", "name", "summary"):
+            if item.get(key):
+                return str(item[key])
+        # 兜底：拼接非空标量字段，避免整条规则被丢弃
+        pairs = [f"{k}:{v}" for k, v in item.items() if isinstance(v, (str, int, float)) and v]
+        return "; ".join(pairs) if pairs else ""
+    if item is None:
+        return ""
+    return str(item)
+
+
+def cfi_to_text_parts(cfi: Any) -> list[str]:
+    """把 SRR 的 `cross_fp_interactions` 渲染为若干「标签: 内容」文本片段。
+
+    兼容两种历史形态：
+      - shared_business_rules / global_constraints 既可能是 `[{rule: ...}]`，
+        也可能是 `["..."]`（v2.40 前后数据不一致）；
+      - 缺失 / 空值一律跳过，不产生空片段。
+    """
+    if not isinstance(cfi, dict) or not cfi:
+        return []
+
+    parts: list[str] = []
+
+    # 跨 FP 共享业务规则（权限模型、统一编码、锁定/令牌等全局规则）
+    shared_rules = cfi.get("shared_business_rules") or []
+    if isinstance(shared_rules, (list, tuple)):
+        rules_text = "; ".join(t for t in (srr_rule_text(r) for r in shared_rules) if t)
+        if rules_text:
+            parts.append("共享业务规则: " + rules_text)
+    else:
+        single = srr_rule_text(shared_rules)
+        if single:
+            parts.append("共享业务规则: " + single)
+
+    # 全局约束
+    global_constraints = cfi.get("global_constraints")
+    if global_constraints:
+        if isinstance(global_constraints, dict):
+            gc_pairs = [f"{k}:{v}" for k, v in global_constraints.items() if v]
+            if gc_pairs:
+                parts.append("全局约束: " + "; ".join(gc_pairs))
+        elif isinstance(global_constraints, (list, tuple)):
+            gc_items = [t for t in (srr_rule_text(g) for g in global_constraints) if t]
+            if gc_items:
+                parts.append("全局约束: " + "; ".join(gc_items))
+        else:
+            parts.append(f"全局约束: {global_constraints}")
+
+    # 跨功能点流程（FP 之间的调用顺序与数据流转）
+    cross_flows = cfi.get("cross_fp_flows") or []
+    if isinstance(cross_flows, (list, tuple)):
+        cf_lines: list[str] = []
+        for cf in cross_flows:
+            if isinstance(cf, dict):
+                name = cf.get("name") or cf.get("flow_name") or ""
+                src = cf.get("source_fp") or ""
+                dst = cf.get("target_fp") or ""
+                itype = cf.get("interaction_type") or ""
+                desc = cf.get("description") or cf.get("summary") or ""
+                head = "→".join(x for x in (str(src), str(dst)) if x)
+                seg = " ".join(
+                    x for x in [str(name), f"({head})" if head else "", str(itype), str(desc)] if x
+                )
+                if seg.strip():
+                    cf_lines.append(seg.strip())
+            else:
+                txt = srr_rule_text(cf)
+                if txt:
+                    cf_lines.append(txt)
+        if cf_lines:
+            parts.append("跨功能点流程: " + "; ".join(cf_lines))
+
+    # 功能点契约（提供方 → 消费方的输入输出约定）
+    fp_contracts = cfi.get("fp_contracts") or []
+    if isinstance(fp_contracts, (list, tuple)):
+        fc_lines: list[str] = []
+        for fc in fp_contracts:
+            if isinstance(fc, dict):
+                prov = fc.get("provider_fp") or ""
+                cons = fc.get("consumer_fp") or ""
+                desc = fc.get("contract_desc") or fc.get("description") or ""
+                fields = fc.get("data_fields") or []
+                fields_txt = ",".join(str(f) for f in fields) if isinstance(fields, (list, tuple)) else str(fields)
+                head = "→".join(x for x in (str(prov), str(cons)) if x)
+                seg = " ".join(
+                    x for x in [f"({head})" if head else "", str(desc), f"[字段: {fields_txt}]" if fields_txt else ""] if x
+                )
+                if seg.strip():
+                    fc_lines.append(seg.strip())
+            else:
+                txt = srr_rule_text(fc)
+                if txt:
+                    fc_lines.append(txt)
+        if fc_lines:
+            parts.append("功能点契约: " + "; ".join(fc_lines))
+
+    return parts
+
+
 class MilvusVectorStore:
     """Milvus 向量存储（系统唯一向量库后端）。"""
 
@@ -1429,8 +1544,27 @@ class MilvusVectorStore:
             "acceptance_criteria",
             "test_points_hint",
             "notes",
+            # v4.1.1（T4 同族）：v2.34 起共享业务规则已迁入
+            # cross_fp_interactions.shared_business_rules，此前白名单未同步 →
+            # KB 元数据里的 SRR 永远没有 CFI → `clarify_detect._extract_baseline_block`
+            # 第 396 行「新数据分支」（cfi.get("shared_business_rules")）恒为空，
+            # 增量文档基线补全拿不到共享规则（权限/锁定/令牌），只能回退到顶层
+            # business_rules（新数据恒为 None）→ 规则丢失。
+            "cross_fp_interactions",
         }
-        return {k: v for k, v in srr_json.items() if k in KEEP_TOP_KEYS}
+        kept = {k: v for k, v in srr_json.items() if k in KEEP_TOP_KEYS}
+        # 体积守卫：CFI 体积随文档规模增长，若裁剪后仍可能越界（metadata 列 65536
+        # 字节硬上限），宁可回到旧行为（剔除 CFI）也不能让整条写入报 (code=1100)。
+        try:
+            if len(json.dumps(kept, ensure_ascii=False).encode("utf-8")) > self._SRR_META_MAX_BYTES:
+                kept.pop("cross_fp_interactions", None)
+                logger.warning(
+                    "[Milvus] metadata SRR 超体积预算（{} 字节），已剔除 cross_fp_interactions 兜底",
+                    self._SRR_META_MAX_BYTES,
+                )
+        except Exception:  # noqa: BLE001 - 体积探测失败不影响写入
+            pass
+        return kept
 
     # v3.2 N10 优化上升级：向量写入 / 问答回答的源文本需尽量完整，
     # 不能只截取需求概述/前N条规则，否则 LLM 出现"命中 source 但说未找到具体规则"。
@@ -1438,14 +1572,21 @@ class MilvusVectorStore:
     # 上限放宽到 20000 字符（仍远低于 Milvus document 列 65535 与 metadata 65536 上限），
     # 避免超大文档触发 (code=1100) 上限报错；核心细则（概述+功能点+业务规则）置于前部。
     _SRR_TEXT_MAX_CHARS = 20000
+    # v4.1.1：metadata SRR 裁剪后的体积预算（Milvus metadata 列硬上限 65536 字节，
+    # 留 ~5KB 余量给其它 metadata 字段）。超预算时剔除 cross_fp_interactions 兜底。
+    _SRR_META_MAX_BYTES = 60000
 
     def _srr_to_text(self, srr_json: dict) -> str:
         """SRR JSON → 嵌入/问答源文本（N10 修复：纳入功能点级与完整规则，减少截断丢弃）。
 
         产出内容优先级（置于前部，靠后被保护性截断影响最小）：
           需求标题/概述 → 各功能点概要(fp_summary 名称+类型+summary) → 流程(flows) →
-          完整业务规则(不再限前10条) → 边界条件 → 数据约束 → 非功能约束 →
-          角色(user_roles) → UI 规则 → API 定义。
+          业务规则(顶层 + CFI 共享规则) → 跨功能点交互(cross_fp_interactions：
+          共享业务规则/全局约束/跨 FP 流程/FP 契约) → 边界条件 → 数据约束 →
+          非功能约束 → 角色(user_roles) → UI 规则 → API 定义。
+
+        v4.1.1（T4）：补入 cross_fp_interactions —— v2.34 起共享业务规则已从顶层
+        business_rules 迁出，仅读顶层会漏掉权限/锁定/令牌等全局规则。
         """
         parts = []
         req = srr_json.get("requirement", {})
@@ -1485,7 +1626,19 @@ class MilvusVectorStore:
 
         business_rules = srr_json.get("business_rules", [])
         if business_rules:
-            parts.append("业务规则: " + "; ".join(str(r) for r in business_rules))
+            if isinstance(business_rules, dict):
+                br_pairs = [f"{k}:{v}" for k, v in business_rules.items() if v]
+                if br_pairs:
+                    parts.append("业务规则: " + "; ".join(br_pairs))
+            else:
+                br_items = [t for t in (srr_rule_text(r) for r in business_rules) if t]
+                if br_items:
+                    parts.append("业务规则: " + "; ".join(br_items))
+
+        # v4.1.1 修复 T4：纳入 cross_fp_interactions（v2.34 起共享业务规则/全局约束/
+        # 跨 FP 流程/FP 契约的唯一归属地）。此前完全跳过该块 → 权限、锁定、令牌
+        # 等全局规则不进 L0 向量，知识问答检索系统性漏召。
+        parts.extend(cfi_to_text_parts(srr_json.get("cross_fp_interactions")))
 
         boundary = srr_json.get("boundary_conditions", [])
         if boundary:

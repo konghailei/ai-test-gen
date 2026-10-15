@@ -1220,6 +1220,16 @@ class Orchestrator:
                     logger.debug("[Orchestrator] 续跑预嵌入跳过（不阻断）: {}", str(e)[:120])
 
         fp_list = functional_points or []
+        # v4.1.1：总 SRR 的跨 FP 共享业务规则——FP 子 SRR 里没有这一块，
+        # 需在分片生成时随 fp_scope 一并下发（否则全局规则不进 FP 用例上下文）。
+        try:
+            _cfi_block = srr.get("cross_fp_interactions") or {}
+            _srr_shared_rules = (
+                _cfi_block.get("shared_business_rules") or []
+                if isinstance(_cfi_block, dict) else []
+            )
+        except Exception:  # noqa: BLE001 - 结构异常不阻断生成
+            _srr_shared_rules = []
         # v3.4（docs/15 §4.2 第 3 条）：计算本任务的**输入指纹**，随每次 checkpoint 写入。
         # 续跑时 API 层会用"当前输入"重算并逐字段比对（不一致 → 409）。
         # 注意这里要取需求修订号（DB），保证与 API 侧的指纹字段完全一致。
@@ -1376,6 +1386,10 @@ class Orchestrator:
                             impact_guidance=impact_guidance,
                             functional_points=[shard],
                             fp_scope=shard,
+                            # v4.1.1：FP 子 SRR 不含 cross_fp_interactions，须显式把
+                            # 总 SRR 的共享业务规则传下去，否则「登录失败锁定/令牌
+                            # 有效期」等全局规则进不了 FP 用例的生成上下文。
+                            shared_rules=_srr_shared_rules,
                             historical_regression=state.get("test_design_blueprint", {}).get(
                                 "historical_regression_cases", []
                             ),
