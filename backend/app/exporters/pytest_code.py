@@ -378,10 +378,13 @@ def _assertion_to_code(assertion: dict) -> str:
     Returns:
         str: assert 语句字符串；custom 类型或 target 校验失败返回空字符串（由调用方以注释形式处理）
 
-    断言类型映射（docs/04 §1 + §4.1）：
+    断言类型映射（docs/04 §1 + §4.1 + docs/32 B-3）：
         - equals / status_code → assert {target} == {value}
         - not_null → assert {target} is not None
         - contains → assert {value} in {target}
+        - not_contains → assert {value} not in {target}
+        - not_equals → assert {target} != {value}
+        - not_in → assert {target} not in {value}
         - gt → assert {target} > {value}
         - lt → assert {target} < {value}
         - matches → assert re.search({value}, {target})
@@ -410,6 +413,17 @@ def _assertion_to_code(assertion: dict) -> str:
         value_repr = _repr_value(expected_value)
         # contains：expected_value 在 target 中
         expr = f"assert {value_repr} in {target_expr}"
+    elif a_type == "not_contains":
+        # v3.5.10（docs/32 B-3）：安全负向断言（载荷不得出现）
+        value_repr = _repr_value(expected_value)
+        expr = f"assert {value_repr} not in {target_expr}"
+    elif a_type == "not_equals":
+        value_repr = _repr_value(expected_value)
+        expr = f"assert {target_expr} != {value_repr}"
+    elif a_type == "not_in":
+        # not_in：target 不在 expected_value 集合中
+        value_repr = _repr_value(expected_value)
+        expr = f"assert {target_expr} not in {value_repr}"
     elif a_type == "gt":
         value_repr = _repr_value(expected_value)
         expr = f"assert {target_expr} > {value_repr}"

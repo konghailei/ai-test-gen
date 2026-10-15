@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -14,7 +15,7 @@ ASSERTION_TYPE_MAP = {
     "less": "lt", "less_than": "lt", "<": "lt", "regex": "matches",
     "exists": "not_null", "contains_text": "contains", "in": "contains",
     "not_equals": "custom", "not_equal": "custom", "not_contains": "custom",
-    "not_contain": "custom", "not_exists": "custom",
+    "not_contain": "custom", "not_exists": "custom", "not_in": "custom",
     # UTCF 没有非严格比较枚举，保留操作符含义，不能改写为严格大于/小于。
     "greater_or_equal": "custom", "less_or_equal": "custom",
 }
@@ -26,6 +27,73 @@ class GeneratedCaseValidationError(ValueError):
     def __init__(self, issues: list[str]) -> None:
         self.issues = list(issues)
         super().__init__("生成用例合同校验失败: " + "; ".join(self.issues))
+
+
+# v3.5.10（docs/32 B-3 / F3）：安全负向断言方向写反的确定性检测。
+# 形态：type 为正向算子（contains/equals/custom），message 却在说"过滤/移除/
+# 拒绝"（负向），expected_value 还放着攻击载荷本体 → 执行即假阴性（断言
+# "响应包含 <script>"，或 custom 注释与载荷方向矛盾）。
+# 双条件缺一不判（防误伤）：负向词 message ∧ 载荷模式 expected_value。
+_NEGATIVE_ASSERTION_MARKERS = ("过滤", "移除", "剔除", "不保存", "拒绝", "拦截")
+# 载荷模式（子串、小写比较）。定标来源：DB 全量实测 32+20 条同型残余
+# （XSS 事件处理器族 / HTML 标签 / data URI / SQL 布尔注入）。
+# 不含提示文本（"非法输入"/"拒绝上传"等）——那是正确正向断言的 expected。
+_PAYLOAD_PATTERNS = (
+    "<script", "javascript:", "drop table", "onerror",
+    "<iframe", "<style", "<img", "<!--",
+    "onclick", "onload", "onmouseover", "onfocus", "onblur",
+    "<noscript", "<template", "data:text/html", "or 1=1",
+)
+# 裸 script 用词边界匹配：子串会误伤 description/manuscript 等 innocent 词。
+_PAYLOAD_WORD_RE = re.compile(r"\bscript\b")
+# 假阳性白名单：这些别名归一后是 custom 但语义是数值/存在性比较，
+# 与载荷方向无关，不参与方向判定。
+_NON_DIRECTIONAL_CUSTOM_KEYS = ("greater_or_equal", "less_or_equal")
+
+
+def reversed_security_assertion_issues(assertion: Any, path: str) -> list[str]:
+    """检测"安全负向断言方向写反"（纯函数，供校验与存量修复共用同一判定）。
+
+    判定（docs/32 B-3 双条件，缺一不判）：
+    - message 含负向词（过滤/移除/剔除/不保存/拒绝/拦截）之一；
+    - type 是可翻转的正向算子 且 expected_value 命中攻击载荷模式。
+
+    type 口径（⚠ 定稿偏差，实证优先，待确认）：docs/32 定稿为
+    type ∈ {contains, equals}，但 DB 全量定标 32 条反向断言全部是
+    type:"custom"（contains/equals 为 0，docs/31 F3 样例 3/4 亦为 custom）
+    → 按实证纳入 custom。not_* 负向算子是修复后/原生正确形态，一律豁免
+    （防误伤）；greater_or_equal/less_or_equal 归一为 custom 但语义是
+    数值比较，排除。
+
+    合法负向断言（type=not_contains/not_in，载荷放 expected_value 作
+    "不得出现"对照）不命中；合法正向断言（如"响应包含
+    Content-Security-Policy 头"）无载荷模式，不命中。
+    """
+    if not isinstance(assertion, dict):
+        return []
+    message = assertion.get("message")
+    if not isinstance(message, str):
+        return []
+    if not any(word in message for word in _NEGATIVE_ASSERTION_MARKERS):
+        return []
+    key = assertion.get("type")
+    key = key.strip().lower() if isinstance(key, str) else ""
+    if key.startswith("not_"):
+        return []
+    if key in _NON_DIRECTIONAL_CUSTOM_KEYS:
+        return []
+    if ASSERTION_TYPE_MAP.get(key) not in ("contains", "equals", "custom"):
+        return []
+    expected = assertion.get("expected_value")
+    expected_text = str(expected).lower() if expected is not None else ""
+    if not any(pat in expected_text for pat in _PAYLOAD_PATTERNS) \
+            and not _PAYLOAD_WORD_RE.search(expected_text):
+        return []
+    return [
+        f"{path}.type 安全负向断言方向写反（message 表述过滤/拒绝却用 "
+        f"{key} 正向断言载荷本体）：应改用 not_contains/not_in，"
+        f"expected_value 保留载荷本体作为「不得出现」的对照"
+    ]
 
 
 def _nonempty_text(value: Any) -> bool:
@@ -57,6 +125,9 @@ def _assertion_issues(assertion: Any, path: str) -> list[str]:
             issues.append(f"{path}.target 必须是非空字符串")
         if key not in ("not_null", "exists", "not_exists") and "expected_value" not in assertion:
             issues.append(f"{path}.expected_value 缺失")
+    # v3.5.10（docs/32 B-3）：安全负向断言方向写反 → 内容错误，
+    # 经 invalid_case_content → partial_block 走剔坏留好链路。
+    issues.extend(reversed_security_assertion_issues(assertion, path))
     return issues
 
 

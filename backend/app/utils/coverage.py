@@ -23,8 +23,16 @@ _POINT_ID_RE = re.compile(
     r"\[((?:[^\[\]]+?\.)?(?:happy_path|alt_flow|alternate_flow|rule|data|precondition|shared_rule|(?:non_functional(?:\.[a-z_]+|\.\d+)?)|api|role|dependency|ui_rule)(?:\.\d+)?)\]"
 )
 # 无方括号的兜底识别（如 notes 中写成 "fp_x.rule.2"）
+# v3.5.10（docs/32 B-5，docs/31 F2）两处修正：
+# 1. **索引后缀必选**——原 `(?:\.\d+)?` 可选时，正文里的裸类型词
+#    （"happy_path 验证"、URL 里的 "api"）会被当成覆盖声明提取成
+#    invalid_point_ids 假阳性（v2.0 实测 5 条）。真实要点 ID 必带索引
+#    （happy_path.{i} / rule.{i} / api.{i}…；仅 non_functional 允许
+#    `.{key}` 词尾），裸类型词不构成声明，任何位置都不再提取。
+# 2. 边界修正——lookbehind/lookahead 补 `/` 与 `:`，排除 URL/路径形态
+#    （`/api/users`、`api:8080`）。左右对称（docs/31 只提了左侧）。
 _BARE_POINT_ID_RE = re.compile(
-    r"(?<![\w\-\[.])((?:[\w\-]+\.)?(?:happy_path|alt_flow|alternate_flow|rule|data|precondition|shared_rule|(?:non_functional(?:\.[a-z_]+|\.\d+)?)|api|role|dependency|ui_rule)(?:\.\d+)?)(?![\w\-\].])"
+    r"(?<![\w\-\[./:])((?:[\w\-]+\.)?(?:(?:happy_path|alt_flow|alternate_flow|rule|data|precondition|shared_rule|api|role|dependency|ui_rule)(?:\.\d+)|(?:non_functional(?:\.[a-z_]+|\.\d+))))(?![\w\-\]./:])"
 )
 
 _TOP_LEVEL_TYPES = ("happy_path", "alternate_flow", "precondition", "shared_rule")

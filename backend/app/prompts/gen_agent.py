@@ -253,7 +253,15 @@ SYSTEM_PROMPT = """你是一位资深测试工程师。请根据以下结构化�
 
 关键要点：
 - 每个用例必须有完整的 steps（含 action + expected）
+- 顶层 expected 必填：一句话概括本用例通过后系统应处于的状态
+  （如"登录成功，跳转首页并显示用户昵称"），不得留空
 - assertions 明确断言目标和期望值
+- 安全负向断言（过滤/移除/拒绝攻击载荷）一律用 not_contains / not_in：expected_value
+  保留载荷本体作为「不得出现」的对照，type 表达"不得包含"；禁止用 contains / equals
+  正向断言"载荷被过滤"（方向写反，执行即假阴性）
+- 多角色变体用例（同一功能、不同角色权限）须在 title 开头或 steps[0] 显式标注
+  角色身份（如"管理员"、"普通用户"、"访客"）——让角色差异在文本层可分辨，
+  防止后续去重把角色变体误合并；两例角色不同时视为不同用例，不得互相改写覆盖
 - gen_metadata.gen_confidence 诚实反映与 SRR 的匹配度
 - related_fp 标注对应的功能点ID
 - 测试数据覆盖正常值/边界值/异常值"""
@@ -276,10 +284,10 @@ UTCF_CASE_SCHEMA = """每个用例的 JSON 结构：
   "steps": [
     {"step": 1, "action": "操作描述", "expected": "预期结果", "data": {}}
   ],
-  "expected": "整体预期结果（可选）",
+  "expected": "整体预期结果（必填：一句话概括本用例通过后系统应处于的状态）",
   "test_data": {},
   "assertions": [
-    {"type": "equals|contains|matches|status_code|gt|lt|not_null|custom",
+    {"type": "equals|contains|not_contains|not_equals|not_in|matches|status_code|gt|lt|not_null|custom",
      "target": "断言目标路径", "expected_value": null, "message": "断言说明"}
   ],
   "cleanup": ["清理操作"],
