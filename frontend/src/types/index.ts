@@ -554,8 +554,8 @@ export interface Project {
   name: string
   description: string
   version: string
-  // v2.45 新增 / v2.46 三状态机
-  status?: string  // active / pending_archive / archived
+  // v2.45 新增 / v2.47 收敛为两态
+  status?: string  // active / archived
   go_live_date?: string
   archived_at?: string
   archived_by?: string

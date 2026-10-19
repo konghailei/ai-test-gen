@@ -1017,18 +1017,6 @@ export const products = {
       `/products/projects/${projectId}/archive`,
       { method: 'POST', body: JSON.stringify({ go_live_date: goLiveDate, change_summary: changeSummary || '' }) }
     ),
-  // v2.46 标记项目为待归档（三状态机中间态）
-  markPendingArchive: (projectId: string) =>
-    request<{ project_id: string; status: string; requirement_count: number; unconfirmed_count: number; unconfirmed_titles: string[] }>(
-      `/products/projects/${projectId}/pending-archive`,
-      { method: 'POST' }
-    ),
-  // v2.46 取消待归档（回到活跃）
-  cancelPendingArchive: (projectId: string) =>
-    request<{ project_id: string; status: string }>(
-      `/products/projects/${projectId}/cancel-pending-archive`,
-      { method: 'POST' }
-    ),
   // v2.45 项目恢复活动
   reactivateProject: (projectId: string) =>
     request<{ project_id: string; status: string; requirement_count: number; fp_count: number; versions_deactivated: number }>(

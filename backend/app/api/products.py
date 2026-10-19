@@ -649,7 +649,7 @@ async def archive_project(
     规则：
     - 仅 active 状态可归档
     - 项目下所有需求必须为 confirmed 状态（防止未审核需求进入知识库）
-    - 项目状态 pending_archive → archived
+    - 项目状态 active → archived
     - 项目下所有需求按 created_at 排序依次归档（archived + go_live_date + archived_at）
     - 所有 FP.status → archived，同步 summary/relations_summary
     - 生成依赖版本快照（fp_dependency_versions + items）
@@ -1023,6 +1023,43 @@ async def archive_project(
             logger.error("[ArchiveProject] CRSR 固化失败（不阻断）: {}", str(crsr_e)[:200])
             crsr_failed.append({"error": str(crsr_e)[:200]})
 
+    # v2.48: 跨功能点共享业务规则/全局约束逐条编译（与 CRSR 对称）。
+    # 背景：CFI 里这些"一条一个数值"的规则此前只作为"整块拼接文本"混进需求级向量，
+    # 单条语义被稀释（实测相似度 0.49~0.53）→ 低于 KB_QA_MIN_SIMILARITY 0.50 被滤，
+    # 问答答"未找到/未提及"（如"登录连续失败5次锁定30分钟""事件循环采样间隔100ms"）。
+    # 此处用 reconcile 对账：按"本项目 + 产品下其他已归档需求"的规则并集重算，
+    # 并删除已消失规则的过期条目。失败不阻断归档主流程（可重算重建）。
+    shared_rule_count = 0
+    shared_rule_deleted = 0
+    shared_rule_failed: list[dict] = []
+    if product_id_for_cache:
+        try:
+            from app.core.shared_rules import reconcile_shared_rules
+            # 期望集合要覆盖产品下**所有**仍归档的需求（含本次归档的），
+            # 否则会把其他项目的规则当过期删掉。
+            _archived_rows = await session.execute(
+                select(Requirement).where(
+                    Requirement.product_id == product_id_for_cache,
+                    Requirement.status == "archived",
+                )
+            )
+            _archived_reqs = list(_archived_rows.scalars().all())
+            _st = await reconcile_shared_rules(
+                session,
+                product_id=product_id_for_cache,
+                archived_requirements=_archived_reqs,
+                version_id=version_id,
+            )
+            shared_rule_count = _st.get("upserted", 0)
+            shared_rule_deleted = _st.get("deleted", 0)
+            if _st.get("failed"):
+                shared_rule_failed.append({"failed": _st["failed"]})
+            await session.commit()
+        except Exception as sr_e:
+            await session.rollback()
+            logger.error("[ArchiveProject] 共享规则编译失败（不阻断）: {}", str(sr_e)[:200])
+            shared_rule_failed.append({"error": str(sr_e)[:200]})
+
     # v3.4: 功能点最新版用例集固化（与 CRSR 对称）——各 FP 聚合最新线获批用例，
     # 供受影响功能点回归时直接取用（回归测试选择 RTS）。失败不阻断归档。
     fpc_count = 0
@@ -1087,6 +1124,10 @@ async def archive_project(
             # v3.4: FP 最新用例集固化结果
             "fpc_consolidated": fpc_count,
             "fpc_failed": fpc_failed,
+            # v2.48: 共享业务规则/全局约束逐条编译结果
+            "shared_rule_consolidated": shared_rule_count,
+            "shared_rule_deleted": shared_rule_deleted,
+            "shared_rule_failed": shared_rule_failed,
             # v3.5.7（P1-C）：归档时点待投递的固化任务数——>0 表示知识固化仍在
             # 异步进行中，此窗口内 KB 问答可能 miss 最新归档内容（前端可提示）。
             "kb_pending_count": await _count_pending_outbox(session),
@@ -1108,95 +1149,10 @@ async def _count_pending_outbox(session) -> int:
 
 
 # ============================================================================
-# v2.46: 项目状态机——标记待归档 / 取消待归档
+# 项目状态机——归档 / 恢复活动
+# v2.47: 移除 pending_archive 中间态（前端从未使用、且与 archive 端点构成死锁），
+#        状态机收敛为干净的两态：active ⇄ archived。
 # ============================================================================
-
-@router.post("/projects/{proj_id}/pending-archive", response_model=ApiResponse, dependencies=[Depends(require_write)])
-async def mark_pending_archive(
-    proj_id: str,
-    session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    """标记项目为「待归档」状态（v2.46 三状态机中间态）。
-
-    规则：
-    - 仅 active 状态可标记为 pending_archive
-    - 标记后项目下需求进入只读状态（编辑接口需校验）
-    - 不写入知识库，不生成版本快照，可随时取消回到 active
-
-    返回未确认需求列表，供前端提示用户在归档前补全。
-    """
-    project = await session.get(Project, proj_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
-    if project.status != "active":
-        raise HTTPException(
-            status_code=409,
-            detail=f"项目当前状态为「{project.status}」，仅 active 可标记为待归档"
-        )
-
-    # 查询项目下需求，统计未确认数量（用于前端提示，但不阻断标记）
-    req_result = await session.execute(
-        select(Requirement).where(Requirement.project_id == proj_id)
-    )
-    requirements = req_result.scalars().all()
-    unconfirmed = [r for r in requirements if r.status not in ("confirmed", "active")]
-
-    project.status = "pending_archive"
-    await session.commit()
-
-    logger.info(
-        "[MarkPendingArchive] 项目标记为待归档: proj_id={}, user={}, 需求={}, 未确认={}",
-        proj_id, current_user.username, len(requirements), len(unconfirmed)
-    )
-    return ApiResponse(
-        success=True,
-        message="项目已标记为待归档，可校验需求后执行归档" if not unconfirmed
-                else f"项目已标记为待归档，但有 {len(unconfirmed)} 个需求未确认",
-        data={
-            "project_id": proj_id,
-            "status": "pending_archive",
-            "requirement_count": len(requirements),
-            "unconfirmed_count": len(unconfirmed),
-            "unconfirmed_titles": [r.title or r.id for r in unconfirmed[:10]],
-        },
-    )
-
-
-@router.post("/projects/{proj_id}/cancel-pending-archive", response_model=ApiResponse, dependencies=[Depends(require_write)])
-async def cancel_pending_archive(
-    proj_id: str,
-    session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
-):
-    """取消「待归档」状态，回到活跃（v2.46 三状态机回滚）。
-
-    规则：
-    - 仅 pending_archive 状态可取消
-    - 不涉及向量库/版本快照操作（中间态未写入）
-    """
-    project = await session.get(Project, proj_id)
-    if not project:
-        raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
-    if project.status != "pending_archive":
-        raise HTTPException(
-            status_code=409,
-            detail=f"项目当前状态为「{project.status}」，仅 pending_archive 可取消"
-        )
-
-    project.status = "active"
-    await session.commit()
-
-    logger.info(
-        "[CancelPendingArchive] 取消待归档，项目回到活跃: proj_id={}, user={}",
-        proj_id, current_user.username
-    )
-    return ApiResponse(
-        success=True,
-        message="已取消待归档，项目回到活跃状态",
-        data={"project_id": proj_id, "status": "active"},
-    )
-
 
 @router.post("/projects/{proj_id}/reactivate", response_model=ApiResponse, dependencies=[Depends(require_write)])
 async def reactivate_project(
@@ -1204,18 +1160,16 @@ async def reactivate_project(
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    """项目恢复活动（v2.46：支持 pending_archive 和 archived 回到 active）。
+    """项目恢复活动（archived → active）。
 
     规则：
-    - archived → active：
-      * 删除该项目所有需求向量 + FP 向量（按 project_id 批量）
-      * 对应版本 fp_dependency_versions.is_active → False
-      * FPDependency.is_active → True（当前边重新启用）
-      * Requirement.status: archived → active
-      * FP.status: archived → pending_review（v2.45：需重新审核，避免跳过审核流程）
-      * 清空 go_live_date / archived_at
-    - pending_archive → active：
-      * 仅状态变更，无需向量库/版本操作（中间态未持久化副作用）
+    - 仅 archived 可恢复活动
+    - 删除该项目所有需求向量 + FP 向量（按 project_id 批量）
+    - 对应版本 fp_dependency_versions.is_active → False
+    - FPDependency.is_active → True（当前边重新启用）
+    - Requirement.status: archived → active
+    - FP.status: archived → pending_review（v2.45：需重新审核，避免跳过审核流程）
+    - 清空 go_live_date / archived_at
     """
     # 1. 查询项目
     project = await session.get(Project, proj_id)
@@ -1223,24 +1177,10 @@ async def reactivate_project(
         raise HTTPException(status_code=404, detail=f"项目 {proj_id} 不存在")
     if project.status == "active":
         raise HTTPException(status_code=409, detail="项目已为活跃状态，无需恢复")
-    if project.status not in ("archived", "pending_archive"):
+    if project.status != "archived":
         raise HTTPException(
             status_code=409,
-            detail=f"项目状态为 {project.status}，仅 archived/pending_archive 可恢复活动"
-        )
-
-    # v2.46: pending_archive → active 的快速路径（无副作用）
-    if project.status == "pending_archive":
-        project.status = "active"
-        await session.commit()
-        logger.info(
-            "[ReactivateProject] 待归档项目回到活跃: proj_id={}, user={}",
-            proj_id, current_user.username
-        )
-        return ApiResponse(
-            success=True,
-            message="项目已取消待归档，回到活跃状态",
-            data={"project_id": proj_id, "status": "active", "fast_path": True},
+            detail=f"项目状态为 {project.status}，仅 archived 可恢复活动"
         )
 
     # archived → active 的完整路径（保留 v2.45 原有逻辑）
@@ -1352,6 +1292,35 @@ async def reactivate_project(
                 await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{f.id}")
             except Exception as inner_e:
                 logger.warning("[ReactivateProject] 单条FP向量清理失败 fp_id={}: {}", f.id, str(inner_e)[:100])
+
+    # 7. v2.48: 共享业务规则/全局约束向量自愈。
+    # 上一步按 project_id 批量删向量会连带删掉本项目贡献的 shared_rule 条目——
+    # 而一个规则可能被产品下多个项目引用（向量 ID 只按 product+规则文本），
+    # 直接删会误伤其他仍归档的项目。这里按「产品下仍处于 archived 的需求」重算对账：
+    #   - 其他归档项目仍在引用的规则 → 重新补齐；
+    #   - 只由本项目引用的规则 → 保持删除（期望集合里已无它）。
+    _reactivate_pid = getattr(project, "product_id", "") or ""
+    if _reactivate_pid:
+        try:
+            from app.core.shared_rules import reconcile_shared_rules
+            _rows = await session.execute(
+                select(Requirement).where(
+                    Requirement.product_id == _reactivate_pid,
+                    Requirement.status == "archived",
+                )
+            )
+            _still = list(_rows.scalars().all())
+            _st = await reconcile_shared_rules(
+                session, product_id=_reactivate_pid, archived_requirements=_still,
+            )
+            await session.commit()
+            logger.info(
+                "[ReactivateProject] 共享规则向量已对账: proj_id={}, 期望={}, upsert={}, 删除过期={}",
+                proj_id, _st.get("desired"), _st.get("upserted"), _st.get("deleted"),
+            )
+        except Exception as sr_e:
+            await session.rollback()
+            logger.warning("[ReactivateProject] 共享规则对账失败（不阻断）: {}", str(sr_e)[:200])
 
     logger.info(
         "[ReactivateProject] 项目恢复活动: proj_id={}, 需求={}, FP={}, 依赖={}, 版本停用={}",

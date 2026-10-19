@@ -139,7 +139,6 @@ export default function ProjectDetail() {
 
   const statusInfo = (s?: string) => {
     if (s === 'archived') return { text: '已归档', cls: 'bg-slate-100 text-slate-600' }
-    if (s === 'pending_archive') return { text: '待归档', cls: 'bg-amber-100 text-amber-700' }
     return { text: '进行中', cls: 'bg-green-100 text-green-700' }
   }
   const versionText = (v?: string) => (/^v/i.test(v || '') ? v : `v${v}`)

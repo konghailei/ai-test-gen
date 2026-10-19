@@ -374,13 +374,12 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     version: Mapped[str] = mapped_column(String(32), default="1.0")
-    # v2.46: 项目归档三状态机（参考需求状态设计）
-    #   active          — 活跃：可编辑需求/用例/FP
-    #   pending_archive — 待归档：用户主动标记，冻结编辑；归档前需校验需求已确认
-    #   archived        — 已归档：写入知识库，生成依赖版本快照，供后续需求检索
+    # v2.46: 项目归档两态机（v2.47 收敛：移除 pending_archive 中间态）
+    #   active   — 活跃：可编辑需求/用例/FP
+    #   archived — 已归档：写入知识库，生成依赖版本快照，供后续需求检索
     status: Mapped[str] = mapped_column(
         String(16), default="active",
-        comment="v2.46 项目归档状态：active（活跃）/ pending_archive（待归档）/ archived（已归档）"
+        comment="v2.46 项目归档状态：active（活跃）/ archived（已归档）"
     )
     go_live_date: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True,

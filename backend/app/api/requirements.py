@@ -120,10 +120,9 @@ def _create_bg_task(coro) -> asyncio.Task:
 async def _assert_project_editable(session: AsyncSession, project_id: str | None) -> None:
     """v2.46: 校验项目是否可编辑（需求/FP 写操作前置校验）。
 
-    项目状态机：
-    - active          — 允许编辑
-    - pending_archive — 冻结编辑（用户已标记待归档，应先取消或完成归档）
-    - archived        — 冻结编辑（已写入知识库，需先恢复活动）
+    项目状态机（v2.47 收敛为两态）：
+    - active   — 允许编辑
+    - archived — 冻结编辑（已写入知识库，需先恢复活动）
 
     Args:
         session: 数据库会话
@@ -138,11 +137,6 @@ async def _assert_project_editable(session: AsyncSession, project_id: str | None
     proj = await session.get(Project, project_id)
     if proj is None:
         return
-    if proj.status == "pending_archive":
-        raise HTTPException(
-            status_code=409,
-            detail=f"项目「{proj.name}」已标记为待归档，无法编辑需求。请先取消待归档或完成归档操作。"
-        )
     if proj.status == "archived":
         raise HTTPException(
             status_code=409,
@@ -2030,7 +2024,7 @@ async def update_requirement(
     if record is None:
         raise HTTPException(status_code=404, detail=f"需求 {req_id} 不存在")
 
-    # v2.46: 校验所属项目是否可编辑（pending_archive/archived 状态下冻结）
+    # v2.46: 校验所属项目是否可编辑（archived 状态下冻结）
     await _assert_project_editable(session, record.project_id)
 
     # v3.4（docs/15 §4.8）：乐观锁 —— 提交时对该行 FOR UPDATE 并比对 revision。
