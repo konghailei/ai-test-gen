@@ -97,7 +97,11 @@ class ClarifyScoreMixin:
                 items.append({
                     "id": it["question"].get("id", ""),
                     "question": qtext,
-                    "answer": it["answer"][:300],
+                    # v2.48 修复：此处原为 it["answer"][:300]，会把长答案的后段截掉，
+                    # 导致覆盖度评估 LLM 看不到后半部分 → 误判「未覆盖」→ 虚假追问，
+                    # 详细答案反而更难收敛（与「一轮收敛」目标相悖）。
+                    # 评估必须基于用户答案全文，不截断。
+                    "answer": it["answer"],
                 })
             try:
                 prompt = prompts.ANSWER_COVERAGE_EVAL_PROMPT
