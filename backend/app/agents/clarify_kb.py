@@ -150,8 +150,15 @@ class ClarifyKbMixin:
                         product_id=srr.get("requirement", {}).get("product_id", ""),
                         modules=current_modules,
                         status="archived", session=tmp_session,
-                        doc_type=["requirement", "functional_point", "fp_crsr"],
+                        doc_type=["requirement", "functional_point", "fp_crsr", "shared_rule"],
                     )
+                    # v2.48.1 修复假配置：shared_rule 灰度开关此前只在 KB 问答侧
+                    # （knowledge_qa.py）生效，本处 doc_type 硬编码含 shared_rule 却无
+                    # 过滤 → 「一键回退」在澄清链路失效（配置声明 kqa/clarify 两处，
+                    # 实际只 kqa 一处）。现与 kqa 共用同一实现 filter_shared_rule_switch，
+                    # 单一来源、不会再 drift。
+                    from app.core.shared_rules import filter_shared_rule_switch
+                    matched = filter_shared_rule_switch(matched)
             except Exception as e:
                 # 降级策略：KB 不可用 → 静默跳过 → 继续生成澄清问题 → 人工澄清兜底
                 # 不影响生成流程，不注入诊断信息到 Prompt
@@ -255,7 +262,7 @@ class ClarifyKbMixin:
                         "value_full": baseline_block,  # 完整历史 SRR 块（仅用于 _baseline_context 完整性）
                         # 整篇 SRR 文档（截断），供 _verify_kb_answers 的 LLM
                         # 从中提取「针对问题的具体片段」，而非返回整字段/整块
-                        "document_full": json.dumps(src_srr, ensure_ascii=False)[:3000] if src_srr else "",
+                        "document_full": json.dumps(src_srr, ensure_ascii=False)[:4000] if src_srr else "",
                         "go_live_date": go_live,
                         "project_version": proj_ver,
                     })
@@ -269,7 +276,7 @@ class ClarifyKbMixin:
                         "field": q["field"],
                         "value": field_val,
                         # 整篇 SRR 文档（截断），供 LLM 提取针对性片段
-                        "document_full": json.dumps(src_srr, ensure_ascii=False)[:3000] if src_srr else "",
+                        "document_full": json.dumps(src_srr, ensure_ascii=False)[:4000] if src_srr else "",
                         "go_live_date": go_live,
                         "project_version": proj_ver,
                     })
@@ -293,8 +300,13 @@ class ClarifyKbMixin:
                         "similarity": round(m.get("similarity", 0), 3),
                         "field": q["field"],
                         "value": display or doc[:1000],
+                        # v2.48.1：标记「按字段路径提取失败、value 系历史文档概述兜底」
+                        # ——_apply_kb_answers 见此标记只记录补全、不写回 SRR，
+                        # 避免把截断的概述文本（[:300]/[:1000]）塞进结构化业务字段。
+                        # answered 语义不变（仍视为已由 KB 回答，不转人工）。
+                        "_field_extraction_failed": True,
                         # 整篇历史 SRR 供 LLM 校验提取针对性片段
-                        "document_full": json.dumps(src_srr, ensure_ascii=False)[:3000] if src_srr else doc[:3000],
+                        "document_full": json.dumps(src_srr, ensure_ascii=False)[:4000] if src_srr else doc[:4000],
                         "go_live_date": go_live,
                         "project_version": proj_ver,
                     })
@@ -362,7 +374,12 @@ class ClarifyKbMixin:
                 # 「针对问题的具体片段」；回退到字段值 value（机械整字段提取）
                 doc_full = s.get("document_full")
                 if doc_full:
-                    doc_content = doc_full[:1500]
+                    # v2.48.1 修复双重截断：此前此处再截 [:1500]，而源头 document_full
+                    # 已截断（旧 3000，现 4000）——等于白存一截：长 SRR 里靠后的
+                    # 业务规则/非功能约束永远到不了校验 LLM 眼前 → LLM 判「文档与问题
+                    # 不相关」→ KB 命中被拒收 → 该问题转人工（与已修复的 answer[:300]
+                    # 完全同构的缺陷模式）。现直接用源头已限长的完整值，不再二次截断。
+                    doc_content = doc_full
                 else:
                     v = s.get("value")
                     if isinstance(v, (dict, list)):
@@ -388,9 +405,11 @@ class ClarifyKbMixin:
                 "documents": docs,
             })
 
-        # v2.8.1: 批次大小限制，防 LLM token 超限
-        # 每批最多 5 个问题 × 3 来源 × 1500 字符 ≈ 5,600 tokens，加 prompt 约 7K，安全。
-        KB_VERIFY_BATCH = 5
+        # v2.8.1: 批次大小限制，防 LLM token 超限。
+        # v2.48.1：单来源文档上限由 1500 → 4000（不再二切），为控 prompt 总量，
+        # 每批问题数相应 5 → 3：3 问题 × 3 来源 × 4000 字符 ≈ 36K 字符（加 prompt
+        # 仍在安全区）。批越小越稳，代价是 LLM 调用轮次增加。
+        KB_VERIFY_BATCH = 3
         if len(verification_items) > KB_VERIFY_BATCH:
             logger.info("[ClarifyAgent] KB 校验分批: total={}, batch={}", len(verification_items), KB_VERIFY_BATCH)
 
@@ -731,6 +750,21 @@ class ClarifyKbMixin:
 
             if not value or field.startswith("ambiguity."):
                 continue  # 歧义问题不自动补全，仍需人工确认
+
+            # v2.48.1：来源系「字段路径提取失败、用历史文档概述兜底」（value 被
+            # 截断为 display[:300]/doc[:1000]）→ 只记录补全供前端展示，**不写回
+            # 结构化字段**（写回等于把截断概述塞进业务字段，污染权威数据）。
+            # answered 语义不变，故该问题仍不转人工。
+            if best.get("_field_extraction_failed"):
+                a["auto_filled"] = True
+                augmentations.append({
+                    "field": field,
+                    "source_req_id": best["id"],
+                    "similarity": best["similarity"],
+                    "value": value,
+                    "_kb_answered_only": True,
+                })
+                continue
 
             # v2.8.70 KB 命中增强：标记字段（LLM 语义 / 引用未定义）的 KB 答案
             # 不写回具体业务字段——其 field（如 "llm_semantic.requirement.ambiguity"）

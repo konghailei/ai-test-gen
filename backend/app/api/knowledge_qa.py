@@ -121,6 +121,7 @@ AUTHORITY_BY_TYPE = {
     "requirement": "L0",        # 需求文档：规则权威
     "functional_point": "L1",   # 功能点 SRR/CRSR：次权威
     "fp_crsr": "L1",            # v3.5.0（docs/18）：功能点权威完整版 SRR（跨版本聚合编译层）
+    "shared_rule": "L1",        # v2.48：跨功能点共享业务规则（逐条编译层，与 CRSR 同级）
     "test_case": "L3",          # 用例默认 L3，命中人工核准/复用时降为 L2
     "knowledge_qa": "L2",       # 历史问答：可作参考
 }
@@ -375,6 +376,9 @@ async def _enrich_sources(
     # v3.5.0（docs/18 P0-T3）：CRSR 单独查询——向量主键为 "CRSR-"+md5(product|fp_name)[:16]，
     # 定位键是 metadata 里的 (product_id, fp_name)，不是 PG 主键
     crsr_sources = [s for s in kb_sources if s.get("type") == "fp_crsr"]
+    # v2.48：共享业务规则逐条编译层——向量主键 SRULE-*，无 PG 业务行，
+    # 展示信息全部来自 metadata（title/rule_text/product_id）。
+    shared_rule_sources = [s for s in kb_sources if s.get("type") == "shared_rule"]
 
     # 查询需求详情（获取 title + product_id + 版本日期链）
     # v3.3（N1 / B6-3）：额外取 go_live_date / archived_at / updated_at / created_at，
@@ -461,6 +465,11 @@ async def _enrich_sources(
         _cpid = (s.get("metadata") or {}).get("product_id")
         if _cpid:
             product_ids.add(_cpid)
+    # v2.48：shared_rule 条目同样按 metadata.product_id 补产品名
+    for s in shared_rule_sources:
+        _spid = (s.get("metadata") or {}).get("product_id")
+        if _spid:
+            product_ids.add(_spid)
     product_names: dict[str, str] = {}
     if product_ids:
         stmt = select(Product.id, Product.name).where(Product.id.in_(product_ids))
@@ -515,6 +524,22 @@ async def _enrich_sources(
                     product_name = pname
                 effective_date = info.get("consolidated_at") or ""
                 found = True
+
+        elif src_type == "shared_rule":
+            # v2.48：共享业务规则逐条编译层来源富化。
+            # 无对应 PG 业务行（向量主键 SRULE-*），展示信息全部取自 metadata：
+            # 标题「共享业务规则：<规则正文前 60 字>」+ 产品名 + 编译日期。
+            md = src.get("metadata") or {}
+            rule_text = md.get("rule_text") or ""
+            if rule_text:
+                title = f"共享业务规则：{rule_text[:60]}"
+            else:
+                title = str(md.get("title") or "共享业务规则")
+            pname = product_names.get(md.get("product_id", ""), "")
+            if pname:
+                product_name = pname
+            effective_date = md.get("compiled_at") or ""
+            found = True
 
         elif src_type == "test_case" and src_id in case_map:
             info = case_map[src_id]
@@ -770,7 +795,7 @@ async def kqa_ask(
         req_results = await hybrid_searcher.search_requirements(
             query=question, product_id=product_id, modules=modules, top_k=5,
             status="archived", session=session,
-            doc_type=["requirement", "functional_point", "fp_crsr"],
+            doc_type=["requirement", "functional_point", "fp_crsr", "shared_rule"],
         )
         for r in req_results:
             # v3.3（修 N6）：按 Milvus metadata.type **保留真实类型**。
@@ -781,11 +806,14 @@ async def kqa_ask(
             # **整个 L1 权威层在 KB 问答中静默失效**。
             # v3.5.0（docs/18 P0-T2）：fp_crsr 同样显式识别——若落到 else 分支会被
             # 误标为 requirement → _enrich_sources 查不到 → 孤儿丢弃（N6 同款形态）。
+            # v2.48：shared_rule 同理显式识别（主键 SRULE-*，无对应 PG 业务行）。
             _md_type = (r.get("metadata") or {}).get("type") or ""
             if _md_type == "functional_point":
                 r["type"] = "functional_point"
             elif _md_type == "fp_crsr":
                 r["type"] = "fp_crsr"
+            elif _md_type == "shared_rule":
+                r["type"] = "shared_rule"
             else:
                 r["type"] = "requirement"
             kb_sources.append(r)
@@ -797,6 +825,11 @@ async def kqa_ask(
                 kb_sources = [s for s in kb_sources if s.get("type") != "fp_crsr"]
         except Exception:  # noqa: BLE001
             pass
+        # v2.48/2.48.1：共享业务规则逐条编译层灰度开关——False 时剔除 shared_rule
+        # （向量仍在库，一键回退）。与澄清链路（clarify_kb）共用同一实现
+        # filter_shared_rule_switch，杜绝「两处各写一份 → 一处忘改」的假配置。
+        from app.core.shared_rules import filter_shared_rule_switch
+        kb_sources = filter_shared_rule_switch(kb_sources)
     except Exception as e:
         err_msg = str(e)[:200]
         search_errors.append(f"需求检索: {err_msg}")

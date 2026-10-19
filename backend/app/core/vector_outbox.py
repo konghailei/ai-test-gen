@@ -56,7 +56,9 @@ VALID_ACTIONS = ("upsert", "delete")
 # v3.5.0（docs/18 P0）：fp_crsr = 功能点权威完整版 SRR（CRSR 编译层产物）。
 # CRSR 同样遵循出箱语义：PG 固化行（functional_point_crsr）与"写入 Milvus 的意图"
 # 同事务提交，relay 幂等 upsert（确定性 ID，重复投递不堆积）。
-VALID_AGGREGATES = ("test_case", "requirement", "fp_crsr")
+# v2.48：shared_rule = 跨功能点共享业务规则逐条编译层（app/core/shared_rules.py）。
+# 目的：避免整块 CFI 拼接导致单条规则语义稀释（实测 0.49 < 门槛 0.50 → 检索不到）。
+VALID_AGGREGATES = ("test_case", "requirement", "fp_crsr", "shared_rule")
 
 
 def gen_event_id() -> str:
@@ -153,6 +155,21 @@ def _deliver(row) -> None:
             vector_store.add_requirement(
                 row.aggregate_id,
                 payload.get("crsr_content") or {},
+                metadata=metadata,
+            )
+        else:
+            vector_store.delete_requirement(row.aggregate_id)
+    elif row.aggregate_type == "shared_rule":
+        # v2.48：共享业务规则逐条投递。与 fp_crsr 同构——复用 add_requirement
+        # （最小 SRR 同构，_srr_to_text 同口径渲染规则正文）；metadata.type=shared_rule
+        # 由 payload 带入，add_requirement 会自动同步 doc_type。
+        if row.action == "upsert":
+            metadata = dict(payload.get("metadata") or {})
+            metadata["revision"] = row.revision
+            metadata["content_hash"] = row.content_hash
+            vector_store.add_requirement(
+                row.aggregate_id,
+                payload.get("requirement_json") or {},
                 metadata=metadata,
             )
         else:

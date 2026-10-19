@@ -325,6 +325,17 @@ class Settings(BaseSettings):
     """
     KB_CRSR_ENABLED: bool = True
 
+    # ========== 共享业务规则逐条编译层接入检索（v2.48） ==========
+    """KB 问答/澄清检索是否启用 shared_rule 条目（跨功能点共享业务规则逐条编译）。
+
+    False 时 kqa/clarify 检索结果过滤掉 shared_rule 类型（向量仍在库，一键回退）。
+    两处过滤由 `app/core/shared_rules.filter_shared_rule_switch` **统一实现**，
+    避免「两处各写一份 → 一处忘改」的假配置（历史缺陷：只在 kqa 落地）。
+    归档时的逐条向量化（出箱投递）不受此开关控制——编译层持续更新，
+    检索侧按需消费。
+    """
+    KB_SHARED_RULE_ENABLED: bool = True
+
     """KB lint 周期自检间隔（秒）。默认 24h——只读扫描 + 报告，轻量。
     置 0 或 KB_LINT_ENABLED=False 关闭。"""
     KB_LINT_ENABLED: bool = True
