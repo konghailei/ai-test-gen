@@ -68,6 +68,8 @@ export default function UploadRequirementModal({
 
   // 上传标题（手动输入，不再由 LLM 生成）
   const [reqTitle, setReqTitle] = useState('')
+  // v2.49：可执行性追问开关（需求级；与系统总闸 CLARIFY_EXECUTABILITY_GAPS_ENABLED 取 AND）
+  const [execClarify, setExecClarify] = useState(true)
 
   // 上传模块选择
   const [selModules, setSelModules] = useState<string[]>([])
@@ -172,7 +174,7 @@ export default function UploadRequirementModal({
 
     try {
       // v2.14: 异步模式——upload 立即返回 task_id，后台执行分析
-      const res: any = await reqApi.uploadMultiFiles(uploadFiles, productId, reqTitle, selProject, selModules.join(','))
+      const res: any = await reqApi.uploadMultiFiles(uploadFiles, productId, reqTitle, selProject, selModules.join(','), execClarify)
       const taskId = res?.data?.task_id
       const reqId = res?.data?.req_id
 
@@ -659,6 +661,23 @@ export default function UploadRequirementModal({
                   </div>
                 </div>
               </div>
+
+              {/* v2.49：可执行性追问开关（需求级，上传时可自主选择） */}
+              <label className="flex items-start gap-2 mb-4 p-3 rounded-xl cursor-pointer"
+                style={{ background: 'var(--background-muted)', border: '1px solid var(--border)' }}>
+                <input
+                  type="checkbox"
+                  checked={execClarify}
+                  onChange={e => setExecClarify(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span className="text-xs leading-relaxed" style={{ color: 'var(--foreground-secondary)' }}>
+                  <b style={{ color: 'var(--foreground)' }}>补充可执行性追问（推荐）</b>
+                  <br />
+                  在需求澄清阶段额外询问 1-3 个问题（操作入口 / 接口字段 / 测试数据），
+                  可明显提升生成用例的可执行性。取消勾选则澄清更精简，但生成的用例可能需要人工补细节。
+                </span>
+              </label>
 
               {/* 多文件上传 */}
               <div className="mb-4 p-4 rounded-xl transition-colors"

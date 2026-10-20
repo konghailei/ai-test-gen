@@ -923,6 +923,20 @@ class ClarifyQuestionGenMixin:
                         ],
                     })
 
+        # ------------------------------------------------------------------
+        # f) v2.49 可执行性要素缺口（R4 实测驱动）
+        # ------------------------------------------------------------------
+        # 背景：R4 抽验 754 条用例，25.6% 不可执行、71.8% 需补细节，主因是需求
+        # 未提供「可执行性四要素」：入口定位 / 字段响应 / 场景数据 / 故障注入。
+        # 生成阶段没有澄清节点（已确认需求 enable_clarify 强制 False，
+        # orchestrator.py:701-703），因此只能在需求分析澄清阶段问出来。
+        # 生效条件 = 系统级总闸 AND 需求级选项（上传页勾选，默认开）。
+        # 需求级由 requirement_tasks 在上传后注入 srr["_clarify_options"]。
+        _clarify_opts = srr.get("_clarify_options") or {}
+        _req_level_enabled = bool(_clarify_opts.get("executability_check", True))
+        if getattr(settings, "CLARIFY_EXECUTABILITY_GAPS_ENABLED", True) and _req_level_enabled:
+            self._detect_executability_gaps(raw_text, srr, prd_missing)
+
         # 清理临时 _dup 键
         for lst in (prd_missing, prd_ambiguities):
             for item in lst:
@@ -934,6 +948,116 @@ class ClarifyQuestionGenMixin:
                 len(prd_missing), len(prd_ambiguities),
             )
         return prd_missing, prd_ambiguities
+
+    @staticmethod
+    def _detect_executability_gaps(
+        raw_text: str, srr: dict, out: list[dict]
+    ) -> None:
+        """可执行性要素缺口检测（v2.49，规则层，直接 append 到 out）。
+
+        为什么放在澄清阶段：用例生成阶段**没有澄清节点**（已确认需求强制
+        `enable_clarify=False`），所以"生成后才发现的缺口"无法回喂。唯一能在
+        现有架构内自动闭环的位置，就是需求分析的澄清——在生成前把
+        「可执行性四要素」问清楚。
+
+        四类缺口（与 R4 实测的 B/C 级主因一一对应）：
+          1. 入口定位缺失（界面步骤无定位 163 处）
+          2. 字段/响应空白（断言目标抽象 157 条）
+          3. 场景数据缺失（缺 test_data / 并发基线 103 条）
+          4. 故障注入方式缺失（异常类用例无法触发）
+
+        只做规则层保守检测：宁漏不错，避免澄清问题过载。
+        """
+        def _add(dup_key: str, field: str, desc: str, evidence: str,
+                 question: str, options: list[str]) -> None:
+            if any(d.get("_dup") == dup_key for d in out):
+                return
+            out.append({
+                "_dup": dup_key,
+                "field": field,
+                "category": "gap",
+                "description": desc,
+                "evidence": evidence,
+                "suggested_question": question,
+                "suggested_options": options,
+            })
+
+        # 1) 入口定位缺失：有页面/界面操作描述，但全文无强入口信号
+        # 强信号（避免"菜单权限控制""产品可配置"这类通用词误救）：
+        #   位置词 + 入口结构的组合描述（左侧导航/顶部菜单/路由地址/页面路径）
+        ui_ops = re.search(r'(页面|界面|列表页|表单|弹窗|按钮|下拉|标签页)', raw_text)
+        entry_strong = re.search(
+            r'(左侧|右侧|顶部|右上角|导航栏|侧边栏|菜单栏|菜单项|'
+            r'路由|页面路径|访问路径|URL|(?:从|在).{1,12}(?:菜单|入口|导航).{0,8}进入|'
+            r'点击.{0,8}(?:进入|打开).{0,10}(?:页面|界面))',
+            raw_text,
+        )
+        if ui_ops and not entry_strong:
+            start = max(0, ui_ops.start() - 40)
+            snippet = raw_text[start:ui_ops.end() + 60].replace('\n', ' ')
+            _add(
+                "exec_ui_entry", "prd.executability.ui_entry",
+                "需求描述了页面/界面操作，但未说明入口（菜单位置/页面路径），用例无法定位操作起点",
+                f"上下文：…{snippet}…",
+                "文档提到了页面/界面操作，但未说明从哪里进入。请补充：该功能位于哪个菜单或页面入口？",
+                ["顶部导航菜单", "左侧/侧边栏菜单", "列表页或详情页内的按钮",
+                 "独立路由地址", "其他（请说明）"],
+            )
+
+        # 2) 字段/响应空白：接口有 path 但 response_body 为空
+        empty_resp = [
+            str(d.get("path"))
+            for d in (srr.get("api_definitions") or [])
+            if isinstance(d, dict) and d.get("path")
+            and not str(d.get("response_body") or "").strip()
+        ]
+        if empty_resp:
+            _add(
+                "exec_api_response", "prd.executability.api_response",
+                f"{len(empty_resp)} 个接口未定义响应字段，用例断言无法落到具体字段",
+                f"接口：{', '.join(empty_resp[:3])}",
+                "上述接口的响应包含哪些字段？请补充关键字段名与含义（用于断言判定）。",
+                ["返回单个对象（含 id/status/时间戳）",
+                 "返回列表 + 分页（total/items/page）",
+                 "仅返回成功标志与提示信息",
+                 "其他（请说明）"],
+            )
+
+        # 3) 场景数据缺失：涉及并发/多角色/多版本，但无账号或基线数据描述
+        scene = re.search(r'(并发|同时操作|多用户|多角色|乐观锁|冲突|版本回滚|多人协作)', raw_text)
+        baseline = re.search(
+            r'(账号|用户 ?A|用户 ?B|测试数据|基线数据|初始数据|预置数据|角色：|管理员账号|\d+\s*个用户)',
+            raw_text,
+        )
+        if scene and not baseline:
+            _add(
+                "exec_scene_data", "prd.executability.scene_data",
+                "需求涉及并发/多角色/多版本场景，但未提供测试所需的账号与基线数据",
+                f"原文提及：{scene.group(0)}",
+                "并发/多角色测试需要哪些账号与基线数据？（例如两个不同角色的账号、初始记录数）",
+                ["2 个账号（管理员 + 普通用户）",
+                 "2 个同角色账号",
+                 "3 个及以上不同角色",
+                 "其他（请说明）"],
+            )
+
+        # 4) 故障注入方式缺失：有降级/熔断/超时等场景，但无强注入信号
+        # 强信号（避免"产品可配置"这类通用"配置"误救）：模拟/注入/演练/mock/手动触发
+        fault = re.search(r'(降级|熔断|断网|网络中断|超时|失败重试|不可用|宕机|异常恢复)', raw_text)
+        inject_strong = re.search(
+            r'(模拟|注入|故障演练|手动触发|mock|伪造|拦截返回|打桩|'
+            r'开关.{0,8}(?:模拟|注入|强制)|配置项.{0,10}(?:模拟|注入))',
+            raw_text, re.IGNORECASE,
+        )
+        if fault and not inject_strong:
+            _add(
+                "exec_fault_inject", "prd.executability.fault_inject",
+                "需求包含故障/降级场景，但未说明如何模拟该故障，异常类用例无法执行",
+                f"原文提及：{fault.group(0)}",
+                "该故障场景如何模拟？（决定异常类用例能否执行）",
+                ["提供配置开关或开关接口", "停用/断开依赖服务",
+                 "注入延迟或错误码", "其他（请说明）"],
+            )
 
     # ========================================================================
     # 逻辑矛盾检测（v2.39 新增）

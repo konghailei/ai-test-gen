@@ -38,6 +38,7 @@ from app.prompts import review_agent as prompts
 from app.core import prompt_manager
 from app.utils.coverage import calc_point_coverage
 from app.core.publication_policy import decide_publication
+from app.core.case_type_taxonomy import summarize_by_group
 from app.utils.case_validation import validation_issues
 from app.models.utcf import ReviewIssue
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -831,7 +832,8 @@ class ReviewAgent:
         blocked = len(blocked_case_ids)
         passed = total - blocked
 
-        # 覆盖率汇总
+        # 覆盖率汇总（v2.49：coverage 保持细分口径——补充生成判定/技术矩阵依赖
+        # `coverage["boundary"]` 等细分 key，不能改。展示口径见下方 coverage_summary）
         coverage = self._calc_coverage_summary(test_cases)
 
         # 平均置信度
@@ -868,7 +870,10 @@ class ReviewAgent:
             "passed_cases": 0 if llm_report.get("review_degraded") else passed,
             "blocked_cases": blocked,
             "issues": all_issues,
-            "coverage_summary": coverage,
+            "coverage_summary": summarize_by_group(test_cases),
+            # v2.49：细分 type 分布（boundary/exception/exploratory 等），供技术覆盖
+            # 矩阵与审计使用；**不作为展示分类**（boundary ⊂ functional，见 taxonomy）。
+            "coverage_detail": coverage,
             "point_coverage": point_coverage,
             "dimension_scores": dimension_scores,
             "avg_confidence": round(avg_conf, 3),
@@ -1191,6 +1196,42 @@ class ReviewAgent:
             # 否则每次运行都会被判 kb_publication_incomplete。
             "vector_pending": 0,
         }
+
+        # v2.49（R4 缺陷的落库前防线）：标记引用「非本需求契约」接口路径的用例。
+        # 只标记不删除——误杀成本高于漏网；标记写入 case["_path_check"]，
+        # 随 case_json 落库，可审计、可前端提示。fail-open：无可信集合时跳过。
+        try:
+            from app.core.case_path_lint import lint_case_paths
+            _path_stats = lint_case_paths(reviewed_cases, srr)
+            stats["path_check"] = _path_stats
+            if _path_stats.get("flagged"):
+                logger.warning(
+                    "[ReviewAgent] ⚠️ 用例引用不在契约中的接口路径: flagged={}/{} paths={}",
+                    _path_stats["flagged"], _path_stats["checked"],
+                    list(_path_stats.get("unverified_paths", {}))[:5],
+                )
+        except Exception as _pe:  # noqa: BLE001
+            logger.warning("[ReviewAgent] 路径校验失败（不阻断落库）: {}", str(_pe)[:150])
+
+        # v2.49：可执行性分级（A/B/C）+ 编造率（硬指标）。只标记不删除——
+        # C 级（含缺口标注/编造元素）应回喂澄清，而不是当作"坏用例"丢弃。
+        try:
+            from app.core.case_executability import grade_cases
+            _exec_stats = grade_cases(reviewed_cases, srr)
+            stats["executability"] = {k: v for k, v in _exec_stats.items() if k != "details"}
+            if _exec_stats["fabricated"]:
+                logger.warning(
+                    "[ReviewAgent] ⚠️ 检出编造元素: fabricated={}/{} rate={:.1%}",
+                    _exec_stats["fabricated"], _exec_stats["checked"],
+                    _exec_stats["fabricated_rate"],
+                )
+            logger.info(
+                "[ReviewAgent] 可执行性分级: A={} B={} C={}（checked={}）",
+                _exec_stats["A"], _exec_stats["B"], _exec_stats["C"],
+                _exec_stats["checked"],
+            )
+        except Exception as _ee:  # noqa: BLE001
+            logger.warning("[ReviewAgent] 可执行性分级失败（不阻断落库）: {}", str(_ee)[:150])
 
         # Re-evaluate at the side-effect boundary; a caller-supplied 'approved'
         # string cannot bypass missing evidence or a degraded review.

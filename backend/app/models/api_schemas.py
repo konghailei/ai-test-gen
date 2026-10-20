@@ -39,6 +39,9 @@ class RequirementUploadRequest(BaseModel):
     title: str = Field(default="", max_length=512, description="需求标题（可选，留空则从文本提取）")
     priority: Literal["P0", "P1", "P2", "P3"] = Field(default="P2", description="优先级 P0-P3")
     modules: list[str] = Field(default_factory=list, description="关联模块列表")
+    # v2.49：是否在需求分析澄清中追问「可执行性要素缺口」（入口/字段/场景数据/故障注入）。
+    # 默认 True——不追问则生成用例约 1/4 不可执行、3/4 需补细节（R4 实测）。
+    executability_clarify: bool = Field(default=True, description="是否追问可执行性要素缺口（默认开）")
 
 
 class MultiDocUploadRequest(BaseModel):

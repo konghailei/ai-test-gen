@@ -1356,6 +1356,19 @@ async def _run_requirement_analysis(
         async def _clarify_progress_cb(message: str, progress: int) -> None:
             await _update_task(task_id, phase="kb_search", progress=progress, message=message)
 
+        # v2.49：注入需求级澄清选项（上传页勾选，默认开）。
+        # 与系统级 CLARIFY_EXECUTABILITY_GAPS_ENABLED 在 ClarifyAgent 内取 AND——
+        # 用户取消勾选时，澄清问题数量与 v2.48 一致。
+        try:
+            async with async_session() as _opt_session:
+                _opt_req = await _opt_session.get(Requirement, req_id)
+                _exec_opt = bool(getattr(_opt_req, "executability_clarify", True)) if _opt_req else True
+            srr.setdefault("_clarify_options", {})["executability_check"] = _exec_opt
+        except Exception as _opt_e:  # noqa: BLE001
+            logger.warning(
+                "[Task] 读取需求级澄清选项失败（按默认开启处理）: {}", str(_opt_e)[:150]
+            )
+
         clarify_result = None
         questions = []
         clarify_error: str | None = None

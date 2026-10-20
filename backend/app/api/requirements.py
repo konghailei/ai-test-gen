@@ -396,6 +396,8 @@ async def upload_requirement(
         raw_text=req.raw_text,
         source_type="markdown",
         created_by="api",
+        # v2.49：需求级可执行性追问开关（上传页可选，默认开）
+        executability_clarify=req.executability_clarify,
     )
     session.add(record)
     await session.flush()  # 确保 Requirement 先落库，避免 AnalysisTask 外键约束 violation
@@ -479,6 +481,7 @@ async def upload_requirement_multi(
     priority: str = Form(default="P2", description="优先级 P0-P3"),
     project_id: str = Form(default="", description="项目/版本 ID"),
     modules: str = Form(default="", description="关联模块（逗号分隔）"),
+    executability_clarify: bool = Form(default=True, description="是否追问可执行性要素缺口"),
     current_user: CurrentUser = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse:
@@ -562,6 +565,8 @@ async def upload_requirement_multi(
         raw_images=[],
         source_type="multi",
         created_by="api",
+        # v2.49：需求级可执行性追问开关（上传页可选，默认开）
+        executability_clarify=executability_clarify,
     )
     session.add(record)
     await session.flush()

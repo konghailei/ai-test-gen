@@ -73,6 +73,9 @@ class Requirement(Base):
 
     # v2.33: 多人协作冲突检测——每次 srr_json 被修改时自增，前端轮询对比 revision 判断是否需要刷新
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    # v2.49：需求分析澄清是否追问「可执行性要素缺口」（入口/字段/场景数据/故障注入）。
+    # 需求级选项由上传页勾选（默认 True）；与系统级 CLARIFY_EXECUTABILITY_GAPS_ENABLED 取 AND。
+    executability_clarify: Mapped[bool] = mapped_column(Boolean, default=True)
 
     __table_args__ = (
         Index("idx_req_product_module", "product_id", "module"),

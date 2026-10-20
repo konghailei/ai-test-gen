@@ -144,13 +144,15 @@ export const requirements = {
       method: 'POST',
       body: JSON.stringify({ raw_text: raw, ...meta }),
     }),
-    uploadMultiFiles: (files: File[], productId = 'PROD-DEFAULT', title = '', projectId = '', modules = '') => {
+    uploadMultiFiles: (files: File[], productId = 'PROD-DEFAULT', title = '', projectId = '', modules = '', executabilityClarify = true) => {
         const form = new FormData()
         files.forEach(f => form.append('files', f))
         form.append('product_id', productId)
         if (title) form.append('title', title)
         if (projectId) form.append('project_id', projectId)
         if (modules) form.append('modules', modules)
+        // v2.49：需求级可执行性追问开关（上传页勾选，默认开）
+        form.append('executability_clarify', String(executabilityClarify))
         const headers: Record<string, string> = {}
         const token = localStorage.getItem('aitestgen_token')
         if (token) headers['Authorization'] = `Bearer ${token}`

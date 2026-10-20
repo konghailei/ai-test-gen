@@ -439,6 +439,14 @@ class Settings(BaseSettings):
     """ClarifyAgent Optional 类问题上限（v2.1：Critical/Important 不限条数）"""
     CLARIFY_OPTIONAL_LIMIT: int = 20
 
+    """可执行性要素缺口检测（v2.49）：在需求分析澄清中追问入口/字段/场景数据/故障注入。
+
+    背景：R4 实测 25.6% 用例不可执行，主因是需求未提供「可执行性四要素」，而
+    生成阶段没有澄清节点（已确认需求强制 enable_clarify=False）——只能在澄清期问。
+    关闭后恢复 v2.48 行为（不新增这 4 类 gap 问题），用于澄清问题过载时一键回退。
+    """
+    CLARIFY_EXECUTABILITY_GAPS_ENABLED: bool = True
+
     # ========== KB 访问日志配置 ==========
     """是否启用 KB 访问日志（v2.1 新增）"""
     KB_ACCESS_LOG_ENABLED: bool = True

@@ -117,8 +117,7 @@ async def init_db() -> None:
             #   又定义了一个同名 "llm_config" 键，Python 字典后者覆盖前者 →
             #   本处四项曾是死代码。已合并到后段唯一条目，**请勿再在此处重复定义**。
             "requirements": [
-                ("project_id", "VARCHAR(64) REFERENCES projects(id)", "project_id"),
-                ("superseded_by", "VARCHAR(64) REFERENCES requirements(id)", "superseded_by"),
+                ("project_id", "VARCHAR(64) REFERENCES projects(id)", "project_id"),                ("superseded_by", "VARCHAR(64) REFERENCES requirements(id)", "superseded_by"),
                 ("supersedes", "VARCHAR(64) REFERENCES requirements(id)", "supersedes"),
                 ("change_type", "VARCHAR(16)", "change_type"),
                 ("change_summary", "TEXT NOT NULL DEFAULT ''", "change_summary"),
@@ -136,6 +135,8 @@ async def init_db() -> None:
                 ("raw_images", "JSON NOT NULL DEFAULT '[]'::json", "raw_images"),
                 # v2.33: 多人协作冲突检测——每次 srr_json 被修改时自增
                 ("revision", "INTEGER NOT NULL DEFAULT 1", "revision"),
+                # v2.49: 需求级「可执行性缺口追问」开关（上传页可选；默认开）
+                ("executability_clarify", "BOOLEAN NOT NULL DEFAULT TRUE", "executability_clarify"),
             ],
             "test_cases": [
                 # 用例归档时间真实字段
