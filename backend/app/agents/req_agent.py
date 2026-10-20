@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any, NamedTuple
 
 
@@ -374,6 +375,71 @@ class ReqAgent:
             interaction_srr=interaction_srr, reused_fps=reused_fps,
         )
 
+    @staticmethod
+    def _path_matches_text(path: str, text: str) -> bool:
+        """判断路径是否出现在原文中（占位段通配，允许原文省略 /api 前缀）。
+
+        `{task_id}` 之类的占位段既匹配原文里的同名占位符，也匹配原文中的具体值
+        （如原文写 `/tasks/TASK-1/cancel`）——按段位通配，不做字符串相等。
+        """
+        def _compile(p: str) -> re.Pattern:
+            segs = []
+            for seg in p.rstrip("/").split("/"):
+                if seg.startswith("{") and seg.endswith("}"):
+                    segs.append(r"\{[^}]*\}|[^/\s`）),;:]+")
+                else:
+                    segs.append(re.escape(seg))
+            return re.compile("/".join(segs))
+
+        candidates = [path]
+        if path.startswith("/api/"):
+            candidates.append(path[4:])  # 原文可能省略 /api 前缀
+        for cand in candidates:
+            try:
+                if _compile(cand).search(text):
+                    return True
+            except re.error:
+                continue
+        return False
+
+    @staticmethod
+    def _filter_api_definitions(items: list, raw_text: str) -> tuple[list, list]:
+        """剔除「需求原文中不存在」的接口定义（v2.49，R4 缺陷根因修复）。
+
+        为什么需要：LLM 提取 `api_definitions` 时，会把**只有能力描述**的部分
+        （如「LLM 调用异常时熔断」「检索不可用时降级 PG」）臆造成 HTTP 接口。
+        自证实测（R3）产出 `/api/llm/fallback`、`/api/retrieval/status` 两条
+        OpenAPI 中不存在的路径，下游 GenAgent 忠实引用 → 用例不可执行。
+
+        判定口径（确定性规则，不经 LLM）：
+          - path 必须在需求原文中出现（按路径段匹配，`{xxx}` 占位段通配）；
+          - 允许原文省略 `/api` 前缀（原文 `/requirements/upload` 与 LLM 补全的
+            `/api/requirements/upload` 视为同一接口）；
+          - 原文为空时**不过滤**（fail-open，避免历史回填等无原文场景误杀）。
+
+        Returns:
+            tuple[list, list]: (保留的接口定义, 被剔除的 path 列表)
+        """
+        if not isinstance(items, list) or not items:
+            return [], []
+        if not (raw_text or "").strip():
+            return items, []
+        norm = re.sub(r"\s+", " ", raw_text)
+        kept: list = []
+        dropped: list = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            path = str(it.get("path") or "").strip()
+            if not path:
+                dropped.append(path)
+                continue
+            if ReqAgent._path_matches_text(path, norm):
+                kept.append(it)
+            else:
+                dropped.append(path)
+        return kept, dropped
+
     def _post_process(
         self,
         srr: dict,
@@ -454,6 +520,21 @@ class ReqAgent:
 
         # v2.1 字段补默认值
         srr.setdefault("api_definitions", [])
+        # v2.49（R4 根因修复）：剔除「需求原文中不存在」的接口定义。
+        # 根因实测：LLM 提取 api_definitions 时，把只有能力描述的部分（熔断 /
+        # 检索降级）臆造成 HTTP 接口（/api/llm/fallback、/api/retrieval/status
+        # 在 OpenAPI 中不存在），下游用例忠实引用 → 不可执行。此处做确定性校验。
+        _kept_api, _dropped_api = self._filter_api_definitions(
+            srr.get("api_definitions") or [], raw_requirement
+        )
+        srr["api_definitions"] = _kept_api
+        if _dropped_api:
+            logger.warning(
+                "[ReqAgent] api_definitions 剔除原文未出现的接口 {} 条（疑似臆造，已阻断下游）: {}",
+                len(_dropped_api), _dropped_api[:5],
+            )
+            # 下划线前缀：仅作审计留痕，不进正式 Schema 契约
+            srr["_api_definitions_dropped"] = _dropped_api[:20]
         srr.setdefault("user_roles", [])
         srr.setdefault("dependencies", [])
         srr.setdefault("ui_rules", [])
