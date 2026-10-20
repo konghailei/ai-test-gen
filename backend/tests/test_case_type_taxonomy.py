@@ -100,6 +100,51 @@ def test_all_groups_have_labels():
         assert g in DETAIL_LABEL or True  # 分组中文名必须有；细分中文名按组代表值覆盖
 
 
+def test_summarize_by_group_merges_boundary_into_functional():
+    """v2.49：统计口径按展示分组——boundary/exception/exploratory 归入 functional。
+
+    这是"用例分类中不应出现独立边界测试"的守卫：按分组聚合后，
+    boundary 不得作为独立 key 出现。
+    """
+    from app.core.case_type_taxonomy import summarize_by_group
+
+    cases = [
+        {"type": "functional"}, {"type": "functional"},
+        {"type": "boundary"}, {"type": "boundary"},
+        {"type": "exception"},
+        {"type": "security"},
+        {"type": "integration"},
+    ]
+    got = summarize_by_group(cases)
+    assert got == {"functional": 5, "security": 1, "scenario": 1}, got
+    assert "boundary" not in got and "exception" not in got
+
+
+def test_summarize_by_group_accepts_type_strings_and_order():
+    from app.core.case_type_taxonomy import GROUP_ORDER, summarize_by_group
+
+    got = summarize_by_group(["boundary", "security", "boundary", "functional"])
+    assert got == {"functional": 3, "security": 1}
+    # 顺序按 GROUP_ORDER
+    assert list(got) == [g for g in GROUP_ORDER if g in got]
+
+
+def test_summarize_by_detail_keeps_subtypes():
+    """细分口径必须保留 boundary（技术覆盖矩阵度量用）。"""
+    from app.core.case_type_taxonomy import summarize_by_detail
+
+    got = summarize_by_detail([{"type": "boundary"}, {"type": "boundary"}, {"type": "exception"}, {}])
+    assert got == {"boundary": 2, "exception": 1, "functional": 1}, got
+
+
+def test_summarize_empty():
+    from app.core.case_type_taxonomy import summarize_by_detail, summarize_by_group
+
+    assert summarize_by_group([]) == {}
+    assert summarize_by_group(None) == {}
+    assert summarize_by_detail([]) == {}
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

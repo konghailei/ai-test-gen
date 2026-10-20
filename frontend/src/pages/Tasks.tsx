@@ -9,6 +9,7 @@ import { requirements as reqApi } from '../api/client'
 import { useProduct } from '../store/ProductContext'
 import type { AnalysisTaskInfo, PhaseTiming } from '../types'
 import { formatDate } from '../utils'
+import { caseTypeGroupLabel } from '../utils/caseType'
 
 const TASK_TYPE_LABELS: Record<string, { label: string; icon: any; color: string }> = {
   upload_requirement: { label: '需求解析', icon: Brain, color: 'primary' },
@@ -602,13 +603,13 @@ export default function Tasks() {
                               <span className="font-mono font-medium" style={{ color: 'var(--foreground)' }}>{r.case_count}</span>
                             </div>
                           )}
-                          {r.type_dist && typeof r.type_dist === 'object' && Object.keys(r.type_dist).length > 0 && (
+                          {(r.type_group_dist || r.type_dist) && typeof (r.type_group_dist || r.type_dist) === 'object' && Object.keys(r.type_group_dist || r.type_dist || {}).length > 0 && (
                             <div className="flex items-start justify-between text-xs gap-2">
                               <span style={{ color: 'var(--foreground-secondary)' }}>类型分布</span>
                               <div className="flex flex-wrap gap-1 justify-end">
-                                {Object.entries(r.type_dist).map(([t, n]: [string, any]) => (
+                                {Object.entries(r.type_group_dist || r.type_dist || {}).map(([t, n]: [string, any]) => (
                                   <span key={t} className="px-1.5 py-0.5 rounded text-xs" style={{ background: 'var(--brand-100)', color: 'var(--brand-700)' }}>
-                                    {t}: {n}
+                                    {caseTypeGroupLabel(t)}: {n}
                                   </span>
                                 ))}
                               </div>

@@ -40,6 +40,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.core.auth import require_write, get_current_user, CurrentUser
 from app.core.orchestrator import orchestrator
 from app.core.product_access import assert_product_visible
+from app.core.case_type_taxonomy import summarize_by_group
 from app.db.database import async_session
 from app.db.models import Requirement, AnalysisTask
 from app.models.api_schemas import GenerateRequest
@@ -523,6 +524,9 @@ async def generate_test_cases(
                         result_json={
                             "case_count": len(done_cases),
                             "type_dist": type_dist,
+                            # v2.49：展示口径分组统计（boundary/exception/exploratory ⊂ functional）。
+                            # 任务列表按此展示，避免"边界测试"独立成类；type_dist 保留细分供技术矩阵。
+                            "type_group_dist": summarize_by_group(done_cases),
                             "case_titles": case_titles,
                             # 同时保存审核与一致性摘要，便于任务管理页展示
                             "review_passed": event.get("review_report", {}).get("passed_cases", 0),

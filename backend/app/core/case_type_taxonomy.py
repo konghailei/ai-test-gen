@@ -155,3 +155,41 @@ def group_sort_key(group_key: str) -> int:
         return GROUP_ORDER.index(group_key)
     except ValueError:
         return len(GROUP_ORDER)
+
+
+def summarize_by_group(cases_or_types: list) -> dict[str, int]:
+    """按展示分组聚合计数（v2.49：统计口径统一，避免"边界测试"独立成类）。
+
+    为什么：历史上统计各自按细分 type 出数，导致生成结果页/任务列表把
+    `boundary` 当成独立分类展示（与 v3.5.11 类型体系「boundary ⊂ functional」
+    的定稿口径不一致）。统计/展示一律走本函数；细分分布需要时用
+    `summarize_by_detail()`（技术覆盖矩阵度量用，不丢信息）。
+
+    Args:
+        cases_or_types: case dict 列表（取 `type` 字段）或 type 字符串列表。
+
+    Returns:
+        dict: 仅含非零分组，按 GROUP_ORDER 排序（如 {"functional": 619, "security": 66, ...}）。
+    """
+    counts: dict[str, int] = {}
+    for item in cases_or_types or []:
+        t = item.get("type") if isinstance(item, dict) else item
+        # 缺省 type 按 functional（与 review_agent._calc_coverage_summary 口径一致）；
+        # 未知英文值仍由 case_type_group 归 other
+        g = case_type_group(str(t or "functional"))
+        counts[g] = counts.get(g, 0) + 1
+    return {g: counts[g] for g in GROUP_ORDER if counts.get(g)}
+
+
+def summarize_by_detail(cases_or_types: list) -> dict[str, int]:
+    """按细分 type 聚合计数（技术覆盖矩阵度量用；不作为展示分类）。
+
+    与 `summarize_by_group` 的关系：本函数保留 boundary/exception/exploratory
+    等细分粒度（等价类划分/边界值/错误推测法的度量需要），仅供内部度量与审计。
+    """
+    counts: dict[str, int] = {}
+    for item in cases_or_types or []:
+        t = item.get("type") if isinstance(item, dict) else item
+        key = str(t or "functional").strip().lower() or "functional"
+        counts[key] = counts.get(key, 0) + 1
+    return counts

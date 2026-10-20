@@ -8,6 +8,7 @@ import SSEProgress from '../components/SSEProgress'
 import PublicationPanel from '../components/PublicationPanel'
 import { formatDate, priorityBadge, statusBadge, confidenceColor, CASE_STATUS_LABELS } from '../utils'
 import { caseTypeLabel } from '../utils/labels'
+import { caseTypeGroupLabel } from '../utils/caseType'
 
 const SSE_STAGES = ['parse', 'select_channel', 'clarify', 'gate', 'impact', 'test_design', 'generate', 'review']
 
@@ -776,7 +777,8 @@ export default function Generate() {
               <div className="flex flex-wrap gap-2">
                 {Object.entries(reviewReport.coverage_summary).map(([type, count]: [string, number]) => (
                   <span key={type} className="badge bg-slate-100 text-slate-600">
-                    {caseTypeLabel(type)}: {count}
+                    {/* v2.49：coverage_summary 已是展示分组口径（boundary ⊂ functional），用组名 */}
+                    {caseTypeGroupLabel(type)}: {count}
                   </span>
                 ))}
               </div>
