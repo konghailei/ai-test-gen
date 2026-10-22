@@ -47,6 +47,7 @@ from __future__ import annotations
 import copy
 import time
 import asyncio
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -61,6 +62,15 @@ from app.config import settings
 from app.core.channel_selector import build_generation_config
 from app.core.quality_gate import quality_gate
 from app.utils.logger import logger
+
+
+# ============================================================================
+# 生成期心跳（P-9 修复，2026-10-22）
+# ============================================================================
+# task_watchdog 按 analysis_tasks.updated_at 判定超时（TASK_STALE_MINUTES，默认 60 分钟）。
+# 生成节点执行期间起后台定时器刷新该列，防止「单个 FP 分片跑很久」被误判 interrupted。
+# 取值须显著小于 TASK_STALE_MINUTES 留容错余量；测试可 monkeypatch 本模块常量。
+HEARTBEAT_INTERVAL_S: float = 120.0
 
 
 # ============================================================================
@@ -1084,6 +1094,58 @@ class Orchestrator:
         return historical_regression, coverage_gaps
 
     async def _gen_node(self, state: PipelineState) -> dict:
+        """节点 7：用例生成（外层壳，负责生成期心跳生命周期）。
+
+        ── P-9 修复（2026-10-22）──
+        问题：task_watchdog 只按 analysis_tasks.updated_at 判定超时（默认 60 分钟），
+        而生成期只有"每个 FP 完成写 checkpoint"才 commit。若单个 FP 分片因超长需求
+        + LLM 多轮重试超过该窗口，看门狗会把活着的任务标成 interrupted；而
+        requirement_tasks._update_task 带 status != "interrupted" 守卫，协程后续
+        再也无法写回结果 —— 数小时算力白费。
+        方案：生成节点执行期间起一个独立后台定时器，每 HEARTBEAT_INTERVAL_S 刷新
+        一次 updated_at，节点退出（正常/异常/取消）时由 finally 取消。
+        失败静默：心跳是尽力而为，绝不能影响生成主流程。
+        """
+        task_id = state.get("task_id", "")
+        hb_task: asyncio.Task | None = None
+        if task_id:
+            hb_task = asyncio.create_task(
+                self._gen_heartbeat_loop(task_id), name=f"gen-heartbeat-{task_id}"
+            )
+        try:
+            return await self._gen_node_inner(state)
+        finally:
+            if hb_task is not None:
+                hb_task.cancel()
+                try:
+                    await hb_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:  # 兜底：取消过程中的非 Cancelled 异常不掩盖主异常
+                    logger.debug("[Orchestrator] 心跳任务退出异常（忽略）: {}", str(e)[:120])
+
+    async def _gen_heartbeat_loop(self, task_id: str) -> None:
+        """生成期心跳：周期性刷新 analysis_tasks.updated_at，防止看门狗误判超时。"""
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+            try:
+                from app.db.database import async_session
+                from app.db.models import AnalysisTask
+                from sqlalchemy import update as _upd
+                async with async_session() as _s:
+                    await _s.execute(
+                        _upd(AnalysisTask)
+                        .where(
+                            AnalysisTask.id == task_id,
+                            AnalysisTask.status == "running",
+                        )
+                        .values(updated_at=datetime.now(timezone.utc))
+                    )
+                    await _s.commit()
+            except Exception as e:
+                logger.debug("[Orchestrator] 心跳刷新失败（不阻断）: {}", str(e)[:120])
+
+    async def _gen_node_inner(self, state: PipelineState) -> dict:
         """节点 7：GenAgent 生成测试用例。
 
         对应 docs/00 §3 阶段⑤。
