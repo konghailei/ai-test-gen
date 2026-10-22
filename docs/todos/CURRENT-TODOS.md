@@ -35,7 +35,7 @@
 | 5 | **P-4 approve_correction 非幂等**：向量先写、DB 状态靠请求尾 commit；独立片段分支重试产生重复孤儿向量 | KNOWN-ISSUES P-4 | ⬜ 待立项（**已降级**：仅剩「无有效目标→独立片段归档」兜底分支+崩溃窗口可产生孤儿；FP 分支同 ID upsert 幂等，需求级 v3.2 原位合并幂等） | 建议 🟢（原 🟡） |
 | 6 | ~~**P-9 watchdog 无独立心跳**：判定仅看 updated_at，长 LLM 段 >60 分钟会被误标 interrupted 且因 status 守卫无法写回，任务永久中断~~ | KNOWN-ISSUES P-9 | ✅ **已修（v4.1.2，2026-10-22，commit `d2d5225`）** | `_gen_node` 外层起后台心跳循环，每 120s 刷新 `updated_at`（仅 running 态），节点退出 finally 取消；新增 6 条守卫单测 + 真实 PG 端到端验证 |
 | 7 | **假配置清理**：`MATCH_ENABLE_GRAPH` / `RERANKER_THRESHOLD` 零消费点 | 2026-10-22 体检发现 | ✅ **已删（v4.1.2，commit `0352eb3`）** | 全仓历史零消费点（`git log -S` 查证），删除零影响 |
-| 8 | **req_pats 死功能**：需求模式库三件套从未启用（0 数据 / 0 调用方） | 2026-10-22 体检发现 | ✅ **已删（v4.1.2，commit `1beb69e`）** | 表 + Milvus 集合配置 + 3 个 API + 前端说明已移除；**Milvus 物理集合 `aitestgen_req_pats`（0 条）仍需运维手动 drop** |
+| 8 | **req_pats 死功能**：需求模式库三件套从未启用（0 数据 / 0 调用方） | 2026-10-22 体检发现 | ✅ **已删（v4.1.2，commit `1beb69e`）** | 表 + Milvus 集合配置 + 3 个 API + 前端说明已移除；**物理残留也已清理**：PG `DROP TABLE req_patterns`、Milvus `drop_collection(aitestgen_req_pats)`，删后 `init_db` 未重建、容器重启正常、回归 487 passed |
 | 7 | **P-10 反代共享限流桶**：用 request.client.host，无 XFF 解析（auth.py 明确拒绝信任该头） | KNOWN-ISSUES P-10 | ⬜ 部署决策 | 内网单机部署可接受；上反代需定方案 |
 | 8 | **P-2 fp_set_sha256 只哈希 id** | KNOWN-ISSUES P-2 | ⛔ 不修复 | 有意设计（以 id 为身份），仅展示层影响 |
 
