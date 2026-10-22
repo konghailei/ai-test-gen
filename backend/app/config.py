@@ -410,8 +410,9 @@ class Settings(BaseSettings):
     """是否启用 RRF 融合"""
     MATCH_ENABLE_RRF: bool = True
 
-    """是否启用图谱扩展"""
-    MATCH_ENABLE_GRAPH: bool = False
+    # （2026-10-22 移除 MATCH_ENABLE_GRAPH：initial commit 引入但历史上从未有消费点，假配置）
+    # （2026-10-22 移除 RERANKER_THRESHOLD：v1.1.0 引入但从未接线，实际触发条件是
+    #  hybrid_search.py 中 len(fused) > settings.MATCH_FINAL_N，改它无效）
 
     # ========== 重排器配置 ==========
     """是否启用 Cross-Encoder 重排（bge-reranker-base）"""
@@ -422,9 +423,6 @@ class Settings(BaseSettings):
 
     """重排模型计算设备"""
     RERANKER_DEVICE: str = "cpu"
-
-    """重排 Top-N 数量（超过此数量才触发重排）"""
-    RERANKER_THRESHOLD: int = 5
 
     # ========== 质量门禁配置 ==========
     """正常模式质量评分通过阈值（docs/01 §5.2）"""
