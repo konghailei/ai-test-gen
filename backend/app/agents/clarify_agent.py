@@ -101,6 +101,88 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
     # 结构缺口最多注入几个（避免问题列表被规则项刷屏）
     _STRUCTURE_GAP_MAX: int = 4
 
+    # 可执行性要素缺口最多注入几个（4 类，每类至多 1 条）
+    _EXEC_GAP_MAX: int = 4
+
+    def _executability_gap_questions(self, srr: dict) -> list[dict]:
+        """把可执行性要素缺口（规则层）确定性地转为澄清问题（v4.1.2）。
+
+        ## 为什么需要这个方法（2026-10-22 v2.49 端到端实测缺陷）
+
+        `_detect_executability_gaps` 的产出经 ②b 只被**塞进
+        `completeness["important_missing"]`**，随后：
+          - 只被**计数**（quality_report / 日志）；
+          - 被打进 `build_user_prompt` 当 LLM 的参考材料；
+          - **没有任何确定性到达 questions 的路径**。
+
+        后果：同一份需求文档跑两次，规则层稳定检出 8 条 gap（四类齐备），
+        但最终澄清问题里 gap 类**一次 2 条、一次 0 条**——转不转成问题完全取决于
+        LLM 是否"愿意采纳"。实测 10 条澄清问题中 gap 类 0 条。
+
+        而 R4 实测 9 条不可执行用例的归因是：入口定位缺失 5、故障注入缺失 2、
+        接口未指明 2——**7/9 正好落在本规则该覆盖的范围内**，说明判据有效，
+        失效的只是"最后一步交付"。
+
+        ## 设计对齐
+
+        与 ⑧d「结构缺口驱动澄清」、⑧e「原型缺口驱动澄清」同构：纯正则检测（零 LLM）、
+        确定性强，**跳过 KB、直接作为人工问题**（KB 无法回答"你们的入口菜单在哪"）。
+
+        开关与本检测的其他环节完全一致，沿用同一对 AND 条件：
+          系统级 `settings.CLARIFY_EXECUTABILITY_GAPS_ENABLED`
+          需求级 `srr["_clarify_options"]["executability_check"]`
+        **关掉后不仅不检测，也不会注入问题**——不会出现"关了还在问"的假开关。
+
+        Returns:
+            list[dict]: 澄清问题列表（结构对齐 ⑧d/⑧e）
+        """
+        try:
+            from app.agents.clarify_question_gen import settings as _cq_settings
+            if not getattr(_cq_settings, "CLARIFY_EXECUTABILITY_GAPS_ENABLED", True):
+                return []
+            _opts = (srr or {}).get("_clarify_options") or {}
+            if not bool(_opts.get("executability_check", True)):
+                return []
+            from app.agents.clarify_question_gen import ClarifyQuestionGenMixin
+            gaps: list[dict] = []
+            ClarifyQuestionGenMixin._detect_executability_gaps(
+                str((srr or {}).get("_raw_text", "") or ""), srr or {}, gaps
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[ClarifyAgent] 可执行性缺口检测失败（不阻断澄清）: {}", str(e)[:150]
+            )
+            return []
+
+        out: list[dict] = []
+        for g in gaps:
+            if len(out) >= self._EXEC_GAP_MAX:
+                break
+            _f = str(g.get("field", "") or "")
+            if not _f.startswith("prd.executability."):
+                continue
+            question = (g.get("suggested_question") or "").strip()
+            if not question:
+                continue
+            _opts_list = [str(o) for o in (g.get("suggested_options") or []) if str(o).strip()]
+            out.append({
+                "id": f"EXG{len(out) + 1:03d}",
+                "field": _f,
+                # 可执行性缺口直接决定用例能否落地执行，不是"可选追问"
+                "priority": "important",
+                # 归 completeness：语义检测层只接受 completeness/ambiguity/conflict，
+                # 自定义 category 会被下游过滤；来源靠 _source 区分。
+                "category": "completeness",
+                "question": question,
+                "context": str(g.get("description", "") or ""),
+                "default_answer": "",
+                "input_type": "select" if _opts_list else "text",
+                "options": _opts_list,
+                # 标记来源，便于前端/排查区分「规则缺口」与「LLM 生成」
+                "_source": "executability_gap",
+            })
+        return out
+
     def _prototype_gap_questions(self, srr: dict) -> list[dict]:
         """把原型专属缺口（规则层）确定性地转为澄清问题（docs/17 §4.4.2）。
 
@@ -1385,6 +1467,28 @@ class ClarifyAgent(ClarifyQuestionGenMixin, ClarifyDetectMixin, ClarifyKbMixin, 
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "[ClarifyAgent] 原型缺口注入失败（不阻断澄清）: {}", str(e)[:150]
+            )
+
+        # ⑧f v4.1.2：可执行性要素缺口驱动澄清（与 ⑧d/⑧e 同构，规则层确定性注入）
+        #   规则层 `_detect_executability_gaps` 原先只进 `completeness["important_missing"]`
+        #   当 LLM 参考，无确定性到达 questions 的路径 → v2.49 实测稳定检出 8 条、
+        #   最终 0 条成为问题（同文档上次 2 条）。此处补齐：四类要素缺口 → 直接人工问题。
+        #   开关沿用系统级 CLARIFY_EXECUTABILITY_GAPS_ENABLED AND 需求级
+        #   executability_check，与本检测其他环节一致。
+        try:
+            exec_gap_questions = self._executability_gap_questions(srr)
+            if exec_gap_questions:
+                questions.extend(exec_gap_questions)
+                logger.info(
+                    "[ClarifyAgent] 可执行性缺口驱动澄清: 注入 {} 个（字段={}）",
+                    len(exec_gap_questions),
+                    [q["field"].split(".", 1)[-1] for q in exec_gap_questions],
+                )
+            else:
+                logger.debug("[ClarifyAgent] 可执行性缺口驱动澄清: 本次无注入（无缺口或开关关闭）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "[ClarifyAgent] 可执行性缺口注入失败（不阻断澄清）: {}", str(e)[:150]
             )
 
         # ⑧b 需求模式库缺失维度（docs/01 §4.3.3 遗漏检测）

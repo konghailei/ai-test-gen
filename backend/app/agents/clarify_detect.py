@@ -300,6 +300,18 @@ class ClarifyDetectMixin:
             field = str(gap.get("field", "") or "").strip()
             if not field:
                 return
+            # v4.1.2：可执行性要素缺口（prd.executability.*）**不走 KB 查询路径**。
+            #
+            # 为什么：KB 里存的是历史需求内容，不可能回答"你们的入口菜单在左侧还是顶部"
+            # "这个故障谁来 mock"——这些是**只有当前文档的写作者知道**的事实。
+            # 放它们进 KB 查询会有三重副作用（2026-10-22 实测）：
+            #   ① 必然 answered=0 → 落成 `kb_` 前缀人工题，挤占 MAX_KB_QUERIES 名额；
+            #   ② 走 L~1268/1280 的模板重建，`_source`/`input_type`/`options` **全部丢失**，
+            #      4 个候选入口被清空成纯文本框；
+            #   ③ 与 ⑧f 的确定性注入重复，靠语义去重留一条，留错的那条恰好是退化版。
+            # 它们由 clarify_agent ⑧f `_executability_gap_questions` 确定性直接注入。
+            if field.startswith("prd.executability."):
+                return
             # 优先用缺口自带的建议问题（规则层 PRD/歧义检测已生成），否则用描述
             question = (
                 gap.get("_suggested_question")

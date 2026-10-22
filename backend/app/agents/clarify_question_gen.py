@@ -451,9 +451,19 @@ class ClarifyQuestionGenMixin:
         if not questions:
             return questions
 
+        # v4.1.2：规则层确定性来源跳过本校验。
+        # 本函数针对的是「LLM 精炼阶段 options 与问题 index 错乱」——LLM 才会错位，
+        # 规则模板产出的 options 与 question 是**同一处代码成对写死**的，不存在错位可能。
+        # 它们的措辞天然不重叠（问句说「菜单/页面入口」，选项说「左侧导航/独立路由」），
+        # 反而会被重叠检测误判清空。实测：入口定位题的 5 个候选入口被全清。
+        _DETERMINISTIC_SOURCES = ("structure_gap", "prototype_gap", "executability_gap")
+
         fixed: list[dict] = []
         fixed_count = 0
         for q in questions:
+            if str(q.get("_source", "") or "") in _DETERMINISTIC_SOURCES:
+                fixed.append(q)
+                continue
             q_text = (q.get("question", "") or "").strip()
             opts = q.get("options") or []
             input_type = q.get("input_type", "text") or "text"
