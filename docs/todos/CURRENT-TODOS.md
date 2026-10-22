@@ -1,6 +1,6 @@
 # 当前有效待办清单（CURRENT-TODOS）
 
-> 更新日期：2026-10-16 ｜ 系统版本：v4.1.1
+> 更新日期：2026-10-22 ｜ 系统版本：v4.1.2
 > 维护纪律见 `todos/README.md`。**每条待办均经 git log + 代码双重核实，非文档快照照抄。**
 
 ---
@@ -32,8 +32,10 @@
 | **T5** | **用例生成退化为"针对原文"而非依据 SRR（P1，2026-10-16 实测）**：SRR 落库时携带 `_raw_text`（**原文全文**）、`_clarify_history/_state`、`_kb_query_logs` 等内部字段，legacy 数据还把全文塞在 `additional_details`（v2.40 已废弃）。而 `build_user_prompt` 用 `json.dumps(srr)` 整体注入 prompt → **原文全文进入生成上下文**，与 `_parse_node` 约定（"生成用例必须使用已确认的 SRR，不允许回退到重新解析原始文本"）直接相悖；全量通道 prompt 达 12K~52K，绝大部分是无关正文。**修复（v4.1.1）**：新增 `sanitize_srr_for_generation()`，剥离全部下划线前缀键 + `raw_text/raw_requirement/supplementary_text/additional_details` | 2026-10-16 实测 | ✅ **已修（v4.1.1，2026-10-16 实测）** | 实测 8 条需求：全量通道 prompt 31882→12645 / 52454→15865 字，原文探针命中率 **100% → 0%**；FP 分片通道同步 0 命中 |
 | **A** | **知识问答/澄清检索面收敛为需求权威层（v4.1 已实施）**：新增 `KB_QA_INCLUDE_CASES=False`（默认关）+ `hybrid_search/milvus_store` 支持 `doc_type` 多值并集，检索面 = `requirement`+`functional_point`+`fp_crsr`，**排除用例**（用例 cos 0.67-0.69 系统性高于需求 0.47-0.50，混合排序时 top-8 被 test_case 100% 占满 → 循环权威）。附带修 BM25 路缺 `type` 元数据（导致标题显示"（已删除）"、权威层级误取 L1）。**实测**：问答来源 100% 为 functional_point/fp_crsr，top-1 sim 0.6904 直接命中 `BR-UPLOAD-002 单文件大小≤10MB`（修复前答错为 100MB）。**遗留**：排除用例后 SRR 未覆盖的事实答不出 → 见 **T4** | 自证第一/二轮实测 | ✅ 已实施（v4.1），副作用见 T4 | 若 SRR 保真度修好（T4），可评估是否重新开启用例佐证 |
 | 4 | **L-14 断路器 provider 级重构**：record_failure 全函数仅一处且在 provider 循环之后；HALF_OPEN 直接 return True 无并发探测上限 | KNOWN-ISSUES L-14 | ⬜ 暂缓 | 缓解仍在：provider 级连续失败 3 次禁用 600s |
-| 5 | **P-4 approve_correction 非幂等**：向量先写、DB 状态靠请求尾 commit；独立片段分支重试产生重复孤儿向量 | KNOWN-ISSUES P-4 | ⬜ 待立项 | 建议 🟡 |
-| 6 | **P-9 watchdog 无独立心跳**：判定仅看 updated_at，长 LLM 段 >60 分钟会被误标 interrupted 且因 status 守卫无法写回，任务永久中断 | KNOWN-ISSUES P-9 | ⬜ 待立项 | 建议 🟡 |
+| 5 | **P-4 approve_correction 非幂等**：向量先写、DB 状态靠请求尾 commit；独立片段分支重试产生重复孤儿向量 | KNOWN-ISSUES P-4 | ⬜ 待立项（**已降级**：仅剩「无有效目标→独立片段归档」兜底分支+崩溃窗口可产生孤儿；FP 分支同 ID upsert 幂等，需求级 v3.2 原位合并幂等） | 建议 🟢（原 🟡） |
+| 6 | ~~**P-9 watchdog 无独立心跳**：判定仅看 updated_at，长 LLM 段 >60 分钟会被误标 interrupted 且因 status 守卫无法写回，任务永久中断~~ | KNOWN-ISSUES P-9 | ✅ **已修（v4.1.2，2026-10-22，commit `d2d5225`）** | `_gen_node` 外层起后台心跳循环，每 120s 刷新 `updated_at`（仅 running 态），节点退出 finally 取消；新增 6 条守卫单测 + 真实 PG 端到端验证 |
+| 7 | **假配置清理**：`MATCH_ENABLE_GRAPH` / `RERANKER_THRESHOLD` 零消费点 | 2026-10-22 体检发现 | ✅ **已删（v4.1.2，commit `0352eb3`）** | 全仓历史零消费点（`git log -S` 查证），删除零影响 |
+| 8 | **req_pats 死功能**：需求模式库三件套从未启用（0 数据 / 0 调用方） | 2026-10-22 体检发现 | ✅ **已删（v4.1.2，commit `1beb69e`）** | 表 + Milvus 集合配置 + 3 个 API + 前端说明已移除；**Milvus 物理集合 `aitestgen_req_pats`（0 条）仍需运维手动 drop** |
 | 7 | **P-10 反代共享限流桶**：用 request.client.host，无 XFF 解析（auth.py 明确拒绝信任该头） | KNOWN-ISSUES P-10 | ⬜ 部署决策 | 内网单机部署可接受；上反代需定方案 |
 | 8 | **P-2 fp_set_sha256 只哈希 id** | KNOWN-ISSUES P-2 | ⛔ 不修复 | 有意设计（以 id 为身份），仅展示层影响 |
 
