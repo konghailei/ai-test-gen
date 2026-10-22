@@ -9,11 +9,10 @@
 - docs/02-knowledge-base.md §2（双引擎存储架构）
 - docs/02-knowledge-base.md §9（大规模检索优化：HNSW + 分区）
 
-Collection 设计（5 个，>10w 条优化策略）：
+Collection 设计（4 个，>10w 条优化策略）：
 - aitestgen_requirements  — 需求向量（ID: requirement ID）
 - aitestgen_test_cases    — 用例向量（ID: test case ID）
 - aitestgen_patterns      — 测试模式向量（ID: pattern ID）
-- aitestgen_req_pats      — 需求模式向量（ID: requirement pattern ID）
 - aitestgen_errors        — 错误案例向量（ID: error case ID）
 
 索引：HNSW（M=16, efConstruction=200, ef=64），适合 >10w 向量
@@ -204,10 +203,6 @@ COLLECTION_CONFIGS = {
     },
     "patterns": {
         "description": "测试模式向量",
-        "dim": 1024,
-    },
-    "req_pats": {
-        "description": "需求模式向量",
         "dim": 1024,
     },
     "errors": {
@@ -1349,57 +1344,6 @@ class MilvusVectorStore:
     def search_similar_patterns(self, query: str, top_k: int = 5) -> list[dict]:
         """检索相似模式（兼容旧接口，等价于 search_patterns）。"""
         return self.search_patterns(query, top_k=top_k)
-
-    # ========================================================================
-    # 需求模式向量操作（doc-02 §6 需求模式库）
-    # ========================================================================
-
-    def add_req_pattern(self, pattern_id: str, name: str, pattern_json: dict,
-                        modules: list[str] | None = None) -> None:
-        """添加需求模式到向量库。
-
-        Args:
-            pattern_id: 模式 ID
-            name: 模式名称
-            pattern_json: 模式 JSON 数据
-            modules: 适用的模块列表
-        """
-        self._ensure_connected()
-        text = f"{name}: {json.dumps(pattern_json, ensure_ascii=False)}"
-        meta = {
-            "name": name,
-            "doc_type": "req_pattern",
-            "modules": ",".join(modules) if modules else "",
-        }
-        self._upsert("req_pats", [pattern_id], [text], [meta])
-
-    def search_req_patterns(self, query: str, top_k: int = 3,
-                            module: str | None = None) -> list[dict]:
-        """检索需求模式。
-
-        Args:
-            query: 查询文本
-            top_k: Top-K
-            module: 按模块过滤（可选）
-        """
-        self._ensure_connected()
-        where_filter = None  # modules 以逗号分隔字符串存储，无法用 expr 直接过滤
-        results = self._search("req_pats", query, top_k=top_k, where_filter=where_filter)
-        if module:
-            results = [
-                r for r in results
-                if module in (r.get("metadata", {}).get("modules", "") or "").split(",")
-            ]
-        return results
-
-    def delete_req_pattern(self, pattern_id: str) -> None:
-        """删除需求模式。"""
-        self._ensure_connected()
-        collection = self._get_collection("req_pats")
-        collection.delete(f'id == "{_safe_id(pattern_id, "pattern_id")}"')
-        # v2.8.51: 必须 flush 才能让 delete 在 query/num_entities 中生效
-        # （与 delete_requirement / delete_test_case 保持一致，BOUNDED 一致性下否则仍返回已删除记录）
-        collection.flush()
 
     # ========================================================================
     # 错误案例操作

@@ -80,7 +80,7 @@ async def init_db() -> None:
     from app.db.models import (
         Requirement, TestCase, TestPattern, ErrorCase, GenerationBatch,
         ReqDependency, Traceability, LLMConfig, Product, Project, Module,
-        ModuleDependency, KnowledgeQA, User, PromptOverride, ReqPattern,
+        ModuleDependency, KnowledgeQA, User, PromptOverride,
         KBSetting, AnalysisTask, FPDependencyHistory, PromptHistory,
         LLMCallLog, OperationLog,
         # v2.45: 补全 v2.45 新增模型的导入（虽然 Base.metadata.create_all 会自动建表，

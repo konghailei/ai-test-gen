@@ -1430,6 +1430,13 @@ weight = base_weight
 
 ## 6. 需求模式库 (Requirement Pattern Library)
 
+> **⚠️ 本节自 2026-10-22 起为历史设计（未实施，已移除）**
+> 需求模式库（PG `req_patterns` 表 + Milvus `req_pats` 集合 + 检索 API）在 v1.1.0 引入，
+> 但**预定义模式 `REQUIREMENT_PATTERNS` 从未落地为 seed 数据，`search_req_patterns` 全仓零调用方**。
+> ClarifyAgent 的遗漏检测实际走的是规则层 gap 检测 + completeness 清单（见
+> `backend/app/agents/clarify_agent.py` 的 ⑧d/⑧e/⑧f 与 `core/case_executability.py`）。
+> 该功能已随 v4.1.2 从代码、模型、向量库中移除，本节仅作设计沿革保留。
+
 需求模式库存储**同类需求的抽象维度集合**，是 ClarifyAgent 遗漏检测的数据源。
 
 ### 6.1 与测试模式库的区别

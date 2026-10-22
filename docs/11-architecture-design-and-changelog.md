@@ -383,9 +383,13 @@ START → parse → select_channel
 | `kb_settings` | KB 专属设置 | key, value |
 | `roles` / `users` | 角色 / 用户 | RBAC 权限模型 |
 | `prompt_overrides` | 提示词覆盖 | module, name, value, default_value |
-| `req_patterns` | 需求模式库 | modules, required_dimensions, common_boundary, risk_points |
+| ~~`req_patterns`~~ | 需求模式库 | modules, required_dimensions, common_boundary, risk_points |
 
-### 4.2 Milvus 向量库（5 个 Collection）
+> **⚠️ 2026-10-22 更新**：`req_patterns` 表及 Milvus `req_pats` 集合**已删除**（v4.1.2）。
+> 该设计自 v1.1.0 引入后从未落地 seed 数据、`search_req_patterns` 零调用方；
+> ClarifyAgent 的遗漏检测实际由规则层 gap 检测承担。下表 Collection 数已由 5 变 4。
+
+### 4.2 Milvus 向量库（4 个 Collection）
 
 由 [db/milvus_store.py](file:///e:/git-down/ai-test-gen/backend/app/db/milvus_store.py) 管理：
 
@@ -394,7 +398,7 @@ START → parse → select_channel
 | `requirements` | 归档需求嵌入 | SRR JSON 的文本化 |
 | `test_cases` | 用例嵌入 | UTCF case_json |
 | `patterns` | 测试模式嵌入 | pattern_json |
-| `req_pats` | 需求模式嵌入 | req_patterns.pattern_json |
+| ~~`req_pats`~~ | 需求模式嵌入（**已删除 2026-10-22**） | req_patterns.pattern_json |
 | `errors` | 错误案例嵌入 | error_detail |
 
 **嵌入模型**：`BAAI/bge-large-zh-v1.5`（本地 sentence-transformers）。

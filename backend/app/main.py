@@ -387,7 +387,7 @@ def _check_vector_store() -> dict:
         counts = {}
         all_empty = True
         any_coll_error = False
-        for coll_key in ("requirements", "test_cases", "patterns", "req_pats", "errors"):
+        for coll_key in ("requirements", "test_cases", "patterns", "errors"):
             try:
                 collection = vector_store._get_collection(coll_key)
                 count = collection.num_entities

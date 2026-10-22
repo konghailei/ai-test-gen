@@ -6,6 +6,8 @@ PostgreSQL 原生支持 JSON/JSONB/TEXT[]/TIMESTAMPTZ/GIN 索引。
 设计依据：
 - templates/knowledge-base-schema.json（5 张核心表）
 - docs/02-knowledge-base.md:319-453（额外 3 张表：req_dependencies / traceability / req_patterns）
+  （req_patterns 表及其向量库 req_pats 已于 2026-10-22 删除：设计从未落地、零消费方，
+   遗漏检测实际由规则层 gap 检测承担）
 """
 
 from __future__ import annotations
@@ -709,36 +711,6 @@ class PromptHistory(Base):
 
     __table_args__ = (
         Index("idx_prompthist_prompt", "prompt_id", "changed_at"),
-    )
-
-
-# ============================================================================
-# 14. 需求模式表（req_patterns，doc-02 §6 需求模式库）
-# ============================================================================
-
-class ReqPattern(Base):
-    """需求模式库表。
-
-    对应 docs/02-knowledge-base.md §6。
-    存储同类需求的抽象维度集合，供 ClarifyAgent 遗漏检测使用。
-    与 Milvus req_pats collection 配合，支持语义检索同类需求模式。
-    """
-    __tablename__ = "req_patterns"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(128), unique=True, index=True, comment="模式名称")
-    modules: Mapped[list] = mapped_column(JSON, default=list, comment="适用模块列表")
-    required_dimensions: Mapped[list] = mapped_column(JSON, default=list, comment="该类需求的必备维度")
-    common_boundary: Mapped[list] = mapped_column(JSON, default=list, comment="常见边界条件")
-    risk_points: Mapped[list] = mapped_column(JSON, default=list, comment="常见风险点")
-    pattern_json: Mapped[dict] = mapped_column(JSON, default=dict, comment="完整模式定义")
-    usage_count: Mapped[int] = mapped_column(Integer, default=0, comment="被引用次数")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc)
     )
 
 

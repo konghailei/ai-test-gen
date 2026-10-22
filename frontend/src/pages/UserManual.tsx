@@ -224,7 +224,7 @@ const SECTIONS: ManualSection[] = [
       },
       {
         step: '向量化',
-        detail: 'bge-large-zh（中文文本向量化模型）将 SRR 文本编码为 1024 维向量，写入 Milvus 的 5 个集合：requirements（需求）/ test_cases（用例）/ patterns（测试模式）/ req_pats（需求模式）/ errors（错误案例）',
+        detail: 'bge-large-zh（中文文本向量化模型）将 SRR 文本编码为 1024 维向量，写入 Milvus 的 4 个集合：requirements（需求）/ test_cases（用例）/ patterns（测试模式）/ errors（错误案例）',
       },
       {
         step: '异步任务',
@@ -488,7 +488,7 @@ const SECTIONS: ManualSection[] = [
     ],
     config: [
       { key: 'Embedding 模型', value: 'bge-large-zh', note: '本地部署，基础镜像内置 /models 目录' },
-      { key: 'Milvus 集合', value: 'requirements / test_cases / patterns / req_pats / errors', note: '共 5 个独立集合' },
+      { key: 'Milvus 集合', value: 'requirements / test_cases / patterns / errors', note: '共 4 个独立集合' },
       { key: 'MinIO + etcd', value: 'Milvus 存储后端', note: 'S3 兼容对象存储 + 元数据，非独立向量库' },
       { key: '诊断端点', value: 'GET /knowledge/diagnostics', note: '管理员可查看连接状态、集合数量' },
     ],
