@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1097,7 +1098,12 @@ async def kqa_archive(
     Returns:
         ApiResponse: data 含 archived_id / archived_type / title
     """
-    result = await session.execute(select(KnowledgeQA).where(KnowledgeQA.id == req.id))
+    from app.core.vector_outbox import enqueue as _outbox_enqueue
+
+    # v4.1.3：行锁 + 幂等判定放在锁内，避免并发双击双建归档条目
+    result = await session.execute(
+        select(KnowledgeQA).where(KnowledgeQA.id == req.id).with_for_update()
+    )
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail=f"问答记录不存在: {req.id}")
@@ -1155,25 +1161,24 @@ async def kqa_archive(
         )
         session.add(new_req)
 
-        # 异步双写向量库（Celery 不可用时降级为同步）
-        try:
-            from app.tasks.celery_app import celery_app
-            archive_meta = {
-                "title": title, "type": "knowledge_qa", "qa_id": req.id,
-                "product_id": real_product_id,
-                "status": "archived",
-                "archived_at": archived_now.isoformat(),
-            }
-            if celery_app is not None:
-                celery_app.send_task(
-                    "app.tasks.embedding_tasks.embed_and_store_requirement",
-                    args=[archived_id, new_req.srr_json, archive_meta],
-                    queue="embedding",
-                )
-            else:
-                await asyncio.to_thread(vector_store.add_requirement, archived_id, new_req.srr_json, metadata=archive_meta)
-        except Exception as e:
-            logger.warning("[API/knowledge-qa] 向量库归档失败: {}", str(e)[:100])
+        # v4.1.3（P-4 同族）：改为同事务入出箱。原实现是先 send_task/同步写
+        # Milvus、再靠请求尾 commit 落 PG —— 中间失败即"向量有、PG 无"的孤儿，
+        # 且 record.archived 未置位时重试会再建一条。出箱保证两者同生同死。
+        archive_meta = {
+            "title": title, "type": "knowledge_qa", "qa_id": req.id,
+            "product_id": real_product_id,
+            "status": "archived",
+            "archived_at": archived_now.isoformat(),
+        }
+        _outbox_enqueue(
+            session,
+            aggregate_type="requirement",
+            aggregate_id=archived_id,
+            action="upsert",
+            revision=int(archived_now.timestamp() * 1000),
+            payload={"requirement_json": new_req.srr_json, "metadata": archive_meta},
+            created_by="kqa_archive",
+        )
 
     elif req.archive_type == "test_case":
         # 归档为测试用例
@@ -1200,23 +1205,21 @@ async def kqa_archive(
         )
         session.add(new_case)
 
-        # 异步双写向量库（Celery 不可用时降级为同步）
-        try:
-            from app.tasks.celery_app import celery_app
-            archive_meta = {
-                "title": title, "type": "knowledge_qa", "qa_id": req.id,
-                "product_id": real_product_id,
-            }
-            if celery_app is not None:
-                celery_app.send_task(
-                    "app.tasks.embedding_tasks.embed_and_store_test_case",
-                    args=[archived_id, new_case.case_json, archive_meta],
-                    queue="embedding",
-                )
-            else:
-                await asyncio.to_thread(vector_store.add_test_case, archived_id, new_case.case_json, metadata=archive_meta)
-        except Exception as e:
-            logger.warning("[API/knowledge-qa] 向量库归档失败: {}", str(e)[:100])
+        # v4.1.3（P-4 同族）：同事务入出箱（理由同 requirement 分支）
+        archive_meta = {
+            "title": title, "type": "knowledge_qa", "qa_id": req.id,
+            "product_id": real_product_id,
+            "case_type": "functional",
+        }
+        _outbox_enqueue(
+            session,
+            aggregate_type="test_case",
+            aggregate_id=archived_id,
+            action="upsert",
+            revision=int(archived_now.timestamp() * 1000),
+            payload={"case_json": new_case.case_json, "metadata": archive_meta},
+            created_by="kqa_archive",
+        )
 
     else:
         raise HTTPException(status_code=400, detail=f"不支持的归档类型: {req.archive_type}")
@@ -1227,9 +1230,13 @@ async def kqa_archive(
         record.archived_type = req.archive_type
         record.archived_id = archived_id
         record.updated_at = datetime.now(timezone.utc)
+        # v4.1.3：显式提交——归档条目、问答状态、向量出箱三者同一事务
+        await session.commit()
         logger.info("[API/knowledge-qa] 归档完成: {} -> {} ({})", req.id, archived_id, req.archive_type)
     except Exception as e:
+        await session.rollback()
         logger.error("[API/knowledge-qa] 更新归档记录失败: {}", str(e)[:200])
+        raise HTTPException(status_code=500, detail=f"归档失败: {str(e)[:100]}")
 
     return ApiResponse(
         success=True,
@@ -1238,6 +1245,7 @@ async def kqa_archive(
             "archived_id": archived_id,
             "archived_type": req.archive_type,
             "title": title,
+            "vector_delivery": "outbox",
         },
     )
 
@@ -1453,12 +1461,17 @@ async def kqa_approve_correction(
     session: AsyncSession = Depends(get_session),
     current_user: dict = Depends(get_current_user),
 ) -> ApiResponse:
-    """审核通过纠正内容，自动归档到向量库。
+    """审核通过纠正内容，自动归档到知识库（PG 事务 + 向量出箱，幂等）。
 
     审核通过后：
-    - requirement 颗粒度：调用 /archive 逻辑归档为新需求
-    - functional_point 颗粒度：定位原 FP 向量，删除后重新嵌入纠正内容
-      实现"部分纠正"，不影响其他正确 FP 的向量
+    - functional_point 颗粒度：重嵌该 FP 向量（同 fp_id 覆盖）
+    - requirement 颗粒度：指定来源需求 → 原位合并到最新版；未指定 → 独立片段归档
+
+    v4.1.3（P-4 修复）：原实现「先写 Milvus、后靠请求尾 commit 落 PG 状态」——
+    ① 两系统非原子，中途崩溃留下已生效的向量 + 仍为 pending_review 的记录，
+    重试即重复归档；② 并发双击两个请求都能读到 pending_review，双写双向量。
+    现改为：**行锁认领状态 → 全部变更（含向量投递意图）同一事务提交**，
+    向量由 `vector_outbox` relay 异步幂等投递。语义：本接口一次成功 == 至多一次副作用。
 
     Args:
         record_id: 问答记录 ID
@@ -1469,10 +1482,33 @@ async def kqa_approve_correction(
     Returns:
         ApiResponse: data 含 archived_id / archived_type / correction_target_type
     """
-    result = await session.execute(select(KnowledgeQA).where(KnowledgeQA.id == record_id))
+    from app.core.vector_outbox import enqueue as _outbox_enqueue
+
+    # v4.1.3：`FOR UPDATE` 行锁 —— 并发重复提交时第二个请求在此排队，
+    # 拿到锁后重读最新状态，看到 approved 即走幂等返回，不再重复归档。
+    result = await session.execute(
+        select(KnowledgeQA).where(KnowledgeQA.id == record_id).with_for_update()
+    )
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail=f"问答记录不存在: {record_id}")
+
+    if record.correction_status == "approved":
+        # 幂等：已审核通过 → 原样回放上次结果，不产生任何新副作用
+        logger.info(
+            "[API/knowledge-qa] 审核通过幂等命中（已归档，不重复执行）: record={}, archived_id={}",
+            record_id, record.archived_id,
+        )
+        return ApiResponse(
+            success=True,
+            message=f"该纠正已审核通过并归档（{record.archived_type or 'requirement'}），本次为重复提交，未重复写入",
+            data={
+                "archived_id": record.archived_id,
+                "archived_type": record.archived_type,
+                "correction_target_type": record.correction_target_type,
+                "idempotent": True,
+            },
+        )
 
     if record.correction_status != "pending_review":
         raise HTTPException(
@@ -1487,24 +1523,21 @@ async def kqa_approve_correction(
     archived_id = ""
     archived_type = "requirement"
     real_product_id = record.product_id or "PROD-DEFAULT"
+
     archived_now = datetime.now(timezone.utc)
 
     try:
         if record.correction_target_type == "functional_point" and record.correction_target_id:
             # ===== FP 级别部分纠正 =====
-            # 定位原 FP 向量，删除后重新嵌入
+            # v4.1.3（P-4）：改「先删 Milvus、后嵌 Milvus」为**同事务入出箱**。
+            # 原实现两次跨系统调用都在 PG commit 之前，任一中断就是两系统不一致。
+            # 现在只写"投递意图"，与 PG 状态同一事务提交，relay 幂等 upsert
+            # （同 fp_id 主键，天然覆盖旧向量，无需先 delete）。
             fp_id = record.correction_target_id
             logger.info(
                 "[API/knowledge-qa] FP 级别部分纠正: record={}, fp_id={}",
                 record_id, fp_id,
             )
-
-            # 删除原 FP 向量
-            try:
-                await asyncio.to_thread(vector_store.delete_requirement, fp_id)
-                logger.info("[API/knowledge-qa] 已删除原 FP 向量: {}", fp_id)
-            except Exception as e:
-                logger.warning("[API/knowledge-qa] 删除原 FP 向量失败（可能不存在）: {}", str(e)[:100])
 
             # 构造纠正后的 FP SRR
             fp_srr = {
@@ -1518,7 +1551,6 @@ async def kqa_approve_correction(
                 "boundary_conditions": [],
             }
 
-            # 重新嵌入
             archive_meta = {
                 "title": f"知识问答纠正 - FP {fp_id}",
                 "type": "functional_point",
@@ -1530,20 +1562,29 @@ async def kqa_approve_correction(
                 "corrected_by": "knowledge_qa_review",
                 "archived_at": archived_now.isoformat(),
             }
-            await asyncio.to_thread(
-                vector_store.add_requirement, fp_id, fp_srr, metadata=archive_meta
+            _outbox_enqueue(
+                session,
+                aggregate_type="requirement",
+                aggregate_id=fp_id,
+                action="upsert",
+                revision=int(archived_now.timestamp() * 1000),
+                payload={"requirement_json": fp_srr, "metadata": archive_meta},
+                created_by="kqa_approve",
             )
             archived_id = fp_id
             archived_type = "functional_point"
 
             # v3.2: 纠正审核通过后刷新该功能点的 CRSR（权威完整版 SRR），
             # 防止固化内容与纠正后的最新事实漂移。失败不阻断审核主流程。
+            # v4.1.3：**不再在此处 commit**——CRSR 行与其出箱事件必须和
+            # corrective 状态一起在本请求末尾提交，否则又裂出"CRSR 已落、
+            # 审核状态未落"的中间态（中途崩溃即重复归档）。consolidate_crsr
+            # 内部只 add/flush（含 enqueue），不自行提交。
             try:
                 from app.core.fp_crsr import consolidate_crsr
                 fp_row = await session.get(FunctionalPoint, fp_id)
                 if fp_row and fp_row.name:
                     await consolidate_crsr(session, real_product_id, fp_row.name)
-                    await session.commit()
             except Exception as crsr_e:
                 logger.warning(
                     "[API/knowledge-qa] CRSR 刷新失败（不阻断） fp_id={}: {}",
@@ -1596,11 +1637,11 @@ async def kqa_approve_correction(
                 target_req.srr_json = _srr
                 target_req.updated_at = archived_now
 
-                # ③ 原位重嵌：删旧向量 → 按最新 SRR 重新嵌入（同 req_id，不产生新需求）
-                try:
-                    await asyncio.to_thread(vector_store.delete_requirement, target_req.id)
-                except Exception as e:
-                    logger.warning("[API/knowledge-qa] 删除原需求向量失败（继续重嵌）: {}", str(e)[:100])
+                # ③ 原位重嵌：同 req_id 幂等 upsert（不产生新需求）。
+                # v4.1.3（P-4）：不再"先 delete 再 add"两段跨系统调用——
+                # 同一主键 upsert 即覆盖旧向量；投递意图与 PG 变更同事务提交。
+                # 注意 srr_json 必须是**改后的副本**（上面 deepcopy 的那份），
+                # 出箱 payload 深拷贝落库，不依赖 session 里的实例。
                 _meta = {
                     "title": target_req.title,
                     "type": "requirement",
@@ -1611,8 +1652,14 @@ async def kqa_approve_correction(
                     "qa_id": record_id,
                     "archived_at": archived_now.isoformat(),
                 }
-                await asyncio.to_thread(
-                    vector_store.add_requirement, target_req.id, target_req.srr_json, metadata=_meta
+                _outbox_enqueue(
+                    session,
+                    aggregate_type="requirement",
+                    aggregate_id=target_req.id,
+                    action="upsert",
+                    revision=int(archived_now.timestamp() * 1000),
+                    payload={"requirement_json": _srr, "metadata": _meta},
+                    created_by="kqa_approve",
                 )
 
                 # ④ 联动刷新该需求下所有 FP 的 CRSR（纠正事实进入权威固化；失败不阻断）
@@ -1676,8 +1723,19 @@ async def kqa_approve_correction(
                     "corrected_by": "knowledge_qa_review",
                     "archived_at": archived_now.isoformat(),
                 }
-                await asyncio.to_thread(
-                    vector_store.add_requirement, archived_id, new_req.srr_json, metadata=archive_meta
+                # v4.1.3（P-4）：同事务入出箱——req_id 在事务提交时才"存在"，
+                # 向量由 relay 在 commit 之后投递，避免"向量已写但 PG 回滚"的孤儿。
+                _outbox_enqueue(
+                    session,
+                    aggregate_type="requirement",
+                    aggregate_id=archived_id,
+                    action="upsert",
+                    revision=int(archived_now.timestamp() * 1000),
+                    payload={
+                        "requirement_json": new_req.srr_json,
+                        "metadata": archive_meta,
+                    },
+                    created_by="kqa_approve",
                 )
                 archived_type = "requirement"
 
@@ -1693,12 +1751,22 @@ async def kqa_approve_correction(
         record.review_notes = req.review_notes
         record.updated_at = archived_now
 
+        # v4.1.3（P-4）：**显式提交**——业务行（需求/FP/CRSR）、问答状态、
+        # 向量出箱事件三者同一事务落库，不存在"向量写了但状态没写"的中间态。
+        # 原实现依赖 get_session 依赖的请求尾 commit，异常路径上向量已生效
+        # 而 PG 回滚 → 重试即重复归档（P-4 的根）。
+        await session.commit()
+
         logger.info(
-            "[API/knowledge-qa] 审核通过并归档: record={}, archived_id={}, type={}",
+            "[API/knowledge-qa] 审核通过并归档: record={}, archived_id={}, type={}（向量走出箱异步投递）",
             record_id, archived_id, archived_type,
         )
 
+    except HTTPException:
+        await session.rollback()
+        raise
     except Exception as e:
+        await session.rollback()
         logger.error("[API/knowledge-qa] 审核通过失败: {}", str(e)[:200])
         raise HTTPException(status_code=500, detail=f"审核归档失败: {str(e)[:100]}")
 
@@ -1709,6 +1777,7 @@ async def kqa_approve_correction(
             "archived_id": archived_id,
             "archived_type": archived_type,
             "correction_target_type": record.correction_target_type,
+            "vector_delivery": "outbox",  # 向量由 relay 异步幂等投递（非本次请求内同步写）
         },
     )
 
@@ -1735,10 +1804,21 @@ async def kqa_reject_correction(
     Returns:
         ApiResponse: data 含 correction_status
     """
-    result = await session.execute(select(KnowledgeQA).where(KnowledgeQA.id == record_id))
+    result = await session.execute(
+        select(KnowledgeQA).where(KnowledgeQA.id == record_id).with_for_update()
+    )
     record = result.scalar_one_or_none()
     if not record:
         raise HTTPException(status_code=404, detail=f"问答记录不存在: {record_id}")
+
+    if record.correction_status == "rejected":
+        # 幂等：已拒绝 → 原样回放，不重复写审核信息（与 approve 对称）
+        logger.info("[API/knowledge-qa] 审核拒绝幂等命中（已拒绝过）: record={}", record_id)
+        return ApiResponse(
+            success=True,
+            message="该纠正已拒绝过，本次为重复提交，未做变更",
+            data={"correction_status": "rejected", "idempotent": True},
+        )
 
     if record.correction_status != "pending_review":
         raise HTTPException(
@@ -1753,6 +1833,10 @@ async def kqa_reject_correction(
     record.reviewed_at = datetime.now(timezone.utc)
     record.review_notes = req.review_notes
     record.updated_at = datetime.now(timezone.utc)
+
+    # v4.1.3：显式提交并释放行锁（依赖尾 commit 会让锁一直持到响应生成完，
+    # 且与 approve 的"锁—判状态—写"语义不对称）
+    await session.commit()
 
     logger.info("[API/knowledge-qa] 审核拒绝: record={}, notes={}", record_id, req.review_notes[:100])
 

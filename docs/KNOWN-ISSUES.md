@@ -325,12 +325,12 @@
 | P-1 | `core/orchestrator.py:1072` vs `core/pipeline_fingerprint.py:170` | 续跑指纹 product_id 两侧来源不一致（srr vs DB），旧数据可能每次续跑 409 | **已修复（v3.4.3，见 §六）** |
 | P-2 | `core/pipeline_fingerprint.py:57-60` | fp_set_sha256 只哈希 FP id，改名后续跑覆盖率矩阵失真 | 待确认 |
 | P-3 | `api/knowledge_qa.py:997-1154` | 问答历史/详情/corrections 缺产品可见性过滤 | 待确认 |
-| P-4 | `api/knowledge_qa.py:1245-1406` | approve_correction 向量先写、DB 状态靠请求尾 commit，失败可重复重嵌 | 待确认 |
+| P-4 | `api/knowledge_qa.py`（approve / reject / archive） | approve_correction 向量先写、DB 状态靠请求尾 commit，失败可重复重嵌；且无行锁，并发双击双写 | **已修复（v4.1.3，见 §七）** |
 | P-5 | `api/testcases.py:128/169` | `_extract_fp` "业务场景"魔法字符串过滤 | 待确认 |
 | P-6 | `exporters/pytest_code.py:195` | LLM 返回 type 未净化，可能生成非法 Python | 待确认 |
 | P-7 | `core/llm_client.py:268/296/901` | 循环变量遮蔽 provider 参数；docstring 返回值与实际不符 | 待确认 |
 | P-8 | `core/requirement_tasks.py:954-955` | `_update_task` 吞掉所有异常，状态可能长期失真 | 待确认 |
-| P-9 | `core/task_watchdog.py:54-71` + `requirement_tasks.py` | watchdog 60 分钟阈值对"慢而活"的 LLM 调用仍有误杀盲区（机制属实，触发概率中等）；建议加心跳 | 待确认 |
+| P-9 | `core/task_watchdog.py:54-71` + `requirement_tasks.py` | watchdog 60 分钟阈值对"慢而活"的 LLM 调用仍有误杀盲区（机制属实，触发概率中等）；建议加心跳 | **已修复（v4.1.2）** |
 | P-10 | `core/rate_limiter.py:113` | 反代下所有用户共享一个限流桶（内网直连部署无影响） | 待确认 |
 | P-11 | `db/hybrid_search.py` Level C + `db/kb_cache.py` | （并入 L-11） | 待确认 |
 
@@ -643,14 +643,66 @@
 
 ### 未修复项及原因（后续跟进）
 
-> v3.4.3（2026-09-18）：原暂缓项中的 **L-15、P-1 已修复**（见 §六），从本表移除。剩余 5 项：
+> v3.4.3（2026-09-18）：原暂缓项中的 **L-15、P-1 已修复**（见 §六），从本表移除。
+> v4.1.3（2026-10-23）：**P-4 已修复**（见 §七），P-9 已于 v4.1.2 修复，从本表移除。剩余 3 项：
 
 | 条目 | 原因 | 建议 |
 |------|------|------|
 | L-14 | 断路器 provider 级统计 + HALF_OPEN 并发探测限制属熔断器重构，改动面与风险中等。**N-3 已大幅缓解**（403/401 硬失败立即禁用 600s、超时类累计 3 次禁用、单次调用 240s 总预算） | 单独立项，配套故障注入测试 |
 | P-2 | 只哈希 FP id 属**有意设计**（以 id 为身份）；改名仅影响展示 | 不修 |
-| P-4 | `approve_correction` 非幂等（向量先写、DB 后 commit）。按架构惯例（PG→Milvus 一律走出箱）应改走 `vector_outbox`，属架构改造 | 单独立项 |
-| P-9 | watchdog 60 分钟阈值误杀"慢而活"的长 LLM 调用（`requirement_tasks.py` 全文无 `updated_at` 刷新），需加心跳。**N-3 后触发概率已降低** | 单独立项 |
 | P-10 | 反代下共享限流桶。内网直连部署无影响；修复涉及部署层是否信任 `X-Forwarded-For`，与安全策略冲突（`auth.py` 明确拒绝信任该头） | 部署决策，非代码缺陷 |
 
 > 每修复一项，请在该条目的"状态"改为 `已修复` 并在"修复记录"填写：修复 commit / 日期 / 验证方式。
+
+---
+
+## 七、P-4 修复记录：审核归档幂等化（v4.1.3，2026-10-23）
+
+### 原问题（三重缺陷，此前只记录了前两条）
+
+| # | 缺陷 | 后果 |
+|---|------|------|
+| ① | **向量先写、PG 后 commit**：`vector_store.delete_requirement` + `add_requirement` 在请求内同步执行，状态却靠 `get_session` 依赖的**请求尾 commit** 落库 | 向量已生效而 PG 回滚 → 记录仍是 `pending_review`，用户重试即**重复归档**（重复 upsert、重复 CRSR 刷新、`raw_text` 追加两遍纠正段） |
+| ② | **无行锁**：`select(KnowledgeQA).where(id==...)` 裸查 | 并发双击两个请求**都**读到 `pending_review` → 双建归档条目 / 双写 |
+| ③ | **中途插 commit**：FP 分支在 `consolidate_crsr` 后立刻 `await session.commit()` | 又制造一个中间态：CRSR 已落库、审核状态未落库，崩溃后重试重复 |
+
+### 修复
+
+1. **行锁认领状态**：两个审核入口（approve / reject）改
+   `select(...).with_for_update()`，并发第二个请求在锁上排队，拿到锁后重读最新状态。
+2. **状态机幂等**：`correction_status == "approved"` 时直接回放上次结果
+   （返回 `idempotent: true`），零副作用；`rejected` 同理。
+3. **向量改走出箱**：三处同步 Milvus 写全部替换为
+   `core/vector_outbox.enqueue(...)`（同事务，不 commit），relay 异步幂等投递。
+   - FP 分支：删除 `delete_requirement` + `add_requirement` 两段，改一条 `upsert`
+     （同 `fp_id` 主键天然覆盖，无需先删）。
+   - 需求原位合并：同样去掉 delete-then-add，只投递一条 `upsert`，
+     payload 用 **deepcopy 后的新 SRR**（不是旧的）。
+   - 独立片段归档：`upsert`，`aggregate_id` 是新生成的 `REQ-*`。
+4. **一次提交**：三处变更（业务行 / 问答状态 / 出箱事件）共用**一次** `await session.commit()`；
+   去掉中间 commit；异常路径 `rollback()` 后透出。
+5. **顺带修同族**：`/archive` 接口同样存在"先 `send_task`/同步写向量、后靠尾 commit"
+   的问题，一并改为出箱 + 行锁 + 显式提交（否则同类缺陷分散在两条路径上）。
+
+### 影响面
+
+- **行为可见变化**：审核通过后向量**不再同步立即生效**，由 relay（5s 轮询）投递。
+  其它走 `vector_outbox` 的路径（用例审批、CRSR 固化、共享规则）本来就是这一语义，此处对齐。
+- **不改的**：`correction_status` 取值域、返回结构（只**新增** `idempotent` /
+  `vector_delivery` 两个字段，向后兼容）、前端无需改动。
+- **CRSR**：`consolidate_crsr` 本身不 commit（其内部也走出箱），现在与纠正状态同批提交。
+
+### 验证
+
+| 层次 | 方式 | 结果 |
+|------|------|------|
+| 行为级单测 | 新增 `tests/test_kqa_approve_idempotent.py`（10 条，fake session） | 10 passed |
+| 真实 PG + Milvus 端到端 | `verify_p4_approve.py`：首审落库 / 重复审 / **并发双击** / relay 真投递 | 全部 PASS |
+| 关键实证 | 并发两请求 → `created=1`（修复前会 2）；重复审 → Requirement 与 outbox 行数**不变**；`raw_text` 纠正段恰 1 次；relay 后 Milvus 中向量真实存在 | — |
+| 全量回归 | unit 498（+10） | 见提交说明 |
+
+> ⚠️ 教训（与 P-9 同类）：**fake session 全绿 ≠ 生效**。行锁、`FOR UPDATE`、
+> 出箱 payload 是否真落库，fake 都验证不了 —— 必须补真实 PG 端到端。
+> 本次端到端首跑还暴露了一条**断言自身写错**（数 `【纠正补充` 而代码写的是
+> `## 纠正补充（`，报"出现 0 次"），说明断言要按**代码实际产物**写，不能凭记忆。
+

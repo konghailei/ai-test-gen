@@ -492,6 +492,7 @@ START → parse → select_channel
 | v3.0.1 | 2026-08-14 | 多轮澄清收敛重构（禁止发散）+ 依赖边随确认自动审核 + 同名 FP 状态节点折叠 | ⭐⭐⭐⭐⭐ |
 | v3.1.0 | 2026-08-17 | 架构设计文档 + 前端使用手册整理（文档化发布） | ⭐⭐ |
 | v3.1.1 | 2026-08-17 | 修复切换产品时「加载项目列表失败」（PBKDF2 线程池化 + 连接池防御 + 前端超时重试） | ⭐⭐⭐⭐ |
+| v4.1.3 | 2026-10-23 | 审核归档幂等化：P-4「向量先写、PG 后 commit」改走 `vector_outbox` 出箱 + 行锁状态机 + 单次提交 | ⭐⭐⭐⭐ |
 
 ---
 
@@ -1287,6 +1288,59 @@ LLM 语义检测问题（步骤②c）
 | 移除 MatchAgent | v2.0 | SRR 已足够详细，无需 KB 检索历史用例 |
 | 全部走 FULL 通道 | v1.6 | 简单需求也需 Clarify + Impact 确保质量 |
 | 双 SRR 分层 | v2.0 | 消除规则重复，交互层与内部层职责分离 |
+
+### 6.29 v4.1.3 — 审核归档幂等化：知识问答纠正/归档全面改走出箱（2026-10-23）
+
+**问题（KNOWN-ISSUES P-4，此前仅记录前两条）**：`api/knowledge_qa.py` 的审核通过 / 归档路径
+是「**先在请求内同步写 Milvus，PG 状态靠 `get_session` 依赖的请求尾 commit**」：
+
+```
+向量 delete/add  ← 已生效
+        ↓
+（此处任一环节失败/中断 → 向量有、PG 状态没落）
+        ↓
+请求尾 commit  → 状态才落
+```
+
+三个后果：① 重试即重复归档（重复 upsert、`raw_text` 重复追加、重复刷新 CRSR）；
+② 并发双击两请求都能读到 `pending_review` → 双写；③ FP 分支在 CRSR 后还插了一次
+`commit`，又多一个「CRSR 已落、状态未落」的中间态。
+
+**架构变更**：把这三个入口全部收敛到既有的 `core/vector_outbox` 出箱范式（TestCase 审批、
+CRSR 固化、共享规则本就如此，此处是补齐最后一块"直写 Milvus"）：
+
+```
+FOR UPDATE 行锁认领知识问答记录
+        ↓
+状态机判定（approved → 直接回放，零副作用）
+        ↓
+业务行（需求/FP/CRSR）+ 问答状态 + outbox 事件
+        ↓
+一次 session.commit()          ← 三者同生同死
+        ↓
+relay 每 5s 认领 → 幂等 upsert 到 Milvus → 标 done
+```
+
+要点：
+
+| 维度 | 实现 |
+|------|------|
+| 原子性 | 业务行与"向量投递意图"同事务提交；PG commit 前崩溃 → 一起回滚，无孤儿 |
+| 幂等 | `correction_status` 状态机 + `FOR UPDATE`：并发第二个请求拿锁后看到 `approved` → 回放上次结果（返回 `idempotent: true`），不写任何行 |
+| 向量投递 | 全部走出箱 `aggregate_type="requirement"`（FP 分支也复用此类型——Milvus 侧本来就是 `add_requirement` 写 FP 向量）；不再 `delete` 后 `add`，同主键 upsert 即覆盖 |
+| FP 分支 | 去掉 `delete_requirement` + `add_requirement` 两段，改一条 upsert；同时去掉 CRSR 后的中间 commit |
+| 原位合并 | payload 用 **deepcopy 后的新 SRR**（不是旧的），确保重嵌拿到的是"已含纠正补充"的版本 |
+| 同族修复 | `/archive` 接口同样改为出箱 + 行锁 + 显式提交（原先先 `send_task`/同步写向量，再靠尾 commit） |
+| 时序变化 | 审核通过后向量**不再同步生效**，由 relay 投递（与用例审批/CRSR 固化的既有语义一致）；返回体新增 `vector_delivery: "outbox"` 便于前端识别 |
+
+**验证**：10 条行为级守卫单测（fake session）+ 真实 PG/Milvus 端到端
+（首审落库 / 重复审 / **并发双击只建 1 条** / relay 真投递后向量存在）；
+unit 498 项（+10）全绿，phase4 190/190、phase5 112/112 回归通过。
+
+> ⚠️ 方法论沉淀：**fake session 全绿 ≠ 生效**。行锁、`FOR UPDATE`、出箱 payload 是否真
+> 落库，fake 都验证不了；本次端到端还暴露一条"断言自身写错"（数 `【纠正补充` 而代码
+> 写的是 `## 纠正补充（`）。断言必须按**代码实际产物**写，不能凭记忆。
+
 | 相似度阈值 0.40 | v2.0 | bge-large-zh 问题→文档实际相似度 0.40-0.65 |
 | 引入 DLQ | v2.2 | L4 防护最后一环，异步任务失败可追溯 |
 | zhparser 中文分词 | v1.4 | BM25 关键词检索需要中文分词支持 |
