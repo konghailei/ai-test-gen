@@ -92,6 +92,19 @@ class CircuitBreaker:
         self._state = self.CLOSED
         self._opened_at: float = 0.0
         self._half_open_successes = 0
+        # v4.1.4（L-14 修复）：HALF_OPEN 探测闸门。
+        # 原实现 `allow_request` 在 HALF_OPEN 直接 return True —— 探测期不限并发，
+        # 冷却结束后所有在飞的请求会同时涌向尚未恢复的 provider，断路器形同虚设
+        # （实测：转 HALF_OPEN 后连续 10 次 allow_request 全部放行）。
+        # 现在改用"探测票"：同一时刻只有 1 个请求能拿到票去做真实探测，
+        # 其余在探测期一律快速失败；票在 record_success / record_failure /
+        # 超时归还票时释放。用"抢票 + 超时归还"而不是布尔标志，是为了让
+        # 忘记 record_* 的调用方（如 future 被取消）也能自动恢复，不会永久卡死。
+        self._probe_in_flight: bool = False
+        self._probe_started_at: float = 0.0
+        # 探测票最长持有时间：超过即视为调用方遗忘了 record_*，允许下一张票。
+        # 取单次 LLM 调用的总预算（240s）+ 余量，避免正常长调用被误抢。
+        self._probe_lease_seconds = 300.0
         # 滑动窗口：记录 (timestamp, is_success)
         self._events: deque[tuple[float, bool]] = deque()
 
@@ -99,6 +112,22 @@ class CircuitBreaker:
     def state(self) -> str:
         """当前断路器状态。"""
         return self._state
+
+    @property
+    def probe_held(self) -> bool:
+        """当前调用是否持有 HALF_OPEN 探测票（供调用方在早退路径归还）。"""
+        return self._probe_in_flight
+
+    def release_probe(self) -> None:
+        """归还 HALF_OPEN 探测票（不记录成功/失败）。
+
+        仅用于"领了票但没真正完成一次调用"的路径（缓存命中提前返回、
+        构造参数阶段异常等）。正常完成必须走 record_success / record_failure，
+        那样才会推进状态机 —— 这里刻意**不改状态**，只释放锁。
+        """
+        if self._probe_in_flight:
+            self._probe_in_flight = False
+            logger.debug("断路器：探测票已归还（未完成真实调用）")
 
     def allow_request(self) -> bool:
         """判断当前是否允许放行请求。
@@ -108,17 +137,33 @@ class CircuitBreaker:
 
         State Transitions:
             CLOSED → 允许
-            OPEN → 若冷却已过则转 HALF_OPEN 并允许；否则拒绝
-            HALF_OPEN → 允许（探测请求）
+            OPEN → 若冷却已过则转 HALF_OPEN 并发放唯一一张探测票；否则拒绝
+            HALF_OPEN → 仅持票者放行，其余拒绝（v4.1.4 修复，原为全部放行）
+
+        Note（v4.1.4 / L-14）:
+            HALF_OPEN 下若探测票仍被占用（且未超租约）→ 返回 False。
+            调用方应把它当作"服务暂不可用"处理（与 OPEN 态同语义），
+            而不是重试打满——这正是断路器的目的。
         """
         now = time.time()
         if self._state == self.OPEN:
             if now - self._opened_at >= self._cooldown_seconds:
                 self._state = self.HALF_OPEN
                 self._half_open_successes = 0
-                logger.warning("断路器 OPEN → HALF_OPEN，开始探测")
+                # 进入探测态，立即发放本次（第一个请求的）探测票
+                self._probe_in_flight = True
+                self._probe_started_at = now
+                logger.warning("断路器 OPEN → HALF_OPEN，开始单请求探测")
                 return True
             return False
+        if self._state == self.HALF_OPEN:
+            # 探测票被占用且未过租约 → 拒绝并发探测
+            if self._probe_in_flight and (now - self._probe_started_at) < self._probe_lease_seconds:
+                return False
+            # 无票（上一个探测已归还）或租约已过 → 发放新票
+            self._probe_in_flight = True
+            self._probe_started_at = now
+            return True
         return True
 
     def record_success(self) -> None:
@@ -128,6 +173,7 @@ class CircuitBreaker:
         self._evict_expired(now)
 
         if self._state == self.HALF_OPEN:
+            self._probe_in_flight = False    # 归还探测票
             self._half_open_successes += 1
             if self._half_open_successes >= self._half_open_success_threshold:
                 self._state = self.CLOSED
@@ -141,7 +187,7 @@ class CircuitBreaker:
         self._evict_expired(now)
 
         if self._state == self.HALF_OPEN:
-            # 探测失败，立即重新断开
+            # 探测失败，立即重新断开（_trip_open 内部会归还探测票）
             self._trip_open(now)
             logger.warning("断路器 HALF_OPEN → OPEN，探测失败")
             return
@@ -160,6 +206,7 @@ class CircuitBreaker:
         """转入 OPEN 态。"""
         self._state = self.OPEN
         self._opened_at = now
+        self._probe_in_flight = False
 
     def _evict_expired(self, now: float) -> None:
         """清除滑动窗口外的过期事件。"""
@@ -381,6 +428,12 @@ class LLMClient:
                     temperature, 0, {}, False, str(err)[:500],
                 )
             raise err
+        # v4.1.4（L-14）：HALF_OPEN 下上面可能领到了"探测票"。真实发起调用的
+        # 路径会由 record_success / record_failure 归还；但**提早返回**的路径
+        # （缓存命中、提前异常）既不会记录成功也不会记录失败，票会一直被占用
+        # 直到租约到期 —— 期间所有请求都被拒，等于断路器长时间断流。
+        # 故下面每个早退点都显式 `_release_probe_if_idle()`。
+        _probe_held = self._breaker.probe_held
 
         # 优化 4：LLM 响应缓存（仅缓存 temperature=0 的确定性调用）
         import hashlib
@@ -394,6 +447,10 @@ class LLMClient:
         cached = self._cache_get(cache_key) if temperature == 0 else None
         if cached is not None:
             logger.debug("[LLM] 缓存命中: key={}", cache_key[:12])
+            # v4.1.4（L-14）：缓存命中不是真实调用，不推进断路器状态，
+            # 但必须归还探测票（否则 HALF_OPEN 下会把后续请求全部拒掉）。
+            if _probe_held:
+                self._breaker.release_probe()
             # 缓存命中非真实 LLM 调用，不写日志
             if return_usage:
                 return cached, {}, "", ""
@@ -407,6 +464,9 @@ class LLMClient:
         # 构建候选提供商列表（主 -> 备）
         providers = self._candidate_providers(model, provider=provider)
         if not providers:
+            # v4.1.4（L-14）：无候选 = 没有真实调用，归还探测票
+            if _probe_held:
+                self._breaker.release_probe()
             # v3.4.2：区分"一家都没配"与"全都被禁用"——后者是典型的供应商全挂，
             # 必须给出"更换供应商"的明确指引（此前只报"未配置 API Key"，误导排查方向）。
             now_ts = time.time()
@@ -577,7 +637,17 @@ class LLMClient:
                 )
 
         # 所有提供商均失败（或总预算耗尽 / 全被禁用）
-        self._breaker.record_failure()
+        # v4.1.4（L-14 修复）：`attempted == 0` 表示**一家都没真正调用过**
+        # （候选全被持久化禁用/总预算在首次调用前就耗尽）。这种"没发生真实
+        # LLM 调用"的情况若计入断路器，会在 5 次之后把断路器打开，使系统在
+        # provider 被重新启用后仍需多等一轮冷却——把运维操作的效果延迟。
+        # 因此只在**确有真实尝试且全部失败**时才计为一次失败。
+        if attempted > 0:
+            self._breaker.record_failure()
+        else:
+            logger.warning(
+                "[LLM] 无可用候选（0 次真实调用），不计入断路器失败统计"
+            )
         duration_ms = int((time.time() - start_ts) * 1000)
         detail = "；".join(failure_notes[:4]) if failure_notes else str(last_error or "")
         hint = "请到「系统设置 → LLM 供应商」检查供应商状态（可能已被禁用），或等待其恢复后重试。"
@@ -756,6 +826,8 @@ class LLMClient:
         """
         if not self._breaker.allow_request():
             raise LLMBreakerOpenError("LLM 断路器开启，服务暂不可用（错误率超阈值）")
+        # v4.1.4（L-14）：与文本链路同语义——无候选时归还探测票，避免卡住探测
+        _probe_held = self._breaker.probe_held
 
         # 构造多模态消息（OpenAI Vision API 格式）
         data_url = f"data:{mime_type};base64,{image_base64}"
@@ -771,6 +843,8 @@ class LLMClient:
         # 构建候选提供商列表
         providers = self._candidate_providers(None, provider=provider)
         if not providers:
+            if _probe_held:
+                self._breaker.release_probe()
             raise LLMNoProviderAvailable("无可用多模态 LLM 提供商（未配置 API Key）")
 
         # v3.4.4（自审补漏 N-3）：多模态链路此前没有总预算，供应商全挂时会逐家等满
@@ -812,7 +886,9 @@ class LLMClient:
                 self._disable_provider_now(prov, reason=str(e)[:80])
                 logger.warning("视觉提供商 {} 不可重试错误，故障转移: {}", prov["key"], str(e)[:200])
 
-        self._breaker.record_failure()
+        # v4.1.4（L-14 修复）：与文本链路对齐——0 次真实调用不计入断路器。
+        if attempted > 0:
+            self._breaker.record_failure()
         raise LLMNoProviderAvailable(
             f"所有多模态 LLM 提供商均不可用（已尝试 {attempted} 家，耗时 {int(time.time() - start_ts)}s）。"
             "请到「系统设置 → LLM 供应商」更换支持视觉的可用供应商，或检查 API Key / 额度。"
