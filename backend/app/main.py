@@ -144,6 +144,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("[ResourceGuard] 启动失败（并发控制退化为不限制）: {}", str(e)[:150])
 
+    # v4.1.5：显式设定 torch intra-op 线程数。
+    # 此前只有去重进程池的 worker init 里设了，**API 主进程从未设过** —— torch 默认
+    # 线程数是"物理核数"，与容器 cgroup 配额无关。容器被限到 6 逻辑核时它仍可能
+    # 开满宿主硬件线程，于是"并发预算算得再准"也会被单个 encode 打穿。
+    # 必须早于任何本地模型加载（bge embedding / CrossEncoder 重排）执行。
+    try:
+        from app.core.resource_guard import apply_torch_threads
+        apply_torch_threads()
+    except Exception as e:
+        logger.warning("[ResourceGuard] torch 线程设置失败（沿用默认值）: {}", str(e)[:150])
+
     # v3.3（N5-c 根治）：启动知识库维护周期任务。
     # 对账自愈 PG 向量化状态 ↔ Milvus 实际向量（只新增不删除），并报告孤儿向量。
     try:

@@ -67,10 +67,26 @@ _DEDUP_PROC_POOL_WORKERS = 0  # 当前池的 worker 数（与配置不符时重�
 
 
 def _dedup_encode_worker_init() -> None:
-    """进程池 worker 初始化：固定 4 线程（探针实测最优）。"""
+    """进程池 worker 初始化：固定 4 线程（探针实测最优）。
+
+    与主进程 `resource_guard.apply_torch_threads()` 同口径：worker 进程刚 spawn
+    出来，torch 线程池还是默认值（= 物理核数），必须在这里重设，否则 N 个
+    worker × 默认线程数会把核彻底抢爆。取 `encode_threads()` 而非硬编码 4，
+    是为了在小机器（≤4 核）上自动收缩，不再超配。
+    """
     import torch as _torch
 
-    _torch.set_num_threads(4)
+    try:
+        from app.core.resource_guard import encode_threads as _encode_threads
+
+        n = int(_encode_threads())
+    except Exception:  # noqa: BLE001 - 拿不到探测结果就用实测最优值
+        n = 4
+    _torch.set_num_threads(n)
+    try:
+        _torch.set_num_interop_threads(1)
+    except Exception:  # noqa: BLE001
+        pass
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
@@ -125,15 +141,75 @@ def _get_dedup_proc_pool(workers: int):
 
 
 def _physical_cores() -> int:
-    """保守估物理核（逻辑核 ÷2 去超线程；容器内 cpu_count 含超线程）。"""
+    """本容器真正能用的物理核数（与 `core/resource_guard.physical_cores()` 同源）。
+
+    ⚠️ 必须与 `core/resource_guard.physical_cores()` **同口径**（函数注释历史要求，
+    但实现此前不一致——这里用 `os.cpu_count()`，那边用 `cpu_limit()`）。
+    差异的实际后果：容器 `--cpus=4` 的 8 核机器上，`os.cpu_count()` 仍是 8 →
+    去重开 3 个进程 × 4 线程，而生成并发按 4 核算 1~2 个任务 → **两处互相不知道对方在抢核**。
+
+    口径（v4.1.5 起）：直接复用 `resource_guard.physical_cores()`——那边读
+    `/proc/cpuinfo` 的 `siblings / cpu cores` 得真实每核线程数，读不到才退回
+    「逻辑核÷2」。**不要在这里再实现一份**（两份实现必然漂移，历史已证明）。
+    延迟导入：`resource_guard` 是 core 层模块，顶层导入会与 `app.main` 形成环。
+    """
     try:
-        return max(1, (os.cpu_count() or 2) // 2)
+        from app.core.resource_guard import physical_cores as _rg_physical_cores
+
+        return max(1, int(_rg_physical_cores()))
     except Exception:  # noqa: BLE001
-        return 1
+        try:
+            # 兜底：退回本进程可见逻辑核（含 affinity 收缩，优于 os.cpu_count）
+            return max(1, (len(os.sched_getaffinity(0)) or 2) // 2)
+        except Exception:  # noqa: BLE001
+            try:
+                return max(1, (os.cpu_count() or 2) // 2)
+            except Exception:  # noqa: BLE001
+                return 1
+
+
+def _in_celery_worker() -> bool:
+    """当前进程是否是 celery worker（而非 API 主进程 / 单测 / 调试进程）。
+
+    判据必须用**运行时特征**，不能用环境变量：`CELERY_WORKER_PROCESS` 由 compose
+    注入到容器环境里，`docker exec` 进容器跑的单元测试、一次性脚本、调试进程
+    **全都继承它** → 会把"celery 里串行"误判成"所有进程都串行"。
+    实测代价：本仓 `test_dedup_chunk_order`（专测并行分片）在容器内跑会直接失败，
+    且这种"环境变量污染测试"最难排查。
+
+    两条运行时特征（任一成立即认定）：
+      ① `current_app._current_worker` 非空 —— celery 启动 worker 时会设置；
+      ② 进程名含 `ForkPoolWorker` —— prefork 池子进程被 celery 改名后的特征。
+    """
+    try:
+        from celery import current_app  # noqa: PLC0415
+
+        if getattr(current_app, "_current_worker", None) is not None:
+            return True
+    except Exception:  # noqa: BLE001 - 无 celery 时走进程名判定
+        pass
+    try:
+        import multiprocessing as _mp  # noqa: PLC0415
+
+        if "ForkPoolWorker" in (_mp.current_process().name or ""):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 
 
 def _dedup_workers_configured() -> int:
-    """解析 DEDUP_EMBED_WORKERS：auto = max(1, 物理核-1)，留 1 核给主进程。"""
+    """解析 DEDUP_EMBED_WORKERS：auto = max(1, 物理核-1)，留 1 核给主进程。
+
+    ⚠️ v4.1.5：**celery worker 进程内强制串行**（返回 1）。
+    原因：celery 是独立进程，它开的是**进程池**（每 worker 一份模型 + N 线程），
+    而部署脚本给 celery 容器的 CPU 只有 api 的一半。若它也按物理核开 N 个 worker，
+    合计线程数会直接超过该容器的 cpus 配额 —— 配额被超额时内核靠上下文切换"假并发"，
+    结果比串行更慢，且 api 侧的生成预算完全看不到它。
+    串行后 celery 靠 `--concurrency=2` 的 prefork 进程数提供吞吐，不再叠加进程池。
+    """
+    if _in_celery_worker():
+        return 1
     raw = str(settings.DEDUP_EMBED_WORKERS).strip().lower()
     if raw in ("", "1", "off", "0"):
         return 1

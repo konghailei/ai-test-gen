@@ -64,6 +64,24 @@ try:
         },
     )
     logger.info("[Celery] 应用已初始化: broker={}", broker)
+
+    # ---- v4.1.5：worker 侧也必须显式设 torch 线程 ----
+    # 此前只有 API 主进程设了（main.py 的 lifespan），**celery worker 完全没设**。
+    # 后果：worker 进程用 torch 默认线程数（= 物理核数，与容器 cpus 配额无关），
+    # 而部署脚本给 celery 的 CPU 只是 api 的一半 → 它按宿主核数开线程，
+    # 直接抢走生成链路的物理核（表现为"生成忽然变慢，日志里什么都看不到"）。
+    #
+    # 为什么放在模块导入期而不是 worker 信号里：
+    #   torch.set_num_threads 必须在**第一个张量运算之前**生效，而
+    #   prefork 模式的子进程是 fork 出来的，父进程导入本模块时设置一次即可
+    #   被子进程继承；放到 worker_ready 信号里反而可能晚于模型加载。
+    # 失败不影响启动（无 torch 的环境照样能消费非 embedding 任务）。
+    try:
+        from app.core.resource_guard import apply_torch_threads
+
+        apply_torch_threads()
+    except Exception as _e:  # noqa: BLE001 - 线程设置失败不阻断 worker 启动
+        logger.warning("[Celery] torch 线程设置失败（沿用默认值）: {}", str(_e)[:120])
 except (ImportError, _CeleryDisabled):
     # v3.4.1 修复 M-11：未安装或未配置 broker 都走同步降级（celery_app = None）
     logger.warning("[Celery] celery 未安装或 broker 未配置，异步双写降级为同步")

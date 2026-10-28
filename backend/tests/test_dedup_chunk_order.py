@@ -121,3 +121,49 @@ def test_parallel_matches_serial_semantics(monkeypatch, restore_cfg):
     serial = _serial_encode(texts)
     out, _ = _run_with_fake_pool(texts, 4, monkeypatch)
     assert out == serial
+
+
+# ============================================================================
+# v4.1.5：celery worker 内强制串行（防两个容器各自按宿主核数开线程）
+# ============================================================================
+
+def test_celery_worker_forces_serial(monkeypatch, restore_cfg):
+    """celery 进程内即使配了 auto/N，去重进程池也必须退化为串行。
+
+    为什么：celery 是独立容器，cpus 只有 api 的一半；它再按物理核开进程池，
+    线程数直接超过自己的配额（内核靠上下文切换"假并发"，比串行更慢）。
+    """
+    monkeypatch.setattr(ms, "_in_celery_worker", lambda: True)
+    monkeypatch.setattr(settings, "DEDUP_EMBED_WORKERS", "auto")
+    assert ms._dedup_workers_configured() == 1
+    monkeypatch.setattr(settings, "DEDUP_EMBED_WORKERS", "4")
+    assert ms._dedup_workers_configured() == 1
+
+
+def test_api_process_keeps_configured_workers(monkeypatch, restore_cfg):
+    """API 主进程不受影响：配了 4 就该是 4（否则 dev 的并行优化会静默失效）。"""
+    monkeypatch.setattr(ms, "_in_celery_worker", lambda: False)
+    monkeypatch.setattr(settings, "DEDUP_EMBED_WORKERS", "4")
+    assert ms._dedup_workers_configured() == 4
+
+
+def test_in_celery_worker_detects_pool_process_name(monkeypatch):
+    """运行时特征判定：ForkPoolWorker 进程名必须被认出来。
+
+    这条同时是"为什么不用环境变量"的守卫：环境变量会被 docker exec 的
+    测试/调试进程继承，从而把 API 侧也误判成 celery。
+    """
+    import multiprocessing as _mp
+
+    class _FakeProc:
+        name = "ForkPoolWorker-1"
+
+    monkeypatch.setattr(_mp, "current_process", lambda: _FakeProc())
+    assert ms._in_celery_worker() is True
+
+    class _MainProc:
+        name = "MainProcess"
+
+    monkeypatch.setattr(_mp, "current_process", lambda: _MainProc())
+    # 当前进程名不含特征且 celery 未启动 worker → 不应认定
+    assert ms._in_celery_worker() is False
