@@ -79,7 +79,7 @@ class KbCache:
         return f"kb_cache:{product_id}:{hashlib.md5(raw.encode()).hexdigest()}"
 
     @staticmethod
-    def _bucket_top_k(top_k: int) -> int:
+    def bucket_top_k(top_k: int) -> int:
         """把任意 top_k 映射到 {10, 20, 40, 80} 桶，避免因 top_k 微小差异导致缓存命中率过低。"""
         if top_k <= 10:
             return 10
@@ -103,7 +103,7 @@ class KbCache:
 
         查询顺序：L2 LRU → L1 Redis。
         """
-        bucket = self._bucket_top_k(top_k)
+        bucket = self.bucket_top_k(top_k)
         key = self._cache_key(query, product_id, coll_type, modules, doc_type, status or "", bucket)
 
         # L2 LRU
@@ -148,7 +148,7 @@ class KbCache:
         """写入缓存（L2 LRU + L1 Redis）。"""
         if not results:
             return
-        bucket = self._bucket_top_k(top_k)
+        bucket = self.bucket_top_k(top_k)
         key = self._cache_key(query, product_id, coll_type, modules, doc_type, status or "", bucket)
         try:
             value = json.dumps(results, ensure_ascii=False)

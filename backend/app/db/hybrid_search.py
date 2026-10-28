@@ -119,7 +119,10 @@ class HybridSearcher:
         # v3.4.1 修复 M-1：top_n 取 max(top_k, MATCH_FINAL_N)。原实现写死 MATCH_FINAL_N=5，
         # 与请求 top_k 无关地把融合结果截到 5 条，而截断后的列表又按原 top_k 分桶写入
         # 24h 缓存，使 top_k=20/40 的检索最多只返回 5 条。
-        rerank_n = max(top_k, settings.MATCH_FINAL_N)
+        # v4.1.8 修复（M-1 残留）：缓存按 bucket_top_k 分桶共享（10/20/40/80），
+        # 若按请求 top_k 截断，同桶小 top_k 写的短列表会被大 top_k 命中 → 少返回。
+        # 取桶上限后，同桶任意 top_k 都能从缓存拿到足量条目。
+        rerank_n = max(top_k, kb_cache.bucket_top_k(top_k), settings.MATCH_FINAL_N)
         if settings.RERANKER_ENABLED and len(fused) > settings.MATCH_FINAL_N:
             try:
                 from app.db.reranker import reranker
