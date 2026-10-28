@@ -87,19 +87,31 @@ HOST_CPU=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)
 #   为什么不按"宿主 - 固定预留"：预留值随数据量变化，固定值会在小内存机器上
 #   算成负数、在大内存机器上算得过松。分档更可预测。
 if [ -z "${API_MEM_LIMIT:-}" ] && [ "${HOST_MEM_MB:-0}" -gt 0 ]; then
-  if   [ "$HOST_MEM_MB" -lt 7000 ];  then API_MEM_LIMIT="4g";  warn "宿主内存 ${HOST_MEM_MB}MB < 7GB，api 限 4g 可能偏紧"
-  elif [ "$HOST_MEM_MB" -lt 12000 ]; then API_MEM_LIMIT="6g"
-  elif [ "$HOST_MEM_MB" -lt 24000 ]; then API_MEM_LIMIT="10g"
-  elif [ "$HOST_MEM_MB" -lt 48000 ]; then API_MEM_LIMIT="20g"
-  else                                    API_MEM_LIMIT="32g"
+  if   [ "$HOST_MEM_MB" -lt 7000 ];   then API_MEM_LIMIT="4g";  warn "宿主内存 ${HOST_MEM_MB}MB < 7GB，api 限 4g 可能偏紧"
+  elif [ "$HOST_MEM_MB" -lt 12000 ];  then API_MEM_LIMIT="6g"
+  elif [ "$HOST_MEM_MB" -lt 24000 ];  then API_MEM_LIMIT="10g"
+  elif [ "$HOST_MEM_MB" -lt 48000 ];  then API_MEM_LIMIT="20g"
+  elif [ "$HOST_MEM_MB" -lt 96000 ];  then API_MEM_LIMIT="32g"
+  elif [ "$HOST_MEM_MB" -lt 200000 ]; then API_MEM_LIMIT="64g"
+  else                                     API_MEM_LIMIT="96g"
   fi
 fi
 
+# v4.1.7：补 48G 以上档位。
+#   旧实现最后一档是 `else 32g`，在 256G 机器上只给 api 32g——
+#   浪费 200G+，且 DEDUP_EMBED_WORKERS 想开大时会因内存上限被 OOM Killer 杀
+#   （用户看到的是"开了 20 个 worker 但启动几个就挂"，很难联想到是容器上限）。
+#   96G 的上限依据：单 worker ~1.6GB，96G 可容纳 ~40 worker 同时持有模型，
+#   再加 10 个并发生成任务各自的中间态，余量充足。
+#   不直接给"宿主一半"是因为 api 实际不会用满，给太大反而让 OOM 保护迟钝
+#   （守卫按"容器上限的百分比"判断紧张程度，上限虚高 = 永远不觉得紧张）。
+
 if [ -z "${MILVUS_MEM_LIMIT:-}" ] && [ "${HOST_MEM_MB:-0}" -gt 0 ]; then
-  if   [ "$HOST_MEM_MB" -lt 7000 ];  then MILVUS_MEM_LIMIT="3g"
-  elif [ "$HOST_MEM_MB" -lt 12000 ]; then MILVUS_MEM_LIMIT="4g"
-  elif [ "$HOST_MEM_MB" -lt 24000 ]; then MILVUS_MEM_LIMIT="6g"
-  else                                    MILVUS_MEM_LIMIT="8g"
+  if   [ "$HOST_MEM_MB" -lt 7000 ];   then MILVUS_MEM_LIMIT="3g"
+  elif [ "$HOST_MEM_MB" -lt 12000 ];  then MILVUS_MEM_LIMIT="4g"
+  elif [ "$HOST_MEM_MB" -lt 24000 ];  then MILVUS_MEM_LIMIT="6g"
+  elif [ "$HOST_MEM_MB" -lt 48000 ];  then MILVUS_MEM_LIMIT="8g"
+  else                                     MILVUS_MEM_LIMIT="16g"
   fi
 fi
 
@@ -120,6 +132,41 @@ fi
 if [ -z "${CELERY_CPU_LIMIT:-}" ] && [ -n "${API_CPU_LIMIT:-}" ]; then
   CELERY_CPU_LIMIT=$(( API_CPU_LIMIT / 2 ))
   [ "$CELERY_CPU_LIMIT" -lt 1 ] && CELERY_CPU_LIMIT=1
+fi
+
+# ---------------------------------------------------------------------------
+# 3b. v4.1.7：CPU 合计不得超过宿主逻辑核（防超卖）
+# ---------------------------------------------------------------------------
+# 为什么必须校验：`API_CPU_LIMIT = 宿主-2`、`CELERY_CPU_LIMIT = API/2` 这两个
+# 公式各自独立成立，但**合计是 1.5 倍宿主-3**：
+#     96 核 → api 94 + celery 47 = 141 > 96  ← 超卖 45 核
+#     8 核  → api  6 + celery  3 =   9 > 8   ← 也超卖 1 核（小机器同样中招）
+# 后果不是"崩"，而是**性能塌陷**：两个容器都以为自己是唯一使用者，
+# 各自按配额开线程池；内核靠上下文切换做"假并发"，实测比串行更慢，
+# 且应用侧的 task_ceiling 完全看不到这部分竞争（它只算自己容器内的配额）。
+#
+# 处理策略：按 **api : celery = 3 : 1** 重新分配宿主核数。
+#   为什么是 3:1 而不是"api 优先、celery 吃剩余"：
+#     96 核下 api 拿 94、celery 只剩 2 —— celery 要跑 2 个 prefork 进程 × 4 线程
+#     = 8 个线程挤 2 核，知识库向量化会慢到用户以为卡死（表现是"归档后状态一直
+#     pending"）。而 api 的 94 核它自己也用不满（生成任务大部分时间在等 LLM）。
+#   为什么 3:1 能让所有档位都自然合理（实测各档位）：
+#     8 核  → api 6 / celery 2   （与 v4.1.6 的默认值完全一致，无回归）
+#     16 核 → api 12 / celery 4
+#     96 核 → api 72 / celery 24 （api 够开 18 个 DEDUP worker，celery 够跑 6 进程）
+#   只在"合计超限"时启用该分配；不超限时保留各自公式的结果，避免动到小机器。
+if [ -n "${API_CPU_LIMIT:-}" ] && [ -n "${CELERY_CPU_LIMIT:-}" ] && [ "${HOST_CPU:-0}" -gt 0 ]; then
+  CPU_SUM=$(( API_CPU_LIMIT + CELERY_CPU_LIMIT ))
+  if [ "$CPU_SUM" -gt "$HOST_CPU" ]; then
+    OLD_API=$API_CPU_LIMIT
+    OLD_CELERY=$CELERY_CPU_LIMIT
+    API_CPU_LIMIT=$(( HOST_CPU * 3 / 4 ))
+    CELERY_CPU_LIMIT=$(( HOST_CPU / 4 ))
+    # 下限保护：任何一边都不能是 0（celery=0 会让知识库向量化永久 pending）
+    [ "$API_CPU_LIMIT" -lt 1 ] && API_CPU_LIMIT=1
+    [ "$CELERY_CPU_LIMIT" -lt 1 ] && CELERY_CPU_LIMIT=1
+    V4_CPU_CLAMP_NOTE="api ${OLD_API}→${API_CPU_LIMIT}, celery ${OLD_CELERY}→${CELERY_CPU_LIMIT}（原合计 ${CPU_SUM} 超宿主 ${HOST_CPU} 核，按 3:1 重分）"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -157,6 +204,11 @@ if [ -z "$CELERY_MEM_LIMIT" ] && [ -n "${API_MEM_LIMIT:-}" ]; then
     10g) CELERY_MEM_LIMIT="4g" ;;
     20g) CELERY_MEM_LIMIT="6g" ;;
     32g) CELERY_MEM_LIMIT="8g" ;;
+    # v4.1.7：大内存档位。celery 只跑 embedding/双写，不跑生成链路，
+    # 不需要跟着 api 同比例放大；8g 足够它持有 2 个 prefork 进程的模型
+    # （各 ~1.6GB）与写入缓冲。给太大会让 OOM 保护判断失真。
+    64g) CELERY_MEM_LIMIT="8g" ;;
+    96g) CELERY_MEM_LIMIT="12g" ;;
     4g)  CELERY_MEM_LIMIT="2g" ;;
     *)   CELERY_MEM_LIMIT="$API_MEM_LIMIT" ;;  # 自定义值时保守取同值
   esac
@@ -215,6 +267,15 @@ info "已生成 $OUT_FILE"
 info "  backend.mem_limit      = ${API_MEM_LIMIT}   backend.cpus = ${API_CPU_LIMIT:-未设}"
 info "  celery_worker.mem_limit = ${CELERY_MEM_LIMIT:-未设}   celery_worker.cpus = ${CELERY_CPU_LIMIT:-未设}"
 info "  milvus.mem_limit        = ${MILVUS_MEM_LIMIT:-未设}"
+# v4.1.7：CPU 合计校验结果必须显式打印。
+#   否则"celery 被悄悄压小了"这件事只在 override 文件里能看到，
+#   而现场排查时人会先怀疑代码/应用，最后才去看 override。
+if [ -n "${V4_CPU_CLAMP_NOTE:-}" ]; then
+  info "  ⚠️ CPU 合计防超卖已生效：${V4_CPU_CLAMP_NOTE}"
+fi
+if [ -n "${API_CPU_LIMIT:-}" ] && [ -n "${CELERY_CPU_LIMIT:-}" ] && [ "${HOST_CPU:-0}" -gt 0 ]; then
+  info "  CPU 合计 = $((API_CPU_LIMIT + CELERY_CPU_LIMIT)) / 宿主 ${HOST_CPU} 逻辑核"
+fi
 
 # 语法自检：叠加后必须能被 compose 解析（失败就别让部署继续）
 if command -v docker &>/dev/null && docker compose version &>/dev/null; then

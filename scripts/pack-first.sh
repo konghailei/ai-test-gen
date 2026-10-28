@@ -180,12 +180,14 @@ MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
 
 # ---------------------------------------------------------------------------
-# 容器资源配额（v4.1.5）
+# 容器资源配额（v4.1.5，v4.1.7 补大内存档位）
 # ---------------------------------------------------------------------------
 # 留空/不写 = deploy.sh 按宿主内存与核数自动计算（推荐）：
-#   8GB 宿主 → api 6g / celery 3g / milvus 3g，api cpus 6 / celery cpus 3
-#   16GB → 10g / 4g / 6g，cpus 6 / 3；32GB → 20g / 6g / 8g，cpus 14 / 7
-#   容器 cpus = 宿主核数 - 2（下限 2）；celery cpus = api 的一半（下限 1）
+#   8GB  宿主 → api 6g / api cpus 6     16GB  → api 10g / cpus 6
+#   32GB       → api 20g / cpus 12      64GB  → api 32g / cpus 24
+#   128GB      → api 64g / cpus 48      256GB → api 96g / cpus 72
+#   celery cpus 取 api 的 1/2，但 **api+celery 合计不得超过宿主核数**
+#   （超限时按 3:1 重分；v4.1.6 之前的公式在 96 核上会算出 141 核，属超卖）
 # 设了上限，应用的 OOM 保护（内存紧张自动降并发）与并发预算才有依据；
 # 不设 = 应用读到的是宿主内存，保护形同虚设（严重时被内核 OOM Killer 直接杀容器）。
 # celery 的 cpus 也必须限：它是独立进程、有自己的一份模型与线程池，
@@ -197,6 +199,36 @@ MINIO_SECRET_KEY=minioadmin
 # MILVUS_MEM_LIMIT=3g
 # CELERY_MEM_LIMIT=3g
 # CELERY_CPU_LIMIT=3
+
+# ---------------------------------------------------------------------------
+# 生成并发与去重并行（v4.1.7，大机器必看）
+# ---------------------------------------------------------------------------
+# 【GEN_TASK_CONCURRENCY_MAX】全局同时进行的生成任务上限（硬顶）。
+#   默认 4。注意它是**硬顶**：即使 96 核机器推导出 23 个并发，也会被它卡在 4。
+#   建议值 ≈ 同时使用人数上浮 1~2：
+#     10 人左右 → 8~10；20 人 → 16；单人 → 4（默认即可）
+#   不要盲目设很大：并发生成任务都会去占本地 bge 推理，超过物理核后互相拖慢。
+# GEN_TASK_CONCURRENCY_MAX=8
+#
+# 【DEDUP_EMBED_WORKERS】语义去重时的 Embedding 分片并行进程数。
+#   ""/1/0/off = 串行（默认）；auto = max(1, 物理核-1)；整数 N = N 个进程。
+#   每 worker 独立加载一份 bge 模型（约 1.6GB 内存）、4 线程。
+#   推荐 N ≈ api cpus / 4（每进程 4 线程正好吃满配额）：
+#     api 6 核 → N=1~2      api 12 核 → N=3      api 24 核 → N=6
+#     api 72 核 → N=16~18   （16×4=64 线程，留余量给事件循环）
+#   ⚠️ 两个硬约束：
+#     ① 内存：N × 1.6GB 必须 < api 的 mem_limit，否则被 OOM Killer 杀
+#     ② 分片门槛：单次去重的文本数 < N×2 时**自动回退串行**
+#        （代码里 `len(texts) >= workers * 2`），所以 N 开太大对小批次无收益
+#   实测参考：526 条用例串行约 35 分钟（单条 ~4 秒，见 DEDUP_SINGLE_CASE_SEC）。
+# DEDUP_EMBED_WORKERS=auto
+#
+# 【DEDUP_EMBEDDING_MODEL_NAME】去重专用嵌入模型（可换轻量模型加速）。
+#   留空 = 用全局 bge-large（1024 维，质量最好，最慢）。
+#   改成 bge-base（768 维）/ bge-small（512 维）能显著提速，但**必须重新定标阈值**
+#   （DEDUP_SEMANTIC_THRESHOLD 默认 0.92 是 bge-large 的定标值），
+#   且已有向量缓存全部失效需重算。实测 small 在部分场景召回质量下降，谨慎使用。
+# DEDUP_EMBEDDING_MODEL_NAME=/models/bge-base-zh-v1.5
 ENVEOF
 
 # ==================================================================

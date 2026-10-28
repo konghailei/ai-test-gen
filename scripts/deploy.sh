@@ -514,6 +514,100 @@ if command -v iptables &>/dev/null; then
   fi
 fi
 
+# ---------- 0c-2b. 其余内核参数（v4.1.7 补，3.10 老机器的三类隐性坑）----------
+# 这三项的共同特征：**默认值在小机器上够用，在大机器/高并发下才会撞墙**，
+# 而撞墙时的报错全都指向别处（"Cannot allocate memory" / "too many open files"），
+# 排查时通常会先怀疑内存泄漏或应用 bug，最后才想到内核参数。
+#
+# ① kernel.pid_max
+#    默认 32768。Milvus standalone 单进程线程数可达数千（querynode 的 knowhere
+#    线程池按 NumCPU×4 开），96 核机器上仅 Milvus 一个容器就可能吃掉上万个
+#    PID/线程名额，再叠加 api 的 DEDUP worker、PG 的每连接进程，
+#    会在 fork/thread_create 时报 "Cannot allocate memory" —— 但 free -g 显示
+#    内存充足，极具误导性。
+#    取值 655360：够 96 核机器上跑满所有容器，且远低于 4.x 的 4194304。
+# ② fs.file-max
+#    默认常是 65535 或更小。Milvus 每个 segment 持有若干文件句柄，
+#    PG 每个连接也占 fd，高并发时先撞系统级上限，报 "too many open files"。
+#    取值 1048576：这是 4.x 内核的默认值，3.10 上手工设上去是安全的。
+# ③ SELinux（仅提示，不自动关）
+#    CentOS 7 默认 enforcing，容器绑定挂载 ./data 会被拒绝，
+#    报错是 "Permission denied" 且 docker logs 里什么都没有。
+#    正确处理是只给数据目录打 svirt 标签，**不要 setenforce 0**（削弱整机防护）。
+#
+# 与 vm.max_map_count 一样：能自动修就修，修不了明确告警，不静默跳过。
+# ⚠️ 必须先初始化：本脚本是 `set -euo pipefail`，下面第一次 `${SYSCTL_PERSIST_HINT}...`
+#    若变量不存在会直接终止脚本（且报 "unbound variable" 的位置与真实原因无关，
+#    很容易被误读成 sysctl 命令本身出错）。
+SYSCTL_PERSIST_HINT=""
+for _kv in "kernel.pid_max:655360" "fs.file-max:1048576"; do
+  _key="${_kv%%:*}"
+  _req="${_kv##*:}"
+  _cur=$(sysctl -n "$_key" 2>/dev/null || echo "")
+  if [ -z "$_cur" ]; then
+    info "$_key: 不可读，跳过"
+  elif [ "$_cur" -ge "$_req" ] 2>/dev/null; then
+    info "$_key: $_cur ✅"
+  elif [ "$(id -u)" = "0" ]; then
+    # 与 max_map_count 一致的降级链：sysctl → 直接写 /proc
+    sysctl -w "$_key=$_req" >/dev/null 2>&1 || true
+    _new=$(sysctl -n "$_key" 2>/dev/null || echo "$_cur")
+    if [ "$_new" -ge "$_req" ] 2>/dev/null; then
+      info "$_key: $_cur → $_new ✅（临时生效，持久化见下）"
+      SYSCTL_PERSIST_HINT="${SYSCTL_PERSIST_HINT}${_key} = ${_req}\\n"
+    else
+      warn "  ⚠️  $_key=$_cur 偏低且调整失败，请手工执行: sysctl -w $_key=$_req"
+    fi
+  else
+    warn "  ⚠️  $_key=$_cur 偏低（需要 >= $_req），非 root 无法自动调整"
+    SYSCTL_PERSIST_HINT="${SYSCTL_PERSIST_HINT}${_key} = ${_req}\\n"
+  fi
+done
+
+# 持久化提示合并成一条：三项参数往往同时需要，逐条打印会淹没在输出里，
+# 而且用户粘一条漏两条的概率很高。
+if [ -n "${SYSCTL_PERSIST_HINT:-}" ]; then
+  info "  持久化（重启仍生效），执行一次即可："
+  info "    cat >> /etc/sysctl.d/99-aitg.conf <<'EOF'"
+  # shellcheck disable=SC2059
+  printf "%b" "$SYSCTL_PERSIST_HINT" | sed 's/^/    /'
+  info "    EOF"
+  info "    sysctl -p /etc/sysctl.d/99-aitg.conf"
+fi
+
+# SELinux：只判定 + 给修复命令，不自动执行。
+# 为什么不自动 chcon：目录可能在 NFS/只读挂载上，chcon 失败会打印一堆噪音，
+# 而且被拒绝的具体路径取决于 compose 的挂载方式，脚本猜不准。
+if command -v getenforce &>/dev/null; then
+  _sel=$(getenforce 2>/dev/null || echo unknown)
+  case "$_sel" in
+    Enforcing)
+      warn "  SELinux=Enforcing —— 容器挂载数据目录可能被拒（报 Permission denied）"
+      info "     修复（推荐，只给数据目录打标签，不要 setenforce 0）："
+      info "       chcon -Rt svirt_sandbox_file_t $(pwd)/data"
+      info "     若仍失败，在 compose 的服务上加 security_opt: [\"label:disable\"]"
+      ;;
+    Permissive) info "SELinux=Permissive（不阻断，仅记审计日志）" ;;
+    Disabled|unknown) : ;;
+    *) info "SELinux=$_sel" ;;
+  esac
+fi
+
+# 存储驱动：3.10 + xfs ftype=0 无法用 overlay2，落到 vfs 会让 Milvus IO 慢到不可用
+# （vfs 每层全量复制）。这是 3.10 迁移里最容易被忽略、后果最严重的一项。
+if command -v docker &>/dev/null && docker info &>/dev/null; then
+  _drv=$(docker info --format '{{.Driver}}' 2>/dev/null || echo "")
+  if [ "$_drv" = "vfs" ]; then
+    error "  ❌ Docker 存储驱动是 vfs —— Milvus 的 IO 会慢到不可用"
+    error "     vfs 通常是 overlay2 不可用时的兜底。检查数据盘："
+    error "       xfs_info /var/lib/docker | grep ftype    # 需要 ftype=1"
+    error "     若 ftype=0，只能重格式化该分区为 ext4 或 xfs(ftype=1)（先备份！）"
+    CHECK_FAILED=true
+  elif [ -n "$_drv" ]; then
+    info "Docker 存储驱动: $_drv ✅"
+  fi
+fi
+
 # ---------- 0c-3. CPU 核数（决定并发预算与单次推理线程数）----------
 # 口径见 docs/24 §5-2：并发任务数按**物理核**，单次推理线程按**逻辑核**封顶且 ≤4。
 # 这里只做"能不能跑"的下限检查 + 把两个数打出来，供现场对照应用自检结果。
