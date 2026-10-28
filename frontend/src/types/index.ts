@@ -483,10 +483,18 @@ export interface HealthStatus {
   generation_load?: {
     cpu_logical_cores: number
     cpu_physical_cores: number
+    /** v4.1.5：物理核是「读 cpuinfo 拓扑测得」还是「逻辑核÷2 保守估」 */
+    cpu_topology?: 'cpuinfo' | 'heuristic'
+    cpu_threads_per_core?: number | null
+    /** v4.1.5：单次推理的 torch intra-op 线程数（与并发份额是两回事） */
+    encode_threads?: number
     inference_slots: number
     task_ceiling: number
     active_tasks: number
     waiting_tasks: number
+    /** v4.1.5：内存探测来源；proc 表示 OOM 保护基于宿主内存，不可信 */
+    mem_source?: string
+    mem_available_ratio?: number | null
   }
 }
 
@@ -496,6 +504,10 @@ export interface SystemResources {
     logical_cores: number
     physical_cores: number
     cpu_limit: number
+    /** v4.1.5：超线程比（2 = 开了超线程）；null = 拓扑读不到 */
+    threads_per_core?: number | null
+    topology_source?: 'cpuinfo' | 'heuristic'
+    encode_threads?: number
     usage_percent: number | null
     usage_percent_avg: number | null
     load_1m: number | null

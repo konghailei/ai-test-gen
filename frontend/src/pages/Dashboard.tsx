@@ -225,7 +225,10 @@ export default function Dashboard() {
                 value={res.cpu.usage_percent_avg}
                 display={res.cpu.usage_percent_avg == null ? '—' : `${res.cpu.usage_percent_avg}%`}
                 color={usageColor(res.cpu.usage_percent_avg)}
-                hint={`${res.cpu.physical_cores} 物理核 / ${res.cpu.logical_cores} 逻辑核`}
+                hint={
+                  `${res.cpu.physical_cores} 物理核 / ${res.cpu.logical_cores} 逻辑核` +
+                  (res.cpu.topology_source === 'heuristic' ? '（拓扑不可读，按÷2估算）' : '')
+                }
               />
               <Meter
                 label="内存可用"
@@ -269,6 +272,7 @@ export default function Dashboard() {
                     ? `排队等待 ${res.generation.waiting} 个 · `
                     : ''}
                   推理份额 {res.inference_slots} 核（本地模型推理预算）
+                  {res.cpu.encode_threads ? ` · 单次推理 ${res.cpu.encode_threads} 线程` : ''}
                 </p>
               </div>
             </div>
