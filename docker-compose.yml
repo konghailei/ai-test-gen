@@ -70,7 +70,6 @@ services:
       - VECTOR_STORE=milvus
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
-      - EMBEDDING_MODEL_TYPE=local
       - EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5
       - RERANKER_ENABLED=true
       - RERANKER_MODEL_NAME=/models/bge-reranker-base
@@ -150,7 +149,6 @@ services:
       - VECTOR_STORE=milvus
       - MILVUS_HOST=milvus
       - MILVUS_PORT=19530
-      - EMBEDDING_MODEL_TYPE=local
       - EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5
       - REDIS_HOST=redis
       - REDIS_PORT=6379

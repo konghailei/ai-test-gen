@@ -356,11 +356,11 @@ class Settings(BaseSettings):
     KB_LINT_INTERVAL: int = 86400
 
     # ========== 嵌入模型配置 ==========
-    """嵌入模型类型：local（sentence-transformers，默认）| cloud（远程 API 嵌入）。
-    注：ChromaDB 已弃用，chroma_default 选项不再可用；模型实际加载由 EMBEDDING_MODEL_NAME 决定。"""
-    EMBEDDING_MODEL_TYPE: str = "local"
-
-    """本地嵌入模型名称（仅 EMBEDDING_MODEL_TYPE=local 时生效）"""
+    # （2026-10-28 移除 EMBEDDING_MODEL_TYPE：initial commit 引入但全仓零消费点。
+    #  真实加载分支在 milvus_store.py 按 EMBEDDING_MODEL_NAME 是否为绝对路径判定，
+    #  与 type 字段无关——旧注释「仅 local 时生效」是假文档。）
+    """本地嵌入模型名称。绝对路径 → 视为本地模型目录（镜像内置/bind mount）；
+    否则按 HuggingFace 模型 ID 解析（首次运行自动下载并缓存）。"""
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-large-zh-v1.5"
 
     """嵌入模型计算设备：cpu | cuda | mps"""
@@ -396,33 +396,16 @@ class Settings(BaseSettings):
     DEDUP_EMBED_WORKERS: str = ""
 
     # ========== 知识库维护配置 ==========
-    """时间衰减率（半衰期 ~180 天）"""
-    KB_DECAY_RATE: float = 0.005
-
-    """复用加分系数"""
-    KB_BOOST_REUSE: float = 1.5
-
-    """最低权重（防止完全遗忘）"""
-    KB_MIN_WEIGHT: float = 0.1
-
-    """超过多少天未使用的知识自动归档"""
-    KB_CLEANUP_DAYS: int = 365
+    # （2026-10-28 移除 KB_DECAY_RATE / KB_BOOST_REUSE / KB_MIN_WEIGHT / KB_CLEANUP_DAYS：
+    #  initial commit 引入但全仓零消费点。时间衰减的真实实现在 hybrid_search.py：
+    #  TIME_DECAY_HALF_LIFE_DAYS = 180 硬编码（decay = 0.5 ** (age/180)），改配置无效。）
 
     # ========== 检索配置 ==========
-    """召回数量"""
-    MATCH_TOP_K: int = 20
-
+    # （2026-10-28 移除 MATCH_TOP_K / MATCH_SIMILARITY_THRESHOLD / MATCH_ENABLE_RRF /
+    #  FEW_SHOT_SIMILARITY_THRESHOLD：均为 initial commit 死配置。真实行为：
+    #  召回数 = 各调用方 top_k 参数（当前均 5）；RRF 无条件执行；相似度无过滤点。）
     """最终返回数量"""
     MATCH_FINAL_N: int = 5
-
-    """最低相似度阈值"""
-    MATCH_SIMILARITY_THRESHOLD: float = 0.70
-
-    """GenAgent Few-shot 注入相似度阈值（优化 5：可配置，默认 0.70）"""
-    FEW_SHOT_SIMILARITY_THRESHOLD: float = 0.70
-
-    """是否启用 RRF 融合"""
-    MATCH_ENABLE_RRF: bool = True
 
     # （2026-10-22 移除 MATCH_ENABLE_GRAPH：initial commit 引入但历史上从未有消费点，假配置）
     # （2026-10-22 移除 RERANKER_THRESHOLD：v1.1.0 引入但从未接线，实际触发条件是
@@ -448,8 +431,8 @@ class Settings(BaseSettings):
     """ClarifyAgent 最大迭代轮次（docs/01 §5.3，防止死循环）"""
     MAX_CLARIFY_ITERATIONS: int = 3
 
-    """ClarifyAgent Optional 类问题上限（v2.1：Critical/Important 不限条数）"""
-    CLARIFY_OPTIONAL_LIMIT: int = 20
+    # （2026-10-28 移除 CLARIFY_OPTIONAL_LIMIT：initial commit 引入但零消费点，
+    #  Optional 类问题当前不受该值约束）
 
     """可执行性要素缺口检测（v2.49）：在需求分析澄清中追问入口/字段/场景数据/故障注入。
 
@@ -460,9 +443,8 @@ class Settings(BaseSettings):
     CLARIFY_EXECUTABILITY_GAPS_ENABLED: bool = True
 
     # ========== KB 访问日志配置 ==========
-    """是否启用 KB 访问日志（v2.1 新增）"""
-    KB_ACCESS_LOG_ENABLED: bool = True
-
+    # （2026-10-28 移除 KB_ACCESS_LOG_ENABLED：initial commit 引入但零消费点，
+    #  访问日志恒按 KB_ACCESS_LOG_MAX_ENTRIES 生效）
     """单次需求分析最多记录条数"""
     KB_ACCESS_LOG_MAX_ENTRIES: int = 50
 
@@ -479,11 +461,9 @@ class Settings(BaseSettings):
     """Redis 密码"""
     REDIS_PASSWORD: str = ""
 
-    """LLM 每分钟最大请求数（限流用）"""
-    LLM_RPM_LIMIT: int = 500
-
-    """LLM 每分钟最大 Token 数"""
-    LLM_TPM_LIMIT: int = 100000
+    # （2026-10-28 移除 LLM_RPM_LIMIT / LLM_TPM_LIMIT：initial commit 引入但零消费点。
+    #  HTTP 层限流真实配置是 API_RPM_LIMIT / API_RATE_WINDOW，LLM 维度的
+    #  RPM/TPM 限流从未实现）
 
     # ========== Celery 配置 ==========
     """Celery broker URL（Redis）"""
