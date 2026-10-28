@@ -48,9 +48,95 @@ def test_physical_cores_discards_hyperthreading():
 
 
 def test_inference_slots_reserves_one_core_for_main_process():
-    """必须留 1 核给主进程/事件循环——这是并发预算的底线，不是可选项。"""
+    """大机器上必须留 1 核给主进程/事件循环——这是并发预算的底线。"""
     assert inference_slots() >= 1
-    assert inference_slots() == max(1, physical_cores() - 1)
+
+
+def test_inference_slots_small_machine_keeps_one(monkeypatch):
+    """只有 1 个物理核时**不扣**主进程那一核。
+
+    小机器上"扣 → 0 → 兜成 1"等于没扣，却让人以为留了一核给事件循环；
+    而 api 在等 LLM 返回时实测只吃 1~1.6% CPU，那核留着是纯浪费。
+    """
+    monkeypatch.setattr(rg_module, "physical_cores", lambda: 1)
+    assert rg_module.inference_slots() == 1, "1 物理核不能被扣成 0（也不该假装扣过）"
+
+
+def test_inference_slots_ignores_peer_projection(monkeypatch):
+    """**slots 不扣兄弟投影**（v4.1.7 返工结论，真实回归）。
+
+    为什么不能扣：slots 还被 `clamp_fp_concurrency()` 用来算**单任务内的 FP
+    并行度**，而 celery 是异步旁路、大部分时间空闲。用它永久砍掉 api 的并行度
+    是常态性浪费。
+
+    实测代价（本机 8 逻辑核 / api cpus=6 / celery cpus=3）：
+        扣 → slots=1 → FP 并行度 1 → 生成慢一倍
+        不扣 → slots=2 → FP 并行度 2（与 v4.1.6 一致，无回归）
+    这条断言锁住"不扣"；投影扣减的位置见下一条（task_ceiling）。
+    """
+    monkeypatch.setattr(rg_module, "physical_cores", lambda: 4)
+    monkeypatch.setattr(rg_module, "_read_peer_cpu_budget", lambda: (3.0, "test"))
+    assert rg_module.inference_slots() == 3, "投影不得影响 inference_slots（只影响 task_ceiling）"
+
+
+def test_task_ceiling_peer_deduction_units_are_consistent(monkeypatch):
+    """投影扣减的单位必须统一：**两边都折算成物理核再相减**。
+
+    v4.1.6 的 bug：`peer`（逻辑核）直接与 `physical_cores()`（物理核）混算，
+    而且减完还又 `-1`（与 slots 内部的"留 1 核"重复）。
+
+    夹具 = 真实内网机器：6 逻辑核 / 每核 2 线程（3 物理核）、celery 投影 3 逻辑核。
+        slots = reserve(3) = 2
+        投影：own_phys=3，peer_phys=floor(3/2)=1 → eff_phys=2
+        ceiling = min(2, 2) = **2**
+        ❌ v4.1.6：eff_phys=ceil((6−3)/2)=2，再 −1 → 1（少一半吞吐）
+    """
+    monkeypatch.setattr(rg_module, "physical_cores", lambda: 3)
+    monkeypatch.setattr(rg_module, "_threads_per_core", lambda: 2)
+    monkeypatch.setattr(rg_module, "_read_peer_cpu_budget", lambda: (3.0, "test"))
+    monkeypatch.setattr(rg_module, "_cfg", lambda n, d: 4 if n == "GEN_TASK_CONCURRENCY_MAX" else d)
+    snap = {"cpu_percent_avg": 0.0, "load_1m": 0.0, "memory": {"available_ratio": 0.9}}
+    assert rg_module.task_ceiling(snap) == 2, "投影后应保留 2 个并发，而非被重复扣成 1"
+
+
+def test_inference_slots_not_double_deducted(monkeypatch):
+    """slots 自身不因投影少算（v4.1.6 把"留 1 核"扣了两次）。
+
+    夹具：4 物理核 → slots = 4−1 = 3，无论有没有投影都应是 3。
+    """
+    monkeypatch.setattr(rg_module, "physical_cores", lambda: 4)
+    monkeypatch.setattr(rg_module, "_read_peer_cpu_budget", lambda: (2.0, "test"))
+    assert rg_module.inference_slots() == 3
+
+
+def test_physical_cores_from_logical_rounds_up(monkeypatch):
+    """自己的份额必须向上取整：算的是"能承载几个任务"，白丢半个核更亏。"""
+    monkeypatch.setattr(rg_module, "_threads_per_core", lambda: 2)
+    assert rg_module.physical_cores_from_logical(6) == 3
+    assert rg_module.physical_cores_from_logical(3) == 2, "3/2=1.5 应向上取整为 2"
+    assert rg_module.physical_cores_from_logical(1) == 1
+    assert rg_module.physical_cores_from_logical(0) == 1, "绝不返回 0"
+
+
+def test_physical_cores_claimed_rounds_down(monkeypatch):
+    """兄弟占用必须向下取整：只有"至少占满"的整核才算真被拿走。
+
+    若这里也用 ceil，`ceil_phys(6)=3` 与 `ceil_phys(3)=2` 相加超过整机 3 个
+    物理核 → 超卖；实测后果是 6 核机器上并发被压到 1。
+    """
+    monkeypatch.setattr(rg_module, "_threads_per_core", lambda: 2)
+    assert rg_module.physical_cores_claimed(3) == 1, "1.5 个物理核只算占掉 1 个整核"
+    assert rg_module.physical_cores_claimed(2) == 1
+    assert rg_module.physical_cores_claimed(4) == 2
+    assert rg_module.physical_cores_claimed(0) == 0, "无投影必须是 0（不能是 1）"
+
+
+def test_reserve_for_main_process_skips_on_single_core(monkeypatch):
+    """留核规则：1 核不扣（扣了等于没扣），≥2 核扣 1。"""
+    assert rg_module._reserve_for_main_process(1) == 1
+    assert rg_module._reserve_for_main_process(2) == 1
+    assert rg_module._reserve_for_main_process(4) == 3
+    assert rg_module._reserve_for_main_process(8) == 7
 
 
 def test_probes_fall_open_when_sources_missing(monkeypatch):
@@ -935,9 +1021,13 @@ def test_task_ceiling_shrinks_when_peer_declared(monkeypatch):
 
 
 def test_task_ceiling_peer_deduction_reduces_ceiling_visibly(monkeypatch):
-    """能明显区分的一档：逻辑核 8/每核 2 → 物理 4 → slots 3。
+    """能明显区分的一档：物理 4 核 → slots 3。
 
-    兄弟占 4 核 → 可用逻辑核 8−4=4 → 物理核 2 → ceiling=1。
+    兄弟占 4 逻辑核 = floor(4/2) = **2 个整物理核** → 可用 4−2=2 → ceiling=2。
+
+    ⚠️ v4.1.7 起期望值是 2 而非 1：旧实现减完还多 `-1`（与 slots 内部的
+    "留 1 核"重复），属于同一理由扣两遍。详见
+    `test_task_ceiling_peer_deduction_units_are_consistent`。
     """
     _clear_peer(monkeypatch)
     monkeypatch.setattr(rg_module, "cpu_limit", lambda: 8.0)
@@ -948,15 +1038,15 @@ def test_task_ceiling_peer_deduction_reduces_ceiling_visibly(monkeypatch):
 
     assert rg_module.task_ceiling(snap) == 3
     rg_module.set_peer_cpu_budget(4.0, source="test")
-    assert rg_module.task_ceiling(snap) == 1
+    assert rg_module.task_ceiling(snap) == 2
     _clear_peer(monkeypatch)
 
 
 def test_task_ceiling_peer_small_overhead_stays_gentle(monkeypatch):
-    """兄弟只占少量核时不能过度惩罚：8 逻辑核 / 物理 4，兄弟占 2 核。
+    """兄弟只占少量核时不能过度惩罚：物理 4 核，兄弟占 2 逻辑核。
 
-    可用逻辑核 6 → 物理 3 → slots 2（而不是被压成 1）。
-    这条防的是"减法写成了取 min"或"减完之后忘了按 tpc 折算"。
+    2 逻辑核 = floor(2/2) = 1 个整物理核 → 可用 3 → slots 已是 3，ceiling 不变。
+    （原期望 2 是因为旧实现把 1.5 个物理核向上取整成 2 再减，多算了半个核。）
     """
     _clear_peer(monkeypatch)
     monkeypatch.setattr(rg_module, "cpu_limit", lambda: 8.0)
@@ -967,7 +1057,7 @@ def test_task_ceiling_peer_small_overhead_stays_gentle(monkeypatch):
 
     assert rg_module.task_ceiling(snap) == 3
     rg_module.set_peer_cpu_budget(2.0, source="test")
-    assert rg_module.task_ceiling(snap) == 2
+    assert rg_module.task_ceiling(snap) == 3, "兄弟只占 1 个整物理核，api 仍应保有 3 个并发"
     _clear_peer(monkeypatch)
 
 

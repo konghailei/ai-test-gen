@@ -36,8 +36,16 @@ CPU/GIL 争抢**，不是某个单点阻塞。
    探测本身变成阻塞源。故采样线程 2s 刷新一次缓存，预算判定只读内存。
 
 2. **并发预算**（`inference_slots`）：本地推理能占的"物理核份额"。
-   `max(1, 物理核 - 1)`——留 1 核给主进程/事件循环，与
-   `milvus_store._dedup_workers_configured` 的 `auto = 物理核-1` 完全同口径。
+
+   唯一口径（v4.1.7 定稿，**顺序不可换**）：
+      可用逻辑核 = `effective_cpu_limit()`（自身额度 − 兄弟容器投影）
+      可用物理核 = `physical_cores_from_logical(可用逻辑核)`
+      slots      = `_reserve_for_main_process(可用物理核)`
+
+   **"留 1 核给主进程"只在这一处扣，且小机器（1 物理核）不扣。**
+   v4.1.6 的写法是 `physical_cores() - 1` 得基础值、投影在 `task_ceiling()`
+   里再压一次，等于同一个"留 1 核"扣两遍——6 逻辑核的内网机器上
+   `2 − 1 = 1`，明明能吃 2 个生成任务却只放 1 个。
 
    **口径分界（v4.1.5 明确）**：
    - **并发任务数**按**物理核**算——超线程对 matmul 是纯竞争（8 线程比 4 线程
@@ -51,6 +59,10 @@ CPU/GIL 争抢**，不是某个单点阻塞。
      再按**运行时负载降级**（CPU 打满或内存紧张时收紧）。
    - 每任务 FP 并发 `clamp_fp_concurrency(cfg)` = min(cfg, slots // 活跃任务数)。
      → **单任务时与今天完全一致**（无回归），多任务时自动平分预算。
+
+   ⚠️ **`inference_slots()` 依赖 `effective_cpu_limit()` 读投影**，而投影值
+   在部署后可能变化（改环境变量/落盘文件需重启容器）。因此它是一个
+   "配置态"的量，不是"实时态"；实时态只有 `task_ceiling()` 的负载降级。
 
 3. **准入门 + 等待队列**（`GenerationGate`）：资源不足时**排队等待释放**
    （不拒绝），但有双上限防无限等：等待者数上限 + 等待时长上限。
@@ -67,6 +79,7 @@ CPU/GIL 争抢**，不是某个单点阻塞。
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import threading
 import time
@@ -510,6 +523,20 @@ def set_peer_cpu_budget(logical_cores: float | None, source: str = "") -> bool:
         return False
 
 
+def _own_logical_cores() -> float:
+    """本容器自己的逻辑核额度（**不含**兄弟容器扣减）。
+
+    单独抽出来是因为 `inference_slots()` 需要同时知道"我自己的额度"和
+    "兄弟占了多少"，才能分别用不同的取整方向折算（见该函数）。若直接用
+    `effective_cpu_limit()`（已经减过了），就只能对"净额"做一次二选一的取整，
+    无论向上还是向下都会在 4~6 核的小机器上算错半个核。
+    """
+    try:
+        return max(1.0, float(cpu_limit()))
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
 def effective_cpu_limit() -> float:
     """本进程**实际可用于本地推理**的逻辑核数（自身额度 − 兄弟容器占用）。
 
@@ -521,16 +548,54 @@ def effective_cpu_limit() -> float:
     为什么不直接改 `cpu_limit()`：那是"容器能看到的额度"，是**环境事实**；
     这里算的是"同机竞争后还能用多少"，是**预算**。两者不能混，否则
     自检日志（mem_source/cpu_source 那套证据）会跟着失真。
+
+    ⚠️ 这是**逻辑核**口径，只用于展示与负载判据。算并发任务数请走
+    `inference_slots()`——它还要按物理核折算、并让兄弟那份向下取整。
     """
-    try:
-        own = float(cpu_limit())
-    except Exception:  # noqa: BLE001
-        own = 1.0
+    own = _own_logical_cores()
     peer, _src = _read_peer_cpu_budget()
-    if peer:
-        # 下限 1：绝不返回 0 或负数（否则并发预算算出 0，生成永远进不来）
-        return max(1.0, own - peer)
-    return max(1.0, own)
+    # 下限 1：绝不返回 0 或负数（否则并发预算算出 0，生成永远进不来）
+    return max(1.0, own - float(peer or 0))
+
+
+def physical_cores_from_logical(logical: float) -> int:
+    """把**可用逻辑核数**折算成物理核数（向上取整，至少 1）。
+
+    唯一的折算入口：`inference_slots()` 与 `task_ceiling()` 的投影分支都必须
+    走这里。此前两处各写一份 `ceil(x / tpc)`，一旦其中一处改了取整方向，
+    "基础值与投影值不可比"的问题会以"偶尔多放一个任务"的形式静默出现。
+
+    向上取整的理由：算的是"**自己**能承载几个并发任务"。宁可多算半核也不能
+    因为 3 逻辑核 ÷ 2 = 1.5 白丢一个任务——那半个核实际就在自己手里。
+    """
+    tpc = _threads_per_core() or 2
+    try:
+        n = int(-(-float(logical) // float(tpc)))
+    except Exception:  # noqa: BLE001
+        n = int(logical or 1)
+    return max(1, n)
+
+
+def physical_cores_claimed(logical: float) -> int:
+    """把**兄弟容器占用的逻辑核数**折算成物理核数（**向下取整**）。
+
+    取整方向必须与 `physical_cores_from_logical` **相反**，否则两边都 +0.5
+    会把整机核数卖超。v4.1.7 实测内网机器（6 逻辑核 / 3 物理核，超线程 2）：
+        celery 占 3 逻辑核 → ceil 得 2 个物理核（实际只用 1.5 个）
+        api 可用 3 逻辑核 → ceil 也得 2 个物理核
+        2 + 2 = 4 > 整机 3 个物理核 → **超卖**，于是留 1 核后 slots 只剩 1
+    改为：兄弟向下取整（3→1 个物理核），api 向上取整（3→2），
+    合计 3 = 整机核数，api 拿到 2 个物理核 → 留 1 核 → **slots=2**。
+
+    语义上更准确：兄弟"至少占掉"的整物理核才算被拿走，剩下的碎片归 api。
+    宁可用满碎片，也不要因为"半个核不知道算谁的"而白空着。
+    """
+    tpc = _threads_per_core() or 2
+    try:
+        n = int(math.floor(float(logical) / float(tpc)))
+    except Exception:  # noqa: BLE001
+        n = int(logical or 1)
+    return max(0, n)
 
 
 def inference_slots() -> int:
@@ -540,11 +605,46 @@ def inference_slots() -> int:
     资源竞争，8 线程实测比 4 线程**慢 22%**（docs/27 §2.6）。并发任务的粒度必须
     落在物理核上，逻辑核只用来设**单次 encode 的线程数**（见 encode_threads）。
 
-    注意：小机器上 `物理核=1` 时这里仍返回 1（`max(1, ...)`）——**并发预算的最小
-    值与物理核数不是一回事**，前者是"至少允许 1 个任务"的语义保证。真正防止
-    小机器超卖的是 `task_ceiling()` 里对兄弟容器份额的扣减（见该函数）。
+    ## ⚠️ 这里**不扣**兄弟容器投影（v4.1.7 返工结论）
+
+    本函数有两个消费者，对"兄弟占用"的容忍度完全不同：
+
+      ① `task_ceiling()` —— 全局**并发生成任务数**。多个任务同时跑起来会一起
+         抢核，超卖代价大 → **必须扣**兄弟份额。
+      ② `clamp_fp_concurrency()` —— **单个任务内**的 FP 并行度。celery 是异步
+         旁路（只在知识库入库时跑 embedding），**大部分时间空闲**。因为它"声明
+         了 3 核配额"就永久砍掉 api 一路并行，是常态性浪费。
+
+    实测代价（本机 8 逻辑核 / api cpus=6 / celery cpus=3）：
+        扣 → slots=1 → 单任务 FP 并行度被压到 1（生成变慢一倍）
+        不扣 → slots=2 → FP 并行度 2（v4.1.6 行为，无回归）
+    `test_fp_concurrency.py::test_concurrency_semaphore_respected` 正是因此变红，
+    它测的是"限流逻辑本身"，不该被核数预算间接影响。
+
+    投影扣减统一放在 `task_ceiling()` 里，见那里的单位说明。
     """
-    return max(1, physical_cores() - 1)
+    return _reserve_for_main_process(physical_cores())
+
+
+def _reserve_for_main_process(phys: int) -> int:
+    """从物理核份额里给主进程/事件循环留 1 核，但小机器上不扣。
+
+    小机器（折算后物理核 = 1，即 2~4 逻辑核）的取舍完全不同：
+        扣掉一核 = 并发 0 → 被 `max(1, ...)` 兜成 1，等于"扣了但没生效"；
+        而那一核留给谁？主进程在**等 LLM 返回**时几乎不吃 CPU（实测 api 容器
+        1~1.6%），本地推理的 3~4 线程也塞得进 1 个物理核。
+        → 小机器上"1 个能跑的并发"远比"1 个空闲核"有价值，故不扣。
+
+    大机器（≥2 物理核）照旧扣 1：那里并发本来就不止 1，留 1 核能真正
+    让事件循环不被 matmul 挤住，代价只是少一个并发。
+
+    这也是"6 核机器只允许 1 个生成任务"的直接修复——原来扣完之后
+    `3-1=2`，再被投影压一次成 1；现在 `物理 2 核算出的 slots=2`。
+    """
+    phys = max(1, int(phys))
+    if phys <= 1:
+        return 1
+    return phys - 1
 
 
 def encode_threads() -> int:
@@ -901,17 +1001,29 @@ def task_ceiling(snap: dict | None = None) -> int:
     """
     base = min(inference_slots(), int(_cfg("GEN_TASK_CONCURRENCY_MAX", GEN_TASK_CONCURRENCY_MAX)))
     base = max(1, int(base))
-    # 兄弟容器投影：api 与 celery 是两个容器，各算各的 → 小机器上会超卖。
-    # 投影后容量（自身 − 兄弟占用）按物理核折算，再留 1 核给事件循环。
-    # -1 的语义是"留给主进程的那 1 核"，小机器上会把 base 正确压到 1。
+    # ---- 兄弟容器投影：只压"并发任务数"，且"留 1 核"不重复扣 ----
+    #
+    # 为什么投影放在这里而不是 `inference_slots()`：那个函数还被
+    # `clamp_fp_concurrency()` 消费（单任务内的 FP 并行度），而 celery 是**异步
+    # 旁路、大部分时间空闲**，用它永久砍掉 api 的单任务并行度是常态性浪费。
+    # 详见 `inference_slots()` 的 docstring。
+    #
+    # ⚠️ 单位必须统一（v4.1.6 的 bug 就在这）：`peer` 是**逻辑核**，
+    #    `physical_cores()` 是**物理核**，直接相减等于两把尺子混用。
+    #    必须先把 peer 折算成物理核（向下取整：只有"至少占满"的整核才算真被拿走），
+    #    再与自己的物理核份额相减。
+    #
+    # ⚠️ 这里**不要再 `-1`**（v4.1.6 的第二个 bug）：`inference_slots()` 内部
+    #    已经留过 1 核给主进程，这里再减一次就是同一个理由扣两遍。
+    #    实测 6 逻辑核机器：可用物理 2 核 → 再减 1 → ceiling=1（本应 2）。
     try:
-        peer, _peer_src = _read_peer_cpu_budget()
-        if peer:
-            eff_lc = effective_cpu_limit()
-            tpc = _threads_per_core() or 2
-            eff_phys = max(1, int(-(-eff_lc // float(tpc))))
-            base = max(1, min(base, eff_phys - 1) if eff_phys > 1 else 1)
-    except Exception:  # noqa: BLE001 - 投影计算出错保持原值
+        peer_lc, _peer_src = _read_peer_cpu_budget()
+        if peer_lc:
+            own_phys = physical_cores()
+            peer_phys = physical_cores_claimed(peer_lc)
+            eff_phys = max(1, own_phys - peer_phys)
+            base = min(base, eff_phys)
+    except Exception:  # noqa: BLE001 - 投影计算出错保持原值（fail-open）
         pass
     try:
         if snap is None:
