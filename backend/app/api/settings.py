@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -896,16 +896,22 @@ async def list_notifications(
 ) -> ApiResponse:
     """获取管理员通知列表（登录即可见；未读数供铃铛展示）。"""
     from app.db.models import AdminNotification
+    # v4.1.8：分页参数夹取（与 utils/pagination 同一约定 page≥1、page_size∈[1,100]）；
+    # 计数改 COUNT——原实现把全表 id 拉进内存再 len()，通知表只增不减会越来越慢
+    page = max(1, int(page or 1))
+    page_size = min(100, max(1, int(page_size or 20)))
     q = select(AdminNotification).order_by(AdminNotification.created_at.desc())
     if only_unread:
         q = q.where(AdminNotification.is_read.is_(False))
-    total = len((await session.execute(select(AdminNotification.id))).scalars().all())
+    total = (await session.execute(
+        select(func.count(AdminNotification.id))
+    )).scalar() or 0
     rows = (await session.execute(
         q.offset((page - 1) * page_size).limit(page_size)
     )).scalars().all()
-    unread = len((await session.execute(
-        select(AdminNotification.id).where(AdminNotification.is_read.is_(False))
-    )).scalars().all())
+    unread = (await session.execute(
+        select(func.count(AdminNotification.id)).where(AdminNotification.is_read.is_(False))
+    )).scalar() or 0
     items = [{
         "id": r.id, "type": r.type, "title": r.title, "content": r.content,
         "related_type": r.related_type, "related_id": r.related_id,
