@@ -33,6 +33,27 @@ echo "============================================"
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/images" "$OUTPUT_DIR/models" "$OUTPUT_DIR/code"
 
+# 记录版本信息（与 pack-update.sh 对称；此前首次包只有目录名带版本，
+# 部署时 deploy.sh 读不到 VERSION → 版本信息显示"未标注"，事后无法核对）
+echo "$VERSION" > "$OUTPUT_DIR/VERSION"
+echo "$(date '+%Y-%m-%d %H:%M:%S')" >> "$OUTPUT_DIR/VERSION"
+
+# 版本一致性校验：包名版本必须与代码内 VERSION 一致，
+# 否则内网部署出来的实际版本和包的标称版本不符（发版纪律问题）。
+CODE_VER=$(head -1 backend/app/VERSION 2>/dev/null | tr -d '\r\n')
+FRONT_VER=$(grep -m1 '"version"' frontend/package.json 2>/dev/null | sed 's/.*: *"\([^"]*\)".*/\1/')
+echo ""
+echo "=== 版本一致性校验 ==="
+echo "  包版本    : $VERSION"
+echo "  后端 VERSION: ${CODE_VER:-<缺失>}"
+echo "  前端 version: ${FRONT_VER:-<缺失>}"
+STRIP_VER="${VERSION#v}"
+if [ "$STRIP_VER" != "$CODE_VER" ] || [ "$STRIP_VER" != "$FRONT_VER" ]; then
+  echo "  ⚠️ 版本不一致：请先把 backend/app/VERSION 与 frontend/package.json 改成 $STRIP_VER"
+  echo "     （继续打包也能用，但内网会看到版本号对不上）"
+fi
+echo ""
+
 # ==================================================================
 # 1. 构建/拉取所有镜像
 # ==================================================================
@@ -137,7 +158,15 @@ cp .dockerignore "$OUTPUT_DIR/code/" 2>/dev/null || true
 echo "  复制部署文件"
 cp docker-compose.offline.yml "$OUTPUT_DIR/"
 cp scripts/deploy.sh "$OUTPUT_DIR/"
-chmod +x "$OUTPUT_DIR/deploy.sh"
+mkdir -p "$OUTPUT_DIR/scripts"
+# apply-resource-limits.sh：deploy.sh 阶段 4-2 调用，按宿主资源生成
+# docker-compose.resources.override.yml（容器内存/CPU 配额）。
+# 漏打包的后果：部署时提示"未找到脚本，跳过" → 容器无上限 → OOM 保护失效（静默）。
+cp scripts/apply-resource-limits.sh "$OUTPUT_DIR/scripts/" 2>/dev/null || {
+  echo "  ❌ scripts/apply-resource-limits.sh 缺失（OOM 保护依赖它）"
+  exit 1
+}
+chmod +x "$OUTPUT_DIR/deploy.sh" "$OUTPUT_DIR/scripts/apply-resource-limits.sh"
 
 # 生成 install.env
 cat > "$OUTPUT_DIR/install.env" << 'ENVEOF'
@@ -149,6 +178,25 @@ DEBUG=false
 PG_PASSWORD=aitestgen123
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
+
+# ---------------------------------------------------------------------------
+# 容器资源配额（v4.1.5）
+# ---------------------------------------------------------------------------
+# 留空/不写 = deploy.sh 按宿主内存与核数自动计算（推荐）：
+#   8GB 宿主 → api 6g / celery 3g / milvus 3g，api cpus 6 / celery cpus 3
+#   16GB → 10g / 4g / 6g，cpus 6 / 3；32GB → 20g / 6g / 8g，cpus 14 / 7
+#   容器 cpus = 宿主核数 - 2（下限 2）；celery cpus = api 的一半（下限 1）
+# 设了上限，应用的 OOM 保护（内存紧张自动降并发）与并发预算才有依据；
+# 不设 = 应用读到的是宿主内存，保护形同虚设（严重时被内核 OOM Killer 直接杀容器）。
+# celery 的 cpus 也必须限：它是独立进程、有自己的一份模型与线程池，
+#   不设会和 api 抢物理核，而 api 侧的并发预算完全看不到它。
+#
+# 只在自动计算不合预期时手工指定，格式：内存用 6g / 10240m，CPU 用整数或小数。
+# API_MEM_LIMIT=6g
+# API_CPU_LIMIT=6
+# MILVUS_MEM_LIMIT=3g
+# CELERY_MEM_LIMIT=3g
+# CELERY_CPU_LIMIT=3
 ENVEOF
 
 # ==================================================================
@@ -189,6 +237,7 @@ check_file "$OUTPUT_DIR/code/docker/postgres.Dockerfile"
 check_file "$OUTPUT_DIR/code/docker/init-zhparser.sql"
 check_file "$OUTPUT_DIR/docker-compose.offline.yml"
 check_file "$OUTPUT_DIR/deploy.sh"
+check_file "$OUTPUT_DIR/scripts/apply-resource-limits.sh"
 check_dir "$OUTPUT_DIR/images"
 check_dir "$OUTPUT_DIR/models/bge-large-zh-v1.5"
 check_file "$OUTPUT_DIR/models/bge-large-zh-v1.5/pytorch_model.bin"

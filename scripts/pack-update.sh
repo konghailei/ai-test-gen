@@ -79,7 +79,14 @@ echo "=== [2/2] 复制部署文件 ==="
 
 cp docker-compose.offline.yml "$OUTPUT_DIR/"
 cp scripts/deploy.sh "$OUTPUT_DIR/"
-chmod +x "$OUTPUT_DIR/deploy.sh"
+mkdir -p "$OUTPUT_DIR/scripts"
+# 增量包同样必须带 apply-resource-limits.sh：
+# deploy.sh 每次部署（含增量）都会重算配额 override，漏了它容器会退回无上限（OOM 保护失效）。
+cp scripts/apply-resource-limits.sh "$OUTPUT_DIR/scripts/" 2>/dev/null || {
+  echo "  ❌ scripts/apply-resource-limits.sh 缺失（OOM 保护依赖它）"
+  exit 1
+}
+chmod +x "$OUTPUT_DIR/deploy.sh" "$OUTPUT_DIR/scripts/apply-resource-limits.sh"
 
 # 复制 install.env 如果存在
 if [ -f "$OUTPUT_DIR/../install.env" ]; then
@@ -89,6 +96,22 @@ fi
 # 记录版本信息
 echo "$VERSION" > "$OUTPUT_DIR/VERSION"
 echo "$(date '+%Y-%m-%d %H:%M:%S')" >> "$OUTPUT_DIR/VERSION"
+
+# 版本一致性校验：包名版本必须与代码内 VERSION 一致，
+# 否则内网部署出来的实际版本和包的标称版本不符（deploy.sh 会报"包版本与代码版本不一致"）。
+CODE_VER=$(head -1 backend/app/VERSION 2>/dev/null | tr -d '\r\n')
+FRONT_VER=$(grep -m1 '"version"' frontend/package.json 2>/dev/null | sed 's/.*: *"\([^"]*\)".*/\1/')
+echo ""
+echo "=== 版本一致性校验 ==="
+echo "  包版本      : $VERSION"
+echo "  后端 VERSION: ${CODE_VER:-<缺失>}"
+echo "  前端 version: ${FRONT_VER:-<缺失>}"
+STRIP_VER="${VERSION#v}"
+if [ "$STRIP_VER" != "$CODE_VER" ] || [ "$STRIP_VER" != "$FRONT_VER" ]; then
+  echo "  ⚠️ 版本不一致：请先把 backend/app/VERSION 与 frontend/package.json 改成 $STRIP_VER"
+  echo "     （继续打包也能用，但内网会看到版本号对不上）"
+fi
+echo ""
 
 # ==================================================================
 # 打包
