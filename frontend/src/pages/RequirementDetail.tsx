@@ -492,7 +492,10 @@ export default function RequirementDetail() {
     } catch (e: any) {
       alert(e?.message || '保存失败：需求可能已被他人修改，请刷新页面后重试')
       refreshRevisionBaseline()
-      return
+      // v4.1.8：必须向上抛出——FieldEditor 依赖 reject 判定保存失败。
+      // 此前这里 return（resolve），子组件会把失败当成功并 setEditing(false)，
+      // 编辑器关闭、草稿销毁，用户已输入的内容在"请刷新后重试"提示下被静默丢弃。
+      throw e
     }
     setReq(prev => prev ? { ...prev, srr_json: srr } : prev)
     // v2.33: 本地变更后刷新 revision 基线，避免下次轮询误报冲突
@@ -2277,12 +2280,14 @@ export default function RequirementDetail() {
         </div>
       )}
 
-      {/* v2.33: 任务运行中提示条 —— 有分析任务正在执行，此期间无法进行其他分析操作 */}
+      {/* v2.33: 任务运行中提示条。v4.1.8 更正文案：锁是按 req_id 的 advisory lock，
+          只约束「同一需求」不能并发新建分析，不同需求/其他用户完全可并行——
+          旧文案「此期间无法进行其他分析操作」会让人误以为全站互斥。 */}
       {taskRunningInfo && !conflictDetected && (
         <div className="p-3 text-sm flex items-center gap-2" style={{ background: 'rgba(0, 122, 255, 0.08)', border: '1px solid rgba(0, 122, 255, 0.2)', borderRadius: 'calc(var(--radius) * 0.6)', color: 'var(--brand-700)' }}>
           <Loader2 className="w-4 h-4 animate-spin flex-shrink-0" />
           <span>{taskRunningInfo.message || `正在执行${taskRunningInfo.task_type}任务...`}</span>
-          <span className="text-xs ml-1" style={{ color: 'var(--brand-500)' }}>（此期间无法进行其他分析操作）</span>
+          <span className="text-xs ml-1" style={{ color: 'var(--brand-500)' }}>（该需求有任务在跑，暂不能新建分析）</span>
         </div>
       )}
 

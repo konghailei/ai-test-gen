@@ -84,35 +84,48 @@ export default function Tasks() {
   const [tasks, setTasks] = useState<AnalysisTaskInfo[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [filterStatus, setFilterStatus] = useState<string>('')
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)  // v2.23: 展开耗时明细
   const [detailTask, setDetailTask] = useState<AnalysisTaskInfo | null>(null)  // v2.24: 任务详情弹窗
   const [serverNow, setServerNow] = useState<string | undefined>(undefined)  // v2.36: 服务器当前时间
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  // v4.1.8：请求序号守卫——切筛选/换产品后，旧请求的迟到响应直接丢弃，避免覆盖新列表
+  const reqSeq = useRef(0)
+  // v4.1.8：始终指向最新一次渲染的 loadTasks——定时器与限流监听在闭包里永远拿最新筛选
+  const loadTasksRef = useRef<() => void>(() => {})
 
   const loadTasks = async () => {
+    const seq = ++reqSeq.current
     try {
       const res = await reqApi.listTasks({
         status: filterStatus || undefined,
         product_id: selectedProductId || undefined,
         limit: 100,
       })
+      // v4.1.8：只接受"最后一次请求"的响应，旧筛选的迟到响应直接丢弃
+      if (seq !== reqSeq.current) return
       setTasks(res.items || [])
       setTotal(res.total || 0)
       setServerNow(res.server_now)
+      setLoadError(null)
     } catch (e: any) {
+      // v4.1.8：失败必须可见——此前只写 console，用户无法区分"加载失败"与"暂无任务"
+      if (seq === reqSeq.current) setLoadError(e?.message || '加载任务列表失败')
       console.error('加载任务失败:', e?.message)
     } finally {
-      setLoading(false)
+      if (seq === reqSeq.current) setLoading(false)
     }
   }
+  // 每次渲染同步最新闭包：定时器/限流监听通过 ref 调用，永不用挂载时的旧 filterStatus
+  useEffect(() => { loadTasksRef.current = loadTasks })
 
   useEffect(() => {
     setLoading(true)
     loadTasks()
-    // 自动轮询（进行中任务实时刷新）
+    // 自动轮询（进行中任务实时刷新）——经 ref 调用，始终用最新筛选
     if (pollTimer.current) clearInterval(pollTimer.current)
-    pollTimer.current = setInterval(loadTasks, 3000)
+    pollTimer.current = setInterval(() => loadTasksRef.current(), 3000)
     return () => {
       if (pollTimer.current) clearInterval(pollTimer.current)
     }
@@ -128,8 +141,10 @@ export default function Tasks() {
       if (pollTimer.current) { clearInterval(pollTimer.current); pollTimer.current = null }
       if (boosted) clearTimeout(boosted)
       boosted = setTimeout(() => {
-        loadTasks()
-        if (!pollTimer.current) pollTimer.current = setInterval(loadTasks, 3000)
+        // v4.1.8：经 ref 取最新闭包——此前捕获的是挂载时的 loadTasks（初始筛选），
+        // 429 退避恢复后会用"全部状态"覆盖用户当前筛选且不再自愈
+        loadTasksRef.current()
+        if (!pollTimer.current) pollTimer.current = setInterval(() => loadTasksRef.current(), 3000)
       }, 15000)
     }
     window.addEventListener('aitestgen:rate-limited', onRateLimited)
@@ -199,6 +214,18 @@ export default function Tasks() {
         ))}
       </div>
 
+      {/* v4.1.8：加载失败可见——此前仅 console.error，用户无法区分"加载失败"与"暂无任务" */}
+      {loadError && (
+        <div
+          className="flex items-center gap-2 px-3 py-2 text-sm rounded-lg"
+          style={{ border: '1px solid var(--state-error)', color: 'var(--state-error)', background: 'var(--background)' }}
+        >
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>任务列表加载失败：{loadError}</span>
+          <button onClick={() => loadTasks()} className="ml-auto underline shrink-0">重试</button>
+        </div>
+      )}
+
       {/* 任务列表 */}
       <div className="card overflow-hidden">
         {loading ? (
@@ -208,7 +235,7 @@ export default function Tasks() {
         ) : tasks.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16" style={{ color: 'var(--foreground-quaternary)' }}>
             <ListTodo className="w-10 h-10 mb-3 opacity-30" />
-            <p className="text-sm">暂无任务记录</p>
+            <p className="text-sm">{loadError ? '数据加载失败，请重试' : '暂无任务记录'}</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
