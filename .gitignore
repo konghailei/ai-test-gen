@@ -169,3 +169,13 @@ _cleanup_total.tmp
 backend/tests/_verify_*.py
 dsh-plugins-recommend.md
 _dogfood_out/
+
+# 部署时由 scripts/apply-resource-limits.sh 按宿主资源生成，属于环境产物
+# （不同机器配额不同，提交进版本库会让别人误用你的内存值）
+docker-compose.resources.override.yml
+
+# 部署时由 deploy.sh 在安装目录生成的运行时记录（环境相关，不进版本库）
+# - .deployed-version : 供下次部署做降级判断
+# - DEPLOY-RECORD.md  : 本次部署的完整环境快照
+.deployed-version
+DEPLOY-RECORD.md

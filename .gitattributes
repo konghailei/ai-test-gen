@@ -1,0 +1,30 @@
+# 行尾符策略
+#
+# 仓库启用了 core.autocrlf=true，Windows 下 checkout 会把 LF 改成 CRLF。
+# 但 shell 脚本 / SQL / Dockerfile 拿到 Linux 后，CRLF 会导致：
+#   bash: set: pipefail\r: invalid option name
+#   或  $'\r': command not found
+# 故对这类文件强制 LF，不随 autocrlf 变化。
+
+*.sh          text eol=lf
+*.bash        text eol=lf
+*.sql         text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.env         text eol=lf
+.env.*        text eol=lf
+Dockerfile    text eol=lf
+Dockerfile.*  text eol=lf
+*.Dockerfile  text eol=lf
+
+# Python / Markdown 也强制 LF（v4.1.5 补）：
+# .py 里的 CRLF 虽然 Python 能忍（\r 被当空白），但有两个实际代价：
+#   ① 与 Linux 容器内的文件哈希永远对不上 → "宿主机改的文件到底进容器没有"无法用 md5 判定
+#   ② 三引号字符串 / 正则里若混入 \r 会变成难以察觉的行为差异
+# .md 强制 LF 是为了 diff 干净（Windows 编辑器保存时常切回 CRLF）。
+*.py          text eol=lf
+*.pyi         text eol=lf
+*.md          text eol=lf
+*.ts          text eol=lf
+*.tsx         text eol=lf
+*.json        text eol=lf
