@@ -445,7 +445,19 @@ class Orchestrator:
                     return
                 old = dict(t.result_json or {})
                 old_cp = dict(old.get("checkpoint") or {})
-                new_cp = {"fp_groups": list(fp_groups), "completed": len(fp_groups)}
+                # v4.1.8：按 fp_id 取**并集**合并，而非全量覆盖。
+                # 并发 FP 分片各自 append 共享列表后调用本函数，快照可能落后于其他
+                # 分片的 append——全量覆盖会让后提交者的旧快照吞掉先提交的 FP，
+                # 续跑时被判为"未完成"而重复生成（浪费算力，甚至重复用例）。
+                # 并集合并对乱序提交、单次写失败后的重试都幂等，且无需加锁
+                # （避免 asyncio.Lock 绑定事件循环、测试多次 asyncio.run 即炸的老坑）。
+                _merged: dict[str, dict] = {}
+                for _g in list(old_cp.get("fp_groups") or []) + list(fp_groups):
+                    _k = str(_g.get("fp_id") or _g.get("fp_name") or "")
+                    if _k:
+                        _merged[_k] = _g
+                _groups = list(_merged.values())
+                new_cp = {"fp_groups": _groups, "completed": len(_groups)}
                 # 指纹：新值优先；不传则保留旧值（绝不能回退成"无指纹"——那会让续跑校验失效）
                 new_cp["fingerprint"] = fingerprint or old_cp.get("fingerprint") or {}
                 old["checkpoint"] = new_cp

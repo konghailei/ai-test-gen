@@ -447,9 +447,15 @@ class GenAgent:
         joined = self.merge_regression_cases(historical_regression or [], cases)
         reuse_count = len(historical_regression or [])
         if reuse_count:
-            for c in joined:
+            # v4.1.8：盖章前拷贝。merge_regression_cases 保留原引用（merged.append(case)），
+            # 而并发 FP 分片共享同一份 historical_regression 列表——直接改 gen_batch_id
+            # 会让各分片互相覆盖，最终批次归属取决于完成顺序（溯源失真）。
+            # dict(c) 浅拷贝足够：只改顶层 gen_batch_id，不动 steps 等嵌套内容。
+            for _i, c in enumerate(joined):
                 if c.get("source") == "reused":
-                    c["gen_batch_id"] = batch_id
+                    _c = dict(c)
+                    _c["gen_batch_id"] = batch_id
+                    joined[_i] = _c
             logger.info(
                 "[GenAgent] 合并回归复用基线: reused={}, total={}",
                 reuse_count, len(joined),

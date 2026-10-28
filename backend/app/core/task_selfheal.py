@@ -133,6 +133,21 @@ async def _run_selfheal(task_id: str, req_id: str, srr_json: dict,
                     error=str(event.get("message", ""))[:500],
                     completed_at=_dt.now(_tz.utc),
                 )
+    except asyncio.CancelledError:
+        # v4.1.8：取消（进程优雅停机）也必须在 DB 留痕。CancelledError 继承
+        # BaseException，下面的 except Exception 捕获不到——不处理则任务永远停在
+        # running，直到下次启动 init_db 的 stale 清理才改判；窗口期内该需求
+        # 新建分析会被活动任务唯一索引挡成 409。_update_task 自带终态守卫，
+        # 重复写/失败均无副作用。
+        try:
+            await _update_task(
+                task_id, status="interrupted", phase="generate", progress=0,
+                message="自愈续跑被中断（进程停机）",
+                completed_at=_dt.now(_tz.utc),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        raise
     except Exception as e:  # noqa: BLE001
         logger.error("[SelfHeal] 自愈续跑异常: task={}, req={}, err={}", task_id, req_id, str(e)[:200])
         await _update_task(
