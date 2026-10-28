@@ -16,33 +16,60 @@ from app.utils.logger import logger
 
 
 async def _update_vectorization_status(req_id: str, status: str, error: str | None = None):
-    """异步回写需求向量化状态到 PostgreSQL。"""
-    from app.db.database import async_session
-    from app.db.models import Requirement
-    from sqlalchemy import select
+    """异步回写需求向量化状态到 PostgreSQL。
 
-    async with async_session() as session:
-        r = await session.execute(select(Requirement).where(Requirement.id == req_id))
-        record = r.scalar_one_or_none()
-        if record:
-            record.vectorization_status = status
-            record.vectorization_error = error
-            await session.commit()
+    v4.1.8：改用**短命 NullPool 引擎**，不再复用 app.db.database 的全局连接池。
+    全局池的连接绑定在首次 asyncio.run 的事件循环上；Celery prefork 子进程会
+    串行处理多个任务，第二次 asyncio.run 建的新循环一旦拿到绑定旧循环的池化
+    连接就会报 "Event loop is closed"——异常被 _update_vs_sync 吞成 warning，
+    表现为状态静默不更新（前端永远看到 pending）。NullPool 每次独立建连/断开，
+    与事件循环天然解耦；任务本身是重活（编码+写库），建连开销可忽略。
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app.config import settings
+    from app.db.models import Requirement
+
+    engine = create_async_engine(settings.pg_async_url, poolclass=NullPool)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            r = await session.execute(select(Requirement).where(Requirement.id == req_id))
+            record = r.scalar_one_or_none()
+            if record:
+                record.vectorization_status = status
+                record.vectorization_error = error
+                await session.commit()
+    finally:
+        await engine.dispose()
 
 
 async def _update_tc_vectorization_status(case_id: str, status: str, error: str | None = None):
-    """异步回写测试用例向量化状态到 PostgreSQL（修复 C4）。"""
-    from app.db.database import async_session
-    from app.db.models import TestCase
-    from sqlalchemy import select
+    """异步回写测试用例向量化状态到 PostgreSQL（修复 C4）。
 
-    async with async_session() as session:
-        r = await session.execute(select(TestCase).where(TestCase.id == case_id))
-        record = r.scalar_one_or_none()
-        if record:
-            record.vectorization_status = status
-            record.vectorization_error = error
-            await session.commit()
+    v4.1.8：同 _update_vectorization_status，改用短命 NullPool 引擎。
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app.config import settings
+    from app.db.models import TestCase
+
+    engine = create_async_engine(settings.pg_async_url, poolclass=NullPool)
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            r = await session.execute(select(TestCase).where(TestCase.id == case_id))
+            record = r.scalar_one_or_none()
+            if record:
+                record.vectorization_status = status
+                record.vectorization_error = error
+                await session.commit()
+    finally:
+        await engine.dispose()
 
 
 def _update_vs_sync(req_id: str, status: str, error: str | None = None):
