@@ -8,11 +8,23 @@
 # - infrastructure 服务（redis/etcd/minio/milvus）只有 image，从 .tar 加载
 # ============================================================================
 
+# v4.1.5：统一 stdout 日志轮转。
+# 背景（实测）：日志驱动未配置时 Docker 默认 json-file **不轮转**，
+# uvicorn access log + loguru console sink 全写 stdout → 长期运行会把
+# /var/lib/docker 写满，写满后 Postgres/Milvus 同时故障（3.10 老机器磁盘通常只有 30-50G）。
+# 应用自身的 logs/ 文件有 loguru rotation，但 Docker 那层没有。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   # ==========================================================================
   # 前端 + Nginx 反向代理
   # ==========================================================================
   frontend:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     image: ai-test-gen-web:latest
     build:
       context: .
@@ -31,6 +43,7 @@ services:
   # 后端 API 服务
   # ==========================================================================
   backend:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     image: ai-test-gen-api:latest
     build:
       context: .
@@ -53,6 +66,15 @@ services:
         DEBUG: ${DEBUG:-false}
         APP_SECRET_KEY: ${APP_SECRET_KEY:-}
         MASTER_KEY: ${MASTER_KEY:-}
+        # v4.1.5（跨容器 CPU 预算投影，重要）：
+        #   api 与 celery 是**两个容器**，各自只读自己的 cgroup，谁都以为整机归自己用
+        #   → 小机器上 CPU 超卖。deploy.sh 会按"celery 的 cpus 声明"算出占用，
+        #   通过这个变量告诉 api："同机还有个兄弟在用 N 个逻辑核"，api 的并发预算
+        #   按「自身 − N」算（resource_guard.effective_cpu_limit）。
+        #   留空 = 单容器形态/未投影，预算只看自己（旧行为，安全）。
+        #   ⚠️ 必须走环境变量而不是运行时 dict：`docker exec` 是另一个进程，
+        #      往里写状态主进程读不到（实测踩到）。
+        PEER_CELERY_CPU: ${PEER_CELERY_CPU:-}
         DATABASE_URL: postgresql+asyncpg://aitestgen:aitestgen123@postgres:5432/ai_test_gen
         VECTOR_STORE: milvus
         MILVUS_HOST: milvus
@@ -66,6 +88,19 @@ services:
         CELERY_BROKER_URL: redis://redis:6379/1
         CELERY_RESULT_BACKEND: redis://redis:6379/2
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    # v4.1.5（OOM 保护依据，重要）：
+    #   应用的内存守卫（MEM_LOW_RATIO → 自动降并发）靠容器 cgroup 上限判断"内存是否紧张"。
+    #   若这里不设上限，容器 cgroup 为 "max" → 守卫只能读宿主内存 → 保护失效，
+    #   内存耗尽时被内核 OOM Killer 硬杀（容器莫名重启，而非优雅降级）。
+    #   3.x 内核对应用无影响（已内置 cgroup v1 读取），但要生效仍须在此声明上限。
+    #   ★ 取值来自 install.env / .env，由 deploy.sh 按宿主内存自动算；不设 = 不限（旧行为）。
+    #     8GB 宿主 → 6g；16GB → 10g；32GB → 20g（约 60%~65%，给 Milvus/模型留余量）
+    #   ⚠️ 这里**不能**写 `mem_limit: ${API_MEM_LIMIT:-}`——变量为空时 compose 会报
+    #     `invalid size: ''`（mem_limit 和 cpus 都不接受空串）。
+    #     配额统一由 deploy.sh 生成的 docker-compose.resources.override.yml 注入，
+    #     只有真正算出了值才存在该文件，没算出来就完全不写 → 保持"不限"的旧行为。
+    #     手工设：在 .env 写 API_MEM_LIMIT=6g 后执行
+    #       docker compose -f docker-compose.offline.yml -f docker-compose.resources.override.yml up -d
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 30s
@@ -87,6 +122,7 @@ services:
   # Celery Worker（异步嵌入计算 + 知识库双写）
   # ==========================================================================
   celery_worker:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     image: ai-test-gen-api:latest
     container_name: ai-test-gen-celery
     extra_hosts:
@@ -98,6 +134,20 @@ services:
       - ./models/bge-reranker-base:/models/bge-reranker-base:ro
     environment:
       <<: *backend-env
+      # v4.1.5（同步 dev 与内网）：语义去重 embed 并行进程池 worker 数。
+      #   此前**只有 docker-compose.yml（dev）有这一行**，内网 offline 缺省 →
+      #   settings 默认 "" = 串行，于是"dev 上验证过的并行优化在内网从未生效"，
+      #   且没有任何日志提示（属于"声明的配置与实际生效的代码不一致"）。
+      #   留空 / 1 / 0 / off = 串行；auto = max(1, 物理核-1)；整数 N = N 进程。
+      #   内存预算：每 worker ~1.6GB，开启前确认空闲内存 ≥ N×1.6GB。
+      #   ⚠️ 必须写成映射形式：`<<: *backend-env` 合并的是 dict，与 `- KEY=VAL`
+      #      列表混用会让 compose 报 "expected a mapping"。
+      DEDUP_EMBED_WORKERS: ${DEDUP_EMBED_WORKERS:-}
+      # v4.1.5 修正：**不再用环境变量标记 celery**。
+      #   环境变量会随容器环境被 docker exec 的测试/调试进程一并继承，
+      #   导致"celery 串行"误伤单测（test_dedup_chunk_order 实测失败）。
+      #   改为运行时特征判定（见 milvus_store._in_celery_worker）：
+      #   `current_app._current_worker` 或 prefork 进程名含 ForkPoolWorker。
     command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=2 --queues=embedding
     healthcheck:
       test: ["CMD-SHELL", "celery -A app.tasks.celery_app.celery_app inspect ping -d celery@$$HOSTNAME --timeout=10 || exit 1"]
@@ -120,6 +170,7 @@ services:
   # PostgreSQL 16 + pgvector + zhparser（自定义构建）
   # ==========================================================================
   postgres:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     image: ai-test-gen-postgres:latest
     build:
       context: .
@@ -146,13 +197,22 @@ services:
   # Redis（L1 缓存 + Celery broker）— 纯官方镜像，无自定义构建
   # ==========================================================================
   redis:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     image: redis:7-alpine
     container_name: ai-test-gen-redis
     ports:
       - "6379:6379"
     volumes:
       - ./data/redis:/data
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # v4.1.5：淘汰策略从 allkeys-lru 改为 noeviction。
+    # 原因（实测）：同一实例同时承担 KB 缓存、Celery broker(1 号库)、result backend(2 号库)。
+    # allkeys-lru 会**无差别淘汰**——包括 Celery 队列里还没被消费的任务消息；
+    # 消息被淘汰后 send_task 这种 fire-and-forget 调用不会报错，
+    # vectorization_status 会永久停在 pending（静默丢数据，比写失败更危险）。
+    # noeviction 下写满会报错，但缓存侧已 try/except 降级（kb_cache.py:170 只记 debug），
+    # 主流程不受影响；任务消息宁可写入失败也不该被静默丢弃。
+    # 若后续把 broker 拆到独立实例，可再考虑把缓存库改回 volatile-lru。
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -166,6 +226,7 @@ services:
   # Milvus 向量数据库及其依赖（etcd + minio）
   # ==========================================================================
   etcd:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     image: quay.io/coreos/etcd:v3.5.5
     container_name: ai-test-gen-etcd
     environment:
@@ -186,6 +247,7 @@ services:
     restart: unless-stopped
 
   minio:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     container_name: ai-test-gen-minio
     environment:
@@ -206,11 +268,30 @@ services:
     restart: unless-stopped
 
   milvus:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     image: milvusdb/milvus:v2.4.0
     container_name: ai-test-gen-milvus
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
+    # v4.1.5：Milvus 用 mmap 锁页（tiered storage / growing segment）。
+    # 3.x 内核（RHEL/CentOS 7）默认 memlock 仅 64KB，不放开会在数据量上来后
+    # 报 "mmap: cannot allocate memory" 并崩溃。v2/v3 语法均支持 ulimits。
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
+    # 可选内存上限（同 api：不设则容器内存无上限）
+    # Milvus 内存随集合数量/数据量上涨，但没有 api 那种"自动降并发"守卫，
+    # 设上限主要是**兜住它别把整机吃干**（超限被 OOM Killer 杀，restart 拉起）。
+    # 由 deploy.sh 生成的 override 文件注入 mem_limit，模板里不写死。
+    # Milvus 的查询/构建并发由自身参数控制，不需要 cpus 配额；
+    # 硬加配额反而会让 segment 加载变慢，这里刻意不设。
+    # Milvus 的查询/构建并发由自身参数控制，不需要 cpus 配额；
+    # 硬加配额反而会让 segment 加载变慢，这里刻意不设。
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000

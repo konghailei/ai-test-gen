@@ -11,11 +11,19 @@
 #   docker compose up -d --build    # 只重建应用层（几秒）
 # ============================================================================
 
+# v4.1.5：统一 stdout 日志轮转（Docker 默认 json-file 不轮转，长跑会写满磁盘）
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   # ==========================================================================
   # 前端 + Nginx 反向代理
   # ==========================================================================
   frontend:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     build:
       context: .
       dockerfile: frontend/Dockerfile
@@ -33,6 +41,7 @@ services:
   # 后端 API 服务（基于预构建基础镜像，只 COPY 代码）
   # ==========================================================================
   backend:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -74,6 +83,19 @@ services:
       #   worker 各 ~1.6GB，实测余量充足）。dedup_semantic 已在 to_thread 内，
       #   进程池进一步把「单次 encode 35min」压到近半，且与出箱投递在 CPU 上交错。
       - DEDUP_EMBED_WORKERS=${DEDUP_EMBED_WORKERS:-2}
+      # v4.1.5：celery 进程内去重进程池强制串行 —— 由运行时特征判定
+      #   （milvus_store._in_celery_worker），**不注入环境变量**，避免污染测试进程。
+      # v4.1.5（跨容器 CPU 预算投影）：api 与 celery 各自只读自己的 cgroup，
+      #   小机器上会超卖。deploy.sh 把 celery 的 cpus 声明换算成逻辑核数注入这里，
+      #   api 的并发预算按「自身 − 该值」算（resource_guard.effective_cpu_limit）。
+      #   留空 = 未投影，只看自己（旧行为）。开发机通常不必设。
+      - PEER_CELERY_CPU=${PEER_CELERY_CPU:-}
+    # v4.1.5（OOM 保护依据）：不设上限则容器 cgroup 为 "max"，
+    # 应用的 MEM_LOW_RATIO 守卫读不到容器上限 → 只能读宿主内存 → 保护失效。
+    # 开发机默认留空（不限制，保持旧行为）；生产由 deploy.sh 按宿主内存自动写入。
+    # 注意：mem_limit / cpus 都不接受空串（`invalid size: ''`），
+    # 因此配额由 deploy.sh 生成的 docker-compose.resources.override.yml 注入，
+    # 需要本地验收时：API_MEM_LIMIT=6g API_CPU_LIMIT=4 bash scripts/apply-resource-limits.sh
     command: >
       sh -c "
         if [ '${DEBUG:-true}' = 'true' ]; then
@@ -103,6 +125,7 @@ services:
   # Celery Worker（异步嵌入计算 + 知识库双写）
   # ==========================================================================
   celery_worker:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     container_name: ai-test-gen-celery
     build:
       context: .
@@ -150,6 +173,7 @@ services:
   # PostgreSQL 16 + pgvector + zhparser（关系数据库 + BM25 中文全文检索）
   # ==========================================================================
   postgres:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     container_name: ai-test-gen-pg
     build:
       context: .
@@ -175,13 +199,22 @@ services:
   # Redis（L1 缓存 + Celery broker）
   # ==========================================================================
   redis:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     container_name: ai-test-gen-redis
     image: redis:7-alpine
     ports:
       - "6379:6379"
     volumes:
       - ./data/redis:/data
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # v4.1.5：淘汰策略从 allkeys-lru 改为 noeviction。
+    # 原因（实测）：同一实例同时承担 KB 缓存、Celery broker(1 号库)、result backend(2 号库)。
+    # allkeys-lru 会**无差别淘汰**——包括 Celery 队列里还没被消费的任务消息；
+    # 消息被淘汰后 send_task 这种 fire-and-forget 调用不会报错，
+    # vectorization_status 会永久停在 pending（静默丢数据，比写失败更危险）。
+    # noeviction 下写满会报错，但缓存侧已 try/except 降级（kb_cache.py:170 只记 debug），
+    # 主流程不受影响；任务消息宁可写入失败也不该被静默丢弃。
+    # 若后续把 broker 拆到独立实例，可再考虑把缓存库改回 volatile-lru。
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -196,6 +229,7 @@ services:
   # 这些服务的实际定义在 docker-compose.base.yml 中
   # ==========================================================================
   etcd:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     container_name: ai-test-gen-etcd
     image: quay.io/coreos/etcd:v3.5.5
     environment:
@@ -216,6 +250,7 @@ services:
     restart: unless-stopped
 
   minio:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     container_name: ai-test-gen-minio
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     environment:
@@ -236,11 +271,20 @@ services:
     restart: unless-stopped
 
   milvus:
+    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
     container_name: ai-test-gen-milvus
     image: milvusdb/milvus:v2.4.0
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
+    # v4.1.5：Milvus mmap 锁页需要放开 memlock（3.x 内核默认仅 64KB 会崩）
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
