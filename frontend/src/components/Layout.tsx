@@ -60,16 +60,44 @@ export default function Layout() {
   }, [])
 
   // v2.14: 轮询进行中任务数（角标显示）；v2.20: 只显示未结束任务（running+pending），failed/completed 不计入
+  //
+  // v4.1.6 自适应降频：这是全站请求量的最大来源（12 次/分钟），
+  // 一旦命中 429 说明桶已经紧张，此时**继续按 5s 硬打**只会让情况更糟
+  // （每次 429 又消耗一次检查机会，恢复更慢）。改为指数退避：
+  //   正常 5s → 遇 429 逐步拉长到 60s 上限 → 成功后立即回到 5s。
+  // 用 setTimeout 递归而不是 setInterval，才能动态改间隔。
   useEffect(() => {
+    let alive = true
+    let interval = 5000
+    // timer 必须在 schedule 之前声明：schedule 闭包引用它，
+    // 虽然在 TDZ 内不会被执行，但提前声明能让静态检查和人的阅读都更安全。
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const schedule = (ms: number) => {
+      if (!alive) return
+      timer = setTimeout(pollRunningCount, ms)
+    }
+
     const pollRunningCount = async () => {
       try {
         const res = await reqApi.listTasks({ status: 'running,pending', limit: 1 })
+        if (!alive) return
         setRunningTaskCount(res.total || 0)
-      } catch { /* 忽略 */ }
+        interval = 5000            // 成功即恢复到最快频率
+      } catch (e: any) {
+        if (!alive || e?._aborted) return
+        if (e?._rateLimited) {
+          // 被限流：退避并保持沉默（角标延迟刷新不影响用户操作）
+          interval = Math.min(60000, interval * 2)
+        }
+        // 其它错误：保持当前间隔重试（网络瞬断不值得拉长到一分钟）
+      } finally {
+        schedule(interval)
+      }
     }
-    pollRunningCount()
-    const timer = setInterval(pollRunningCount, 5000)
-    return () => clearInterval(timer)
+
+    schedule(0)
+    return () => { alive = false; if (timer) clearTimeout(timer) }
   }, [])
 
   // v3.5.6: 管理员通知未读数轮询（60s；仅管理员）

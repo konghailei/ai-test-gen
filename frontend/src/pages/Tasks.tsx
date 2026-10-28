@@ -118,6 +118,27 @@ export default function Tasks() {
     }
   }, [filterStatus, selectedProductId])
 
+  // v4.1.6: 页面挂久了会一直按 3s 打（20 次/分钟），是全站第二大请求源。
+  // 命中限流时退避，恢复后自动回到 3s —— 用独立定时器覆盖上面的固定间隔，
+  // 避免改动既有轮询结构带来的回归面。
+  useEffect(() => {
+    let boosted: ReturnType<typeof setTimeout> | undefined
+    const onRateLimited = () => {
+      // 暂停固定轮询 15s，避免 429 期间继续消耗桶
+      if (pollTimer.current) { clearInterval(pollTimer.current); pollTimer.current = null }
+      if (boosted) clearTimeout(boosted)
+      boosted = setTimeout(() => {
+        loadTasks()
+        if (!pollTimer.current) pollTimer.current = setInterval(loadTasks, 3000)
+      }, 15000)
+    }
+    window.addEventListener('aitestgen:rate-limited', onRateLimited)
+    return () => {
+      window.removeEventListener('aitestgen:rate-limited', onRateLimited)
+      if (boosted) clearTimeout(boosted)
+    }
+  }, [])
+
   const handleRowClick = (task: AnalysisTaskInfo) => {
     if (task.req_id) {
       navigate(`/requirements/${task.req_id}`)

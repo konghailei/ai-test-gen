@@ -95,6 +95,48 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     // v3.1.1: 标记 _unauthorized，调用方跳过「加载失败」类提示（页面即将跳转登录页）
     throw Object.assign(new Error('登录已过期，请重新登录'), { _unauthorized: true })
   }
+
+  // v4.1.6: 429 限流 → 按 Retry-After 退避重试，不直接抛错。
+  //
+  // 为什么必须重试（现场症状："分析期间刷新页面非常慢"）：
+  //   后端限流桶被前端轮询（Layout 5s / Tasks 3s / 上传弹窗 1.5s）打满后，
+  //   用户的真实请求会拿到 429。旧实现把 429 当成普通失败直接抛，
+  //   调用方大多是 `catch {}` 静默吞掉 → 表现为"数据不刷新/页面卡住"，
+  //   用户只能反复刷新，越刷越卡（每次刷新又是一轮请求洪峰）。
+  //
+  // 为什么不重试写操作（POST/PUT/DELETE）：
+  //   非幂等，重试可能造成重复提交（建两个任务、重复生成）。
+  //   这类请求直接把 429 抛给调用方，由用户决定是否重来。
+  if (res.status === 429 && isGet) {
+    const retryAfter = Number(res.headers.get('Retry-After')) || 1
+    // 最多 2 次，且总等待不超过 3 秒：轮询是背景任务，
+    // 为它长时间阻塞没有意义（下一次定时器本来就会再发）。
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const waitMs = Math.min(3000, Math.max(200, retryAfter * 1000))
+      await new Promise(r => setTimeout(r, waitMs))
+      try {
+        res = await doFetch()
+      } catch (e) {
+        if ((e as any)?.name === 'AbortError') {
+          throw Object.assign(e as Error, { _aborted: true })
+        }
+        break
+      }
+      if (res.status !== 429) break
+    }
+    if (res.status === 429) {
+      // 广播给关心限流状态的组件（如 Tasks 页暂停高频轮询）。
+      // 用 window 事件而不是引入全局状态库：只有少数页面需要，不值得为此加依赖。
+      try {
+        window.dispatchEvent(new CustomEvent('aitestgen:rate-limited'))
+      } catch { /* SSR / 测试环境无 window，忽略 */ }
+      throw Object.assign(
+        new Error('请求过于频繁，请稍后再试'),
+        { _rateLimited: true },
+      )
+    }
+  }
+
   // v3.1.2: 502/504 等网关错误返回 HTML 页时 res.json() 会抛 SyntaxError，收敛为友好错误
   let json: any
   try {
