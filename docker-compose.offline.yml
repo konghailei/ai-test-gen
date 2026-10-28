@@ -75,6 +75,18 @@ services:
         #   ⚠️ 必须走环境变量而不是运行时 dict：`docker exec` 是另一个进程，
         #      往里写状态主进程读不到（实测踩到）。
         PEER_CELERY_CPU: ${PEER_CELERY_CPU:-}
+        # v4.1.7（大机器必看）：全局并发生成任务数的**硬顶**。
+        #   ⚠️ 这项此前**在 compose 里根本没有定义** —— 用户在 .env 里写了也不生效，
+        #      属于"声明的配置与实际生效的代码不一致"：settings 里有字段、
+        #      task_ceiling 里读它，但 compose 不传 → 永远是代码里的默认值 4。
+        #      后果：96 核机器推导出 23 个并发，仍被硬顶卡在 4，用户以为"迁了大机器没用"。
+        #   不传（留空）= 用代码默认 4，小机器行为不变。
+        #   建议值 ≈ 同时使用人数（10 人 → 8~10）。不要设过大：
+        #   每个并发生成任务都会抢本地 bge 推理，超过物理核后互相拖慢。
+        GEN_TASK_CONCURRENCY_MAX: ${GEN_TASK_CONCURRENCY_MAX:-}
+        # v4.1.7：去重专用嵌入模型（留空 = 用全局 bge-large，行为不变）。
+        #   换轻量模型能提速，但必须重新定标 DEDUP_SEMANTIC_THRESHOLD 且向量缓存失效。
+        DEDUP_EMBEDDING_MODEL_NAME: ${DEDUP_EMBEDDING_MODEL_NAME:-}
         DATABASE_URL: postgresql+asyncpg://aitestgen:aitestgen123@postgres:5432/ai_test_gen
         VECTOR_STORE: milvus
         MILVUS_HOST: milvus

@@ -33,6 +33,20 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # v4.1.7（重要）：空串环境变量视为"未设置"，回退到类属性默认值。
+        #
+        # 为什么必须加：docker compose 的 `VAR: ${VAR:-}` 写法在 .env 未设置时
+        # 会**注入一个空串**，而不是不注入。对 str 类型无害（"" 就是合法值），
+        # 但对 int/float/bool 类型是**启动即崩**：
+        #     pydantic_core.ValidationError: Input should be a valid integer,
+        #     unable to parse string as an integer [input_value='']
+        # 实测：`GEN_TASK_CONCURRENCY_MAX: ${...:-}` 加上后，只要用户没在 .env 里
+        # 显式写这一项，整个应用就起不来（不是降级，是直接 Import 失败）。
+        #
+        # 这个坑的隐蔽性在于：新增一个"可选配置"反而让原本能跑的部署全部崩掉，
+        # 而报错信息里只有字段名，看不出是 compose 注入空串导致的。
+        # 与其在每个新配置上单独加 validator，不如在基类上一次性关掉。
+        env_ignore_empty=True,
     )
 
     # ========== 安全配置 ==========

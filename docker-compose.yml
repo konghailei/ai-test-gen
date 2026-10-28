@@ -90,6 +90,11 @@ services:
       #   api 的并发预算按「自身 − 该值」算（resource_guard.effective_cpu_limit）。
       #   留空 = 未投影，只看自己（旧行为）。开发机通常不必设。
       - PEER_CELERY_CPU=${PEER_CELERY_CPU:-}
+      # v4.1.7：生成并发硬顶（留空 = 代码默认 4）。
+      #   此前 compose 未定义 → .env 里设了也不生效（详见 offline 版注释）。
+      - GEN_TASK_CONCURRENCY_MAX=${GEN_TASK_CONCURRENCY_MAX:-}
+      # v4.1.7：去重专用嵌入模型（留空 = 用全局 bge-large）
+      - DEDUP_EMBEDDING_MODEL_NAME=${DEDUP_EMBEDDING_MODEL_NAME:-}
     # v4.1.5（OOM 保护依据）：不设上限则容器 cgroup 为 "max"，
     # 应用的 MEM_LOW_RATIO 守卫读不到容器上限 → 只能读宿主内存 → 保护失效。
     # 开发机默认留空（不限制，保持旧行为）；生产由 deploy.sh 按宿主内存自动写入。
