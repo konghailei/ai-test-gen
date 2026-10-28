@@ -19,10 +19,13 @@ CPU/GIL 争抢**，不是某个单点阻塞。
 ## 三道机制
 
 1. **资源探测**（纯标准库，不引 psutil）——全部在**后台采样线程**里做：
-   - CPU 上限：cgroup v2 `cpu.max` → cgroup v1 quota/period → `sched_getaffinity`
-     → `cpu_count`。**容器配额优先**——`nproc` 在容器里看到的是宿主逻辑核，
-     不一定是自己真能用的（本项目 compose 未设 cpus，故退化为 8）。
-   - 物理核：逻辑核 ÷ 2 去超线程（与 `db/milvus_store._physical_cores` 同口径）。
+   - CPU 逻辑核：cgroup v2 `cpu.max` → cgroup v1 quota/period →
+     `sched_getaffinity` → cgroup cpuset 兜底 → `cpu_count`。
+     **容器配额优先**——`nproc` 在容器里看到的是宿主逻辑核，不一定是自己能用的。
+   - CPU 物理核：读 `/proc/cpuinfo` 的 `siblings / cpu cores` 得**每核线程数**，
+     再 `ceil(可用逻辑核 / 每核线程数)`（多 socket 求和口径一致）。
+     读不到拓扑才退回「逻辑核 ÷ 2」保守估计（见 `physical_cores`）。
+     与 `db/milvus_store._physical_cores` **同口径**。
    - 内存：cgroup `memory.max/current` → `/proc/meminfo`。容器有上限时
      **以 cgroup 为准**——那才是真正的 OOM 线（宿主 MemTotal 会把"容器快饿死"
      误判成"内存充足"）。
@@ -32,9 +35,18 @@ CPU/GIL 争抢**，不是某个单点阻塞。
    不进事件循环"。而且并发预算要在等待循环里**每秒重判**，若每次都现读会把
    探测本身变成阻塞源。故采样线程 2s 刷新一次缓存，预算判定只读内存。
 
-2. **并发预算**（`inference_slots`）：本地推理能占的"核份额"。
+2. **并发预算**（`inference_slots`）：本地推理能占的"物理核份额"。
    `max(1, 物理核 - 1)`——留 1 核给主进程/事件循环，与
    `milvus_store._dedup_workers_configured` 的 `auto = 物理核-1` 完全同口径。
+
+   **口径分界（v4.1.5 明确）**：
+   - **并发任务数**按**物理核**算——超线程对 matmul 是纯竞争（8 线程比 4 线程
+     慢 22%，docs/27），并发粒度落在物理核上才对。
+   - **单次推理的线程数**（`encode_threads`）按**逻辑核**封顶、实测最优 4——
+     torch 默认是"物理核数"，与容器配额无关，必须显式设（`apply_torch_threads`）。
+   - **负载判据**（`task_ceiling`）比较基准是**逻辑核**，因为 `load_1m` 的可运行
+     队列按逻辑 CPU 统计，拿物理核去比会让降级门过早触发。
+
    - 全局生成任务上限 `task_ceiling()` = min(inference_slots, 配置硬上限)，
      再按**运行时负载降级**（CPU 打满或内存紧张时收紧）。
    - 每任务 FP 并发 `clamp_fp_concurrency(cfg)` = min(cfg, slots // 活跃任务数)。
@@ -80,6 +92,31 @@ GEN_RESOURCE_MAX_WAITERS = 8
 _SAMPLE_INTERVAL = 2.0
 #: CPU 使用率的窗口平均长度（样本数，× 间隔 ≈ 10s）
 _CPU_AVG_WINDOW = 5
+#: 单次 encode 实测最优 intra-op 线程粒度（docs/27 §2.6：4 线程 35.2s vs 8 线程 42.9s）
+_BEST_ENCODE_THREADS = 4
+
+#: **[部署侧投影]** 同机兄弟容器（celery）占用的逻辑核数。
+#: 为什么用**环境变量 + 落盘文件**而不是进程内 dict：
+#:   `docker exec` 起的是**另一个进程**，进程内状态写进去 uvicorn 主进程看不到
+#:   （实测踩到：脚本打印"投影已生效"，但主进程 ceiling 根本没变）。
+#: 环境变量在容器重建时由 compose 注入 → 主进程一启动就能读到。
+#: 落盘文件是给"容器已建好、只想改投影"的场景用的（改完重启容器生效）。
+_PEER_ENV_KEYS = ("PEER_CELERY_CPU", "PEER_CELERY_CPU_CORES")
+#: 落盘路径（容器内）；宿主机 ./data 已挂到 /app/data
+_PEER_FILE_CANDIDATES = ("/app/data/.peer_cpu_budget", "data/.peer_cpu_budget")
+#: 落盘结果的**一次性缓存**：`(核数, 来源)`。
+#: 为什么必须缓存：`health_brief()` 被 `/api/health` 每次探活调用，若每次都 `open()`
+#: 就是**同步 IO 进事件循环**（本项目已因同类问题吃过亏）。而投影是部署期确定的静态事实
+#: （改了要重启容器），启动后第一次读到就可以定下来。环境变量分支不缓存（零成本，且便于
+#: 现场 `docker run -e` 试验）。
+_PEER_FILE_CACHE: dict[str, Any] = {}
+
+#: CPU 拓扑（逻辑核 / 每核线程数），进程内只探测一次——容器配额启动后不会变，
+#: 而 `physical_cores()` 会被 admin 重复调用，不该反复读 /proc 与 /sys。
+#: `threads_per_core` 的值可能是 None（拓扑不可读/不可信），**None 也要缓存**，
+#: 否则每次调用都会重读 /proc/cpuinfo。
+_TOPOLOGY: dict[str, Any] = {}
+_TOPOLOGY_LOCK = threading.Lock()
 
 
 def _cfg(name: str, default: Any) -> Any:
@@ -125,10 +162,14 @@ def _cgroup_v2_cpu_limit() -> float | None:
         return None
 
 
-def _cgroup_v1_cpu_limit() -> float | None:
-    """cgroup v1：quota/period 两个文件，quota 为 -1 表示无限制。"""
-    q_raw = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
-    p_raw = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+def _cgroup_v1_cpu_limit(base: str = "/sys/fs/cgroup/cpu") -> float | None:
+    """cgroup v1：quota/period 两个文件，quota 为 -1 表示无限制。
+
+    Args:
+        base: v1 cpu 控制器目录。参数化只为可测（tmp 目录伪造 v1 布局）。
+    """
+    q_raw = _read_text(f"{base}/cpu.cfs_quota_us")
+    p_raw = _read_text(f"{base}/cpu.cfs_period_us")
     if not q_raw or not p_raw:
         return None
     try:
@@ -138,6 +179,53 @@ def _cgroup_v1_cpu_limit() -> float | None:
         return q / p
     except ValueError:
         return None
+
+
+def _cpuset_count(base: str = "/sys/fs/cgroup") -> int | None:
+    """cgroup cpuset 约束的核数；无 cpuset 文件/内容为空/覆盖全部核时返回 None。
+
+    为什么需要（3.10 与 4.x 都要）：
+        `cpu.max` / `cpu.cfs_quota_us` 只表达"时间份额"，不表达"能用哪几个核"。
+        开 `--cpuset-cpus=0-3` 或 systemd `AllowedCPUs=` 时二者都可能是 unlimited，
+        此时 `sched_getaffinity` 才是唯一正确来源。顶层先试 `os.sched_getaffinity`
+        （内核已按 cpuset 收敛过，一行搞定），这里只是**兜底**：极老的 3.10 分支上
+        Python 层拿到的 affinity 可能未收敛到 cgroup 范围。
+
+    v1/v2 文件位置不同，逐个探测（谁先读到用谁）：
+        v2: /sys/fs/cgroup/cpuset.cpus.effective（内核算好，最准）
+        v1: /sys/fs/cgroup/cpuset/cpuset.effective_cpus（部分内核有）
+            /sys/fs/cgroup/cpuset/cpuset.cpus（原始配置，可能含换行续写）
+    """
+    for rel in ("cpuset.cpus.effective", "cpuset/cpuset.effective_cpus", "cpuset/cpuset.cpus"):
+        raw = _read_text(f"{base}/{rel}")
+        if not raw:
+            continue
+        n = _count_cpu_list(raw)
+        if n:
+            return n
+    return None
+
+
+def _count_cpu_list(raw: str) -> int | None:
+    """解析 `0-3,8,10-11` 形式的 CPU 列表为核数；解析失败返回 None。"""
+    total = 0
+    for chunk in raw.replace("\n", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            if "-" in chunk:
+                lo, hi = chunk.split("-", 1)
+                lo_i, hi_i = int(lo), int(hi)
+                if hi_i < lo_i:
+                    return None
+                total += hi_i - lo_i + 1
+            else:
+                int(chunk)
+                total += 1
+        except ValueError:
+            return None
+    return total or None
 
 
 def _affinity_count() -> int | None:
@@ -151,9 +239,11 @@ def _affinity_count() -> int | None:
 def cpu_limit() -> float:
     """本进程真正能用的 CPU 核数（浮点，容器配额可能是 2.5 这种）。
 
-    优先级：cgroup 配额 → affinity → cpu_count。
+    优先级：cgroup quota → affinity → cpuset 兜底 → cpu_count。
     ⚠️ 不能只用 `os.cpu_count()`：容器里它返回**宿主**逻辑核，
        而 cgroup 配额可能只给了 2 核——按 8 核定并发会把机器打穿。
+    affinity 放在 cpuset 兜底之前：`sched_getaffinity` 已包含 cpuset 收敛结果，
+       正常情况下前面就返回了；cpuset 兜底只为"affinity 不可用/未收敛"的边角。
     """
     for probe in (_cgroup_v2_cpu_limit, _cgroup_v1_cpu_limit):
         try:
@@ -165,29 +255,362 @@ def cpu_limit() -> float:
     aff = _affinity_count()
     if aff and aff > 0:
         return float(aff)
+    cs = _cpuset_count()
+    if cs and cs > 0:
+        return float(cs)
     return float(os.cpu_count() or 1)
 
 
-def physical_cores() -> int:
-    """保守估物理核（逻辑核 ÷ 2 去超线程；容器内 cpu_count 含超线程）。
+def _cpu_snapshot_source() -> str:
+    """标记 `cpu_limit()` 最终命中哪条探测链（观测用，只有几个小文件读取）。"""
+    try:
+        for name, probe in (("cgroup_v2", _cgroup_v2_cpu_limit), ("cgroup_v1", _cgroup_v1_cpu_limit)):
+            try:
+                if (probe() or 0) > 0:
+                    return name
+            except Exception:  # noqa: BLE001
+                continue
+        if (_affinity_count() or 0) > 0:
+            return "affinity"
+        if (_cpuset_count() or 0) > 0:
+            return "cpuset"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    return "cpu_count"
 
-    与 `db/milvus_store._physical_cores` 同口径——那边靠它决定去重进程池
-    worker 数，这边靠它决定生成并发。**两处必须同口径**，否则"去重开 3 个
-    进程 × 4 线程"与"同时跑 4 个生成任务"会互相不知道对方在抢核。
+
+def physical_cores() -> int:
+    """本进程所在容器**真正能用的物理核数**（多路 socket 求和）。
+
+    为什么不能再用「逻辑核 ÷ 2」：
+        ① 那是硬编码假设"开了超线程"。若宿主关超线程 / ARM 大核簇 /
+           `--cpus` 给出非偶数份额，÷2 直接算错——本机 6 核配额下会报 3，
+           实际拿到的是 6 个逻辑核背后 4 个物理核里的 6 个硬件线程。
+        ② 它从不读 `siblings` / `cpu cores`，等于"猜"而不是"测"。
+
+    现在的口径（逐级降级，任一级成功即返回）：
+        1. 读 `/proc/cpuinfo` 的 `siblings` 与 `cpu cores` → 每核线程数 →
+           `ceil(可用逻辑核 / 每核线程数)`。**这是唯一一次读真实拓扑**，
+           结果缓存在 `_TOPOLOGY`。
+        2. 拓扑读不到（非 x86 / 容器屏蔽 /proc/cpuinfo）→ 退回「逻辑核 ÷ 2」
+           保守估计（宁少不多，超卖比欠卖危险）。
+        3. 仍然至少 1——绝不返回 0（否则并发预算算出 0，生成永远进不来）。
+
+    ⚠️ 与 `db/milvus_store._physical_cores` **同口径**：那边靠它决定去重进程池
+    worker 数，这边靠它决定生成并发。两处必须一致，否则"去重开 3 进程 × 4 线程"
+    与"同时跑 N 个生成任务"会互相不知道对方在抢核。
+    """
+    lc = int(cpu_limit())
+    # 1) 真实拓扑
+    try:
+        per_core = _threads_per_core()
+        if per_core and per_core > 0:
+            return max(1, -(-lc // int(per_core)))  # ceil 除法
+    except Exception:  # noqa: BLE001 - 拓扑探测失败不阻断预算
+        pass
+    # 2) 保守降级：假设开了超线程
+    return max(1, (lc or 2) // 2)
+
+
+def _threads_per_core() -> int | None:
+    """每物理核的硬件线程数；读不到/不可信时返回 None。
+
+    一次解析 `/proc/cpuinfo` 同时取两个字段（都是"每个 processor 一行"：
+        8 cpu cores   : 4      ← 每 socket 的物理核数
+        8 siblings    : 8      ← 每 socket 的硬件线程数
+    8 行 = 8 个逻辑处理器，说明是 1 socket × 4 核 × 2 线程。
+    `siblings / cpu cores` 即每核线程数，**跨 socket 求和也一样**
+    （2 socket × 8 核 × 2 线程：siblings=16/cores=8 → 仍是 2）。
+
+    ⚠️ 必须做**交叉校验**（v4.1.5 补充，由反向审查发现）：
+        有些环境把 `cpu cores` 填成**整机总核数**而非每 socket 核数，
+        于是 `siblings == cores` → tpc=1 → `physical_cores(8) = 8`，
+        **并发预算翻倍**，比原来的 ÷2 更危险。但"tpc=1"本身也可能是真的
+        （关超线程的机器就是 1），**不能一概拒绝**。
+
+        真正的判据是**自相矛盾**：
+          ① `tpc ∈ {1,2,4,8}`——SMT 的现实取值，3/5/6 之类不可能
+          ② `n_proc % siblings == 0`——整机逻辑处理器数必须是每 socket 线程数的整数倍
+             （1 socket: n=8/sib=8 ✔；2 socket: n=16/sib=8 ✔；矛盾: n=2/sib=8 ✘）
+          ③ 若 cpuinfo 给出 physical id，则 `n_proc / siblings == len(physical ids)`
+        三条全过才采信；任一不过 → None → 退回 ÷2（宁少不多，超卖比欠卖危险）。
+
+        反例说明：`n_proc=8, siblings=8, cores=8` 三条全过 → 视为真实
+        "1 socket × 8 核 × 无超线程"，`physical_cores=8` 是**正确**的。
+        这类机器本来就能开 8 个并发任务，不是 bug。
+
+    结果缓存：容器配额与宿主拓扑在进程生命周期内不变。
+    """
+    with _TOPOLOGY_LOCK:
+        if "threads_per_core" in _TOPOLOGY:
+            return _TOPOLOGY["threads_per_core"]
+    tpc: int | None = None
+    raw = _read_text("/proc/cpuinfo")
+    if raw:
+        siblings: int | None = None
+        cores: int | None = None
+        n_proc = 0
+        physical_ids: set[str] = set()
+        for line in raw.splitlines():
+            if line.startswith("processor"):
+                n_proc += 1
+                continue
+            if ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            k, v = k.strip(), v.strip()
+            if k == "siblings":
+                try:
+                    siblings = int(v)
+                except ValueError:
+                    siblings = None
+            elif k == "cpu cores":
+                try:
+                    cores = int(v)
+                except ValueError:
+                    cores = None
+            elif k == "physical id":
+                physical_ids.add(v)
+        if siblings and cores and siblings >= cores > 0:
+            cand = max(1, siblings // cores)
+            ratio_ok = cand in (1, 2, 4, 8)
+            div_ok = n_proc <= 0 or (n_proc % siblings == 0)
+            sockets = (n_proc // siblings) if (n_proc and siblings and div_ok) else None
+            id_ok = (not physical_ids) or sockets is None or sockets == len(physical_ids)
+            if ratio_ok and div_ok and id_ok:
+                tpc = cand
+            else:
+                logger.debug(
+                    "[ResourceGuard] cpuinfo 拓扑自相矛盾（siblings={}, cores={}, 处理器数={}, "
+                    "socket标识={}）→ 退回逻辑核÷2 保守估计",
+                    siblings, cores, n_proc, sorted(physical_ids)[:3],
+                )
+    with _TOPOLOGY_LOCK:
+        _TOPOLOGY["threads_per_core"] = tpc
+    return tpc
+
+
+def _topology_source() -> str:
+    """物理核数是怎么来的：`cpuinfo`（真拓扑）/ `heuristic`（÷2 保守估）。"""
+    try:
+        return "cpuinfo" if _threads_per_core() else "heuristic"
+    except Exception:  # noqa: BLE001
+        return "heuristic"
+
+
+def _read_peer_cpu_budget() -> tuple[float, str]:
+    """读出兄弟容器占用（逻辑核数, 来源）；无投影返回 (0.0, "")。
+
+    读取顺序（后者覆盖前者，便于现场临时改）：
+      ① 环境变量 `PEER_CELERY_CPU`（compose 注入，容器重建即生效）
+      ② 落盘文件 `/app/data/.peer_cpu_budget`（首行一个数字，改完重启容器生效）
+
+    ⚠️ 为什么必须走这两条而不是进程内 dict：`docker exec` 是**另一个进程**，
+    往里写 dict 主进程永远看不到（实测踩到：脚本打印"投影已生效"，ceiling 没变）。
+    """
+    raw, src = "", ""
+    for key in _PEER_ENV_KEYS:
+        v = (os.environ.get(key) or "").strip()
+        if v:
+            raw, src = v, f"env:{key}"
+            break
+
+    # env 通道命中：直接解析返回（**不缓存**，零成本，便于现场 `docker run -e` 试验）。
+    # ⚠️ v4.1.6 修复：这里原先漏了 return —— env 命中后函数一路走到末尾隐式返回 None，
+    #    调用方 `[0]` 就炸 `TypeError: 'NoneType' object is not subscriptable`，
+    #    表现成 `/api/health` 500（比"投影不生效"严重得多）。
+    #    教训：给函数加分叉时，**每条分叉都必须显式 return**；类型标注是 tuple
+    #    不代表运行时会替你兜底。
+    if raw:
+        try:
+            val = float(raw)
+        except ValueError:
+            logger.debug("[ResourceGuard] 兄弟容器 CPU 份额无法解析（{}={}），忽略", src, raw[:20])
+            return 0.0, ""
+        if val <= 0:
+            return 0.0, ""
+        return val, src
+
+    # 落盘通道只读一次（见 `_PEER_FILE_CACHE` 的注释：health 探活不能做同步 IO）
+    if _PEER_FILE_CACHE:
+        return float(_PEER_FILE_CACHE.get("cores") or 0.0), str(_PEER_FILE_CACHE.get("source") or "")
+    for path in _PEER_FILE_CANDIDATES:
+        txt = _read_text(path)
+        if txt:
+            raw, src = txt.splitlines()[0].strip(), f"file:{path}"
+            break
+    # 文件不存在也缓存（否则每次探活都去 stat 两个路径）；投影要变更必须重启容器，
+    # 与"容器创建时注入环境变量"的语义一致。
+    if not raw:
+        _PEER_FILE_CACHE.update({"cores": 0.0, "source": ""})
+        return 0.0, ""
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.debug("[ResourceGuard] 兄弟容器 CPU 份额无法解析（{}={}），忽略", src, raw[:20])
+        _PEER_FILE_CACHE.update({"cores": 0.0, "source": ""})
+        return 0.0, ""
+    if val <= 0:
+        _PEER_FILE_CACHE.update({"cores": 0.0, "source": ""})
+        return 0.0, ""
+    _PEER_FILE_CACHE.update({"cores": val, "source": src})
+    return val, src
+
+
+def set_peer_cpu_budget(logical_cores: float | None, source: str = "") -> bool:
+    """把「同机兄弟容器的 CPU 占用」持久化，供**主进程**下次启动时读取。
+
+    背景（内网小机器实证的风险）：
+        `ai-test-gen-api` 与 `ai-test-gen-celery` 是**两个容器**，各自读自己的
+        cgroup。谁都只看得到自己那份额度——api 算出 `逻辑核=6 → 物理核=3 → slots=2`，
+        celery 也算一份，**合计超出整机容量**。celery 跑 embedding + Milvus 双写，
+        它那份预算 api 完全看不见。
+
+    做法：写落盘文件（`/app/data/.peer_cpu_budget`，落在已挂载的 ./data 上），
+    主进程启动时由 `_read_peer_cpu_budget()` 读入。**不做 cgroup 改动**，可审计、可删。
+
+    ⚠️ 本函数**只对"即将启动的新进程"生效**，不会改变当前正在跑的进程
+    （原因见 `_read_peer_cpu_budget` 的进程隔离说明）。部署脚本的执行顺序因此是
+    「先写文件 → 再 up -d 重建容器」。
+
+    Args:
+        logical_cores: 兄弟容器**占用的**逻辑核数；`None`/`<=0` = 撤销投影。
+        source: 记录来源（写进 stats，便于现场核对是谁设的）。
+
+    Returns:
+        是否成功写入/删除（失败返回 False，调用方应告警但不阻断）。
+    """
+    path = None
+    for cand in _PEER_FILE_CANDIDATES:
+        d = os.path.dirname(cand) or "."
+        if os.path.isdir(d):
+            path = cand
+            break
+    try:
+        if logical_cores is None or float(logical_cores) <= 0:
+            if path and os.path.exists(path):
+                os.remove(path)
+            _PEER_FILE_CACHE.update({"cores": 0.0, "source": ""})
+            return True
+        if not path:
+            logger.warning("[ResourceGuard] 找不到可写的投影目录（data/ 未挂载？），投影未落盘")
+            return False
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{float(logical_cores)}\n# source={source or 'deploy.sh'}\n")
+        # 同进程写入后立即刷新缓存，避免本进程后续读到旧值（跨进程仍需重启）
+        _PEER_FILE_CACHE.update({"cores": float(logical_cores), "source": f"file:{path}"})
+        logger.info(
+            "[ResourceGuard] 兄弟容器 CPU 占用已落盘: {} 逻辑核 → {}（来源: {}），"
+            "主进程重启后按「自身 − 该值」计预算",
+            float(logical_cores), path, source or "deploy.sh",
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 - 投影失败不影响主流程
+        logger.warning("[ResourceGuard] 写投影失败（忽略）: {}", str(e)[:120])
+        return False
+
+
+def effective_cpu_limit() -> float:
+    """本进程**实际可用于本地推理**的逻辑核数（自身额度 − 兄弟容器占用）。
+
+    为什么是**减法**而不是取 min：
+        `min(自身, 兄弟份额)` 的语义是"兄弟份额是上限"，但兄弟容器是**在抢核**，
+        不是"给你留了这么多"。举例：api 被限 8、celery 被限 2，
+        取 min 得 2（错，api 明明还有 6 核可跑），减法得 6（对）。
+
+    为什么不直接改 `cpu_limit()`：那是"容器能看到的额度"，是**环境事实**；
+    这里算的是"同机竞争后还能用多少"，是**预算**。两者不能混，否则
+    自检日志（mem_source/cpu_source 那套证据）会跟着失真。
     """
     try:
-        return max(1, (int(cpu_limit()) or 2) // 2)
+        own = float(cpu_limit())
     except Exception:  # noqa: BLE001
-        return 1
+        own = 1.0
+    peer, _src = _read_peer_cpu_budget()
+    if peer:
+        # 下限 1：绝不返回 0 或负数（否则并发预算算出 0，生成永远进不来）
+        return max(1.0, own - peer)
+    return max(1.0, own)
 
 
 def inference_slots() -> int:
-    """本地模型推理可用的"核份额"（留 1 核给主进程/事件循环）。"""
+    """本地模型推理可用的"物理核份额"（留 1 核给主进程/事件循环）。
+
+    为什么按**物理核**而不是逻辑核分配并发：超线程对 transformer matmul 是纯
+    资源竞争，8 线程实测比 4 线程**慢 22%**（docs/27 §2.6）。并发任务的粒度必须
+    落在物理核上，逻辑核只用来设**单次 encode 的线程数**（见 encode_threads）。
+
+    注意：小机器上 `物理核=1` 时这里仍返回 1（`max(1, ...)`）——**并发预算的最小
+    值与物理核数不是一回事**，前者是"至少允许 1 个任务"的语义保证。真正防止
+    小机器超卖的是 `task_ceiling()` 里对兄弟容器份额的扣减（见该函数）。
+    """
     return max(1, physical_cores() - 1)
 
 
-def _mem_from_cgroup() -> tuple[int, int] | None:
-    """cgroup 内存（total, available）字节数；无上限时返回 None。"""
+def encode_threads() -> int:
+    """单次 encode / 本地模型推理的 **intra-op 线程数**（torch.set_num_threads）。
+
+    为什么必须显式设置：torch 默认是 `物理核数`（不是容器配额），容器被限制到
+    6 逻辑核时默认仍可能开满宿主硬件线程 → 线程池持有物理核却只分到时间片，
+    上下文切换吃掉全部收益。实测最优点固定在 4 线程（docs/27）。
+
+    取值 = `max(1, min(4, 物理核, 逻辑核))`，三个上限各自的理由：
+        - `4`：实测最优粒度，超过无收益（8 线程反而慢 22%）
+        - **物理核**：超线程的两条硬件线程共享执行单元，按物理核开才不互相争抢
+        - **逻辑核**：容器只给 2 核时开 4 线程纯属自伤（超配只会增加切换开销）
+    """
+    try:
+        phys = physical_cores()
+        lc = int(cpu_limit())
+    except Exception:  # noqa: BLE001
+        return _BEST_ENCODE_THREADS
+    return max(1, min(_BEST_ENCODE_THREADS, phys, lc))
+
+
+def apply_torch_threads() -> int:
+    """把 `encode_threads()` 落到 torch 线程池（进程级，幂等）。
+
+    **必须在 API 主进程启动时调用**：此前只有去重进程池的 worker init 里设了
+    `set_num_threads(4)`，主进程完全没设 → 主进程 encode 用的是 torch 默认值
+    （= 物理核数，与容器配额无关），这是"并发预算算得再准也白算"的隐藏漏口。
+    torch 未安装（纯 API 形态）时静默跳过——不引入 torch 依赖。
+
+    Returns:
+        最终生效的 intra-op 线程数（无 torch 时返回"本应设置的值"，
+        供调用方/单测断言——函数本身失败也不抛异常）。
+    """
+    n = encode_threads()
+    try:
+        import torch as _torch  # noqa: PLC0415 - 可选依赖，延迟导入
+
+        _torch.set_num_threads(n)
+        interop_ok = True
+        try:
+            # inter-op 线程池按"算子并行度"开线程，本场景是单流推理，
+            # 多开会与 intra-op 抢核（torch 默认值随核数增长）。
+            _torch.set_num_interop_threads(1)
+        except Exception:  # noqa: BLE001 - 已启动/不支持时不可改，忽略
+            interop_ok = False
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        # 用 info 级：排查"线程数为什么是 N"必须能直接看到，
+        # 而不是猜（debug 级在生产默认不输出 = 又一处静默）。
+        logger.info(
+            "[ResourceGuard] torch 线程已设定: intra-op={} interop={} (物理核={}, 逻辑核={}, 拓扑={})",
+            n, 1 if interop_ok else "默认", physical_cores(), int(cpu_limit()), _topology_source(),
+        )
+    except Exception as e:  # noqa: BLE001 - 无 torch 时保持默认，不影响启动
+        logger.info(
+            "[ResourceGuard] 未设置 torch 线程（{}）→ 本应设为 {}（物理核={}, 逻辑核={}）",
+            str(e)[:60], n, physical_cores(), int(cpu_limit()),
+        )
+    return n
+
+
+def _mem_from_cgroup_v2() -> tuple[int, int] | None:
+    """cgroup v2 内存（total, available）字节数；无上限时返回 None。
+
+    v2 只有 unified 层级：`memory.max` / `memory.current` 就在根下。
+    """
     mx = _read_text("/sys/fs/cgroup/memory.max")
     cur = _read_text("/sys/fs/cgroup/memory.current")
     if mx and mx != "max" and cur:
@@ -197,6 +620,126 @@ def _mem_from_cgroup() -> tuple[int, int] | None:
                 return total_b, max(0, total_b - used_b)
         except ValueError:
             pass
+    return None
+
+
+#: cgroup v1 的「无限制」哨兵：limit_in_bytes 为极大值（PAGE_COUNTER_MAX 量级）。
+#: 内核用 `LONG_MAX & PAGE_MASK` 表示 unlimited，**位宽决定具体数值**：
+#:   - 64 位: ≈ 2^63 ≈ 9.2EB
+#:   - 32 位（i686/armhf 的 CentOS 7）: ≈ 2^31 ≈ 2.1GB
+#: 32 位的值**和"真的给了 2GB 上限"靠量级区分不了**，所以下面用精确等式判定。
+_CGROUP_V1_UNLIMITED_FLOOR = 1 << 60
+
+#: 32 位内核的 unlimited 精确值：`(LONG_MAX & PAGE_MASK)`，page 4K。
+#:   0x7FFFFFFF & ~0xFFF = 0x7FFFF000 = 2147479552
+#: 实测（2026-10-27）：若只按 1<<60 判，2.1GB 会被当成真实上限 → 占用 300MB 时
+#: ratio 已是 0.86，稍涨即跌破 MEM_LOW_RATIO=0.15 → 并发被压到 1、排队超时，
+#: 而 mem_source 仍显示 cgroup_v1（"看起来正常"），是最难归因的一类降级。
+_CGROUP_V1_UNLIMITED_32BIT = 2147479552
+#: 判定容差只给一页：该值本质是 `2^31 - 一页`，不同 page size(4K/16K/64K) 会差几页。
+#: 若放大到 MB 级，会把真实配额 2GB(=2^31) 一起误判 —— 实测已踩：
+#: 2GB 与哨兵只差 4096B，容差 1MB 时真实 2G 容器被当成"无限制"→ OOM 保护反而失效。
+_CGROUP_V1_UNLIMITED_TOLERANCE = 65536  # 64KB = 最大 page size
+
+
+def _mem_from_cgroup_v1(base: str = "/sys/fs/cgroup/memory") -> tuple[int, int] | None:
+    """cgroup v1 内存（total, available）字节数；无上限时返回 None。
+
+    为什么必须有这条分支（2026-10-27 实证）：
+        Kernel 3.10（RHEL/CentOS 7 系列）**只有 cgroup v1**，没有 `memory.max`。
+        此前 `_mem_from_cgroup` 只读 v2 → 在 3.10 上恒返回 None → 静默退化为
+        `/proc/meminfo`（宿主总内存），导致 `MEM_LOW_RATIO` 的 OOM 保护完全失效：
+        容器内存快耗尽时守卫仍认为"内存充足"，最终被内核 OOM Killer 直接杀掉
+        （比"慢"致命得多）。CPU 侧早已有 v1 兜底（`_cgroup_v1_cpu_limit`），
+        内存侧此前是漏的 —— 同一条链上不能只兜一半。
+
+    可用内存口径：v1 没有 v2 的 `max-current` 直接可得，也没有 `meminfo`。
+    这里用 PG 同款思路的保守估算：`limit - usage`，再与 `total - working_set`
+    取小（working_set = usage - inactive_file，是内核认为"不可回收"的部分）。
+    取小是因为 available 被低估只会让守卫更早降并发（安全侧），
+    高估才会漏掉 OOM 保护（危险侧）——fail-safe 优先。
+
+    Args:
+        base: cgroup v1 memory 控制器目录。参数化只为可测：单测用 tmp 目录
+              伪造 v1 文件布局，不必真的跑在 3.10 内核上。
+    """
+    lim_raw = _read_text(f"{base}/memory.limit_in_bytes")
+    usage_raw = _read_text(f"{base}/memory.usage_in_bytes")
+    if not lim_raw or not usage_raw:
+        # 非 v1 环境（或未开 memory controller）→ 交给上层走下一个探测源
+        return None
+    try:
+        total_b = int(lim_raw)
+        used_b = int(usage_raw)
+    except ValueError:
+        return None
+    if total_b <= 0 or total_b >= _CGROUP_V1_UNLIMITED_FLOOR:
+        # 关键：v1 的"无限制"不是字符串 "max"，而是个巨大数值。
+        # 不判这个哨兵会把 9.2EB 当成真实上限，得出 ratio≈1.0 的"内存极度充足"。
+        return None
+
+    # 32 位哨兵：unlimited 恰好是 LONG_MAX&PAGE_MASK ≈ 2GB，量级上看不出异常。
+    # 判据必须同时满足两条，否则会误伤真实配额：
+    #   ① 落在哨兵的极窄窗口内（±64KB，覆盖不同 page size）
+    #   ② **不是** 2 的整数幂（真实配额都是 1G/2G/4G 这类规格值，哨兵是 2^31-一页）
+    # 实测踩坑：只放宽容差会把真实 2GB(2147483648，与哨兵仅差 4096) 判成 unlimited，
+    # 结果 OOM 保护反而失效——两个方向的错都必须挡住。
+    if (abs(total_b - _CGROUP_V1_UNLIMITED_32BIT) <= _CGROUP_V1_UNLIMITED_TOLERANCE
+            and (total_b & (total_b - 1)) != 0):
+        logger.debug(
+            "[ResourceGuard] cgroup v1 上限 {} B 命中 32 位 unlimited 哨兵，视为无限制",
+            total_b,
+        )
+        return None
+
+    # 补充交叉校验：容器上限不可能 >= 宿主总内存（覆盖其它位宽的哨兵形态）。
+    host = _mem_from_proc()
+    if host is not None and total_b >= host[0]:
+        return None
+
+    avail_b = max(0, total_b - used_b)
+
+    # working_set 修正：inactive_file 是可回收页缓存，从占用里剔除
+    stat_txt = _read_text(f"{base}/memory.stat")
+    if stat_txt:
+        inactive_file = None
+        for line in stat_txt.splitlines():
+            if line.startswith("total_inactive_file "):
+                inactive_file = line.split()[1]
+                break
+        if inactive_file is None:
+            for line in stat_txt.splitlines():
+                if line.startswith("inactive_file "):
+                    inactive_file = line.split()[1]
+                    break
+        if inactive_file is not None:
+            try:
+                working_set = max(0, used_b - int(inactive_file))
+                avail_b = min(avail_b, max(0, total_b - working_set))
+            except ValueError:
+                pass
+    return total_b, avail_b
+
+
+def _mem_from_cgroup() -> tuple[int, int] | None:
+    """cgroup 内存（total, available）字节数；无上限/非容器时返回 None。
+
+    先 v2 后 v1：v2 unified 层级下读 v1 路径必然为空，反之亦然，
+    两条互斥，顺序只影响多读两次文件（2s 采样一次，可忽略）。
+    """
+    return _mem_from_cgroup_v2() or _mem_from_cgroup_v1()
+
+
+def _mem_cgroup_version() -> str | None:
+    """返回当前生效的 cgroup 版本（"v2" / "v1"）；都没有上限时返回 None。
+
+    观测用：`/api/health` 的 `generation_load` 会带出 source，
+    排查"OOM 保护为何失效"时一眼能看出走的是哪条分支。
+    """
+    if _mem_from_cgroup_v2() is not None:
+        return "v2"
+    if _mem_from_cgroup_v1() is not None:
+        return "v1"
     return None
 
 
@@ -222,10 +765,12 @@ def _mem_from_proc() -> tuple[int, int] | None:
 
 def _mem_snapshot_raw() -> dict:
     """内存快照（同步，只允许在采样线程里调）。"""
-    cg = _mem_from_cgroup()
+    cg_v2 = _mem_from_cgroup_v2()
+    cg_v1 = _mem_from_cgroup_v1() if cg_v2 is None else None
+    cg = cg_v2 or cg_v1
     if cg is not None:
         total, avail = cg
-        source = "cgroup"
+        source = "cgroup_v2" if cg_v2 is not None else "cgroup_v1"
     else:
         pr = _mem_from_proc()
         if pr is None:
@@ -342,24 +887,49 @@ def task_ceiling(snap: dict | None = None) -> int:
     """当前允许的**全局并发生成任务数**上限。
 
     基础 = min(推理份额, 配置硬上限)；再按运行时负载降级：
-      - CPU 窗口均值 ≥ 85% 且 1 分钟负载 > 物理核 → 收紧一档（机器已经在喘）
+      - CPU 窗口均值 ≥ 85% 且 1 分钟负载 > **逻辑核数** → 收紧一档（机器已经在喘）
       - 可用内存 < 15% → 压到 1（防 OOM Kill，那比慢更致命）
+
+    ⚠️ load_1m 的**量纲是"可运行任务数"，而 Linux 的可运行队列按逻辑 CPU 统计**
+    （超线程的两个硬件线程各算一个 CPU）。故比较基准必须是 `cpu_limit()`
+    （逻辑核/配额份额），**不是** `physical_cores()`：后者在 8 逻辑核机器上是 4，
+    正常负载 4.5 就被判成"过载"，与 cpu_percent 89% 叠加后会把预算无故砍一档
+    （实测：8 核机上 3 个生成任务被砍成 2，用户体感"明明是 8 核却只能跑 2 个"）。
 
     Args:
         snap: 采样快照；None 时现场取（采样线程未启动时的兜底）
     """
     base = min(inference_slots(), int(_cfg("GEN_TASK_CONCURRENCY_MAX", GEN_TASK_CONCURRENCY_MAX)))
     base = max(1, int(base))
+    # 兄弟容器投影：api 与 celery 是两个容器，各算各的 → 小机器上会超卖。
+    # 投影后容量（自身 − 兄弟占用）按物理核折算，再留 1 核给事件循环。
+    # -1 的语义是"留给主进程的那 1 核"，小机器上会把 base 正确压到 1。
+    try:
+        peer, _peer_src = _read_peer_cpu_budget()
+        if peer:
+            eff_lc = effective_cpu_limit()
+            tpc = _threads_per_core() or 2
+            eff_phys = max(1, int(-(-eff_lc // float(tpc))))
+            base = max(1, min(base, eff_phys - 1) if eff_phys > 1 else 1)
+    except Exception:  # noqa: BLE001 - 投影计算出错保持原值
+        pass
     try:
         if snap is None:
             snap = _sampler.snapshot()
         mem = snap.get("memory") or {}
         ratio = mem.get("available_ratio")
+        # ⚠️ 顺序（v4.1.5）：先判"CPU 打满"再判 OOM。
+        #   两条保护**都成立**时该报哪一个？先判内存 → 日志/仪表盘只显示
+        #   "按内存压到 1"，现场看不到"CPU 也打满了"，两次故障长得一模一样。
+        #   先判 CPU 会把"内存告急（比值也 <1 但没低于阈值）"漏掉吗？不会——
+        #   CPU 分支只降一档、不 return，内存分支随后仍会执行到。
+        # 比较基准 = 逻辑核（与 load 同量纲）；取整后至少 1
+        logical = max(1, int(cpu_limit()))
+        if (snap.get("cpu_percent_avg") or 0) >= float(_cfg("CPU_OVERLOAD_PERCENT", CPU_OVERLOAD_PERCENT)) \
+                and (snap.get("load_1m") or 0) > logical:
+            base = max(1, base - 1)
         if ratio is not None and ratio < float(_cfg("MEM_LOW_RATIO", MEM_LOW_RATIO)):
             return 1
-        if (snap.get("cpu_percent_avg") or 0) >= float(_cfg("CPU_OVERLOAD_PERCENT", CPU_OVERLOAD_PERCENT)) \
-                and (snap.get("load_1m") or 0) > physical_cores():
-            base = max(1, base - 1)
     except Exception:  # noqa: BLE001 - 探测失败保持基础值（fail-open）
         pass
     return base
@@ -633,6 +1203,16 @@ class _ResourceGuard:
                 "logical_cores": int(cpu_limit()),
                 "physical_cores": physical_cores(),
                 "cpu_limit": cpu_limit(),
+                # threads_per_core：超线程比（2 = 开了超线程，1 = 没开）。前端用它
+                # 解释"为什么 6 逻辑核只给 3 个推理份额"。
+                "threads_per_core": _threads_per_core(),
+                "topology_source": _topology_source(),
+                "encode_threads": encode_threads(),
+                # 兄弟容器投影：非空说明本进程的并发预算已被"同机另一个容器"扣减过。
+                # 空 = 单容器部署或不需干预（单进程就能吃满整机的形态）。
+                "peer_cpu_budget": _read_peer_cpu_budget()[0] or None,
+                "effective_logical_cores": effective_cpu_limit(),
+                "peer_budget_source": _read_peer_cpu_budget()[1],
                 "usage_percent": snap.get("cpu_percent"),
                 "usage_percent_avg": snap.get("cpu_percent_avg"),
                 "load_1m": snap.get("load_1m"),
@@ -647,14 +1227,47 @@ class _ResourceGuard:
         }
 
     def health_brief(self) -> dict:
-        """极轻量字段（纯内存计数，不读 /proc），可随 /api/health 每次探活返回。"""
+        """极轻量字段（纯内存计数，不读 /proc），可随 /api/health 每次探活返回。
+
+        采样线程未启动时（独立进程/测试/启动早期）快照为空，
+        此时现场补一次内存探测——否则 mem_source 会是 "unknown"，
+        部署排查时无法判断 OOM 保护有没有依据。内存探测只读 2-4 个小文件，
+        且在 health_brief 里最多发生一次，不会成为阻塞源。
+        """
+        mem = _sampler.snapshot().get("memory") or {}
+        if not mem or mem.get("source") in (None, "", "unknown"):
+            try:
+                mem = _mem_snapshot_raw()
+            except Exception:  # noqa: BLE001 - 观测字段失败不能拖垮探活
+                mem = {}
         return {
             "cpu_logical_cores": int(cpu_limit()),
             "cpu_physical_cores": physical_cores(),
+            # cpu_topology：physical_cores 是"测"出来的还是"÷2 猜"出来的。
+            # cpuinfo = 读了 /proc/cpuinfo 的 siblings / cpu cores（真拓扑）；
+            # heuristic = 读不到拓扑，退回逻辑核÷2（保守值，宁少不多）。
+            "cpu_topology": _topology_source(),
+            "cpu_threads_per_core": _threads_per_core(),
+            "encode_threads": encode_threads(),
             "inference_slots": inference_slots(),
             "task_ceiling": self.task_ceiling(),
             "active_tasks": _gate.active_tasks,
             "waiting_tasks": _gate.waiting_count,
+            # v4.1.5：OOM 保护的"有效性证据"。source=proc 意味着读的是宿主/VM 内存，
+            # 不是容器自己的上限 —— 那时 MEM_LOW_RATIO 判定不可信，需在部署侧给容器
+            # 显式 mem_limit（deploy.sh 会就此告警）。3.10 上 v1 分支未覆盖时这里会显示 proc。
+            "mem_source": mem.get("source", "unknown"),
+            "mem_available_ratio": mem.get("available_ratio"),
+            # cpu_source：回答"并发上限为什么是这个数"。
+            # cgroup_v2/cgroup_v1 = 读到容器配额；affinity = 只有核亲和性；
+            # cpuset = 兜底路径（affinity 不可用）；cpu_count = **未约束，看得到宿主全部核**，
+            # 此时 task_ceiling 可能按宿主机核数放大 —— 需在部署侧给 --cpus 或 cpuset。
+            "cpu_source": _cpu_snapshot_source(),
+            # 兄弟容器投影（v4.1.5）：非空表示并发预算已按"同机另一个容器"的份额扣减。
+            # 部署脚本会写进来；空值 = 单容器形态，预算只看自己。
+            "cpu_peer_budget": (_read_peer_cpu_budget()[0] or None),
+            "cpu_peer_budget_source": _read_peer_cpu_budget()[1] or None,
+            "cpu_effective_logical_cores": effective_cpu_limit(),
         }
 
 
