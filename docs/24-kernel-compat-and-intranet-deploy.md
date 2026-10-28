@@ -245,12 +245,37 @@ echo 'fs.inotify.max_user_watches = 524288' >> /etc/sysctl.d/99-ai-test-gen.conf
 # AI-Test-Gen 内网部署所需内核参数
 # 适用：Kernel 3.10 / 4.x / 5.x 全部
 
-# Milvus 硬要求（默认 65530 不够）
+# ---- Milvus 硬要求（默认 65530 不够）----
+# 为什么是 262144 而不是"越大越好"：每个 VMA 是内核 struct vm_area_struct，
+# 约 120~288 字节且**不可换出**。过大会造成三个真实问题：
+#   ① 累积占用内核 slab 内存（2147483647 理论上要吃 GB 级）
+#   ② 内核遍历百万级 VMA 会显著拖慢 mmap/munmap 等常规系统调用
+#   ③ **OOM Killer 决策时不把内核 VMA 结构算进去** → 内存紧张时先杀掉
+#      无关的高内存进程，真正的元凶反而活着
+# 另：这是个 DoS 面——单个失控进程就能拖垮整机。
+# 判断依据不是"设多大"，而是"峰值用量不超过上限的 70%"：
+#   cat /proc/<pid>/maps | wc -l
 vm.max_map_count = 262144
+
+# ---- 进程/线程数上限（96 核这类大机器必做）----
+# 默认 32768。Milvus 的 querynode 线程池按 NumCPU×4 开，96 核机器上
+# 仅 Milvus 一个容器就可能吃掉上万个名额，再叠加 DEDUP worker 与 PG 连接，
+# 会在 fork/thread_create 时报 "Cannot allocate memory" —— 但 free -g 显示内存充足，
+# 极具误导性（这是 3.10 大机器上最常见的误判之一）。
+kernel.pid_max = 655360
+
+# 每个 segment 持有若干文件句柄，PG 每连接也占 fd。
+# 默认 65535 在高并发下先撞系统级上限，报 "too many open files"。
+fs.file-max = 1048576
 
 # 文件监听（容器较多时）
 fs.inotify.max_user_watches = 524288
 ```
+
+> **最后三项（pid_max / file-max / inotify）是 v4.1.7 补的。** 它们的共同特征：
+> 小机器上默认值够用，**大机器/高并发下才会撞墙**，且撞墙时的报错都指向别处
+> （"内存不足" / "fd 太多"），排查时通常先怀疑应用有 bug。
+> `deploy.sh` 的 0c-2b 段会自动检测并尝试修复，修不了会明确告警。
 
 应用方式：
 ```bash
@@ -281,11 +306,21 @@ PG_PASSWORD=<改成你的强密码>
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=<改成强密码>
 
-# ---- 容器资源配额（v4.1.5）----
+# ---- 容器资源配额（v4.1.5，v4.1.7 补大机器档位）----
 # 留空 = deploy.sh 按宿主自动算（推荐，不需要你操心）
-#  8GB 宿主 → api 6g·cpus 6 / celery 3g·cpus 3 / milvus 3g
-# 16GB 宿主 → api 10g·cpus 6 / celery 4g·cpus 3 / milvus 6g
-# 32GB 宿主 → api 20g·cpus 14 / celery 6g·cpus 7 / milvus 8g
+#   8GB  宿主 → api 6g·cpus 6  / celery 3g·cpus 2 / milvus 3g
+#   16GB       → api 10g·cpus 6 / celery 4g·cpus 2 / milvus 6g
+#   32GB       → api 20g·cpus 12/ celery 6g·cpus 4 / milvus 8g
+#   64GB       → api 32g·cpus 24/ celery 8g·cpus 8 / milvus 8g
+#   128GB      → api 64g·cpus 48/ celery 8g·cpus 16/ milvus 16g
+#   256GB      → api 96g·cpus 72/ celery 12g·cpus 24/ milvus 16g
+#
+# ⚠️ v4.1.7 修：api+celery 的 cpus **合计不得超过宿主核数**。
+#   旧公式（api=宿主-2、celery=api/2）在 96 核上算出 94+47=141 核（超卖 45 核），
+#   在 8 核上算出 6+3=9（超卖 1 核）——小机器同样中招。
+#   超卖不会崩，但会让两个容器都按"自己是唯一使用者"开线程池，
+#   内核靠上下文切换做假并发，实测比串行更慢，且应用侧预算完全看不到。
+#   超限时按 api:celery = 3:1 重分（8 核 → 6/2，与旧默认一致，无回归）。
 #
 # 想手工指定就取消注释：
 # API_MEM_LIMIT=10g
@@ -313,6 +348,178 @@ MINIO_SECRET_KEY=<改成强密码>
 > 实测形态：api 限 6 核、celery 看到 8 核 → 两边合计最多开 6 + 2×4 个线程池，
 > 远超宿主 8 逻辑核容量。故默认取 api 的一半（下限 1）：
 > `10g→cpus 5`、`6g→3`、`4g→2→1`。可显式设 `CELERY_CPU_LIMIT` 覆盖。
+
+---
+
+## 三之二、大机器调参（≥32 核必读，v4.1.7）
+
+> 应用会自动按容器配额推导并发，但有两个**硬顶**不由硬件决定。
+> 不调它们，96 核机器跑出来和 8 核机器一样 —— 这是"迁到大机器却没变快"的头号原因。
+
+### 3-2.1 两个必须手工调的旋钮
+
+| 配置项 | 默认值 | 96 核建议 | 不调的后果 |
+|---|---|---|---|
+| `GEN_TASK_CONCURRENCY_MAX` | **4** | 8~10（10 人使用） | 96 核推导出 23 个并发，被硬顶卡在 **4** |
+| `DEDUP_EMBED_WORKERS` | `""`（串行） | **16~18** | 去重永远单进程，大机器完全没用上 |
+
+```bash
+# .env
+GEN_TASK_CONCURRENCY_MAX=10
+DEDUP_EMBED_WORKERS=18
+```
+
+### 3-2.2 这两个值怎么算出来的
+
+**`DEDUP_EMBED_WORKERS`** —— 每 worker 4 线程（实测最优粒度），故：
+
+```
+workers ≈ api_cpus / 4
+96 核机器 api_cpus=72  →  72/4 = 18
+```
+
+内存校验（必须做，否则被 OOM Killer 杀）：
+
+```
+18 × 1.6GB ≈ 28.8GB  <  api mem_limit 96g   ✅ 余量充足
+```
+
+> ⚠️ **分片门槛**：代码里并行条件是 `len(texts) >= workers * 2`。
+> workers=18 时单次去重文本数需 ≥36 条才走并行；526 条的批次没问题，
+> 但小批次（十几条）会自动回退串行，此时开再多 worker 也无效。
+> 这是"设了但感觉没变快"的常见原因，不是 bug。
+
+**`GEN_TASK_CONCURRENCY_MAX`** —— 按同时使用人数定：
+
+```
+10 人左右 → 8~10      20 人 → 16      单人 → 4（默认）
+```
+
+不要设很大：每个并发生成任务都会去抢本地 bge 推理，
+超过物理核后互相拖慢（实测 8 线程比 4 线程慢 22%，见 docs/27）。
+
+### 3-2.3 调完怎么验证生效
+
+```bash
+curl -s --noproxy '*' http://127.0.0.1:8000/api/health | python -m json.tool | grep -A12 generation_load
+```
+
+**96 核 256G 的期望值**（api cpus=72 / celery cpus=24 / 硬顶 10）：
+
+```
+cpu_logical_cores            96
+cpu_physical_cores           48
+inference_slots              35      ← 容器内 72 cpus ÷ 2 − 1
+task_ceiling                 10      ← 被 GEN_TASK_CONCURRENCY_MAX 卡住（不是被核数卡）
+```
+
+推导链（可用这个核对现场是否一致）：
+
+```
+api 容器 72 逻辑核  →  36 物理核
+slots              =  36 − 1 = 35          （留 1 核给事件循环）
+兄弟 celery 24 逻辑核 → floor(24/2) = 12 个整物理核被占
+可用物理核          =  36 − 12 = 24
+task_ceiling       =  min(slots 35, 硬顶 10, 可用 24) = 10
+```
+
+> **`task_ceiling` 被硬顶卡住，不是被核数卡住** —— 这正是 §3-2.1 强调
+> `GEN_TASK_CONCURRENCY_MAX` 必须手工调的原因。不调它（保持默认 4），
+> 96 核机器上只会跑 4 个并发生成，和 8 核机器完全一样。
+
+**若 `task_ceiling` 仍然只有 1~2**，按这个顺序查：
+
+1. `GEN_TASK_CONCURRENCY_MAX` 是否真的进了容器：
+   `docker exec ai-test-gen-api env | grep GEN_TASK_CONCURRENCY_MAX`
+   空值或没输出 = compose 没传（v4.1.6 及之前就是这个状态），检查 `.env`。
+2. `cpu_peer_budget` 是否过大（celery 分到的核太多）：
+   它会按 `floor(peer/2)` 扣物理核。celery cpus=24 就扣 12 个。
+3. `cpu_logical_cores` 是否远小于宿主核数：
+   说明容器 `cpus` 配额没生效或被 override 文件覆盖成了小值。
+
+---
+
+## 三之三、整套迁移到新机器（换机场景）
+
+> 适用于"从旧机器整体搬到新机器"（如 8 核 → 96 核）。
+> 与"首次安装"的区别：**必须迁移数据与密钥**，否则起来是个空库 + 连不上 LLM。
+
+### 3-3.1 迁移清单（漏一个就白跑）
+
+| 类别 | 路径 / 内容 | 漏了会怎样 |
+|---|---|---|
+| **主密钥** | `backend/.keys/`（Fernet 主密钥） | **数据库里加密的 LLM API Key 全部解不开**，需重新填所有供应商密钥 |
+| 数据库 | PG 库 `ai_test_gen` | 需求、用例、任务、知识库元数据全丢 |
+| 向量库 | `milvus/` 目录（etcd + minio + milvus） | 需重新向量化全部知识库（几千条，耗时且要 LLM/模型） |
+| 模型 | `models/bge-large-zh-v1.5`、`bge-reranker-base` | 起不来，或退化成联网下载（内网下不了） |
+| 配置 | `.env` / `install.env` | 供应商配置、端口、密码全丢 |
+| 数据目录 | `data/`（PG 数据文件、redis、日志） | 见上面各项 |
+
+> **`backend/.keys/` 是最容易漏的一项**，因为它默认被 `.gitignore` 排除，
+> 打包脚本也不会带上。它不在，数据库里的 `llm_config.api_key` 全是废密文。
+
+### 3-3.2 迁移步骤
+
+```bash
+# ===== 旧机器：停机 + 备份 =====
+cd /opt/ai-test-gen
+docker compose -f docker-compose.yml stop          # 先停，保证数据一致
+
+# ① 主密钥（最关键）
+tar czf /tmp/keys.tgz backend/.keys/
+
+# ② 数据库（自定义格式，可并行恢复）
+docker exec ai-test-gen-pg pg_dump -U aitestgen -Fc ai_test_gen > /tmp/aitg.dump
+
+# ③ 向量库（体积大，先看多大）
+du -sh milvus/ data/ models/
+docker run --rm -v "$PWD/milvus:/m" -v /tmp:/b alpine tar czf /b/milvus.tgz -C /m .
+
+# ④ 配置
+cp .env /tmp/env.bak 2>/dev/null || cp install.env /tmp/env.bak
+
+# ⑤ 模型（若新机器没有）
+tar czf /tmp/models.tgz models/
+
+# ===== 拷到新机器（千兆网，按体积估时间）=====
+scp /tmp/{keys.tgz,aitg.dump,env.bak} <新机>:/tmp/
+# 向量库与模型体积大，建议 rsync 断点续传：
+rsync -avP /tmp/milvus.tgz /tmp/models.tgz <新机>:/tmp/
+
+# ===== 新机器：部署 + 恢复 =====
+# 1. 先做宿主配置（第二节全部 5 项 + pid_max/file-max）
+# 2. 部署空系统
+bash deploy.sh
+# 3. 停业务容器（只留 PG）
+docker compose -f docker-compose.offline.yml stop backend celery_worker
+# 4. 恢复数据库
+docker exec -i ai-test-gen-pg pg_restore -U aitestgen -d ai_test_gen --clean --if-exists < /tmp/aitg.dump
+# 5. 恢复密钥与向量库
+tar xzf /tmp/keys.tgz -C /opt/ai-test-gen/
+tar xzf /tmp/milvus.tgz -C /opt/ai-test-gen/milvus/
+# 6. 起全部
+docker compose -f docker-compose.offline.yml up -d
+```
+
+### 3-3.3 迁移后必须验收的三件事
+
+```bash
+# ① 密钥能解开（否则 LLM 全挂，但服务"看起来正常"）
+curl -s --noproxy '*' http://127.0.0.1:8000/api/health | grep -o '"llm_configured":[a-z]*'
+# 期望 true。false 说明 .keys 没恢复或 MASTER_KEY 不一致。
+
+# ② 向量库条数对得上（不是 0 也不是异常值）
+curl -s --noproxy '*' http://127.0.0.1:8000/api/health | python -m json.tool | grep -A6 vector_db
+# 旧机器 requirements 444 / test_cases 1698 这类数字应与新机一致
+
+# ③ 并发预算真的用上了大机器（见 §3-2.3）
+```
+
+### 3-3.4 回滚
+
+旧机器容器只是 `stop` 不是 `rm`，数据目录原样保留。
+切换失败时在旧机器 `docker compose up -d` 即可原样恢复，
+**唯一需要注意的是 DNS/端口指向**（客户端连的是 IP 还是域名）。
 
 ---
 
