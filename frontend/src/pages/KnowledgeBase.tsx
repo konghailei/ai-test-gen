@@ -672,7 +672,7 @@ export default function KnowledgeBase() {
                               <CheckCircle2 className="w-2.5 h-2.5" /> 已向量化
                             </span>
                           ) : entry.vectorization_status === 'failed' ? (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5" style={{ background: 'var(--state-error-surface)', color: 'var(--state-error)' }} title={entry.vectorization_error || '向量化任务失败（Celery 重试耗尽）'}>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5" style={{ background: 'var(--state-error-surface)', color: 'var(--state-error)' }} title={entry.vectorization_error || '向量化投递失败（已达重试上限），可对单条点「重新向量化」'}>
                               <XCircle className="w-2.5 h-2.5" /> 向量化失败
                             </span>
                           ) : (

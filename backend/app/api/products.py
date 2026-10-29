@@ -832,6 +832,86 @@ async def archive_project(
         r.go_live_date = parsed_go_live
         r.archived_at = now
 
+    # 11a. v4.1.9：向量写入意图**同事务入出箱**（替代 v2.8.58 的 celery 派发）。
+    #
+    # 旧链路：commit → send_task(Redis) → worker 异步 embed → 第二个 commit 回写状态。
+    # 三个缺口：① 消息丢失（Redis 重启 / worker 崩溃且未重投）后需求停 pending；
+    #          ② FP 向量**无任何对账**，丢一条就永久缺失且无人知晓；
+    #          ③ 状态回写是独立 commit、失败只记 warning，向量与状态可能各说各话。
+    # 新链路：业务行（archived）+ status=pending + 出箱事件**同一事务**提交——
+    # 要么一起生效、要么一起回滚；relay 至少一次投递（Milvus 幂等 upsert），
+    # 投递结果按 payload.status_writeback 回写状态（见 vector_outbox.status_writeback_req_id）。
+    from app.core.vector_outbox import enqueue as _outbox_enqueue
+
+    project_version = project.version
+    kb_count = 0
+    kb_fp_count = 0
+    # v2.45 优化：按 requirement_id 分组 FP，避免嵌套循环 O(需求数 × FP数) → O(需求数 + FP数)
+    fp_by_req: dict[str, list] = {}
+    for f in all_fps:
+        fp_by_req.setdefault(f.requirement_id, []).append(f)
+
+    _rev = int(now.timestamp() * 1000)  # 变更时刻（epoch 毫秒），出箱 revision 语义
+    for r in requirements:
+        milvus_meta = {
+            "type": "requirement",
+            "product_id": r.product_id,
+            "project_id": proj_id,  # v2.45: 新增 project_id，支持按项目过滤
+            "modules": ",".join(r.modules or []),
+            "priority": r.priority,
+            "status": "archived",
+            "go_live_date": parsed_go_live.isoformat(),
+            "project_version": project_version,
+        }
+        r.vectorization_status = "pending"
+        r.vectorization_error = None
+        _outbox_enqueue(
+            session,
+            aggregate_type="requirement",
+            aggregate_id=r.id,
+            action="upsert",
+            revision=_rev,
+            payload={
+                "requirement_json": r.srr_json or {},
+                "metadata": milvus_meta,
+                # 显式声明：此事件的投递结果回写 requirements.vectorization_status
+                "status_writeback": {"req_id": r.id},
+            },
+            created_by="archive_project",
+        )
+        kb_count += 1
+
+        # FP 向量（复用 requirement 类型 + "FP-" 前缀 ID，与孤儿扫描/reconcile 约定一致）
+        for f in fp_by_req.get(r.id, []):
+            fp_meta = {
+                "type": "functional_point",
+                "requirement_id": r.id,
+                "project_id": proj_id,  # v2.45: 新增
+                "fp_id": f.id or "",
+                "fp_name": f.name or "",
+                "modules": ",".join(f.modules or []) if f.modules else (f.module_id or ""),
+                "module_id": f.module_id or "",
+                "fp_type": f.fp_type,
+                "product_id": r.product_id,
+                "status": "archived",
+            }
+            embed_srr = dict(f.srr_json) if isinstance(f.srr_json, dict) else {}
+            embed_srr.setdefault("requirement", {})
+            embed_srr["requirement"]["title"] = f.name
+            if f.summary:
+                embed_srr["requirement"]["summary"] = f.summary
+            # FP 行没有 vectorization_status 列，不挂 status_writeback
+            _outbox_enqueue(
+                session,
+                aggregate_type="requirement",
+                aggregate_id=f"FP-{f.id}",
+                action="upsert",
+                revision=_rev,
+                payload={"requirement_json": embed_srr, "metadata": fp_meta},
+                created_by="archive_project",
+            )
+            kb_fp_count += 1
+
     # 11b. v3.3（N1 治理 · 用例库与需求库口径对齐）：随项目归档**固化用例**。
     #
     # 背景：KB 问答的需求检索只取 `status="archived"` 的需求（"只信已归档"），
@@ -871,124 +951,9 @@ async def archive_project(
             )
         raise HTTPException(status_code=409, detail=f"归档失败（数据冲突）: {str(e)[:200]}")
 
-    # 12. 写入向量库（v2.8.58: 改为 Celery 异步派发，PG 同步落库后立即返回）
-    # 架构设计：PG commit → celery_app.send_task → Celery Worker 异步 Embedding + Milvus 写入
-    # Celery 不可用时降级为同步写入（保持兼容）
-    project_version = project.version
-    kb_count = 0
-    kb_failed: list[dict] = []  # v2.8.56: 记录向量写入失败的条目
-    # v2.45 优化：按 requirement_id 分组 FP，避免嵌套循环 O(需求数 × FP数) → O(需求数 + FP数)
-    fp_by_req: dict[str, list] = {}
-    for f in all_fps:
-        fp_by_req.setdefault(f.requirement_id, []).append(f)
-
-    # v2.8.58: 检测 Celery 是否可用（决定异步派发还是同步降级）
-    try:
-        from app.tasks.celery_app import celery_app as _celery_app
-        _celery_available = _celery_app is not None
-    except ImportError:
-        _celery_app = None
-        _celery_available = False
-
-    for r in requirements:
-        milvus_meta = {
-            "type": "requirement",
-            "product_id": r.product_id,
-            "project_id": proj_id,  # v2.45: 新增 project_id，支持按项目过滤
-            "modules": ",".join(r.modules or []),
-            "priority": r.priority,
-            "status": "archived",
-            "go_live_date": parsed_go_live.isoformat(),
-            "project_version": project_version,
-        }
-        if _celery_available:
-            # 异步派发：设置 pending 状态，Celery 任务完成后回写 completed/failed
-            try:
-                _celery_app.send_task(
-                    "app.tasks.embedding_tasks.embed_and_store_requirement",
-                    args=[r.id, r.srr_json or {}, milvus_meta],
-                    queue="embedding",
-                )
-                kb_count += 1
-                r.vectorization_status = "pending"
-                r.vectorization_error = None
-            except Exception as e:
-                err_msg = str(e)[:500]
-                logger.error("[ArchiveProject] 需求向量化任务派发失败 req_id={}: {}", r.id, err_msg[:150])
-                r.vectorization_status = "failed"
-                r.vectorization_error = f"任务派发失败: {err_msg}"
-                kb_failed.append({"id": r.id, "title": r.title, "type": "requirement", "error": err_msg[:200]})
-        else:
-            # 降级：同步写入（Celery 未安装）
-            try:
-                from app.db.milvus_store import vector_store
-                await asyncio.to_thread(
-                    vector_store.add_requirement,
-                    req_id=r.id,
-                    srr_json=r.srr_json or {},
-                    metadata=milvus_meta,
-                )
-                kb_count += 1
-                r.vectorization_status = "completed"
-                r.vectorization_error = None
-            except Exception as e:
-                err_msg = str(e)[:500]
-                logger.error("[ArchiveProject] 需求向量写入失败 req_id={}: {}", r.id, err_msg[:150])
-                r.vectorization_status = "failed"
-                r.vectorization_error = err_msg
-                kb_failed.append({"id": r.id, "title": r.title, "type": "requirement", "error": err_msg[:200]})
-
-        # FP 向量（从预分组字典读取，O(1) 查找）
-        for f in fp_by_req.get(r.id, []):
-            fp_meta = {
-                "type": "functional_point",
-                "requirement_id": r.id,
-                "project_id": proj_id,  # v2.45: 新增
-                "fp_id": f.id or "",
-                "fp_name": f.name or "",
-                "modules": ",".join(f.modules or []) if f.modules else (f.module_id or ""),
-                "module_id": f.module_id or "",
-                "fp_type": f.fp_type,
-                "product_id": r.product_id,
-                "status": "archived",
-            }
-            embed_srr = dict(f.srr_json) if isinstance(f.srr_json, dict) else {}
-            embed_srr.setdefault("requirement", {})
-            embed_srr["requirement"]["title"] = f.name
-            if f.summary:
-                embed_srr["requirement"]["summary"] = f.summary
-            if _celery_available:
-                # 异步派发 FP 向量化
-                try:
-                    _celery_app.send_task(
-                        "app.tasks.embedding_tasks.embed_and_store_requirement",
-                        args=[f"FP-{f.id}", embed_srr, fp_meta],
-                        queue="embedding",
-                    )
-                except Exception as e:
-                    err_msg = str(e)[:500]
-                    logger.error("[ArchiveProject] FP向量化任务派发失败 fp_id={}: {}", f.id, err_msg[:150])
-                    kb_failed.append({"id": f.id, "title": f.name, "type": "functional_point", "error": err_msg[:200]})
-            else:
-                # 降级：同步写入
-                try:
-                    from app.db.milvus_store import vector_store
-                    await asyncio.to_thread(
-                        vector_store.add_requirement,
-                        req_id=f"FP-{f.id}",
-                        srr_json=embed_srr,
-                        metadata=fp_meta,
-                    )
-                except Exception as e:
-                    err_msg = str(e)[:500]
-                    logger.error("[ArchiveProject] FP向量写入失败 fp_id={}: {}", f.id, err_msg[:150])
-                    kb_failed.append({"id": f.id, "title": f.name, "type": "functional_point", "error": err_msg[:200]})
-
-    # v2.8.56: 回写 vectorization_status 到 DB
-    try:
-        await session.commit()
-    except Exception as e:
-        logger.warning("[ArchiveProject] vectorization_status 回写失败（不阻断）: {}", str(e)[:150])
+    # 12. 向量写入已前移到第 11a 步（同事务入出箱，v4.1.9）。
+    # 此处不再派发 celery、不再二次回写状态——状态与事件都随第 9 段的主事务提交。
+    kb_failed: list[dict] = []  # 出箱路径下入箱失败会整体回滚（无逐条失败），保留字段兼容响应
 
     # v2.8.55 Bug A-2: 失效该产品的 KB 检索缓存，防止 24h 内 augmentation 使用归档前旧数据
     product_id_for_cache = requirements[0].product_id if requirements else ""
@@ -1094,16 +1059,13 @@ async def archive_project(
             fpc_failed.append({"error": str(fpc_e)[:200]})
 
     logger.info(
-        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 向量派发={}, 失败={}, celery={}, crsr={}, fpc={}",
-        proj_id, version_id, len(requirements), len(all_fps), len(all_deps), kb_count, len(kb_failed),
-        "async" if _celery_available else "sync", crsr_count, fpc_count,
+        "[ArchiveProject] 项目归档成功: proj_id={}, version_id={}, 需求={}, FP={}, 依赖={}, 出箱事件={}(+FP {}), 失败={}, crsr={}, fpc={}",
+        proj_id, version_id, len(requirements), len(all_fps), len(all_deps), kb_count, kb_fp_count,
+        len(kb_failed), crsr_count, fpc_count,
     )
-    # v2.8.58: 异步派发时提示用户向量化进行中，同步写入时提示完成状态
+    # v4.1.9: 出箱路径——事件与业务行同事务提交，投递由 relay 后台完成（至少一次）
     msg = f"项目已归档，版本号: {version_id}"
-    if _celery_available and not kb_failed:
-        msg += f"（向量化任务已异步派发，{kb_count} 条记录正在后台处理）"
-    elif kb_failed:
-        msg += f"（警告: {len(kb_failed)} 条向量写入失败，知识库检索可能不完整，请检查嵌入模型状态）"
+    msg += f"（向量写入已入出箱：{kb_count} 条需求 + {kb_fp_count} 个功能点后台投递中）"
     return ApiResponse(
         success=True,
         message=msg,
@@ -1115,8 +1077,9 @@ async def archive_project(
             "fp_count": len(all_fps),
             "dependency_count": len(all_deps),
             "kb_written": kb_count,
-            "kb_failed": kb_failed,  # v2.8.56: 返回失败列表供前端展示
-            "vectorization_mode": "async" if _celery_available else "sync",  # v2.8.58
+            "kb_fp_written": kb_fp_count,
+            "kb_failed": kb_failed,  # 出箱路径下恒为空（入箱失败会整体回滚）；保留字段兼容响应
+            "vectorization_mode": "outbox",  # v4.1.9: 取代 async/sync 二态
             "go_live_date": parsed_go_live.isoformat(),
             # v3.2: CRSR 固化结果
             "crsr_consolidated": crsr_count,

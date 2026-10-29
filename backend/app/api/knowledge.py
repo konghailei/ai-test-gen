@@ -52,30 +52,6 @@ def _build_requirement_kb_meta(record: Requirement, project_version: str) -> dic
     }
 
 
-def _dispatch_embedding_task(req_id: str, srr_json: dict, meta: dict) -> bool:
-    """派发需求向量化异步任务；Celery 不可用时降级为同步写入。
-
-    返回 True 表示任务已派发/已同步写入；False 表示派发与同步均失败
-    （如模型未就绪）。注意：True 仅代表“已提交”，不保证 Milvus 已落库。
-    """
-    try:
-        from app.tasks.celery_app import celery_app
-
-        if celery_app is not None:
-            celery_app.send_task(
-                "app.tasks.embedding_tasks.embed_and_store_requirement",
-                args=[req_id, srr_json, meta],
-                queue="embedding",
-            )
-            return True
-        # Celery 不可用 → 同步写入（会真正加载模型并写入 Milvus）
-        vector_store.add_requirement(req_id, srr_json, metadata=meta)
-        return True
-    except Exception as e:
-        logger.warning("[API/knowledge] 向量化任务派发失败: req_id={}, error={}", req_id, str(e)[:200])
-        return False
-
-
 async def _project_version(session: AsyncSession, project_id: str | None) -> str:
     if not project_id:
         return ""
@@ -835,20 +811,32 @@ async def reverctorize_requirement(entry_id: str, session: AsyncSession = Depend
     project_version = await _project_version(session, record.project_id)
     meta = _build_requirement_kb_meta(record, project_version)
 
-    # 标记向量化状态为"进行中"，清除旧错误
+    # v4.1.9：改为**同事务入出箱**（替代 celery 派发 + 同步降级两条路）。
+    # 状态 processing 与出箱事件一起提交；relay 投递结果按 status_writeback 回写
+    # （成功 → completed；重试耗尽 → failed + error）。入箱不会"派发失败"：
+    # 要么提交成功，要么整体回滚抛错。
+    from app.core.vector_outbox import enqueue as _outbox_enqueue
+
     record.vectorization_status = "processing"
     record.vectorization_error = None
-    await session.commit()
-
-    # v4.0.1（S1 同类修复）：_dispatch_embedding_task 是**同步**函数——Celery 不可用时
-    # 其降级分支会真正加载嵌入模型并同步写 Milvus（阻塞数十秒），故用 to_thread 隔离。
-    queued = await asyncio.to_thread(
-        _dispatch_embedding_task, record.id, record.srr_json or {}, meta
+    _outbox_enqueue(
+        session,
+        aggregate_type="requirement",
+        aggregate_id=record.id,
+        action="upsert",
+        revision=int(datetime.now(timezone.utc).timestamp() * 1000),
+        payload={
+            "requirement_json": record.srr_json or {},
+            "metadata": meta,
+            "status_writeback": {"req_id": record.id},
+        },
+        created_by="revectorize",
     )
+    await session.commit()
     return ApiResponse(
         success=True,
-        message="已重新派发向量化任务（异步）" if queued else "向量化任务派发失败：请检查 Celery 是否运行或嵌入模型是否就绪",
-        data={"req_id": entry_id, "queued": queued},
+        message="已重新入队向量化任务（出箱投递，后台处理）",
+        data={"req_id": entry_id, "queued": True},
     )
 
 
@@ -876,22 +864,35 @@ async def reverctorize_missing(session: AsyncSession = Depends(get_session)) -> 
     stmt = select(Requirement).where(Requirement.status == "archived")
     records = (await session.execute(stmt)).scalars().all()
 
+    # v4.1.9：改为同事务入出箱（一次性提交）。出箱路径不存在"派发失败"分支——
+    # 入箱异常会让整批回滚并 500，由调用方重试；投递失败由 relay 退避重试 + 终态 failed。
+    from app.core.vector_outbox import enqueue as _outbox_enqueue
+
     queued = 0
-    failed = 0
+    _rev_now = int(datetime.now(timezone.utc).timestamp() * 1000)
     for r in records:
         if r.id in vectorized_ids:
             continue
         project_version = await _project_version(session, r.project_id)
         meta = _build_requirement_kb_meta(r, project_version)
-        # v4.0.1（S1 同类修复）：同步派发（Celery 不可用时降级为同步加载模型+写 Milvus），
-        # 必须 to_thread 隔离——本循环会遍历全部已归档需求，阻塞代价随规模放大。
-        if await asyncio.to_thread(_dispatch_embedding_task, r.id, r.srr_json or {}, meta):
-            r.vectorization_status = "processing"
-            r.vectorization_error = None
-            queued += 1
-        else:
-            failed += 1
+        r.vectorization_status = "processing"
+        r.vectorization_error = None
+        _outbox_enqueue(
+            session,
+            aggregate_type="requirement",
+            aggregate_id=r.id,
+            action="upsert",
+            revision=_rev_now,
+            payload={
+                "requirement_json": r.srr_json or {},
+                "metadata": meta,
+                "status_writeback": {"req_id": r.id},
+            },
+            created_by="revectorize_missing",
+        )
+        queued += 1
     await session.commit()
+    failed = 0  # 保留响应字段（出箱路径下无逐条失败）
 
     missing = len(records) - len(vectorized_ids)
     return ApiResponse(
