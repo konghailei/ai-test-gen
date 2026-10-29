@@ -1,11 +1,12 @@
-"""Celery 应用实例 — 异步嵌入计算 + 知识库双写。
+"""Celery 应用实例 — v4.1.9 起**已无内置任务**（向量化全部改走出箱）。
 
-设计依据：
-- docs/02-knowledge-base.md §9.7（异步双写一致性方案）
-- PG 同步写入（事务保证）→ Celery 异步计算 Embedding → 写入 Milvus
+历史：本模块承载「PG 落库 → Celery 异步 Embedding → Milvus 写入」的异步双写。
+v4.1.9 起归档/补写路径改为 `vector_outbox` 同事务入箱 + API 进程内 relay 投递，
+`embedding_tasks` 两个任务已删除。保留本模块只为让 `celery_worker` 容器仍能启动
+（服务空转一版观察，下一版删容器与 broker 配置）。
 
-降级策略：
-- Celery 未安装或 broker 不可用 → celery_app = None → 归档端点降级为同步写入
+**新增后台任务时**：请先确认是否真的需要独立进程（CPU 隔离），
+否则优先走 main.py lifespan 的周期协程（kb_lint / kb_maintenance / outbox relay 先例）。
 """
 from __future__ import annotations
 
@@ -34,7 +35,8 @@ try:
         "ai_test_gen",
         broker=broker,
         backend=backend,
-        include=["app.tasks.embedding_tasks"],
+        # v4.1.9：无内置任务（embedding_tasks 已删除，向量化改出箱 relay）
+        include=[],
     )
 
     celery_app.conf.update(
@@ -58,12 +60,10 @@ try:
         worker_max_memory_per_child=2_000_000,
         # 结果最长保留 24h（防止 result backend Redis 内存爆炸）
         result_expires=86400,
-        task_routes={
-            "app.tasks.embedding_tasks.embed_and_store_requirement": {"queue": "embedding"},
-            "app.tasks.embedding_tasks.embed_and_store_test_case": {"queue": "embedding"},
-        },
+        # v4.1.9：task_routes 随任务删除一并清空（无路由可配）
+        task_routes={},
     )
-    logger.info("[Celery] 应用已初始化: broker={}", broker)
+    logger.info("[Celery] 应用已初始化（无内置任务）: broker={}", broker)
 
     # ---- v4.1.5：worker 侧也必须显式设 torch 线程 ----
     # 此前只有 API 主进程设了（main.py 的 lifespan），**celery worker 完全没设**。
