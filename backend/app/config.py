@@ -466,11 +466,9 @@ class Settings(BaseSettings):
     #  RPM/TPM 限流从未实现）
 
     # ========== Celery 配置 ==========
-    """Celery broker URL（Redis）"""
-    CELERY_BROKER_URL: str = ""
-
-    """Celery result backend URL（Redis）"""
-    CELERY_RESULT_BACKEND: str = ""
+    # （2026-10-29 / v4.1.9 移除 CELERY_BROKER_URL / CELERY_RESULT_BACKEND：
+    #  归档向量化切出箱 relay 后 celery_worker 已删除，两个字段零消费点。
+    #  Redis 本体保留——kb_cache（L1 语义缓存）仍在用。）
 
     # ========== 限流配置 ==========
     """全局 API 每分钟最大请求数（内存 Token Bucket 限流）"""
