@@ -11,6 +11,11 @@ milvus/
 # 本地模型（通过 bind mount 挂载进容器，不烘焙进镜像；
 # 排除可避免 ~2.4GB 模型被打入 build context，极大加速构建）
 models/
+# v4.2.1 修复：模型还有一份历史副本在 backend/models/（1.3GB，代码零引用、
+#   .gitignore 已排除）。上面那条 `models/` 只匹配**根目录**，匹配不到
+#   backend/models/ → 每次 build 都把它 COPY 进镜像（api 镜像 12.6G vs base 10.5G，
+#   COPY 阶段白等 50s+），且 pack-update 会把它打进升级包（1.3GB 虚胖）。
+backend/models/
 
 # Python 缓存
 __pycache__/
