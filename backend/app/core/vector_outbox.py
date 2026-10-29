@@ -114,6 +114,26 @@ def enqueue(
     return event_id
 
 
+def status_writeback_req_id(row) -> str | None:
+    """解析出箱行里的**显式状态回写目标**（纯函数，便于单测）。
+
+    v4.1.9：归档/补偿补写路径在 payload 里放 `status_writeback={"req_id": ...}`，
+    relay 投递成功后据此回写 `requirements.vectorization_status`。
+    必须**显式标记**而非按 aggregate_type 隐式推断——correction 流（kqa_archive）
+    也投 requirement 类型事件，但它的状态语义不归这里管；只有声明了才回写。
+    """
+    if row.action != "upsert" or row.aggregate_type != "requirement":
+        return None
+    payload = row.payload or {}
+    if not isinstance(payload, dict):
+        return None
+    sw = payload.get("status_writeback")
+    if not isinstance(sw, dict):
+        return None
+    rid = sw.get("req_id")
+    return str(rid) if rid else None
+
+
 def _deliver(row) -> None:
     """真正投递到 Milvus（同步，由 to_thread 调用）。幂等：按主键 upsert / delete。"""
     from app.db.milvus_store import vector_store
@@ -276,13 +296,16 @@ async def dispatch_batch(limit: int = OUTBOX_BATCH) -> dict:
     )
     outcome: dict[str, str] = {eid: err for eid, err in results}
 
-    # ── ③ 回写段（另一个短事务：批量回写 done/failed + 退避）──
+    # ── ③ 回写段（另一个短事务：批量回写 done/failed + 退避 + 显式状态回写）──
     async with async_session() as session:
         fresh = (await session.execute(
             select(VectorOutbox).where(VectorOutbox.event_id.in_(claimed_ids))
         )).scalars().all()
         now = datetime.now(timezone.utc)
+        _sw_done: list[str] = []
+        _sw_failed: list[tuple[str, str]] = []
         for row in fresh:
+            _req_target = status_writeback_req_id(row)
             err = outcome.get(row.event_id, "")
             if not err:
                 row.status = "done"
@@ -290,6 +313,8 @@ async def dispatch_batch(limit: int = OUTBOX_BATCH) -> dict:
                 row.error = ""
                 row.lease_until = None
                 stats["done"] += 1
+                if _req_target:
+                    _sw_done.append(_req_target)
             else:
                 row.retry_count = (row.retry_count or 0) + 1
                 row.error = err
@@ -301,6 +326,10 @@ async def dispatch_batch(limit: int = OUTBOX_BATCH) -> dict:
                         "[VectorOutbox] ⛔ 投递超上限转 failed（等对账）: event={}, agg={}, retry={}, err={}",
                         row.event_id, row.aggregate_id, row.retry_count, row.error[:160],
                     )
+                    # 只有**终态 failed** 才回写 failed 状态；中间重试保持 pending，
+                    # 前端仍显示"处理中"（符合用户预期：还在重试就不该报失败）
+                    if _req_target:
+                        _sw_failed.append((_req_target, row.error))
                 else:
                     delay = next_retry_delay(row.retry_count)
                     row.status = "pending"
@@ -311,6 +340,29 @@ async def dispatch_batch(limit: int = OUTBOX_BATCH) -> dict:
                     )
                 stats["failed"] += 1
                 stats["errors"].append({"event_id": row.event_id, "error": row.error[:200]})
+
+        # v4.1.9：显式状态回写（与出箱行同一短事务提交，两表同库原子）
+        if _sw_done:
+            await session.execute(
+                text(
+                    "UPDATE requirements SET vectorization_status='completed', "
+                    "vectorization_error=NULL WHERE id = ANY(:ids)"
+                ),
+                {"ids": _sw_done},
+            )
+        for _rid, _err in _sw_failed:
+            await session.execute(
+                text(
+                    "UPDATE requirements SET vectorization_status='failed', "
+                    "vectorization_error=:e WHERE id=:i"
+                ),
+                {"i": _rid, "e": (_err or "")[:500]},
+            )
+        if _sw_done or _sw_failed:
+            logger.info(
+                "[VectorOutbox] vectorization_status 回写: completed={}, failed={}",
+                len(_sw_done), len(_sw_failed),
+            )
         await session.commit()
 
     if stats["done"] or stats["failed"]:
