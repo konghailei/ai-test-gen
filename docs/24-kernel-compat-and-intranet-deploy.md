@@ -1,8 +1,15 @@
 # 内网部署与迁移手册（Kernel 3.10 / 4.x 双兼容）
 
-> 版本：v4.1.6 ｜ 适用：RHEL/CentOS 7 系（内核 3.10）、内核 4.x 及以上
+> 版本：v4.1.9 ｜ 适用：RHEL/CentOS 7 系（内核 3.10）、内核 4.x 及以上
 > 面向：**无法访问外网、无法在线装包**的内网服务器
-> 最后更新：2026-10-27
+> 最后更新：2026-10-29
+>
+> **⚠️ v4.1.9 重要变更：`celery_worker` 已退役（8 容器 → 7 容器）。**
+> 归档/补写向量化改为出箱 relay（API 进程内）投递，不再需要 Celery broker。
+> 影响：① 无需再配 `CELERY_*` 与 `CELERY_CPU/MEM_LIMIT`；
+> ② **不再有跨容器 CPU 投影**，api 独占「宿主核数 − 2」；
+> ③ 老部署升级时 `deploy.sh` 会自动清理 `PEER_CELERY_CPU` 历史值（否则白扣核数）。
+> 本文中标注「v4.1.5~v4.1.8 历史」的 celery 段落仅用于理解老部署。
 >
 > **本文是内网迁移的唯一入口文档**，覆盖：
 > ① 宿主配置清单（照着敲）；② 每项为什么必须做；③ 怎么验证做对了；
@@ -306,28 +313,23 @@ PG_PASSWORD=<改成你的强密码>
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=<改成强密码>
 
-# ---- 容器资源配额（v4.1.5，v4.1.7 补大机器档位）----
+# ---- 容器资源配额（v4.1.5，v4.1.7 补大机器档位，v4.1.9 celery 退役）----
 # 留空 = deploy.sh 按宿主自动算（推荐，不需要你操心）
-#   8GB  宿主 → api 6g·cpus 6  / celery 3g·cpus 2 / milvus 3g
-#   16GB       → api 10g·cpus 6 / celery 4g·cpus 2 / milvus 6g
-#   32GB       → api 20g·cpus 12/ celery 6g·cpus 4 / milvus 8g
-#   64GB       → api 32g·cpus 24/ celery 8g·cpus 8 / milvus 8g
-#   128GB      → api 64g·cpus 48/ celery 8g·cpus 16/ milvus 16g
-#   256GB      → api 96g·cpus 72/ celery 12g·cpus 24/ milvus 16g
+# ⚠️ v4.1.9：celery_worker 已删除（归档向量化改走出箱 relay），只剩 3 个受限服务：
+#   8GB  宿主 → api 6g·cpus 6  / milvus 3g
+#   16GB       → api 10g·cpus 6 / milvus 6g
+#   32GB       → api 20g·cpus 12/ milvus 8g
+#   64GB       → api 32g·cpus 24/ milvus 8g
+#   128GB      → api 64g·cpus 48/ milvus 16g
+#   256GB      → api 96g·cpus 72→按新公式 94/ milvus 16g
 #
-# ⚠️ v4.1.7 修：api+celery 的 cpus **合计不得超过宿主核数**。
-#   旧公式（api=宿主-2、celery=api/2）在 96 核上算出 94+47=141 核（超卖 45 核），
-#   在 8 核上算出 6+3=9（超卖 1 核）——小机器同样中招。
-#   超卖不会崩，但会让两个容器都按"自己是唯一使用者"开线程池，
-#   内核靠上下文切换做假并发，实测比串行更慢，且应用侧预算完全看不到。
-#   超限时按 api:celery = 3:1 重分（8 核 → 6/2，与旧默认一致，无回归）。
+# ⚠️ v4.1.9 之前（v4.1.7 时代）的 api+celery 3:1 防超卖逻辑已随 celery 退役移除；
+#   现在 api 独占「宿主核数-2」（留 2 核给 Milvus/PG/系统），不再有跨容器投影。
 #
 # 想手工指定就取消注释：
 # API_MEM_LIMIT=10g
 # API_CPU_LIMIT=6
 # MILVUS_MEM_LIMIT=6g
-# CELERY_MEM_LIMIT=4g
-# CELERY_CPU_LIMIT=3
 ```
 
 > **为什么这一节很关键**：容器不设内存上限时，应用的 OOM 保护（内存紧张自动降并发）
@@ -335,14 +337,18 @@ MINIO_SECRET_KEY=<改成强密码>
 > 且 `mem_limit` / `cpus` 在 compose 里不接受空值，所以配额靠
 > `docker-compose.resources.override.yml` 注入（deploy.sh 自动生成，不要手改）。
 >
+> **v4.1.9 变更**：`celery_worker` 已退役（归档/补写向量化改走出箱 relay）。
+> 下面关于 celery 的三段说明是 v4.1.5~v4.1.8 的历史记录，**仅用于理解老部署**；
+> 新部署只有 `backend` 与 `milvus` 两个受限服务，且不再有跨容器 CPU 投影
+> （`PEER_CELERY_CPU` 已移除，deploy.sh 升级时会自动清理历史值）。
+>
 > **三个服务都要限额（内存 + CPU 都要）**，各有各的理由：
 > - `backend`：OOM 保护与并发预算的依据（读 container cgroup 上限）
-> - `celery_worker`：独立进程，各自加载一份 bge + reranker，没有降并发守卫，
->   不限额会和 backend 抢内存，且 OOM Killer 挑谁全看运气（3.10 常杀 PID 最大者）
 > - `milvus`：内存随集合数量上涨，没有守卫，限它主要是兜住别把整机吃干
+> - ~~`celery_worker`~~：v4.1.9 已删除
 >
-> **celery 的 CPU 为什么也必须限**（v4.1.5 补）：它跑 embedding + 双写，
-> 每个 worker 进程各有一份 torch 线程池（4 线程）。不设 `cpus` 时它看到全部宿主核、
+> **celery 的 CPU 为什么也必须限**（v4.1.5 补；**v4.1.9 起 celery 已退役，以下为历史**）：
+> 它跑 embedding + 双写，每个 worker 进程各有一份 torch 线程池（4 线程）。不设 `cpus` 时它看到全部宿主核、
 > 与 API 争同一批物理核，而应用侧的 `task_ceiling` **完全看不到它**
 > （那是另一个进程，预算只管 API 自己的生成任务）。
 > 实测形态：api 限 6 核、celery 看到 8 核 → 两边合计最多开 6 + 2×4 个线程池，
@@ -404,24 +410,27 @@ workers ≈ api_cpus / 4
 curl -s --noproxy '*' http://127.0.0.1:8000/api/health | python -m json.tool | grep -A12 generation_load
 ```
 
-**96 核 256G 的期望值**（api cpus=72 / celery cpus=24 / 硬顶 10）：
+**96 核 256G 的期望值**（v4.1.9：无 celery，api 独占 94 核 / 硬顶 10）：
 
 ```
-cpu_logical_cores            96
-cpu_physical_cores           48
-inference_slots              35      ← 容器内 72 cpus ÷ 2 − 1
+cpu_logical_cores            94      ← 宿主 96 − 2（留 Milvus/PG/系统）
+cpu_physical_cores           47
+inference_slots              46      ← 容器内 94 cpus ÷ 2 − 1
 task_ceiling                 10      ← 被 GEN_TASK_CONCURRENCY_MAX 卡住（不是被核数卡）
 ```
 
 推导链（可用这个核对现场是否一致）：
 
 ```
-api 容器 72 逻辑核  →  36 物理核
-slots              =  36 − 1 = 35          （留 1 核给事件循环）
-兄弟 celery 24 逻辑核 → floor(24/2) = 12 个整物理核被占
-可用物理核          =  36 − 12 = 24
-task_ceiling       =  min(slots 35, 硬顶 10, 可用 24) = 10
+api 容器 94 逻辑核  →  47 物理核（按每核 2 线程）
+slots              =  47 − 1 = 46          （留 1 核给事件循环）
+无兄弟容器           →  可用物理核 = 47
+task_ceiling       =  min(slots 46, 硬顶 10) = 10
 ```
+
+> v4.1.8 及之前：api cpus=72 + celery cpus=24 + 投影扣除 12 物理核。
+> v4.1.9 起 celery 退役，`cpu_peer_budget` 应为空——若仍非空，说明历史投影残留，
+> `deploy.sh` 会自动清理；手工部署需自查 `data/.peer_cpu_budget` 与 `.env`。
 
 > **`task_ceiling` 被硬顶卡住，不是被核数卡住** —— 这正是 §3-2.1 强调
 > `GEN_TASK_CONCURRENCY_MAX` 必须手工调的原因。不调它（保持默认 4），
@@ -432,8 +441,8 @@ task_ceiling       =  min(slots 35, 硬顶 10, 可用 24) = 10
 1. `GEN_TASK_CONCURRENCY_MAX` 是否真的进了容器：
    `docker exec ai-test-gen-api env | grep GEN_TASK_CONCURRENCY_MAX`
    空值或没输出 = compose 没传（v4.1.6 及之前就是这个状态），检查 `.env`。
-2. `cpu_peer_budget` 是否过大（celery 分到的核太多）：
-   它会按 `floor(peer/2)` 扣物理核。celery cpus=24 就扣 12 个。
+2. `cpu_peer_budget` 是否非空（v4.1.9 后应恒为空；非空=历史投影残留）：
+   删 `data/.peer_cpu_budget` 与 `.env` 里的 `PEER_CELERY_CPU` 后重建 backend。
 3. `cpu_logical_cores` 是否远小于宿主核数：
    说明容器 `cpus` 配额没生效或被 override 文件覆盖成了小值。
 
@@ -491,7 +500,7 @@ rsync -avP /tmp/milvus.tgz /tmp/models.tgz <新机>:/tmp/
 # 2. 部署空系统
 bash deploy.sh
 # 3. 停业务容器（只留 PG）
-docker compose -f docker-compose.offline.yml stop backend celery_worker
+docker compose -f docker-compose.offline.yml stop backend   # v4.1.9：无 celery
 # 4. 恢复数据库
 docker exec -i ai-test-gen-pg pg_restore -U aitestgen -d ai_test_gen --clean --if-exists < /tmp/aitg.dump
 # 5. 恢复密钥与向量库
@@ -698,16 +707,16 @@ curl -s http://127.0.0.1:8000/api/health | python -m json.tool | grep -E "mem_so
 >
 > 只改配额（不动代码）时用这条；`deploy.sh` 全量部署时会自己重建，无需手动。
 
-### 5.4 三个容器的配额都要核对
+### 5.4 两个受配额的容器都要核对（v4.1.9：celery 已退役）
 
 ```bash
-for c in ai-test-gen-api ai-test-gen-celery ai-test-gen-milvus; do
+for c in ai-test-gen-api ai-test-gen-milvus; do
   printf '%-22s ' "$c"
   docker inspect "$c" --format 'mem={{.HostConfig.Memory}}'
 done
 ```
 
-期望：三个都不是 0。
+期望：两个都不是 0。
 
 ```
 ai-test-gen-api        mem=10737418240    (10g)

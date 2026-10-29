@@ -186,19 +186,15 @@ MINIO_SECRET_KEY=minioadmin
 #   8GB  宿主 → api 6g / api cpus 6     16GB  → api 10g / cpus 6
 #   32GB       → api 20g / cpus 12      64GB  → api 32g / cpus 24
 #   128GB      → api 64g / cpus 48      256GB → api 96g / cpus 72
-#   celery cpus 取 api 的 1/2，但 **api+celery 合计不得超过宿主核数**
-#   （超限时按 3:1 重分；v4.1.6 之前的公式在 96 核上会算出 141 核，属超卖）
+#   v4.1.9 起 celery 已退役（向量化走出箱 relay），api 独占其余核数，
+#   不再有 "api+celery 合计不得超过宿主核数" 的 3:1 重分逻辑。
 # 设了上限，应用的 OOM 保护（内存紧张自动降并发）与并发预算才有依据；
 # 不设 = 应用读到的是宿主内存，保护形同虚设（严重时被内核 OOM Killer 直接杀容器）。
-# celery 的 cpus 也必须限：它是独立进程、有自己的一份模型与线程池，
-#   不设会和 api 抢物理核，而 api 侧的并发预算完全看不到它。
 #
 # 只在自动计算不合预期时手工指定，格式：内存用 6g / 10240m，CPU 用整数或小数。
 # API_MEM_LIMIT=6g
 # API_CPU_LIMIT=6
 # MILVUS_MEM_LIMIT=3g
-# CELERY_MEM_LIMIT=3g
-# CELERY_CPU_LIMIT=3
 
 # ---------------------------------------------------------------------------
 # 生成并发与去重并行（v4.1.7，大机器必看）

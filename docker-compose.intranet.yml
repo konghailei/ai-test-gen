@@ -58,8 +58,6 @@ services:
         RERANKER_MODEL_NAME: /models/bge-reranker-base
         REDIS_HOST: redis
         REDIS_PORT: 6379
-        CELERY_BROKER_URL: redis://redis:6379/1
-        CELERY_RESULT_BACKEND: redis://redis:6379/2
         # v2.8.60 修复：补齐生产环境必需密钥（原缺失会导致 DEBUG=false 时启动失败）
         APP_SECRET_KEY: ${APP_SECRET_KEY:-}
         MASTER_KEY: ${MASTER_KEY:-}
@@ -69,37 +67,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 60s
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      milvus:
-        condition: service_healthy
-    networks:
-      - ai-test-gen-net
-    restart: unless-stopped
-
-  # ==========================================================================
-  # Celery Worker（异步嵌入计算 + 知识库双写）
-  # ==========================================================================
-  celery_worker:
-    image: ${REGISTRY:-192.168.1.100:5000}/ai-test-gen-api:latest
-    container_name: ai-test-gen-celery
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
-      - ./models/bge-reranker-base:/models/bge-reranker-base:ro
-    environment:
-      <<: *backend-env
-    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=2 --queues=embedding
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A app.tasks.celery_app.celery_app inspect ping -d celery@$$HOSTNAME --timeout=10 || exit 1"]
-      interval: 30s
-      timeout: 15s
-      retries: 3
       start_period: 60s
     depends_on:
       redis:

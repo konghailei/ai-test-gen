@@ -75,8 +75,6 @@ services:
       - RERANKER_MODEL_NAME=/models/bge-reranker-base
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
       # v4.1（缺陷 C）：语义去重 embed 并行进程池 worker 数。
       #   留空 = 串行（旧行为）；2 = 2 进程 × 4 线程（宿主 12 逻辑核 / 31.9GB，
       #   worker 各 ~1.6GB，实测余量充足）。dedup_semantic 已在 to_thread 内，
@@ -84,11 +82,9 @@ services:
       - DEDUP_EMBED_WORKERS=${DEDUP_EMBED_WORKERS:-2}
       # v4.1.5：celery 进程内去重进程池强制串行 —— 由运行时特征判定
       #   （milvus_store._in_celery_worker），**不注入环境变量**，避免污染测试进程。
-      # v4.1.5（跨容器 CPU 预算投影）：api 与 celery 各自只读自己的 cgroup，
-      #   小机器上会超卖。deploy.sh 把 celery 的 cpus 声明换算成逻辑核数注入这里，
-      #   api 的并发预算按「自身 − 该值」算（resource_guard.effective_cpu_limit）。
-      #   留空 = 未投影，只看自己（旧行为）。开发机通常不必设。
-      - PEER_CELERY_CPU=${PEER_CELERY_CPU:-}
+      # v4.1.9：celery 已退役（向量化全部走出箱 relay），不存在"兄弟容器"，
+      #   **不再注入 PEER_CELERY_CPU**。resource_guard 的投影机制保留（默认空=不扣），
+      #   deploy.sh 升级老部署时会主动清空 .env 与 data/.peer_cpu_budget 里的历史值。
       # v4.1.7：生成并发硬顶（留空 = 代码默认 4）。
       #   此前 compose 未定义 → .env 里设了也不生效（详见 offline 版注释）。
       - GEN_TASK_CONCURRENCY_MAX=${GEN_TASK_CONCURRENCY_MAX:-}
@@ -113,53 +109,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 60s
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      milvus:
-        condition: service_healthy
-    networks:
-      - ai-test-gen-net
-    restart: unless-stopped
-
-  # ==========================================================================
-  # Celery Worker（异步嵌入计算 + 知识库双写）
-  # ==========================================================================
-  celery_worker:
-    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
-    container_name: ai-test-gen-celery
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-      args:
-        BASE_IMAGE: ai-test-gen-base:latest
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      # 开发模式：挂载代码（与 backend 一致）
-      - ./backend:/app
-      # bge 模型：独立挂载（/app 被覆盖后模型仍可访问）
-      - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
-      - ./models/bge-reranker-base:/models/bge-reranker-base:ro
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://aitestgen:aitestgen123@postgres:5432/ai_test_gen
-      - VECTOR_STORE=milvus
-      - MILVUS_HOST=milvus
-      - MILVUS_PORT=19530
-      - EMBEDDING_MODEL_NAME=/models/bge-large-zh-v1.5
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
-    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=2 --queues=embedding
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A app.tasks.celery_app.celery_app inspect ping -d celery@$$HOSTNAME --timeout=10 || exit 1"]
-      interval: 30s
-      timeout: 15s
-      retries: 3
       start_period: 60s
     depends_on:
       redis:

@@ -237,9 +237,7 @@ MEM_RATIO=""
 CEILING=""
 CPU_SOURCE="unknown"
 CPU_CORES="?"
-PEER_EFFECTIVE=""
-PEER_CPU=""
-API_CPU_DECL=""
+# v4.1.9：跨容器投影变量已移除（celery 退役）
 
 # ---------- 跳过检查（环境变量 SKIP_CHECK=true） ----------
 if [ "${SKIP_CHECK:-false}" = "true" ]; then
@@ -626,7 +624,7 @@ if [ -r /proc/cpuinfo ] || [ "$HAS_NPROC" = true ]; then
     [ "$HOST_PHYS" -lt 1 ] && HOST_PHYS=1
     info "CPU: ${HOST_LOGICAL} 逻辑核 / 物理核未知（按 ÷2 保守估算 ${HOST_PHYS}）"
   fi
-  # 4 核是"能跑"的底线：Milvus + PG + api + celery 本身就要抢核，
+  # 4 核是"能跑"的底线：Milvus + PG + api 本身就要抢核（v4.1.9 起无 celery），
   # 2 核机器上生成任务会因为拿不到推理份额而长期排队（不报错、只变慢）。
   if [ "${HOST_LOGICAL:-0}" -lt 4 ]; then
     warn "  ⚠️  仅 ${HOST_LOGICAL} 个逻辑核：本项目最低建议 4 核（推荐 8 核）"
@@ -1222,76 +1220,26 @@ elif [ "$NEED_RECREATE" = true ]; then
 fi
 
 # ==================================================================
-# 阶段 5-3: 兄弟容器 CPU 份额投影（**必须在 up -d 之前**）
+# 阶段 5-3: 清理历史 CPU 投影（v4.1.9：celery 已退役）
 # ==================================================================
-# 背景：api 与 celery 是**两个容器**，各自只读自己的 cgroup。
-#   api 算出"逻辑核 6 → 物理核 3 → slots 2"，celery 也算一份，
-#   **合计超出整机容量**（celery 跑 embedding / Milvus 双写，最吃 CPU）。
-#   应用侧无法自己解决（它不该去读别的容器信息），只能由部署侧投影。
-#
-# ⚠️ 时序是硬约束（实测踩坑两次）：
-#   ① 投影写进 `docker exec` 起的那个进程，uvicorn 主进程**看不到**（两个进程）；
-#   ② 即使落盘，主进程若已启动并读过一次，也不会重读（静态事实，只读一次并缓存）。
-#   所以必须「先把投影交给 compose（环境变量 + .env + 落盘文件）→ 再 up -d」。
-#   `PEER_CELERY_CPU` 在 docker-compose.offline.yml 的 *backend-env 里声明，
-#   容器重建时注入主进程；落盘文件是给"容器已建好、只想改投影"的现场手段。
-PEER_CPU=""
-API_CPU_DECL=""
-if [ -f "$WORK_DIR/$RES_OVERRIDE" ]; then
-  PEER_CPU=$(awk '
-    /^  celery_worker:/{f=1; next}
-    f && /^  [a-z_]+:/{f=0}
-    f && /cpus:/{gsub(/[^0-9.]/,"",$2); print $2; exit}' "$WORK_DIR/$RES_OVERRIDE" 2>/dev/null)
+# 背景（保留说明，避免后人重新发明）：
+#   v4.1.5~v4.1.8 期间 api 与 celery 是两个容器，各自只读自己的 cgroup，
+#   曾用 `PEER_CELERY_CPU`（env + data/.peer_cpu_budget 落盘 + .env）把
+#   "兄弟占用的逻辑核数"投影给 api，预算按「自身 − 投影」计算。
+#   v4.1.9 起归档向量化全部走出箱 relay，celery_worker 已删除 → **不再有兄弟容器**。
+#   ⚠️ 升级老部署时必须**主动清空**三处历史值，否则 api 会一直少算 24 核
+#      （96 核机上表现为"迁了大机器却没变快"，几乎无法归因）。
+PEER_CELERY_CPU=""
+export PEER_CELERY_CPU
+rm -f "$WORK_DIR/data/.peer_cpu_budget" 2>/dev/null || true
+if [ -f "$WORK_DIR/.env" ] && grep -q '^PEER_CELERY_CPU=' "$WORK_DIR/.env" 2>/dev/null; then
+  _env_tmp="$WORK_DIR/.env.tmp.$$"
+  awk '/^PEER_CELERY_CPU=/{print "PEER_CELERY_CPU="; next} {print}' \
+    "$WORK_DIR/.env" > "$_env_tmp" 2>/dev/null && mv -f "$_env_tmp" "$WORK_DIR/.env"
+  rm -f "$_env_tmp" 2>/dev/null || true
+  info "  已清除 .env 中历史 PEER_CELERY_CPU（celery 退役，api 独占全部核）"
 fi
-if [ -f "$WORK_DIR/$RES_OVERRIDE" ]; then
-  API_CPU_DECL=$(awk '
-    /^  backend:/{f=1; next}
-    f && /^  [a-z_]+:/{f=0}
-    f && /cpus:/{gsub(/[^0-9.]/,"",$2); print $2; exit}' "$WORK_DIR/$RES_OVERRIDE" 2>/dev/null)
-fi
-
-if [ -n "$PEER_CPU" ] && [ -n "$API_CPU_DECL" ]; then
-  # ⚠️ 语义（勿混）：投影的**入参是兄弟容器占用的份额**，应用侧做**减法**
-  #    （自身 − 兄弟）得到可用额度（见 resource_guard.effective_cpu_limit）。
-  #    这里打印的 PEER_EFFECTIVE 只是"预期结果"，供人对照，不参与计算。
-  PEER_EFFECTIVE=$(awk -v a="$API_CPU_DECL" -v c="$PEER_CPU" 'BEGIN{v=a-c; if(v<1)v=1; printf "%.0f", v}')
-  info "  兄弟容器投影: celery 占用 ${PEER_CPU} 核；api 自身 ${API_CPU_DECL} 核 → 预期 api 可用 ${PEER_EFFECTIVE} 核"
-  export PEER_CELERY_CPU="$PEER_CPU"
-  # 落盘一份（容器内 /app/data 已挂载 → 宿主机 ./data）；失败不阻断。
-  if printf '%s\n# source=deploy.sh:celery=%s\n' "$PEER_CPU" "$PEER_CPU" > "$WORK_DIR/data/.peer_cpu_budget" 2>/dev/null; then
-    info "  投影已落盘: data/.peer_cpu_budget（容器重启后按该值扣减预算）"
-  else
-    warn "  ⚠️  投影落盘失败（data/ 不可写）→ 仅靠环境变量传递"
-  fi
-  # 若把投影写进 .env，则**下次**不带本脚本启动容器时也能保持。
-  # ⚠️ 不用 `sed -i`：GNU sed 与 BSD/macOS sed 语义不同（后者要求 `sed -i ''`），
-  #    内网服务器版本杂，改用「写成临时文件再 mv」这种可移植写法。
-  if [ -f "$WORK_DIR/.env" ]; then
-    _env_tmp="$WORK_DIR/.env.tmp.$$"
-    if grep -q '^PEER_CELERY_CPU=' "$WORK_DIR/.env" 2>/dev/null; then
-      awk -v v="$PEER_CPU" '/^PEER_CELERY_CPU=/{print "PEER_CELERY_CPU=" v; next} {print}' \
-        "$WORK_DIR/.env" > "$_env_tmp" 2>/dev/null && mv -f "$_env_tmp" "$WORK_DIR/.env"
-    else
-      cp -f "$WORK_DIR/.env" "$_env_tmp" 2>/dev/null \
-        && printf 'PEER_CELERY_CPU=%s\n' "$PEER_CPU" >> "$_env_tmp" \
-        && mv -f "$_env_tmp" "$WORK_DIR/.env"
-    fi
-    rm -f "$_env_tmp" 2>/dev/null || true
-    info "  .env 已同步 PEER_CELERY_CPU（手工 compose up 时投影同样生效）"
-  fi
-else
-  info "  未声明 celery cpus 配额（或 override 缺失）→ 不做跨容器投影"
-  info "     （大盘不小时影响可忽略；4~8 核小机器建议保留 celery 配额，见 docs/24 §6）"
-  # 清掉历史投影，避免"上次算 3 核、这次不投影"却仍按 3 核扣减（假配置）。
-  export PEER_CELERY_CPU=""
-  rm -f "$WORK_DIR/data/.peer_cpu_budget" 2>/dev/null || true
-  if [ -f "$WORK_DIR/.env" ] && grep -q '^PEER_CELERY_CPU=' "$WORK_DIR/.env" 2>/dev/null; then
-    _env_tmp="$WORK_DIR/.env.tmp.$$"
-    awk '/^PEER_CELERY_CPU=/{print "PEER_CELERY_CPU="; next} {print}' \
-      "$WORK_DIR/.env" > "$_env_tmp" 2>/dev/null && mv -f "$_env_tmp" "$WORK_DIR/.env"
-    rm -f "$_env_tmp" 2>/dev/null || true
-  fi
-fi
+info "  跨容器投影已停用：celery 退役，api 按自身全部额度计算并发预算"
 
 info "执行: $COMPOSE_CMD $COMPOSE_FILES up $UP_ARGS"
 $COMPOSE_CMD $COMPOSE_FILES up $UP_ARGS
@@ -1306,8 +1254,8 @@ info "========================================"
 
 sleep 5
 
-# 检查各服务
-services=("ai-test-gen-pg" "ai-test-gen-redis" "ai-test-gen-etcd" "ai-test-gen-minio" "ai-test-gen-milvus" "ai-test-gen-api" "ai-test-gen-web" "ai-test-gen-celery")
+# 检查各服务（v4.1.9：celery 已退役，7 服务）
+services=("ai-test-gen-pg" "ai-test-gen-redis" "ai-test-gen-etcd" "ai-test-gen-minio" "ai-test-gen-milvus" "ai-test-gen-api" "ai-test-gen-web")
 all_healthy=true
 
 for svc in "${services[@]}"; do
@@ -1332,13 +1280,10 @@ done
 echo ""
 info "并发预算自检（应用视角）:"
 
-# ---- 6-2a. 兄弟容器 CPU 份额投影：**验证**（注入已在阶段 5-3 完成）----
-# 这里只读不写：读 api 主进程的 health_brief，确认它真的收到了投影。
-#   判据：cpu_peer_budget 非空 且 cpu_effective_logical_cores ≈ 自身 − 兄弟（下限 1）
-#   为什么必须单独验证：投影写在"另一个进程"里时脚本会打印成功、主进程却毫无变化
-#   （实测踩坑，脚本自报成功是假信号）。只有从主进程读回来才算数。
-if [ -n "$PEER_CPU" ] && [ -n "$API_CPU_DECL" ]; then
-  PEER_APPLY=$(docker exec ai-test-gen-api python -c "
+# ---- 6-2a. 跨容器投影已停用（v4.1.9：celery 退役）----
+# 只读确认：主进程的 cpu_peer_budget 必须为空（否则说明历史投影残留，白扣核数）。
+#   判据：cpu_peer_budget 为空/None，且 cpu_effective_logical_cores ≈ 自身额度。
+_PEER_CHECK=$(docker exec ai-test-gen-api python -c "
 import sys; sys.path.insert(0, '/app')
 try:
     from app.core.resource_guard import resource_guard
@@ -1348,22 +1293,19 @@ try:
 except Exception as e:
     print('failed', str(e)[:60], '', '', '')
 " 2>/dev/null | tail -1)
-  if [ "$(echo "$PEER_APPLY" | awk '{print $1}')" = "ok" ]; then
-    _got_peer=$(echo "$PEER_APPLY" | awk '{print $2}')
-    _got_eff=$(echo "$PEER_APPLY" | awk '{print $3}')
-    _got_ceil=$(echo "$PEER_APPLY" | awk '{print $4}')
-    _got_src=$(echo "$PEER_APPLY" | awk '{print $5}')
-    if [ -n "$_got_peer" ] && [ "$_got_peer" != "None" ]; then
-      info "  ✅ 投影已在主进程生效（来源 ${_got_src:-?}）：扣除 ${_got_peer} 核 → 可用 ${_got_eff}，并发上限 ${_got_ceil}"
-    else
-      warn "  ⚠️  投影未到达主进程（cpu_peer_budget 为空）：预算仍按 api 自身额度算"
-      warn "     常见原因：容器未重建（compose 不会因 env 变化自动重建）→ 加 --force-recreate"
-      warn "     现场修法：确认 .env 里 PEER_CELERY_CPU=${PEER_CPU} 后执行"
-      warn "       $COMPOSE_CMD $COMPOSE_FILES up -d --force-recreate backend"
-    fi
+if [ "$(echo "$_PEER_CHECK" | awk '{print $1}')" = "ok" ]; then
+  _got_peer=$(echo "$_PEER_CHECK" | awk '{print $2}')
+  _got_eff=$(echo "$_PEER_CHECK" | awk '{print $3}')
+  _got_ceil=$(echo "$_PEER_CHECK" | awk '{print $4}')
+  if [ -z "$_got_peer" ] || [ "$_got_peer" = "None" ]; then
+    info "  ✅ 无跨容器投影（celery 退役）：api 可用 ${_got_eff} 逻辑核，并发上限 ${_got_ceil}"
   else
-    warn "  ⚠️  投影验证失败（$(echo "$PEER_APPLY" | cut -d' ' -f2-)）：无法确认预算是否扣减"
+    warn "  ⚠️  检测到历史投影残留 cpu_peer_budget=${_got_peer}（api 被白扣核数）"
+    warn "     现场修法：删 data/.peer_cpu_budget 与 .env 中 PEER_CELERY_CPU 后重建 backend"
+    warn "       rm -f data/.peer_cpu_budget && $COMPOSE_CMD $COMPOSE_FILES up -d --force-recreate backend"
   fi
+else
+  warn "  ⚠️  预算自检失败（$(echo "$_PEER_CHECK" | cut -d' ' -f2-)）：无法确认投影状态"
 fi
 
 # ---- 6-2b. 内存 / CPU 上限是否真的被容器读到 ----
@@ -1490,7 +1432,7 @@ cat > "$WORK_DIR/DEPLOY-RECORD.md" <<RECEOF
 |---|---|---|
 | mem_source | ${MEM_SOURCE:-unknown} | $([ "$MEM_SOURCE" = "proc" ] && echo '❌ OOM 保护失效' || echo '✅ 读到容器上限') |
 | cpu_source | ${CPU_SOURCE:-unknown} | $([ "$CPU_SOURCE" = "cpu_count" ] && echo '⚠️ 未受配额约束' || echo '✅ 受配额约束') |
-| 兄弟容器投影 | ${PEER_EFFECTIVE:-未投影} | $([ -n "$PEER_EFFECTIVE" ] && echo "✅ celery 占 ${PEER_CPU} 核，api 按剩余预算（预期 ${PEER_EFFECTIVE} 核）" || echo '— 单容器形态') |
+| 兄弟容器投影 | — | v4.1.9 起 celery 已退役，api 独占全部额度（无投影） |
 | mem_available_ratio | ${MEM_RATIO:-?} | — |
 | 应用可见核数 | ${CPU_CORES:-?} | — |
 | 并发上限 task_ceiling | ${CEILING:-?} | — |

@@ -66,15 +66,11 @@ services:
         DEBUG: ${DEBUG:-false}
         APP_SECRET_KEY: ${APP_SECRET_KEY:-}
         MASTER_KEY: ${MASTER_KEY:-}
-        # v4.1.5（跨容器 CPU 预算投影，重要）：
-        #   api 与 celery 是**两个容器**，各自只读自己的 cgroup，谁都以为整机归自己用
-        #   → 小机器上 CPU 超卖。deploy.sh 会按"celery 的 cpus 声明"算出占用，
-        #   通过这个变量告诉 api："同机还有个兄弟在用 N 个逻辑核"，api 的并发预算
-        #   按「自身 − N」算（resource_guard.effective_cpu_limit）。
-        #   留空 = 单容器形态/未投影，预算只看自己（旧行为，安全）。
-        #   ⚠️ 必须走环境变量而不是运行时 dict：`docker exec` 是另一个进程，
-        #      往里写状态主进程读不到（实测踩到）。
-        PEER_CELERY_CPU: ${PEER_CELERY_CPU:-}
+        # v4.1.9：celery 已退役（向量化全部走出箱 relay），不存在"兄弟容器"。
+        #   **不再注入 PEER_CELERY_CPU**；resource_guard 的投影机制保留（默认空=不扣），
+        #   deploy.sh 升级老部署时会清零 .env 与 data/.peer_cpu_budget 里的历史值。
+        #   （v4.1.5 背景：api 与 celery 是两个容器，各自只读自己的 cgroup；
+        #    曾用本变量告诉 api "兄弟占了 N 核"，预算按「自身 − N」算。）
         # v4.1.7（大机器必看）：全局并发生成任务数的**硬顶**。
         #   ⚠️ 这项此前**在 compose 里根本没有定义** —— 用户在 .env 里写了也不生效，
         #      属于"声明的配置与实际生效的代码不一致"：settings 里有字段、
@@ -96,8 +92,6 @@ services:
         RERANKER_MODEL_NAME: /models/bge-reranker-base
         REDIS_HOST: redis
         REDIS_PORT: 6379
-        CELERY_BROKER_URL: redis://redis:6379/1
-        CELERY_RESULT_BACKEND: redis://redis:6379/2
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     # v4.1.5（OOM 保护依据，重要）：
     #   应用的内存守卫（MEM_LOW_RATIO → 自动降并发）靠容器 cgroup 上限判断"内存是否紧张"。
@@ -117,54 +111,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 60s
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      milvus:
-        condition: service_healthy
-    networks:
-      - ai-test-gen-net
-    restart: unless-stopped
-
-  # ==========================================================================
-  # Celery Worker（异步嵌入计算 + 知识库双写）
-  # ==========================================================================
-  celery_worker:
-    logging: *default-logging  # v4.1.5 统一轮转，防写满磁盘
-    image: ai-test-gen-api:latest
-    container_name: ai-test-gen-celery
-    extra_hosts:
-      - "${LLM_HOST:-host.docker.internal}:${LLM_IP:-127.0.0.1}"
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./models/bge-large-zh-v1.5:/models/bge-large-zh-v1.5:ro
-      - ./models/bge-reranker-base:/models/bge-reranker-base:ro
-    environment:
-      <<: *backend-env
-      # v4.1.5（同步 dev 与内网）：语义去重 embed 并行进程池 worker 数。
-      #   此前**只有 docker-compose.yml（dev）有这一行**，内网 offline 缺省 →
-      #   settings 默认 "" = 串行，于是"dev 上验证过的并行优化在内网从未生效"，
-      #   且没有任何日志提示（属于"声明的配置与实际生效的代码不一致"）。
-      #   留空 / 1 / 0 / off = 串行；auto = max(1, 物理核-1)；整数 N = N 进程。
-      #   内存预算：每 worker ~1.6GB，开启前确认空闲内存 ≥ N×1.6GB。
-      #   ⚠️ 必须写成映射形式：`<<: *backend-env` 合并的是 dict，与 `- KEY=VAL`
-      #      列表混用会让 compose 报 "expected a mapping"。
-      DEDUP_EMBED_WORKERS: ${DEDUP_EMBED_WORKERS:-}
-      # v4.1.5 修正：**不再用环境变量标记 celery**。
-      #   环境变量会随容器环境被 docker exec 的测试/调试进程一并继承，
-      #   导致"celery 串行"误伤单测（test_dedup_chunk_order 实测失败）。
-      #   改为运行时特征判定（见 milvus_store._in_celery_worker）：
-      #   `current_app._current_worker` 或 prefork 进程名含 ForkPoolWorker。
-    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=2 --queues=embedding
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A app.tasks.celery_app.celery_app inspect ping -d celery@$$HOSTNAME --timeout=10 || exit 1"]
-      interval: 30s
-      timeout: 15s
-      retries: 3
       start_period: 60s
     depends_on:
       redis:

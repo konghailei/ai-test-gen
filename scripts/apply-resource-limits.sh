@@ -25,9 +25,9 @@
 #   bash scripts/apply-resource-limits.sh --remove       # 删除 override（回到不限）
 #
 # 可覆盖的环境变量:
-#   API_MEM_LIMIT / API_CPU_LIMIT / MILVUS_MEM_LIMIT / CELERY_MEM_LIMIT / CELERY_CPU_LIMIT
-#   （CELERY_MEM_LIMIT 不设时按 API_MEM_LIMIT 的档位自动折半；
-#     CELERY_CPU_LIMIT 不设时取 API_CPU_LIMIT 的一半，下限 1）
+#   API_MEM_LIMIT / API_CPU_LIMIT / MILVUS_MEM_LIMIT
+#   （v4.1.9：celery 已退役，不再有 CELERY_MEM_LIMIT / CELERY_CPU_LIMIT；
+#     api 独占其余核数，不再需要"api:celery = 3:1"的防超卖重分配）
 #
 # 生成后启动方式（deploy.sh 已内置，手工部署时用）:
 #   docker compose -f docker-compose.offline.yml -f docker-compose.resources.override.yml up -d
@@ -122,53 +122,6 @@ if [ -z "${API_CPU_LIMIT:-}" ] && [ "${HOST_CPU:-0}" -gt 0 ]; then
   API_CPU_LIMIT=$(( HOST_CPU > 4 ? HOST_CPU - 2 : 2 ))
 fi
 
-# celery_worker 的 CPU：与 api 同理，必须受限。
-#   它跑 embedding + 知识库双写，每 worker 进程各有一份 torch 线程池（4 线程）。
-#   不设 cpus 时它与 api **争同一批物理核**，且应用侧的并发预算完全看不到它
-#   （它不在 api 进程里，task_ceiling 只管 api 自己的生成任务）。
-#   实测形态：api 被限 6 核、celery 看到 8 核 → 两边合计最多可开 6+（2×4）线程池，
-#   彻底超过宿主 8 逻辑核的容量。
-#   取 api 的一半（下限 1）：celery 是异步旁路，慢一点可接受，抢核会直接拖垮生成。
-if [ -z "${CELERY_CPU_LIMIT:-}" ] && [ -n "${API_CPU_LIMIT:-}" ]; then
-  CELERY_CPU_LIMIT=$(( API_CPU_LIMIT / 2 ))
-  [ "$CELERY_CPU_LIMIT" -lt 1 ] && CELERY_CPU_LIMIT=1
-fi
-
-# ---------------------------------------------------------------------------
-# 3b. v4.1.7：CPU 合计不得超过宿主逻辑核（防超卖）
-# ---------------------------------------------------------------------------
-# 为什么必须校验：`API_CPU_LIMIT = 宿主-2`、`CELERY_CPU_LIMIT = API/2` 这两个
-# 公式各自独立成立，但**合计是 1.5 倍宿主-3**：
-#     96 核 → api 94 + celery 47 = 141 > 96  ← 超卖 45 核
-#     8 核  → api  6 + celery  3 =   9 > 8   ← 也超卖 1 核（小机器同样中招）
-# 后果不是"崩"，而是**性能塌陷**：两个容器都以为自己是唯一使用者，
-# 各自按配额开线程池；内核靠上下文切换做"假并发"，实测比串行更慢，
-# 且应用侧的 task_ceiling 完全看不到这部分竞争（它只算自己容器内的配额）。
-#
-# 处理策略：按 **api : celery = 3 : 1** 重新分配宿主核数。
-#   为什么是 3:1 而不是"api 优先、celery 吃剩余"：
-#     96 核下 api 拿 94、celery 只剩 2 —— celery 要跑 2 个 prefork 进程 × 4 线程
-#     = 8 个线程挤 2 核，知识库向量化会慢到用户以为卡死（表现是"归档后状态一直
-#     pending"）。而 api 的 94 核它自己也用不满（生成任务大部分时间在等 LLM）。
-#   为什么 3:1 能让所有档位都自然合理（实测各档位）：
-#     8 核  → api 6 / celery 2   （与 v4.1.6 的默认值完全一致，无回归）
-#     16 核 → api 12 / celery 4
-#     96 核 → api 72 / celery 24 （api 够开 18 个 DEDUP worker，celery 够跑 6 进程）
-#   只在"合计超限"时启用该分配；不超限时保留各自公式的结果，避免动到小机器。
-if [ -n "${API_CPU_LIMIT:-}" ] && [ -n "${CELERY_CPU_LIMIT:-}" ] && [ "${HOST_CPU:-0}" -gt 0 ]; then
-  CPU_SUM=$(( API_CPU_LIMIT + CELERY_CPU_LIMIT ))
-  if [ "$CPU_SUM" -gt "$HOST_CPU" ]; then
-    OLD_API=$API_CPU_LIMIT
-    OLD_CELERY=$CELERY_CPU_LIMIT
-    API_CPU_LIMIT=$(( HOST_CPU * 3 / 4 ))
-    CELERY_CPU_LIMIT=$(( HOST_CPU / 4 ))
-    # 下限保护：任何一边都不能是 0（celery=0 会让知识库向量化永久 pending）
-    [ "$API_CPU_LIMIT" -lt 1 ] && API_CPU_LIMIT=1
-    [ "$CELERY_CPU_LIMIT" -lt 1 ] && CELERY_CPU_LIMIT=1
-    V4_CPU_CLAMP_NOTE="api ${OLD_API}→${API_CPU_LIMIT}, celery ${OLD_CELERY}→${CELERY_CPU_LIMIT}（原合计 ${CPU_SUM} 超宿主 ${HOST_CPU} 核，按 3:1 重分）"
-  fi
-fi
-
 # ---------------------------------------------------------------------------
 # 4. 生成 override
 # ---------------------------------------------------------------------------
@@ -192,47 +145,6 @@ else
   MILVUS_BLOCK="  # milvus: 未设置内存上限"
 fi
 
-# celery_worker：与 backend 共用同一镜像、各自加载一份 bge（~1.6GB）+ reranker，
-# 但它是**独立进程**，没有 backend 那种 MEM_LOW_RATIO 降并发守卫。
-# 不限额时它和 backend 抢内存，且内核 OOM Killer 挑哪个全看运气
-# （3.10 的 memcg 策略偏好杀 PID 最大者，往往正好是它）。
-# 取 backend 的一半：它只跑嵌入/双写，不跑生成链路。
-CELERY_MEM_LIMIT="${CELERY_MEM_LIMIT:-}"
-if [ -z "$CELERY_MEM_LIMIT" ] && [ -n "${API_MEM_LIMIT:-}" ]; then
-  case "$API_MEM_LIMIT" in
-    6g)  CELERY_MEM_LIMIT="3g" ;;
-    10g) CELERY_MEM_LIMIT="4g" ;;
-    20g) CELERY_MEM_LIMIT="6g" ;;
-    32g) CELERY_MEM_LIMIT="8g" ;;
-    # v4.1.7：大内存档位。celery 只跑 embedding/双写，不跑生成链路，
-    # 不需要跟着 api 同比例放大；8g 足够它持有 2 个 prefork 进程的模型
-    # （各 ~1.6GB）与写入缓冲。给太大会让 OOM 保护判断失真。
-    64g) CELERY_MEM_LIMIT="8g" ;;
-    96g) CELERY_MEM_LIMIT="12g" ;;
-    4g)  CELERY_MEM_LIMIT="2g" ;;
-    *)   CELERY_MEM_LIMIT="$API_MEM_LIMIT" ;;  # 自定义值时保守取同值
-  esac
-fi
-
-CELERY_BLOCK=""
-if [ -n "$CELERY_MEM_LIMIT" ]; then
-  CELERY_BLOCK="  celery_worker:
-    mem_limit: ${CELERY_MEM_LIMIT}"
-else
-  CELERY_BLOCK="  # celery_worker: 未设置内存上限"
-fi
-# CPU 配额接在同一个 celery 块里（块已存在就追加，不存在则新建块）
-if [ -n "${CELERY_CPU_LIMIT:-}" ]; then
-  if printf '%s' "$CELERY_BLOCK" | grep -q "^  celery_worker:"; then
-    CELERY_BLOCK="${CELERY_BLOCK}
-    cpus: \"${CELERY_CPU_LIMIT}\""
-  else
-    CELERY_BLOCK="  celery_worker:
-    # mem_limit 未设置，但 CPU 必须限（否则与 api 争物理核）
-    cpus: \"${CELERY_CPU_LIMIT}\""
-  fi
-fi
-
 CONTENT="# ============================================================================
 # docker-compose.resources.override.yml — 【自动生成，勿手工编辑】
 #
@@ -252,7 +164,6 @@ services:
   backend:
     mem_limit: ${API_MEM_LIMIT}
 ${API_CPU_BLOCK}
-${CELERY_BLOCK}
 ${MILVUS_BLOCK}
 "
 
@@ -265,18 +176,7 @@ fi
 printf '%s' "$CONTENT" > "$OUT_FILE"
 info "已生成 $OUT_FILE"
 info "  backend.mem_limit      = ${API_MEM_LIMIT}   backend.cpus = ${API_CPU_LIMIT:-未设}"
-info "  celery_worker.mem_limit = ${CELERY_MEM_LIMIT:-未设}   celery_worker.cpus = ${CELERY_CPU_LIMIT:-未设}"
 info "  milvus.mem_limit        = ${MILVUS_MEM_LIMIT:-未设}"
-# v4.1.7：CPU 合计校验结果必须显式打印。
-#   否则"celery 被悄悄压小了"这件事只在 override 文件里能看到，
-#   而现场排查时人会先怀疑代码/应用，最后才去看 override。
-if [ -n "${V4_CPU_CLAMP_NOTE:-}" ]; then
-  info "  ⚠️ CPU 合计防超卖已生效：${V4_CPU_CLAMP_NOTE}"
-fi
-if [ -n "${API_CPU_LIMIT:-}" ] && [ -n "${CELERY_CPU_LIMIT:-}" ] && [ "${HOST_CPU:-0}" -gt 0 ]; then
-  info "  CPU 合计 = $((API_CPU_LIMIT + CELERY_CPU_LIMIT)) / 宿主 ${HOST_CPU} 逻辑核"
-fi
-
 # 语法自检：叠加后必须能被 compose 解析（失败就别让部署继续）
 if command -v docker &>/dev/null && docker compose version &>/dev/null; then
   if docker compose -f "$PACK_DIR/docker-compose.offline.yml" -f "$OUT_FILE" config --quiet 2>/dev/null; then
