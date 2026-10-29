@@ -6,9 +6,10 @@
 #   例: bash scripts/pack-update.sh v1.7.1
 #
 # 说明:
-#   只打包变更的源码 + 部署脚本，不含基础镜像和模型文件。
+#   只打包变更的源码 + 前端 dist + 部署脚本，不含基础镜像和模型文件。
 #   内网收到后，deploy.sh 会用已有 base 镜像缓存重建应用层。
-#   包大小通常 ~5MB，远小于首次的 ~6.5GB。
+#   包大小通常 ~10-20MB（v4.2.1 起；此前曾因误打包 backend/models 等膨胀到 1.4GB）。
+#   体积守卫：打包后超过 300MB 会告警并列出 TOP5 大文件（防再次误打包）。
 # ============================================================================
 set -euo pipefail
 
@@ -32,6 +33,17 @@ echo "============================================"
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/code"
 
+# 通用目录复制（v4.2.1：不依赖 rsync —— Git for Windows 不自带 rsync，
+#   而打包通常在 Windows 开发机执行；tar 是 Git Bash 与 Linux 都有的基线工具）。
+#   语义：先清空目标（等价 rsync --delete），再按 GNU tar 的 --exclude 过滤。
+#   ⚠️ 排除路径必须带 "./" 前缀做锚定（如 './models'），否则会匹配任意层级，
+#      把 backend/app/models（Python 模块）一起排除 → 内网启动 ImportError。
+copy_tree() {
+  local src="$1" dst="$2"; shift 2
+  rm -rf "$dst" && mkdir -p "$dst"
+  tar -C "$src" -cf - "$@" . | tar -C "$dst" -xf -
+}
+
 # ==================================================================
 # 1. 复制源码（只含变更，不含 node_modules / __pycache__）
 # ==================================================================
@@ -39,36 +51,55 @@ echo ""
 echo "=== [1/2] 复制源码 ==="
 
 echo "  复制 backend/"
-rsync -a --delete \
-  --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-  --exclude='*.egg-info' --exclude='.keys' \
-  backend/ "$OUTPUT_DIR/code/backend/"
+copy_tree backend "$OUTPUT_DIR/code/backend" \
+  --exclude='__pycache__' --exclude='*.pyc' --exclude='./.pytest_cache' \
+  --exclude='*.egg-info' --exclude='./.keys' \
+  --exclude='./models' --exclude='./data' --exclude='./logs' \
+  --exclude='./_review_runs' --exclude='./_e2e_tmp'
 
 echo "  复制 frontend/"
-rsync -a --delete \
-  --exclude='node_modules' --exclude='dist' \
-  frontend/ "$OUTPUT_DIR/code/frontend/"
+copy_tree frontend "$OUTPUT_DIR/code/frontend" \
+  --exclude='./node_modules' --exclude='./dist'
 
 echo "  复制 docker/"
-rsync -a --delete docker/ "$OUTPUT_DIR/code/docker/"
+copy_tree docker "$OUTPUT_DIR/code/docker"
 
 echo "  复制根目录配置"
 cp .dockerignore "$OUTPUT_DIR/code/" 2>/dev/null || true
 
 # ==================================================================
-# 2. 构建并导出前端镜像（内网无 npm，必须预构建）
+# 2. 构建前端静态产物（v4.2.1：优先只带 dist，替代 82MB 完整镜像 tar）
 # ==================================================================
+# 内网无 npm 源 → 必须预构建。两种形态二选一：
+#   A) dist 模式（推荐）：只打 ~2MB dist，内网用已有基线镜像 + Dockerfile.intranet
+#      本地 build（5 秒，无需网络）。省 80MB/版。
+#   B) 镜像模式（回退）：宿主机 build 完整 web 镜像并 save（82MB），
+#      仅当 npm run build 失败时使用。
 echo ""
-echo "=== [2/3] 构建前端镜像 ==="
-echo "  构建前端镜像 (ai-test-gen-web:latest)..."
-if docker build -t ai-test-gen-web:latest -f frontend/Dockerfile . 2>/dev/null; then
-  echo "  保存前端镜像 → 10-ai-test-gen-web.tar"
-  mkdir -p "$OUTPUT_DIR/images"
-  docker save ai-test-gen-web:latest -o "$OUTPUT_DIR/images/10-ai-test-gen-web.tar"
-  echo "  镜像大小: $(du -h "$OUTPUT_DIR/images/10-ai-test-gen-web.tar" | cut -f1)"
+echo "=== [2/3] 构建前端静态产物 ==="
+DIST_OK=false
+if ( cd frontend && npm run build ) >/tmp/aitg-fe-build.log 2>&1; then
+  mkdir -p "$OUTPUT_DIR/code/frontend-dist"
+  copy_tree frontend/dist "$OUTPUT_DIR/code/frontend-dist/dist"
+  echo "  已打包 dist：$(du -sh "$OUTPUT_DIR/code/frontend-dist/dist" | cut -f1)"
+  echo "  内网将用已有基线镜像本地构建（Dockerfile.intranet），无需 npm、不传 82MB 镜像"
+  DIST_OK=true
 else
-  echo "  ⚠️ 前端构建失败（可能是 npm 源不可达），跳过镜像导出"
-  echo "    内网部署时将使用已有的前端镜像"
+  echo "  ⚠️ 宿主机 npm run build 失败，回退为导出完整前端镜像"
+  tail -5 /tmp/aitg-fe-build.log 2>/dev/null || true
+fi
+
+if [ "$DIST_OK" = false ]; then
+  echo "  构建前端镜像 (ai-test-gen-web:latest)..."
+  if docker build -t ai-test-gen-web:latest -f frontend/Dockerfile . 2>/dev/null; then
+    echo "  保存前端镜像 → 10-ai-test-gen-web.tar"
+    mkdir -p "$OUTPUT_DIR/images"
+    docker save ai-test-gen-web:latest -o "$OUTPUT_DIR/images/10-ai-test-gen-web.tar"
+    echo "  镜像大小: $(du -h "$OUTPUT_DIR/images/10-ai-test-gen-web.tar" | cut -f1)"
+  else
+    echo "  ⚠️ 前端构建失败（可能是 npm 源不可达），跳过镜像导出"
+    echo "    内网部署时将使用已有的前端镜像"
+  fi
 fi
 
 # ==================================================================
@@ -121,7 +152,17 @@ echo "=== 打包完成 ==="
 echo "输出目录: $OUTPUT_DIR"
 echo ""
 echo "目录结构:"
-du -sh "$OUTPUT_DIR"/*
+du -sh "$OUTPUT_DIR"/* 2>/dev/null
+echo ""
+# v4.2.1：体积守卫——升级包应 ≈ 10~20MB（code ~20MB + dist ~2MB）。
+# 历史上曾因 backend/models(1.3G)/_review_runs 被打入而虚胖到 1.4GB（白传十几版）。
+TOTAL_MB=$(du -sm "$OUTPUT_DIR" | cut -f1)
+echo "  合计: ${TOTAL_MB}MB"
+if [ "$TOTAL_MB" -gt 300 ]; then
+  echo "  ⚠️ 升级包超过 300MB —— 疑似混入模型/日志/运行产物，TOP5 大文件："
+  find "$OUTPUT_DIR" -type f -size +20M -exec du -h {} \; 2>/dev/null | sort -rh | head -5 || true
+  echo "     正常增量包应 ≈ 10-20MB；请检查 pack-update.sh 的 rsync 排除项是否被改坏"
+fi
 echo ""
 
 if [ "$COMPRESS" != "--no-compress" ]; then

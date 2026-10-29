@@ -1,0 +1,24 @@
+# ============================================================================
+# 内网增量升级专用前端镜像（v4.2.1）
+#
+# 为什么需要：
+#   内网无 npm 源 → 改不了源码就 build 不出 dist；
+#   而每次升级都传 82MB 的完整 web 镜像（nginx + dist），只为换 ~2MB 静态产物。
+#
+# 做法：
+#   pack-update.sh 在开发机执行 `npm run build`，包里只带 dist（约 2MB）；
+#   内网用本 Dockerfile 把 dist 覆盖进**已有**的 nginx 运行时镜像（首次包已装）。
+#
+# 用法（deploy.sh 自动执行，无需手工）：
+#   docker build -t ai-test-gen-web:latest \
+#     -f frontend/Dockerfile.intranet <含 dist/ 的目录>
+#
+# ⚠️ 前提：本地已存在 ai-test-gen-web:latest（首次部署装过即可）。
+#    基线镜像不存在时 deploy.sh 会回退到「加载完整镜像 tar」或「源码构建」。
+# ============================================================================
+ARG BASE_IMAGE=ai-test-gen-web:latest
+FROM ${BASE_IMAGE}
+
+# 先清空旧静态资源：Vite 产物带内容 hash，不清会残留历代 JS/CSS（体积只增不减）
+RUN rm -rf /usr/share/nginx/html && mkdir -p /usr/share/nginx/html
+COPY dist/ /usr/share/nginx/html/

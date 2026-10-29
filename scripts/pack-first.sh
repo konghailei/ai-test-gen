@@ -33,6 +33,15 @@ echo "============================================"
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/images" "$OUTPUT_DIR/models" "$OUTPUT_DIR/code"
 
+# 通用目录复制（v4.2.1：不依赖 rsync —— Git for Windows 不自带 rsync，
+#   而打包通常在 Windows 开发机执行；tar 是 Git Bash 与 Linux 都有的基线工具）。
+#   ⚠️ 排除路径必须带 "./" 前缀锚定，否则会匹配任意层级（误伤 app/models 等代码模块）。
+copy_tree() {
+  local src="$1" dst="$2"; shift 2
+  rm -rf "$dst" && mkdir -p "$dst"
+  tar -C "$src" -cf - "$@" . | tar -C "$dst" -xf -
+}
+
 # 记录版本信息（与 pack-update.sh 对称；此前首次包只有目录名带版本，
 # 部署时 deploy.sh 读不到 VERSION → 版本信息显示"未标注"，事后无法核对）
 echo "$VERSION" > "$OUTPUT_DIR/VERSION"
@@ -125,7 +134,7 @@ echo "=== [3/4] 复制模型文件 ==="
 if [ -d models/bge-large-zh-v1.5 ] && [ -d models/bge-reranker-base ]; then
   echo "  复制 models/ → $OUTPUT_DIR/models/"
   # 排除 .gitattributes 等非模型文件
-  rsync -a --exclude='.git*' --exclude='README.md' models/ "$OUTPUT_DIR/models/"
+  copy_tree models "$OUTPUT_DIR/models" --exclude='./.git*' --exclude='./README.md'
   echo "  模型大小: $(du -sh "$OUTPUT_DIR/models" | cut -f1)"
 else
   echo "  ⚠️ 未找到 models/ 目录，请手动复制模型文件到 $OUTPUT_DIR/models/"
@@ -139,18 +148,20 @@ echo ""
 echo "=== [4/4] 复制源码和部署脚本 ==="
 
 echo "  复制 backend/"
-rsync -a --delete \
-  --exclude='__pycache__' --exclude='*.pyc' --exclude='.pytest_cache' \
-  --exclude='*.egg-info' --exclude='.keys' \
-  backend/ "$OUTPUT_DIR/code/backend/"
+# ⚠️ 排除路径带 "./" 锚定（v4.2.1）：backend/app/models 是 Python 模块，
+#    不能用非锚定的 `models` 排除，否则内网启动 ImportError。
+copy_tree backend "$OUTPUT_DIR/code/backend" \
+  --exclude='__pycache__' --exclude='*.pyc' --exclude='./.pytest_cache' \
+  --exclude='*.egg-info' --exclude='./.keys' \
+  --exclude='./models' --exclude='./data' --exclude='./logs' \
+  --exclude='./_review_runs' --exclude='./_e2e_tmp'
 
 echo "  复制 frontend/"
-rsync -a --delete \
-  --exclude='node_modules' --exclude='dist' \
-  frontend/ "$OUTPUT_DIR/code/frontend/"
+copy_tree frontend "$OUTPUT_DIR/code/frontend" \
+  --exclude='./node_modules' --exclude='./dist'
 
 echo "  复制 docker/"
-rsync -a --delete docker/ "$OUTPUT_DIR/code/docker/"
+copy_tree docker "$OUTPUT_DIR/code/docker"
 
 echo "  复制根目录配置"
 cp .dockerignore "$OUTPUT_DIR/code/" 2>/dev/null || true

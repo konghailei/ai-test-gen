@@ -1024,31 +1024,53 @@ if [ -d code ] && [ "$(ls -A code/ 2>/dev/null)" ]; then
   #   故这里显式置位，让阶段 5 用 --force-recreate。
   CODE_REBUILT=true
   
-  # 前端镜像处理：
-  #   1) 优先加载预构建的镜像 tar（pack-update.sh 已在外网构建好）
+  # 前端镜像处理（v4.2.1 起优先级调整）：
+  #   0) **dist 产物** → 用已有基线镜像本地构建（Dockerfile.intranet，无需 npm，5 秒）
+  #      —— 升级包只带 ~2MB dist，替代 82MB 完整镜像 tar
+  #   1) 预构建的镜像 tar（pack-update.sh 回退形态 / 首次包）
   #   2) 无 tar 但镜像已存在 → 跳过（无前端变更）
   #   3) 无 tar 无镜像 → 尝试构建（首次部署兜底）
   #
-  # 路径说明（修复）：tar 可能在两处，必须都找 ——
-  #   · $WORK_DIR/images/  → 默认模式（包目录即安装目录）
-  #   · $PACK_DIR/images/  → INSTALL_DIR 分离模式（上面 rsync 明确排除了 images/，
-  #                          旧代码只看相对路径 images/ 会永远找不到 → 前端静默停在旧版本）
-  WEB_TAR=""
-  for cand in "$WORK_DIR/images/10-ai-test-gen-web.tar" "$PACK_DIR/images/10-ai-test-gen-web.tar"; do
-    if [ -f "$cand" ]; then WEB_TAR="$cand"; break; fi
+  # 路径说明（修复）：tar/dist 可能在两处，必须都找 ——
+  #   · $WORK_DIR/...  → 默认模式（包目录即安装目录）
+  #   · $PACK_DIR/...  → INSTALL_DIR 分离模式（rsync 明确排除了 images/，
+  #                       旧代码只看相对路径 images/ 会永远找不到 → 前端静默停在旧版本）
+  DIST_CTX=""
+  for cand in "$WORK_DIR/code/frontend-dist" "$PACK_DIR/code/frontend-dist"; do
+    if [ -d "$cand/dist" ]; then DIST_CTX="$cand"; break; fi
   done
+  WEB_UPDATED=false
+  if [ -n "$DIST_CTX" ]; then
+    info "检测到前端 dist 产物（$DIST_CTX），用已有基线镜像本地构建（无需 npm）..."
+    if docker build -t ai-test-gen-web:latest \
+         -f "$WORK_DIR/frontend/Dockerfile.intranet" "$DIST_CTX" 2>&1 | tail -3; then
+      CODE_REBUILT=true
+      WEB_UPDATED=true
+      info "前端镜像已由 dist 重建（$(du -sh "$DIST_CTX/dist" 2>/dev/null | cut -f1) 静态产物）"
+    else
+      warn "dist 构建失败（基线镜像 ai-test-gen-web:latest 不存在？）→ 回退加载镜像 tar"
+      DIST_CTX=""
+    fi
+  fi
 
-  if [ -n "$WEB_TAR" ]; then
-    info "检测到前端镜像更新包 ($WEB_TAR)，加载新镜像..."
-    docker load -i "$WEB_TAR"
-    # 同理：加载同名 tag 的新前端镜像后，容器不会自动重建 → 前端静默停在旧版本
-    CODE_REBUILT=true
-    info "前端镜像已更新"
-  elif docker image inspect ai-test-gen-web:latest &>/dev/null; then
-    info "前端镜像已存在，跳过构建"
-  else
-    info "前端镜像不存在，尝试构建..."
-    $COMPOSE_CMD -f docker-compose.offline.yml build frontend || warn "前端构建失败，请确认 npm 源可用"
+  if [ "$WEB_UPDATED" = false ]; then
+    WEB_TAR=""
+    for cand in "$WORK_DIR/images/10-ai-test-gen-web.tar" "$PACK_DIR/images/10-ai-test-gen-web.tar"; do
+      if [ -f "$cand" ]; then WEB_TAR="$cand"; break; fi
+    done
+
+    if [ -n "$WEB_TAR" ]; then
+      info "检测到前端镜像更新包 ($WEB_TAR)，加载新镜像..."
+      docker load -i "$WEB_TAR"
+      # 同理：加载同名 tag 的新前端镜像后，容器不会自动重建 → 前端静默停在旧版本
+      CODE_REBUILT=true
+      info "前端镜像已更新"
+    elif docker image inspect ai-test-gen-web:latest &>/dev/null; then
+      info "前端镜像已存在，跳过构建"
+    else
+      info "前端镜像不存在，尝试构建..."
+      $COMPOSE_CMD -f docker-compose.offline.yml build frontend || warn "前端构建失败，请确认 npm 源可用"
+    fi
   fi
   
   info "应用镜像重建完成"

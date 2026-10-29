@@ -577,7 +577,7 @@ bash deploy.sh
 
 | | 首次迁移 | 升级迁移（增量包） |
 |---|---|---|
-| 包类型 | `ai-testgen-offline-pack-vX.Y.Z`（含 images/ models/，~6.5GB） | `ai-testgen-offline-pack-update-vX.Y.Z`（~5MB） |
+| 包类型 | `ai-testgen-offline-pack-vX.Y.Z`（含 images/ models/，~6.5GB） | `ai-testgen-offline-pack-update-vX.Y.Z`（**~8-20MB**） |
 | 宿主配置 | **5 项全做** | 只需验证（第二节验证命令） |
 | `install.env` | 从模板改（改密码） | 会被智能合并，**已有值不覆盖**——密码不会丢 |
 | 模型文件 | 需要（包内自带） | 不需要 |
