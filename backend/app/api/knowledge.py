@@ -515,6 +515,9 @@ async def delete_kb_entry(
     kb_deleted = False
     kb_error = ""
 
+    # v4.1.9：向量删除一律与业务变更同事务入箱（见下方两个分支）
+    from app.core.vector_outbox import enqueue as _enqueue_outbox
+
     if entry_type == "requirement":
         # 恢复为 active 状态，退出知识库
         stmt = select(Requirement).where(Requirement.id == entry_id, Requirement.status == "archived")
@@ -526,20 +529,23 @@ async def delete_kb_entry(
         # 供向量删除后失效该产品 KB 缓存使用
         entry_product_id = record.product_id
         record.status = "active"
+
+        # v4.1.9：原实现 commit 后直删 Milvus、失败仅 warning → 向量残留，
+        # 「退出知识库」实际不生效。改为同事务入箱；payload 带 product_id，
+        # relay 删除时同步失效该产品 KB 检索缓存（否则 24h TTL 内仍会命中）。
+        _enqueue_outbox(
+            session,
+            aggregate_type="requirement",
+            aggregate_id=entry_id,
+            action="delete",
+            revision=0,
+            payload={"product_id": entry_product_id},
+            created_by="kb_exit",
+        )
         await session.commit()
         db_deleted = True
-        logger.info("[API/knowledge] 需求退出知识库: id={}", entry_id)
-
-        # 从向量库移除（v3.4.4：传 product_id，删除后失效该产品 KB 检索缓存——
-        # 否则退出知识库的需求在 24h TTL 内仍会被检索到）
-        try:
-            await asyncio.to_thread(
-                vector_store.delete_requirement_from_kb, entry_id, entry_product_id
-            )
-            kb_deleted = True
-        except Exception as e:
-            kb_error = str(e)[:300]
-            logger.warning("[API/knowledge] 向量库删除失败: req_id={}, error={}", entry_id, kb_error[:200])
+        kb_deleted = True  # 已入队，relay 约 5s 内投递
+        logger.info("[API/knowledge] 需求退出知识库，向量清理已入队: id={}", entry_id)
 
     elif entry_type == "test_case":
         # 从 PG 删除测试用例
@@ -549,17 +555,18 @@ async def delete_kb_entry(
         if not record:
             raise HTTPException(status_code=404, detail=f"测试用例 {entry_id} 不存在")
         await session.delete(record)
+        _enqueue_outbox(
+            session,
+            aggregate_type="test_case",
+            aggregate_id=entry_id,
+            action="delete",
+            revision=0,
+            created_by="kb_delete_case",
+        )
         await session.commit()
         db_deleted = True
-        logger.info("[API/knowledge] 测试用例已删除: id={}", entry_id)
-
-        # 从向量库移除
-        try:
-            await asyncio.to_thread(vector_store.delete_test_case_from_kb, entry_id)
-            kb_deleted = True
-        except Exception as e:
-            kb_error = str(e)[:300]
-            logger.warning("[API/knowledge] 向量库删除失败: case_id={}, error={}", entry_id, kb_error[:200])
+        kb_deleted = True  # 已入队，relay 约 5s 内投递
+        logger.info("[API/knowledge] 测试用例已删除，向量清理已入队: id={}", entry_id)
 
     else:
         raise HTTPException(status_code=400, detail=f"不支持的条目类型: {entry_type}")

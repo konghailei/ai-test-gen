@@ -163,7 +163,13 @@ def _deliver(row) -> None:
                 metadata=metadata,
             )
         else:
-            vector_store.delete_requirement(row.aggregate_id)
+            # v4.1.9：payload 里带 product_id 时同步失效该产品的 KB 检索缓存。
+            # 原 delete 分支只删向量不失效缓存，直删路径（传 product_id）改走出箱后
+            # 会出现「向量已删、缓存还在 24h TTL 内继续命中」的退化。
+            vector_store.delete_requirement(
+                row.aggregate_id,
+                product_id=(row.payload or {}).get("product_id"),
+            )
     elif row.aggregate_type == "fp_crsr":
         # v3.5.0（docs/18 P0-T1）：CRSR 投递。复用 add_requirement（SRR 同构，
         # _srr_to_text 同口径）；metadata.type=fp_crsr 由 payload 带入，
@@ -178,7 +184,13 @@ def _deliver(row) -> None:
                 metadata=metadata,
             )
         else:
-            vector_store.delete_requirement(row.aggregate_id)
+            # v4.1.9：payload 里带 product_id 时同步失效该产品的 KB 检索缓存。
+            # 原 delete 分支只删向量不失效缓存，直删路径（传 product_id）改走出箱后
+            # 会出现「向量已删、缓存还在 24h TTL 内继续命中」的退化。
+            vector_store.delete_requirement(
+                row.aggregate_id,
+                product_id=(row.payload or {}).get("product_id"),
+            )
     elif row.aggregate_type == "shared_rule":
         # v2.48：共享业务规则逐条投递。与 fp_crsr 同构——复用 add_requirement
         # （最小 SRR 同构，_srr_to_text 同口径渲染规则正文）；metadata.type=shared_rule
@@ -193,7 +205,13 @@ def _deliver(row) -> None:
                 metadata=metadata,
             )
         else:
-            vector_store.delete_requirement(row.aggregate_id)
+            # v4.1.9：payload 里带 product_id 时同步失效该产品的 KB 检索缓存。
+            # 原 delete 分支只删向量不失效缓存，直删路径（传 product_id）改走出箱后
+            # 会出现「向量已删、缓存还在 24h TTL 内继续命中」的退化。
+            vector_store.delete_requirement(
+                row.aggregate_id,
+                product_id=(row.payload or {}).get("product_id"),
+            )
     else:
         raise ValueError(f"未知 aggregate_type: {row.aggregate_type}")
 

@@ -539,14 +539,20 @@ async def delete_testcase(
     # 级联删除 error_cases 表中引用该用例的记录（外键 RESTRICT，必须先删）
     await session.execute(_del(ErrorCase).where(ErrorCase.original_case_id == case_id))
     await session.delete(record)
-    await session.commit()
 
-    # 同步删除 Milvus 向量（失败不阻断主流程）
-    try:
-        import asyncio
-        await asyncio.to_thread(vector_store.delete_test_case, case_id)
-    except Exception as e:
-        logger.warning("[API/testcases] Milvus 向量删除失败（不阻断）: case_id={}, err={}", case_id, str(e)[:120])
+    # v4.1.9：向量删除意图与业务行同一事务入箱。原实现是 commit 后直接
+    # to_thread 删 Milvus、失败仅 warning → 永久孤儿，只能人工跑
+    # scripts/cleanup_orphan_vectors.py 兜底。出箱由 relay 在 ~5s 内投递（幂等）。
+    from app.core.vector_outbox import enqueue as _enqueue_outbox
+    _enqueue_outbox(
+        session,
+        aggregate_type="test_case",
+        aggregate_id=case_id,
+        action="delete",
+        revision=0,
+        created_by="delete_testcase",
+    )
+    await session.commit()
 
     logger.info("[API/testcases] 用例已删除: case_id={}", case_id)
 

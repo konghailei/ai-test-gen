@@ -2280,26 +2280,36 @@ async def delete_requirement(
     # 供删除向量后失效该产品的 KB 检索缓存，避免"已删除需求还在"。
     deleted_product_id = record.product_id
     await session.delete(record)
+
+    # v4.1.9：向量删除意图与业务行同一事务入箱（主需求 + FP 级联）。
+    # 原实现 commit 后直删 Milvus、失败仅 warning → 永久孤儿，只能靠
+    # scripts/cleanup_orphan_vectors.py 人工兜底。payload 带 product_id，
+    # relay 删除时同步失效该产品的 KB 检索缓存。
+    from app.core.vector_outbox import enqueue as _enqueue_outbox
+
+    _enqueue_outbox(
+        session,
+        aggregate_type="requirement",
+        aggregate_id=req_id,
+        action="delete",
+        revision=0,
+        payload={"product_id": deleted_product_id},
+        created_by="delete_requirement",
+    )
+    for _fp_id in fp_ids:
+        _enqueue_outbox(
+            session,
+            aggregate_type="fp_crsr",
+            aggregate_id=f"FP-{_fp_id}",
+            action="delete",
+            revision=0,
+            created_by="delete_requirement",
+        )
     await session.commit()
-
-    # 同步删除向量库中的记录（主需求向量 + FP-{fp_id} 向量，避免孤儿）
-    try:
-        from app.db.milvus_store import vector_store
-
-        # 删除主需求向量（v3.4.1 修复 M-2：传 product_id 以同步失效 KB 缓存）
-        await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id, deleted_product_id)
-        logger.info("[API/requirements] 已同步删除向量库主记录: req_id={}", req_id)
-
-        # P0 修复：级联删除 FP-{fp_id} 向量，避免孤儿
-        for fp_id in fp_ids:
-            try:
-                await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{fp_id}")
-            except Exception as fp_err:
-                logger.warning("[API/requirements] FP 向量删除失败(不阻断): fp_id={}, error={}", fp_id, str(fp_err)[:100])
-        if fp_ids:
-            logger.info("[API/requirements] 已同步删除 {} 个 FP 向量", len(fp_ids))
-    except Exception as e:
-        logger.warning("[API/requirements] 向量库删除失败(不阻断): req_id={}, error={}", req_id, str(e)[:100])
+    logger.info(
+        "[API/requirements] 向量清理已入队: req_id={}, fp_vectors={}",
+        req_id, len(fp_ids),
+    )
 
     await log_operation(
         username=current_user.username, user_id=current_user.user_id,

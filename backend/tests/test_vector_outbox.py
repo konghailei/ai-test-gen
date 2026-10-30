@@ -114,8 +114,9 @@ def test_crsr_deliver_routes_to_add_requirement(monkeypatch):
         def add_requirement(self, req_id, srr_json, metadata=None):
             calls.append(("upsert", req_id, srr_json, metadata))
 
-        def delete_requirement(self, req_id):
-            calls.append(("delete", req_id))
+        def delete_requirement(self, req_id, product_id=None):
+            # v4.1.9：删除分支支持透传 product_id 以失效该产品 KB 缓存
+            calls.append(("delete", req_id, product_id))
 
     monkeypatch.setattr(
         "app.db.milvus_store.vector_store", _FakeStore()
@@ -144,6 +145,20 @@ def test_crsr_deliver_routes_to_add_requirement(monkeypatch):
     })()
     vo._deliver(row_del)
     assert calls and calls[0][0] == "delete"
+    # payload 为空 → 不失效任何产品缓存
+    assert calls[0][2] is None
+
+    # v4.1.9：payload 带 product_id 时必须透传，否则「退出知识库」后
+    # 该产品的 KB 检索缓存在 24h TTL 内仍会命中已删向量
+    calls.clear()
+    row_del_pid = type("_R", (), {
+        "aggregate_type": "requirement", "aggregate_id": "REQ-x",
+        "action": "delete", "revision": 1, "content_hash": "",
+        "payload": {"product_id": "PROD-1"},
+    })()
+    vo._deliver(row_del_pid)
+    assert calls and calls[0][0] == "delete"
+    assert calls[0][2] == "PROD-1"
 
 
 def test_kqa_type_mapping_recognizes_fp_crsr():

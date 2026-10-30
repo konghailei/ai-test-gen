@@ -2044,17 +2044,21 @@ async def _run_clarify_reparse(
                 await s.flush()
 
                 # P3 修复：删除旧 FP 对应的 Milvus 向量
+                # v4.1.9：改为与 FP 行删除同事务入箱（commit 在下方 2064 行）。
+                # 原实现 flush 后直删 Milvus、失败仅 warning → 旧 FP 向量永久残留，
+                # 继续被 KB 检索命中且无法区分「已删除的旧功能点」。
                 if old_ids:
-                    try:
-                        from app.db.milvus_store import vector_store
-                        for old_fp_id in old_ids:
-                            try:
-                                await asyncio.to_thread(vector_store.delete_requirement_from_kb, f"FP-{old_fp_id}")
-                            except Exception as fp_err:
-                                logger.warning("[Task/Clarify] 旧 FP 向量删除失败(不阻断): fp_id={}, error={}", old_fp_id, str(fp_err)[:100])
-                        logger.info("[Task/Clarify] 已清理 {} 个旧 FP 向量", len(old_ids))
-                    except Exception as e:
-                        logger.warning("[Task/Clarify] 旧 FP 向量清理失败(不阻断): {}", str(e)[:200])
+                    from app.core.vector_outbox import enqueue as _enqueue_outbox
+                    for old_fp_id in old_ids:
+                        _enqueue_outbox(
+                            s,
+                            aggregate_type="fp_crsr",
+                            aggregate_id=f"FP-{old_fp_id}",
+                            action="delete",
+                            revision=0,
+                            created_by="clarify_fp_refresh",
+                        )
+                    logger.info("[Task/Clarify] 已入队 {} 个旧 FP 向量清理", len(old_ids))
 
                 await _save_fps_to_db(s, req_id, captured_fps, priority, product_id=product_id)
                 # v3.5.7（P1-A）：复用副本登记
