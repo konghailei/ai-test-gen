@@ -48,6 +48,11 @@ export default function Generate() {
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('')
   const [abortController, setAbortController] = useState<AbortController | null>(null)
+  // v4.1.9：卸载时要中断在飞的 SSE。state 在 effect cleanup（依赖 []）里会闭包成
+  // 初始值 null，必须用 ref 才能拿到最新 controller。
+  const abortRef = useRef<AbortController | null>(null)
+  // v4.1.9：需求列表请求序号——快速切项目时旧响应可能后到，直接丢弃
+  const reqListSeq = useRef(0)
 
   // Results
   const [generatedCases, setGeneratedCases] = useState<TestCase[]>([])
@@ -109,17 +114,25 @@ export default function Generate() {
 
   // 加载需求列表：按产品 + 项目过滤
   useEffect(() => {
+    // v4.1.9：只接受「最后一次请求」的响应，避免旧项目的迟到列表覆盖新项目
+    const seq = ++reqListSeq.current
     // 切换项目时清空已选需求（但保留 URL 参数传入的初始需求）
     if (!paramId) setSelectedReq('')
     setLoadingReqs(true)
     reqApi.list(1, 100, selectedProductId || undefined, selectedProject || undefined)
-      .then(r => setReqs(r.items || []))
+      .then(r => {
+        if (seq !== reqListSeq.current) return
+        setReqs(r.items || [])
+      })
       .catch(e => {
+        if (seq !== reqListSeq.current) return
         console.error('[Generate] 需求列表加载失败:', e)
         setError(`需求列表加载失败: ${e?.message || '网络异常'}`)
         setReqs([])
       })
-      .finally(() => setLoadingReqs(false))
+      .finally(() => {
+        if (seq === reqListSeq.current) setLoadingReqs(false)
+      })
   }, [selectedProductId, selectedProject])
 
   // URL 参数传入需求 ID 时，自动选中该需求（若不在当前项目下，则切到"全部项目"再选）
@@ -147,11 +160,16 @@ export default function Generate() {
   }, [])
 
   // v3.5.6: 组件卸载时清理等待重试倒计时定时器
+  // v4.1.9：同时中断在飞的 SSE——否则离开页面后 fetch 与回调仍挂在后台 setState
   useEffect(() => {
     return () => {
       if (countdownTimerRef.current) {
         clearInterval(countdownTimerRef.current)
         countdownTimerRef.current = null
+      }
+      if (abortRef.current) {
+        abortRef.current.abort()
+        abortRef.current = null
       }
     }
   }, [])
@@ -278,6 +296,7 @@ export default function Generate() {
       resume ? { resume: true } : undefined,
     )
     setAbortController(ctrl)
+    abortRef.current = ctrl
   }
 
   const handleCancel = () => {
