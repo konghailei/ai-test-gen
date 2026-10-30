@@ -86,9 +86,22 @@ async def _find_resume_checkpoint(req_id: str, from_task: str = "") -> dict | No
             if not isinstance(cp, dict) or not cp.get("fp_groups"):
                 return None
             return {"checkpoint": cp, "source_task_id": task.id}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning("[API/generate] 续跑 checkpoint 查找失败: {}", str(e)[:120])
-        return None
+        # v4.1.9：查询失败不能静默返回 None——调用方会把 None 当成「无可用
+        # checkpoint」直接从头生成，把用户已有的进度覆盖掉。失败必须可见。
+        logger.error(
+            "[API/generate] 续跑 checkpoint 查找失败，中止续跑: req_id={}, err={}",
+            req_id, str(e)[:200],
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "续跑检查点查询失败，已中止本次续跑以避免覆盖已有进度。"
+                "请稍后重试；若确认要放弃旧进度，请改选「重新生成」。"
+            ),
+        ) from e
 
 
 @router.post("/generate", dependencies=[Depends(require_write)])
@@ -117,35 +130,42 @@ async def generate_test_cases(
         - v1.4：创建 AnalysisTask 记录，使生成任务在「任务管理」页面可见。
           SSE 流式机制不变，仅追加任务状态追踪。
     """
-    # 从 DB 查询需求，取出 raw_text 和澄清答案
+    # 从 DB 查询需求，取出 raw_text 和澄清答案。
+    # v4.1.9：查询、404、可见性校验必须同处一个 session 作用域——原实现在
+    # `async with` 块外调用 assert_product_visible(session, ...)，用的是已 close
+    # 的 session，依赖「close 后可隐式重开」这一脆弱行为；块外继续读 ORM 属性
+    # 同样不可靠（expire_on_commit 配置一变就会触发 DetachedInstanceError）。
     async with async_session() as session:
         stmt = select(Requirement).where(Requirement.id == req.req_id)
         result = await session.execute(stmt)
         requirement = result.scalar_one_or_none()
 
-    if requirement is None:
-        logger.warning("[API/generate] 需求不存在: req_id={}", req.req_id)
-        raise HTTPException(status_code=404, detail=f"需求 {req.req_id} 不存在")
+        if requirement is None:
+            logger.warning("[API/generate] 需求不存在: req_id={}", req.req_id)
+            raise HTTPException(status_code=404, detail=f"需求 {req.req_id} 不存在")
 
-    # v3.1.3 P1-1 产品隔离：需求所属产品对当前用户不可见则拒绝生成
-    await assert_product_visible(session, user, requirement.product_id)
+        # v3.1.3 P1-1 产品隔离：需求所属产品对当前用户不可见则拒绝生成
+        req_product_id = requirement.product_id
+        await assert_product_visible(session, user, req_product_id)
 
-    raw_text = requirement.raw_text or ""
-    srr_json = requirement.srr_json or {}
+        # 块内取完所需标量，后续只用这些快照
+        raw_text = requirement.raw_text or ""
+        srr_json = requirement.srr_json or {}
+        req_status = requirement.status
 
     # v1.6：仅 confirmed（确认完成）状态的需求可生成测试用例。
     # 用户需先确认 SRR 内容、功能点、影响分析无误后，通过 POST /{req_id}/confirm 确认，
     # 状态变为 confirmed 后方可生成。
     # v3.5.3：archived 需求允许 resume 续跑（归档后重新生成走 resume 语义，
     # 不破坏归档状态；全新生成仍要求 confirmed）。
-    if requirement.status != "confirmed" and not (req.resume and req.resume_from_task):
+    if req_status != "confirmed" and not (req.resume and req.resume_from_task):
         logger.warning(
             "[API/generate] 需求状态非 confirmed，拒绝生成: req_id={}, status={}, resume={}",
-            req.req_id, requirement.status, req.resume,
+            req.req_id, req_status, req.resume,
         )
         raise HTTPException(
             status_code=409,
-            detail=f"需求状态为 {requirement.status}，仅 confirmed（确认完成）状态可生成测试用例。"
+            detail=f"需求状态为 {req_status}，仅 confirmed（确认完成）状态可生成测试用例。"
                    f"请先确认需求分析结果（SRR/功能点/影响分析）后再试。"
                    f"（archived 需求可用 resume 续跑）",
         )
@@ -176,7 +196,7 @@ async def generate_test_cases(
     if not has_srr:
         logger.error(
             "[API/generate] 需求 SRR 为空，无法生成: req_id={}, status={}",
-            req.req_id, requirement.status,
+            req.req_id, req_status,
         )
         raise HTTPException(
             status_code=400,
@@ -238,7 +258,7 @@ async def generate_test_cases(
     slot = await reserve_generation_slot(
         req_id=req.req_id,
         task_id=task_id,
-        product_id=requirement.product_id,
+        product_id=req_product_id,
         created_by="api",
     )
     if slot["status"] == "conflict":
@@ -473,7 +493,7 @@ async def generate_test_cases(
             async for event in orchestrator.run_pipeline(
                 raw_requirement=raw_text,
                 srr_json=srr_json if has_srr else None,
-                product_id=requirement.product_id,
+                product_id=req_product_id,
                 product_name=srr_json.get("requirement", {}).get("product_name", ""),
                 clarify_answers=clarify_answers,
                 existing_req_id=req.req_id,
@@ -589,7 +609,7 @@ async def generate_test_cases(
                             _records.append(build_srr_report(
                                 task_id=task_id,
                                 req_id=req.req_id,
-                                product_id=requirement.product_id,
+                                product_id=req_product_id,
                                 req_title=_req_title,
                                 gate_result=_gate_result,
                                 clarify_result=event.get("clarify_result", {}) or {},
@@ -598,7 +618,7 @@ async def generate_test_cases(
                             _records.append(build_case_report(
                                 task_id=task_id,
                                 req_id=req.req_id,
-                                product_id=requirement.product_id,
+                                product_id=req_product_id,
                                 req_title=_req_title,
                                 review_report=_review_report,
                                 gen_batch_id=_gen_batch,
