@@ -33,6 +33,7 @@ from app.core.product_guard import (
     product_id_of_module,
     product_id_of_project,
 )
+from app.core.vector_outbox import enqueue as _enqueue_outbox
 from pydantic import BaseModel, Field
 from sqlalchemy import select, delete, update, exc as sa_exc, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -310,6 +311,19 @@ async def delete_product(
         await _cascade_delete_requirements(session, req_ids)
         await session.execute(delete(Project).where(Project.product_id == pid))
         await session.execute(delete(Product).where(Product.id == pid))
+
+        # v4.1.9：范围删除入箱（与业务删除同事务）。原实现 commit 后直删 Milvus，
+        # 失败仅 warning + 单条退化，仍失败就是永久孤儿。scope 事件由 relay
+        # 幂等投递：按 product_id 批量删需求/FP/用例向量（内部含 KB 缓存失效）。
+        _enqueue_outbox(
+            session,
+            aggregate_type="scope",
+            aggregate_id=f"product:{pid}",
+            action="delete",
+            revision=0,
+            payload={"scope_type": "product", "scope_id": pid, "product_id": pid},
+            created_by="delete_product",
+        )
         await session.commit()
     except sa_exc.IntegrityError as e:
         await session.rollback()
@@ -320,36 +334,8 @@ async def delete_product(
         logger.error("[API/products] 产品删除失败: pid={}, error={}", pid, str(e)[:200])
         raise HTTPException(500, f"删除失败：{str(e)[:200]}")
 
-    # 4) 同步删除向量库中该产品的所有需求与用例向量（按 product_id 批量清理）
-    # v2.8.51 修复：原循环单条 delete 未 flush，导致 Milvus BOUNDED 一致性下查询仍返回已删数据。
-    # 改为按 product_id 批量 delete + flush，确保彻底清理。
-    try:
-        from app.db.milvus_store import vector_store
-        deleted_reqs = await asyncio.to_thread(vector_store.delete_requirement_by_product, pid)
-        deleted_cases = await asyncio.to_thread(vector_store.delete_test_case_by_product, pid)
-        logger.info(
-            "[API/products] 向量库清理完成: pid={}, 需求向量={}, 用例向量={}",
-            pid, deleted_reqs, deleted_cases,
-        )
-    except Exception as e:
-        logger.warning(
-            "[API/products] 向量库批量清理失败(不阻断): pid={}, error={}",
-            pid, str(e)[:200],
-        )
-        # 退化策略：按 req_id 逐条清理（仍走 delete_requirement，已含 flush）
-        for req_id in req_ids:
-            try:
-                await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
-            except Exception as inner_e:
-                logger.warning("[API/products] 单条需求向量清理失败: req_id={}, error={}", req_id, str(inner_e)[:100])
-
-    # v3.4.4（自审补漏 M-2）：统一失效该产品 KB 缓存。批量路径已由
-    # delete_requirement_by_product 内部失效，这里兜底覆盖"批量失败走单条退化清理"的路径。
-    try:
-        from app.db.kb_cache import kb_cache
-        await kb_cache.invalidate_by_product(pid)
-    except Exception as e:
-        logger.warning("[API/products] 失效 KB 缓存失败(不阻断): pid={}, error={}", pid, str(e)[:100])
+    # v4.1.9：向量清理已随业务删除同事务入箱（见上），此处不再直删。
+    # 原先的「批量删 + 失败退化为逐条」两条路径都已由 relay 的 scope 投递替代。
 
     logger.info("[API/products] 产品已删除: id={}, name={}, 关联需求 {} 条已清理", pid, prod.name, len(req_ids))
     return ApiResponse(success=True, message="已删除")
@@ -624,6 +610,18 @@ async def delete_project(proj_id: str, session: AsyncSession = Depends(get_sessi
     )
     req_ids = [r[0] for r in req_result.all()]
 
+    # v4.1.9：scope 事件需要 product_id（失效 KB 缓存）与 fp_ids
+    # （FP CRSR 向量的 metadata 没有 project_id，按 project 批量删删不掉）
+    project_product_id = (
+        await session.execute(select(Project.product_id).where(Project.id == proj_id))
+    ).scalar_one_or_none()
+    fp_ids: list[str] = []
+    if req_ids:
+        fp_rows = await session.execute(
+            select(FunctionalPoint.id).where(FunctionalPoint.requirement_id.in_(req_ids))
+        )
+        fp_ids = [r[0] for r in fp_rows.all()]
+
     try:
         # 应用层级联删除需求及其所有子表（analysis_tasks / traceability 等）
         await _cascade_delete_requirements(session, req_ids)
@@ -638,6 +636,22 @@ async def delete_project(proj_id: str, session: AsyncSession = Depends(get_sessi
             FPDependencyVersion.project_id == proj_id
         ))
         await session.execute(delete(Project).where(Project.id == proj_id))
+
+        # v4.1.9：范围删除入箱（同事务），替代 commit 后的批量直删 + 逐条退化
+        _enqueue_outbox(
+            session,
+            aggregate_type="scope",
+            aggregate_id=f"project:{proj_id}",
+            action="delete",
+            revision=0,
+            payload={
+                "scope_type": "project",
+                "scope_id": proj_id,
+                "product_id": project_product_id or "",
+                "fp_ids": fp_ids,
+            },
+            created_by="delete_project",
+        )
         await session.commit()
     except sa_exc.IntegrityError as e:
         await session.rollback()
@@ -648,27 +662,7 @@ async def delete_project(proj_id: str, session: AsyncSession = Depends(get_sessi
         logger.error("[API/products] 项目删除失败: proj_id={}, error={}", proj_id, str(e)[:200])
         raise HTTPException(500, f"删除失败：{str(e)[:200]}")
 
-    # 同步清理向量库：按 project_id 批量删除（需求向量 + FP 向量 + 用例向量）
-    # v2.45 修复：原循环单条 delete_requirement_from_kb 只删需求向量，FP 向量（FP-{fp_id}）成孤儿
-    try:
-        from app.db.milvus_store import vector_store
-        deleted_reqs = await asyncio.to_thread(vector_store.delete_requirement_by_project, proj_id)
-        deleted_cases = await asyncio.to_thread(vector_store.delete_test_case_by_project, proj_id)
-        logger.info(
-            "[API/products] 向量库清理完成: proj_id={}, 需求/FP向量={}, 用例向量={}",
-            proj_id, deleted_reqs, deleted_cases,
-        )
-    except Exception as e:
-        logger.warning(
-            "[API/products] 向量库批量清理失败(不阻断): proj_id={}, error={}",
-            proj_id, str(e)[:200],
-        )
-        # 退化策略：按 req_id 逐条清理需求向量
-        for req_id in req_ids:
-            try:
-                await asyncio.to_thread(vector_store.delete_requirement_from_kb, req_id)
-            except Exception as inner_e:
-                logger.warning("[API/products] 单条需求向量清理失败: req_id={}, error={}", req_id, str(inner_e)[:100])
+    # v4.1.9：向量清理已随业务删除同事务入箱（见上），此处不再直删。
 
     logger.info("[API/products] 项目已删除: id={}, 关联需求 {} 条已清理", proj_id, len(req_ids))
     return ApiResponse(success=True, message="已删除")
@@ -1294,6 +1288,10 @@ async def reactivate_project(
 
     # 6. 删除向量库（按 project_id 批量，含需求向量 + FP 向量 + 用例向量）
     # v2.45 修复：原循环单条删除性能差且遗漏用例向量，改用批量方法
+    # v4.1.9 说明：这里**刻意保留同步直删**，没有改走 scope 出箱。原因是第 7 步
+    # 的 shared_rule 对账依赖「本项目的向量已经删干净」这个前提——改成异步后，
+    # 对账会在向量仍在时计算期望集合，把仍被其他项目引用的规则误判为过期。
+    # 若要改造，必须把对账也移到 relay 之后，属于独立改动。
     try:
         from app.db.milvus_store import vector_store
         deleted_reqs = await asyncio.to_thread(vector_store.delete_requirement_by_project, proj_id)

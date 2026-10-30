@@ -58,7 +58,7 @@ VALID_ACTIONS = ("upsert", "delete")
 # 同事务提交，relay 幂等 upsert（确定性 ID，重复投递不堆积）。
 # v2.48：shared_rule = 跨功能点共享业务规则逐条编译层（app/core/shared_rules.py）。
 # 目的：避免整块 CFI 拼接导致单条规则语义稀释（实测 0.49 < 门槛 0.50 → 检索不到）。
-VALID_AGGREGATES = ("test_case", "requirement", "fp_crsr", "shared_rule")
+VALID_AGGREGATES = ("test_case", "requirement", "fp_crsr", "shared_rule", "scope")
 
 
 def gen_event_id() -> str:
@@ -212,6 +212,51 @@ def _deliver(row) -> None:
                 row.aggregate_id,
                 product_id=(row.payload or {}).get("product_id"),
             )
+    elif row.aggregate_type == "scope":
+        # v4.1.9：范围删除。出箱原本只有单 aggregate_id 语义，删产品/项目只能
+        # 在 commit 后直删 Milvus（失败仅 warning → 永久孤儿）。scope 事件把
+        # 「按什么维度删」放进 payload，relay 调用对应批量方法（幂等）。
+        #
+        # 注意 FP CRSR 向量：metadata 只有 product_id、没有 project_id
+        # （见 fp_crsr.crsr_outbox_payload），所以按 project 批量删**删不掉**
+        # FP 向量，必须由 payload.fp_ids 显式补删——这也是原直删路径里
+        # 那个循环存在的原因。
+        if row.action != "delete":
+            raise ValueError("scope 类型只支持 delete 动作")
+
+        scoped = row.payload or {}
+        scope_type = scoped.get("scope_type")
+        scope_id = scoped.get("scope_id")
+        if not scope_type or not scope_id:
+            raise ValueError(f"scope 事件缺少 scope_type/scope_id: {row.event_id}")
+
+        if scope_type == "product":
+            vector_store.delete_requirement_by_product(scope_id)  # 内部已失效 KB 缓存
+            vector_store.delete_test_case_by_product(scope_id)
+
+        elif scope_type == "project":
+            vector_store.delete_requirement_by_project(scope_id)
+            vector_store.delete_test_case_by_project(scope_id)
+            # FP CRSR 向量不含 project_id，按 id 补删
+            for fp_id in scoped.get("fp_ids") or []:
+                vector_store.delete_requirement(f"FP-{fp_id}")
+            # delete_requirement_by_project 不失效缓存（与 by_product 不对称）
+            product_id = scoped.get("product_id")
+            if product_id:
+                try:
+                    from app.db.kb_cache import kb_cache
+
+                    kb_cache.invalidate_by_product_sync(product_id)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("[VectorOutbox] 失效 KB 缓存失败（不阻断）: {}", str(e)[:100])
+
+        elif scope_type == "req":
+            # 按需求批量删用例向量（删需求下的全部用例）
+            vector_store.delete_cases_by_req_id(scope_id)
+
+        else:
+            raise ValueError(f"未知的 scope_type: {scope_type}")
+
     else:
         raise ValueError(f"未知 aggregate_type: {row.aggregate_type}")
 

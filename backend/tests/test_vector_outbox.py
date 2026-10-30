@@ -188,3 +188,110 @@ def test_enrich_sources_has_crsr_branch():
     # 孤儿过滤条件行覆盖 fp_crsr（固化行删除后的向量要能被识别为孤儿）
     # —— 直接断言条件行原文，不做脆弱的窗口截取
     assert 'src_type in ("requirement", "functional_point", "fp_crsr")' in src
+
+
+# ---------------------------------------------------------------------------
+# v4.1.9：scope（范围删除）分支
+# ---------------------------------------------------------------------------
+
+def _scope_row(payload: dict, action: str = "delete"):
+    return type("_R", (), {
+        "event_id": "VO-SCOPE-1",
+        "aggregate_type": "scope",
+        "aggregate_id": f"{payload.get('scope_type')}:{payload.get('scope_id')}",
+        "action": action,
+        "revision": 0,
+        "content_hash": "",
+        "payload": payload,
+    })()
+
+
+def test_scope_product_routes_to_batch_deletes(monkeypatch):
+    """删产品：按 product_id 批量删需求/用例向量（FP 向量也带 product_id，一并覆盖）。"""
+    from app.core import vector_outbox as vo
+
+    calls = []
+
+    class _Store:
+        def delete_requirement_by_product(self, pid):
+            calls.append(("req_by_product", pid))
+            return 3
+
+        def delete_test_case_by_product(self, pid):
+            calls.append(("case_by_product", pid))
+            return 5
+
+    monkeypatch.setattr("app.db.milvus_store.vector_store", _Store())
+    vo._deliver(_scope_row({"scope_type": "product", "scope_id": "P1", "product_id": "P1"}))
+
+    assert ("req_by_product", "P1") in calls
+    assert ("case_by_product", "P1") in calls
+
+
+def test_scope_project_also_deletes_fp_vectors(monkeypatch):
+    """删项目：by_project 删不掉 FP 向量（FP CRSR metadata 无 project_id），
+    必须按 payload.fp_ids 显式补删——漏掉就是永久孤儿。"""
+    from app.core import vector_outbox as vo
+
+    calls = []
+
+    class _Store:
+        def delete_requirement_by_project(self, pid):
+            calls.append(("req_by_project", pid))
+            return 1
+
+        def delete_test_case_by_project(self, pid):
+            calls.append(("case_by_project", pid))
+            return 2
+
+        def delete_requirement(self, req_id, product_id=None):
+            calls.append(("req", req_id, product_id))
+
+    monkeypatch.setattr("app.db.milvus_store.vector_store", _Store())
+    monkeypatch.setattr(
+        "app.db.kb_cache.kb_cache.invalidate_by_product_sync",
+        lambda pid: calls.append(("cache", pid)),
+    )
+
+    vo._deliver(_scope_row({
+        "scope_type": "project", "scope_id": "PJ1",
+        "product_id": "P1", "fp_ids": ["FP1", "FP2"],
+    }))
+
+    assert ("req_by_project", "PJ1") in calls
+    assert ("case_by_project", "PJ1") in calls
+    assert ("req", "FP-FP1", None) in calls
+    assert ("req", "FP-FP2", None) in calls
+    # by_project 内部不失效缓存，必须显式失效
+    assert ("cache", "P1") in calls
+
+
+def test_scope_req_deletes_cases_only(monkeypatch):
+    """按需求批量删用例：只删 test_cases 集合，不碰需求向量。"""
+    from app.core import vector_outbox as vo
+
+    calls = []
+
+    class _Store:
+        def delete_cases_by_req_id(self, rid):
+            calls.append(("cases_by_req", rid))
+            return 4
+
+    monkeypatch.setattr("app.db.milvus_store.vector_store", _Store())
+    vo._deliver(_scope_row({"scope_type": "req", "scope_id": "REQ-1"}))
+
+    assert calls == [("cases_by_req", "REQ-1")]
+
+
+def test_scope_rejects_upsert(monkeypatch):
+    """scope 只表达删除；写成 upsert 必须显式报错，不能静默当删除执行。"""
+    from app.core import vector_outbox as vo
+
+    monkeypatch.setattr("app.db.milvus_store.vector_store", object())
+
+    try:
+        vo._deliver(_scope_row({"scope_type": "product", "scope_id": "P1"}, action="upsert"))
+    except ValueError as e:
+        assert "delete" in str(e)
+    else:  # pragma: no cover
+        raise AssertionError("scope + upsert 应抛 ValueError")

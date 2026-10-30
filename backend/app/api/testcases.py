@@ -488,14 +488,24 @@ async def batch_delete_by_requirement(
     )
     # 再删用例
     result = await session.execute(sa_delete(TestCase).where(TestCase.req_id == req_id))
-    await session.commit()
 
-    # 同步删除 Milvus 向量（失败不阻断主流程）
-    try:
-        import asyncio
-        await asyncio.to_thread(vector_store.delete_cases_by_req_id, req_id)
-    except Exception as e:
-        logger.warning("[API/testcases] Milvus 向量批量删除失败（不阻断）: req_id={}, err={}", req_id, str(e)[:120])
+    # v4.1.9：范围删除入箱（与业务删除同事务）——按 req_id 批量删用例向量。
+    # 原实现 commit 后直删、失败仅 warning，孤儿向量只能人工兜底。
+    from app.core.vector_outbox import enqueue as _enqueue_outbox
+    _enqueue_outbox(
+        session,
+        aggregate_type="scope",
+        aggregate_id=f"req:{req_id}",
+        action="delete",
+        revision=0,
+        payload={
+            "scope_type": "req",
+            "scope_id": req_id,
+            "product_id": (req_row.product_id if req_row else "") or "",
+        },
+        created_by="delete_cases_by_req",
+    )
+    await session.commit()
 
     logger.info("[API/testcases] 批量删除: req_id={}, deleted={}", req_id, result.rowcount)
     return ApiResponse(success=True, data={"deleted_count": result.rowcount})
