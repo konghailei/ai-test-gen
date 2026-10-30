@@ -31,7 +31,11 @@ from fastapi import HTTPException
 
 from app.core import product_guard
 from app.core.auth import CurrentUser
-from app.core.product_access import assert_product_visible, get_visible_product_ids
+from app.core.product_access import (
+    assert_product_visible,
+    get_visible_product_ids,
+    invalidate_product_cache,
+)
 from app.db.models import (
     Module,
     Product,
@@ -45,6 +49,14 @@ from app.db.models import (
 ADMIN = CurrentUser("admin", "admin", 1)
 USER_A = CurrentUser("alice", "user", 2)
 USER_B = CurrentUser("bob", "user", 3)
+
+
+@pytest.fixture(autouse=True)
+def _reset_visibility_cache():
+    """可见性矩阵是进程内缓存，用例之间必须清，否则第二个用例会读到第一个的矩阵。"""
+    invalidate_product_cache()
+    yield
+    invalidate_product_cache()
 
 
 class _Result:

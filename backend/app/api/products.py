@@ -26,6 +26,7 @@ from app.core.product_access import (
     apply_visible_product_filter,
     assert_product_visible,
     get_visible_product_ids,
+    invalidate_product_cache,
 )
 from app.core.product_guard import (
     product_id_of_dependency_version,
@@ -205,6 +206,9 @@ async def create_product(body: CreateProductRequest, session: AsyncSession = Dep
             raise HTTPException(status_code=409, detail=f"产品名称「{body.name}」已存在，请使用其他名称")
         raise HTTPException(status_code=500, detail="创建产品失败")
     logger.info("[API/products] 产品已创建: id={}, name={}", pid, body.name)
+    # v4.1.9：新建产品必须立刻进可见性矩阵，否则 5s TTL 内它「不在矩阵里」，
+    # get_visible_product_ids 会把它漏掉（新建产品对创建者本人不可见）
+    invalidate_product_cache()
     return ApiResponse(success=True, message="产品已创建", data={"id": pid, "name": body.name})
 
 
@@ -227,6 +231,8 @@ async def update_product(pid: str, body: UpdateProductRequest, session: AsyncSes
         if _is_unique_violation(e, "uq_product_name"):
             raise HTTPException(status_code=409, detail=f"产品名称「{body.name}」已存在，请使用其他名称")
         raise HTTPException(status_code=500, detail="更新产品失败")
+    # v4.1.9：可见名单可能已变，立即失效缓存（不能等 5s TTL）
+    invalidate_product_cache()
     return ApiResponse(success=True, message="已更新")
 
 
@@ -336,6 +342,9 @@ async def delete_product(
 
     # v4.1.9：向量清理已随业务删除同事务入箱（见上），此处不再直删。
     # 原先的「批量删 + 失败退化为逐条」两条路径都已由 relay 的 scope 投递替代。
+
+    # v4.1.9：产品行已删，立即失效可见性缓存（否则 5s 内仍会出现在可见列表里）
+    invalidate_product_cache()
 
     logger.info("[API/products] 产品已删除: id={}, name={}, 关联需求 {} 条已清理", pid, prod.name, len(req_ids))
     return ApiResponse(success=True, message="已删除")
