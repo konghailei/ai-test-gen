@@ -2466,20 +2466,22 @@ async def _run_regenerate_reparse(
                         if old_fp_rows:
                             old_ids_set = set(old_fp_rows)
                             # P3 修复：清理旧 FP 向量
-                            try:
-                                from app.db.milvus_store import vector_store
-                                for old_fp_id in old_ids_set:
-                                    try:
-                                        await asyncio.to_thread(
-                                            vector_store.delete_requirement_from_kb, f"FP-{old_fp_id}"
-                                        )
-                                    except Exception as fp_vec_err:
-                                        logger.warning(
-                                            "[Task/Regenerate] 旧 FP 向量删除失败(不阻断): fp_id={}, error={}",
-                                            old_fp_id, str(fp_vec_err)[:100],
-                                        )
-                            except Exception as vec_e:
-                                logger.warning("[Task/Regenerate] FP 向量清理失败(不阻断): {}", str(vec_e)[:200])
+                            # v4.1.9：改为与 FP 行删除同事务入箱（commit 在下方
+                            # _save_fps_to_db 之后）。原实现 flush 后直删、失败仅
+                            # warning → 旧 FP 向量永久残留且继续被 KB 检索命中。
+                            from app.core.vector_outbox import enqueue as _enqueue_outbox
+                            for old_fp_id in old_ids_set:
+                                _enqueue_outbox(
+                                    fp_split_sess,
+                                    aggregate_type="fp_crsr",
+                                    aggregate_id=f"FP-{old_fp_id}",
+                                    action="delete",
+                                    revision=0,
+                                    created_by="regenerate_fp_refresh",
+                                )
+                            logger.info(
+                                "[Task/Regenerate] 已入队 {} 个旧 FP 向量清理", len(old_ids_set)
+                            )
                             await fp_split_sess.execute(
                                 sa_delete(FPDependency).where(
                                     (FPDependency.source_fp_id.in_(old_ids_set)) |

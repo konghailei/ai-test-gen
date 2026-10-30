@@ -67,3 +67,31 @@ async def test_delete_testcase_enqueues_delete_event_in_same_commit():
     assert event.aggregate_id == "TC-1"
     assert event.action == "delete"
     assert session.commit_count == 1, "业务删除与出箱事件必须同一次 commit"
+
+
+# ---------------------------------------------------------------------------
+# 防回退哨兵：这两处曾长期是「commit 后直删 + 失败仅 warning」，
+# 函数体太大、fake 成本高，用源码级断言锁住关键形态。
+# ---------------------------------------------------------------------------
+
+def test_fp_delete_enqueues_instead_of_direct_delete():
+    """删 FP 端点是 require_write（普通用户可触发），必须走出箱。"""
+    import inspect
+    from app.api import requirements as req_api
+
+    src = inspect.getsource(req_api.fp_delete)
+    assert 'aggregate_type="fp_crsr"' in src, "删 FP 必须入箱 fp_crsr delete"
+    assert "delete_requirement_from_kb" not in src, (
+        "不得退回 commit 后直删 Milvus——失败仅 warning 会留下孤儿向量"
+    )
+
+
+def test_regenerate_fp_refresh_enqueues_instead_of_direct_delete():
+    """regenerate 重新提取 FP 时清旧向量，同样必须与 FP 行删除同事务入箱。"""
+    import inspect
+    from app.core import requirement_tasks as rt
+
+    # 该分支所在的函数体很大，取整个模块源码做粗粒度断言即可
+    src = inspect.getsource(rt)
+    assert 'created_by="regenerate_fp_refresh"' in src
+    assert 'vector_store.delete_requirement_from_kb, f"FP-{old_fp_id}"' not in src

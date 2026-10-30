@@ -4198,6 +4198,20 @@ async def fp_delete(
         if before != len(srr["impact_analysis"]):
             req.srr_json = srr
 
+    # v4.1.9：FP 向量删除意图与 FP 行删除同事务入箱。原实现是 commit 后直删
+    # Milvus、失败仅 warning——归档→恢复→删 FP 的边界场景会留下孤儿向量，
+    # 只能靠对账脚本兜底。payload 带 product_id 以同步失效该产品 KB 缓存。
+    from app.core.vector_outbox import enqueue as _enqueue_outbox
+
+    _enqueue_outbox(
+        session,
+        aggregate_type="fp_crsr",
+        aggregate_id=f"FP-{fp_id}",
+        action="delete",
+        revision=0,
+        payload={"product_id": fp_req_product_id or ""},
+        created_by="fp_delete",
+    )
     await session.commit()
     # v2.22: 删除 FP 后更新总 SRR 的 fp_index 和 fp_summary
     try:
@@ -4205,16 +4219,7 @@ async def fp_delete(
         await session.commit()
     except Exception as e:
         logger.warning("[FP-Delete] 更新 fp_index/fp_summary 失败（不阻断）: {}", str(e)[:200])
-    # v2.45 修复：清理 Milvus 中的 FP 向量（边界场景：归档→恢复→删除FP 时避免孤儿向量）
-    # v3.4.4（自审补漏 M-2）：传入 product_id，删除后同步失效该产品的 KB 检索缓存，
-    # 否则单独删 FP 后 24h TTL 内"已删除的 FP 仍会被检索到"。
-    try:
-        from app.db.milvus_store import vector_store
-        await asyncio.to_thread(
-            vector_store.delete_requirement_from_kb, f"FP-{fp_id}", fp_req_product_id
-        )
-    except Exception as e:
-        logger.warning("[FP-Delete] 清理 FP 向量失败（不阻断）: fp_id={}, error={}", fp_id, str(e)[:150])
+    # v4.1.9：向量清理已随 FP 行删除同事务入箱（见上），此处不再直删。
     await log_operation(
         username=current_user.username, user_id=current_user.user_id,
         action="fp_delete", target_type="functional_point", target_id=fp_id,
