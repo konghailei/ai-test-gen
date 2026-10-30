@@ -79,7 +79,7 @@ async def _find_resume_checkpoint(req_id: str, from_task: str = "") -> dict | No
                     .order_by(AnalysisTask.created_at.desc())
                 )
             result = await _s.execute(stmt)
-            task = result.scalars().first() if from_task else result.scalars().first()
+            task = result.scalars().first()
             if task is None or not isinstance(task.result_json, dict):
                 return None
             cp = task.result_json.get("checkpoint")
