@@ -64,3 +64,8 @@
 | `tests/博客创作平台-*.md`（根目录 2 份） | 与 backend/tests/ 活引用副本完全重复（md5 一致），冗余 | 已归档至 `archive/blog-platform-requirements/` |
 | `docs/TEST_PLAN-v4-archived.md` | 名字带 archived 却位于 docs/ 根目录 | 已移入 `archive/` |
 | `docs/06-e2e-test-report.md` | v2 时代早期报告，已被 TEST_REPORT 系列取代 | 已移入 `archive/`，README/docs/11 索引路径已同步更新 |
+| `docs/11-` / `docs/12-` / `docs/24-` 双占号 | 三组编号各有两个文件（架构 vs 行业分析、设计对比 vs PPT、内核兼容 vs 自举验证） | 自举验证报告与设计 PPT 移入 `archive/legacy-docs/`；行业分析改名 `docs/11b-system-vs-industry-analysis.md` 并同步 `docs/12` 的基线引用；剩余编号唯一（2026-10-30） |
+| `docs/KNOWN-ISSUES-VERIFICATION-20260917.md` | 独立复核记录，主清单已消费其结论 | 移入 `archive/legacy-docs/`，`docs/KNOWN-ISSUES.md` 引用路径已更新 |
+| 根目录 `TEST_PLAN.md` 与 `docs/TEST_PLAN.md` | 两份并存（19K / 32K），曾计划"保留 docs 版" | **未合并**：21 处裸文件名引用指向根目录版，docs 版更大但引用少；需人工判定权威版本后再合并 |
+| 根目录 `TEST_REPORT.md` / `TEST_PLAN.md` | 曾被列为"应归档" | **未移动**：各 21 处裸引用指向根目录版，移动即断链。根目录只归档零引用报告（`archive/reports-2026/`） |
+| 根目录 `_*.py` 50 个 + `backend/_*.py` 55 个 | 一次性探测/定标/自证脚本长期堆在源码根 | 移入 `archive/scripts-2026-10/`，`.gitignore` 已忽略（本地追溯、不入库） |

@@ -85,6 +85,8 @@ backend/models/
 # ===== 临时分析报告 / 截图 / 工具缓存（不入库） =====
 BUG_ANALYSIS_REPORT.md
 REQ_FLOW_ALIGNMENT_REPORT.md
+# 2026-10-30 根目录/backend 一次性脚本与产物归档（本地追溯用，不入库）
+archive/scripts-2026-10/
 *.png
 .playwright-cli/
 .workbuddy/
