@@ -20,8 +20,19 @@ import random
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from app.core.auth import require_admin, require_write, get_current_user
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from app.core.auth import CurrentUser, require_admin, require_write, get_current_user
+from app.core.product_access import (
+    apply_visible_product_filter,
+    assert_product_visible,
+    get_visible_product_ids,
+)
+from app.core.product_guard import (
+    product_id_of_dependency_version,
+    product_id_of_fp,
+    product_id_of_module,
+    product_id_of_project,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import select, delete, update, exc as sa_exc, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,7 +47,56 @@ from app.db.models import (
 from app.models.api_schemas import ApiResponse
 from app.utils.logger import logger
 
-router = APIRouter()
+def _as_int(value: object) -> int | None:
+    """路径参数转 int（失败返回 None，由端点自身返回 422/404）。"""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+async def _guard_product_scope(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """路由级产品归属守卫（v4.1.9）。
+
+    从路径参数解析资源所属产品，校验对当前用户可见：
+        pid / product_id → 本身即产品 ID
+        proj_id          → projects.product_id
+        mod_id           → modules.product_id
+        fp_id            → functional_points.requirement_id → requirements.product_id
+        version_pk / v1  → fp_dependency_versions.project_id → projects.product_id
+
+    资源不存在 → 放行（端点自身返回 404）；product_id 为空 → 放行；
+    admin →``assert_product_visible`` 内部直接放行。
+
+    注意：本守卫只处理**路径参数**。``GET /dependency-graph`` 的 product_id 是
+    query 参数，取不到，由端点自身按可见集合过滤。
+    """
+    path = request.path_params
+    pid = path.get("pid") or path.get("product_id")
+
+    if not pid:
+        if path.get("proj_id"):
+            pid = await product_id_of_project(session, path["proj_id"])
+        elif path.get("mod_id"):
+            pid = await product_id_of_module(session, path["mod_id"])
+        elif path.get("fp_id"):
+            pid = await product_id_of_fp(session, path["fp_id"])
+        else:
+            pid = await product_id_of_dependency_version(
+                session, _as_int(path.get("version_pk") or path.get("v1"))
+            )
+
+    if pid:
+        await assert_product_visible(session, user, pid)
+
+
+# v4.1.9：守卫挂在 router 级，一次覆盖产品/项目/模块/依赖版本的全部读写端点。
+# 与 requirements.py 的 _guard_product_visibility 同一模式，避免逐端点补漏。
+router = APIRouter(dependencies=[Depends(_guard_product_scope)])
 
 
 def _is_unique_violation(exc: Exception, constraint_name: str) -> bool:
@@ -1699,6 +1759,12 @@ async def diff_dependency_versions(
     ver2 = await session.get(FPDependencyVersion, v2)
     if not ver1 or not ver2:
         raise HTTPException(status_code=404, detail="版本不存在")
+    # v4.1.9：路由级守卫只解析了路径里的 v1，此处补 v2 的同产品校验，
+    # 否则可见产品 A 的用户可以用 v1=A、v2=B 读取产品 B 的版本差异。
+    _p1 = await product_id_of_project(session, ver1.project_id)
+    _p2 = await product_id_of_project(session, ver2.project_id)
+    if _p1 != _p2:
+        raise HTTPException(status_code=404, detail="版本不存在")
 
     items1_result = await session.execute(
         select(FPDependencyVersionItem).where(FPDependencyVersionItem.version_pk == v1)
@@ -1996,19 +2062,31 @@ async def update_module(
 async def get_dependency_graph(
     product_id: str | None = None,
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ):
     """获取依赖图谱数据和布局。
 
     返回 nodes（有依赖关系的模块）和 edges（依赖关系）。
     注意：只有参与依赖关系的模块才会出现在图谱中，新建的无关联模块不会自动显示。
     """
+    # v4.1.9：product_id 是 query 参数，路由级守卫取不到，此处显式校验。
+    # 不传时必须按可见集合过滤——原实现会返回**全部产品**的模块与依赖边。
+    if product_id:
+        await assert_product_visible(session, user, product_id)
+    visible_ids = await get_visible_product_ids(session, user)
+
     nodes: list[dict] = []
     edges: list[dict] = []
 
     # 1. 查询该产品下的所有模块 ID
-    mod_stmt = select(Module.id, Module.name, Module.product_id, Module.description, Module.pos_x, Module.pos_y)
+    mod_conditions: list = []
     if product_id:
-        mod_stmt = mod_stmt.where(Module.product_id == product_id)
+        mod_conditions.append(Module.product_id == product_id)
+    apply_visible_product_filter(mod_conditions, visible_ids, Module.product_id)
+
+    mod_stmt = select(Module.id, Module.name, Module.product_id, Module.description, Module.pos_x, Module.pos_y)
+    if mod_conditions:
+        mod_stmt = mod_stmt.where(*mod_conditions)
     mod_result = await session.execute(mod_stmt)
     module_rows = mod_result.all()
     product_module_ids = {row[0] for row in module_rows}
@@ -2049,6 +2127,7 @@ async def get_dependency_graph(
 async def add_dependency_edge(
     body: AddDependencyEdgeRequest,
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ):
     """添加依赖连线。
 
@@ -2076,6 +2155,9 @@ async def add_dependency_edge(
         raise HTTPException(404, f"源模块 {source} 不存在")
     if not target_mod:
         raise HTTPException(404, f"目标模块 {target} 不存在")
+
+    # v4.1.9：source/target 在 body 里，路由级守卫取不到，此处显式校验产品可见性
+    await assert_product_visible(session, user, source_mod.product_id)
 
     # v2.2: 校验同一产品
     if source_mod.product_id != target_mod.product_id:

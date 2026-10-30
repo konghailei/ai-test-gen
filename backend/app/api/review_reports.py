@@ -31,6 +31,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, get_current_user, require_write
+from app.core.product_access import (
+    apply_visible_product_filter,
+    assert_product_visible,
+    get_visible_product_ids,
+)
 from app.utils.pagination import paginate
 from app.db import prompt_store
 from app.core import prompt_manager
@@ -52,6 +57,7 @@ async def list_review_reports(
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页条数"),
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """获取评审报告列表（按创建时间倒序）。
 
@@ -59,6 +65,11 @@ async def list_review_reports(
     列表项含维度置信度摘要（前端可直接渲染维度分条），详情字段（issues/summary）
     走详情端点。
     """
+    # v4.1.9：原实现只按用户传入的 product_id 过滤，不传即返回全库报告
+    if product_id:
+        await assert_product_visible(session, user, product_id)
+    visible_ids = await get_visible_product_ids(session, user)
+
     conditions = []
     if product_id:
         conditions.append(ReviewReportRecord.product_id == product_id)
@@ -68,6 +79,7 @@ async def list_review_reports(
         conditions.append(ReviewReportRecord.req_id == req_id)
     if task_id:
         conditions.append(ReviewReportRecord.task_id == task_id)
+    apply_visible_product_filter(conditions, visible_ids, ReviewReportRecord.product_id)
 
     # v3.2.2 收敛：count+分页统一走 utils.pagination
     stmt = select(ReviewReportRecord).order_by(ReviewReportRecord.created_at.desc())
@@ -110,8 +122,14 @@ async def list_review_reports(
 async def review_report_stats(
     product_id: str | None = Query(default=None, description="按产品 ID 筛选"),
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """评审报告统计（按类型汇总，供报告中心顶部概览卡片）。"""
+    # v4.1.9：query 参数需显式校验 + 按可见集合过滤
+    if product_id:
+        await assert_product_visible(session, user, product_id)
+    visible_ids = await get_visible_product_ids(session, user)
+
     stmt = (
         select(
             ReviewReportRecord.report_type,
@@ -120,8 +138,12 @@ async def review_report_stats(
         )
         .group_by(ReviewReportRecord.report_type)
     )
+    stat_conditions: list = []
     if product_id:
-        stmt = stmt.where(ReviewReportRecord.product_id == product_id)
+        stat_conditions.append(ReviewReportRecord.product_id == product_id)
+    apply_visible_product_filter(stat_conditions, visible_ids, ReviewReportRecord.product_id)
+    if stat_conditions:
+        stmt = stmt.where(*stat_conditions)
     rows = (await session.execute(stmt)).all()
 
     stats = {
@@ -302,11 +324,15 @@ async def list_prompt_evolution_history(
 async def get_review_report(
     report_id: str,
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """获取评审报告详情（含维度置信度、问题列表、原始报告全文）。"""
     record = await session.get(ReviewReportRecord, report_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"评审报告 {report_id} 不存在")
+
+    # v4.1.9：报告含 issues/summary 全文，需校验归属产品
+    await assert_product_visible(session, user, record.product_id)
 
     return ApiResponse(
         success=True,
@@ -379,6 +405,9 @@ async def adopt_issues(
     record = await session.get(ReviewReportRecord, report_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"评审报告 {report_id} 不存在")
+
+    # v4.1.9：原实现仅 require_write，任意写权限用户可跨产品采纳/驳回意见
+    await assert_product_visible(session, user, record.product_id)
 
     issues = record.issues or []
     issue_map = {i.get("issue_id", ""): i for i in issues if isinstance(i, dict)}

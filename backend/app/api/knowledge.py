@@ -19,7 +19,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user, require_admin, require_write
+from app.core.auth import CurrentUser, get_current_user, require_admin, require_write
+from app.core.product_access import (
+    apply_visible_product_filter,
+    assert_product_visible,
+    get_visible_product_ids,
+)
 from app.utils.pagination import paginate
 from app.db.database import get_session
 from app.db.models import GenerationBatch, Project, Requirement, TestCase, TestPattern, KBSetting, LLMConfig
@@ -70,25 +75,41 @@ async def _project_version(session: AsyncSession, project_id: str | None) -> str
 async def get_knowledge_stats(
     product_id: str | None = Query(default=None, description="按产品筛选"),
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """获取知识库整体统计信息（支持按产品筛选）。"""
+    # v4.1.9：product_id 是 query 参数，路由层无法兜底。显式校验 + 按可见集合过滤，
+    # 否则任何登录用户传别家 product_id（或不传）都能拿到跨产品聚合统计。
+    if product_id:
+        await assert_product_visible(session, user, product_id)
+    visible_ids = await get_visible_product_ids(session, user)
+
     # 构建产品过滤条件
     def _filter(stmt, model):
-        return stmt.where(model.product_id == product_id) if product_id else stmt
+        conditions: list = []
+        if product_id:
+            conditions.append(model.product_id == product_id)
+        apply_visible_product_filter(conditions, visible_ids, model.product_id)
+        return stmt.where(*conditions) if conditions else stmt
 
     total_reqs = (await session.execute(_filter(select(func.count(Requirement.id)), Requirement))).scalar() or 0
     total_cases = (await session.execute(_filter(select(func.count(TestCase.id)), TestCase))).scalar() or 0
     total_patterns = (await session.execute(select(func.count(TestPattern.id)))).scalar() or 0
     # GenerationBatch 没有 product_id，按 req_id 关联的需求过滤
-    if product_id:
-        from sqlalchemy import and_
+    if product_id or visible_ids is not None:
+        batch_conditions: list = []
+        if product_id:
+            batch_conditions.append(Requirement.product_id == product_id)
+        apply_visible_product_filter(batch_conditions, visible_ids, Requirement.product_id)
         total_batches = (await session.execute(
             select(func.count(GenerationBatch.id))
             .join(Requirement, GenerationBatch.req_id == Requirement.id)
-            .where(Requirement.product_id == product_id)
+            .where(*batch_conditions)
         )).scalar() or 0
     else:
-        total_batches = (await session.execute(select(func.count(GenerationBatch.id)))).scalar() or 0
+        total_batches = (await session.execute(
+            select(func.count(GenerationBatch.id))
+        )).scalar() or 0
 
     # 向量库是否为空（冷启动判断）
     kb_empty = False
@@ -122,6 +143,7 @@ async def get_case_quality_report(
     product_id: str | None = Query(default=None, description="按产品筛选"),
     top_n: int = Query(default=10, ge=1, le=50, description="Top-N 条数"),
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """用例库质量报表（docs/14 方向 B / B5）。
 
@@ -137,8 +159,17 @@ async def get_case_quality_report(
        `execution_count` 仅 5 条有值）。报表用 `weight.note` 标注，
        并给出分布直方图让用户自行判断。
     """
+    # v4.1.9：同 /stats，query 参数需显式校验并按可见集合过滤
+    if product_id:
+        await assert_product_visible(session, user, product_id)
+    visible_ids = await get_visible_product_ids(session, user)
+
     def _f(stmt):
-        return stmt.where(TestCase.product_id == product_id) if product_id else stmt
+        conditions: list = []
+        if product_id:
+            conditions.append(TestCase.product_id == product_id)
+        apply_visible_product_filter(conditions, visible_ids, TestCase.product_id)
+        return stmt.where(*conditions) if conditions else stmt
 
     # ---- ① 三档占比 ----
     status_rows = (await session.execute(
@@ -314,6 +345,7 @@ async def list_kb_entries(
     limit: int = Query(default=100, ge=1, le=500, description="每页条数"),
     offset: int = Query(default=0, ge=0, description="偏移量"),
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """获取知识库中的条目列表。
 
@@ -358,11 +390,20 @@ async def list_kb_entries(
         elif vectorized.lower() in ("processing", "failed"):
             vectorized_filter = vectorized.lower()
 
+    # v4.1.9：knowledge 列表原实现只吃用户传入的 product_id，不传即返回全库
+    if product_id:
+        await assert_product_visible(session, user, product_id)
+    visible_ids = await get_visible_product_ids(session, user)
+
     # 从 PostgreSQL 读取已归档的需求（status='archived'）
     if not type_filter or type_filter == "requirement":
         stmt = select(Requirement).where(Requirement.status == "archived").order_by(Requirement.updated_at.desc())
+        req_conditions: list = []
         if product_id:
-            stmt = stmt.where(Requirement.product_id == product_id)
+            req_conditions.append(Requirement.product_id == product_id)
+        apply_visible_product_filter(req_conditions, visible_ids, Requirement.product_id)
+        if req_conditions:
+            stmt = stmt.where(*req_conditions)
         if search:
             stmt = stmt.where(Requirement.title.ilike(f"%{search}%"))
         stmt = stmt.limit(limit).offset(offset)
@@ -407,9 +448,13 @@ async def list_kb_entries(
     # 从 PostgreSQL 读取测试用例
     if not type_filter or type_filter == "test_case":
         stmt = select(TestCase).order_by(TestCase.created_at.desc())
+        case_conditions: list = []
         if product_id:
             # 测试用例表自带 product_id 列，直接按产品隔离过滤
-            stmt = stmt.where(TestCase.product_id == product_id)
+            case_conditions.append(TestCase.product_id == product_id)
+        apply_visible_product_filter(case_conditions, visible_ids, TestCase.product_id)
+        if case_conditions:
+            stmt = stmt.where(*case_conditions)
         if search:
             stmt = stmt.where(TestCase.title.ilike(f"%{search}%"))
         stmt = stmt.limit(limit).offset(offset)
@@ -797,7 +842,11 @@ async def get_model_status() -> ApiResponse:
 # ============================================================================
 
 @router.post("/entries/{entry_id}/revectorize", response_model=ApiResponse, dependencies=[Depends(require_write)])
-async def reverctorize_requirement(entry_id: str, session: AsyncSession = Depends(get_session)) -> ApiResponse:
+async def reverctorize_requirement(
+    entry_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
+) -> ApiResponse:
     """对单条已归档需求重新派发向量化任务。
 
     用于「已归档但未向量化」的需求补救。仅接受 status=archived 的需求。
@@ -807,6 +856,9 @@ async def reverctorize_requirement(entry_id: str, session: AsyncSession = Depend
     record = result.scalar_one_or_none()
     if record is None:
         raise HTTPException(status_code=404, detail=f"需求 {entry_id} 不存在或未归档")
+
+    # v4.1.9：entry_id 是需求 ID，需校验归属产品（原实现任意 write 用户可跨产品触发重向量化）
+    await assert_product_visible(session, user, record.product_id)
 
     project_version = await _project_version(session, record.project_id)
     meta = _build_requirement_kb_meta(record, project_version)

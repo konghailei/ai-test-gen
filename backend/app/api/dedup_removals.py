@@ -19,6 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, get_current_user, require_write
+from app.core.product_access import assert_product_visible, get_visible_product_ids
+from app.core.product_guard import product_id_of_dedup_removal
 from app.db.database import get_session
 from app.db.models import DedupRemoval, Requirement, TestCase
 from app.models.api_schemas import ApiResponse
@@ -59,6 +61,7 @@ async def list_dedup_removals(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """去重留痕列表（分页，按创建时间倒序）。"""
     conditions = []
@@ -72,6 +75,18 @@ async def list_dedup_removals(
         conditions.append(DedupRemoval.decision == decision)
     if restored is not None:
         conditions.append(DedupRemoval.restored.is_(restored))
+
+    # v4.1.9：留痕表无 product_id，经 req_id 回溯源需求做产品隔离。
+    # 原实现不传筛选即返回全库，可看到别家产品被去重用例的标题与完整 JSON。
+    visible_ids = await get_visible_product_ids(session, user)
+    if visible_ids is not None:
+        conditions.append(
+            DedupRemoval.req_id.in_(
+                select(Requirement.id).where(
+                    Requirement.product_id.in_(visible_ids or ["__no_visible_products__"])
+                )
+            )
+        )
 
     stmt = select(DedupRemoval).where(*conditions) if conditions else select(DedupRemoval)
     total = (await session.execute(
@@ -98,6 +113,7 @@ async def list_dedup_removals(
 async def get_dedup_removal(
     removal_id: str,
     session: AsyncSession = Depends(get_session),
+    user: CurrentUser = Depends(get_current_user),
 ) -> ApiResponse:
     """留痕详情（含被去重用例完整 JSON，供人工比对与恢复预览）。"""
     row = (await session.execute(
@@ -105,6 +121,10 @@ async def get_dedup_removal(
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail=f"留痕 {removal_id} 不存在")
+    # v4.1.9：详情返回被去重用例全文，需校验归属产品
+    await assert_product_visible(
+        session, user, await product_id_of_dedup_removal(session, removal_id)
+    )
     return ApiResponse(success=True, message="查询成功", data=_row_to_dict(row, include_case=True))
 
 
@@ -128,6 +148,12 @@ async def restore_dedup_removal(
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail=f"留痕 {removal_id} 不存在")
+
+    # v4.1.9：必须在幂等分支之前校验——否则越权用户可凭已恢复的留痕拿到 restored_case_id
+    await assert_product_visible(
+        session, user, await product_id_of_dedup_removal(session, removal_id)
+    )
+
     if row.decision != "removed":
         raise HTTPException(status_code=400, detail="仅 removed（剔除）记录可恢复")
     if row.restored:
