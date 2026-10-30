@@ -86,8 +86,28 @@ async def main() -> int:
                 ("action=delete", ev.action == "delete"),
                 ("aggregate_type=test_case", ev.aggregate_type == "test_case"),
                 ("aggregate_id 指向该用例", ev.aggregate_id == case_id),
-                ("状态已投递或待投递", ev.status in ("pending", "delivering", "delivered")),
             ]
+
+        # 出箱链路验证：relay 跑在**真实 uvicorn 进程**里（interval=5s），
+        # 只有它成功调用 Milvus 后状态才会变 done。若 relay 没启动、
+        # 或 Milvus 删除抛错，这里会停在 pending/delivering/failed。
+        # 状态枚举（models.VectorOutbox）：pending / delivering / done / failed
+        print("[wait] 等待 relay 投递（最长 24s）...")
+        final_status = None
+        for _ in range(12):
+            await asyncio.sleep(2)
+            async with async_session() as s:
+                final_status = (
+                    await s.execute(
+                        select(VectorOutbox.status).where(
+                            VectorOutbox.aggregate_id == case_id
+                        )
+                    )
+                ).scalar_one_or_none()
+            if final_status == "done":
+                break
+        print(f"[wait] outbox 最终状态: {final_status}")
+        checks.append(("relay 已投递到 Milvus（status=done）", final_status == "done"))
 
         for name, cond in checks:
             ok &= bool(cond)
