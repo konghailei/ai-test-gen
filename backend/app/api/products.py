@@ -1323,6 +1323,36 @@ async def reactivate_project(
             except Exception as inner_e:
                 logger.warning("[ReactivateProject] 单条FP向量清理失败 fp_id={}: {}", f.id, str(inner_e)[:100])
 
+        # v4.1.9：同步批量 + 逐条兜底都失败时，补一条 scope 出箱让 relay 重试。
+        # 否则 Milvus 长时间不可用会在「恢复活动」后残留 status=archived 的旧向量，
+        # 永久污染 KB 检索且没有任何补偿路径。
+        # 正常路径（上面批量成功）不会走到这里，因此不影响 shared_rule 对账对
+        # 「向量已删干净」的时序依赖。
+        try:
+            _enqueue_outbox(
+                session,
+                aggregate_type="scope",
+                aggregate_id=f"project:{proj_id}",
+                action="delete",
+                revision=0,
+                payload={
+                    "scope_type": "project",
+                    "scope_id": proj_id,
+                    "product_id": getattr(project, "product_id", "") or "",
+                    "fp_ids": [f.id for f in all_fps],
+                },
+                created_by="reactivate_fallback",
+            )
+            await session.commit()
+            logger.info(
+                "[ReactivateProject] 同步清理失败，已入队 scope 出箱兜底: proj_id={}", proj_id
+            )
+        except Exception as enq_err:
+            logger.error(
+                "[ReactivateProject] 出箱兜底入队也失败（需人工跑向量对账）: proj_id={}, err={}",
+                proj_id, str(enq_err)[:150],
+            )
+
     # 7. v2.48: 共享业务规则/全局约束向量自愈。
     # 上一步按 project_id 批量删向量会连带删掉本项目贡献的 shared_rule 条目——
     # 而一个规则可能被产品下多个项目引用（向量 ID 只按 product+规则文本），

@@ -380,6 +380,21 @@ class ClarifyLoopGuard:
 # ============================================================================
 
 
+def should_write_fp_checkpoint(failed_shard_count: int) -> bool:
+    """该 FP 是否允许写入「完成」checkpoint（v4.1.9）。
+
+    把失败语义收敛到这一处。原实现用布尔 `single_shard_failed` 且只在
+    `len(shards) == 1` 时置位——大 FP 按要点类型二次分片后，**部分失败仍会
+    写 checkpoint**，而 checkpoint 里只有成功子批的用例，失败子批的要点永久
+    丢失（续跑时 completed_fps 含该 FP → 永不重试）。
+
+    语义：任一子批失败 → 整 FP 不写 checkpoint，续跑重试整 FP。
+    本次运行仍产出成功子批的用例（见 _gen_one_fp 的完成回调），避免
+    「4 个分片成功 3 个也全丢」。
+    """
+    return failed_shard_count == 0
+
+
 class Orchestrator:
     """LangGraph DAG 编排器。
 
@@ -1335,7 +1350,7 @@ class Orchestrator:
         # v3.5.4（docs/21 D-5）：大 FP 按要点类型二次分片。
         # 增量文档常把几十个要点塞进同一个 FP（v2.0 实测 1 FP/97 要点 →
         # 单分片 prompt 膨胀 → LLM 覆盖面不足，覆盖率仅 26.8%）。
-        # 对要点数 > _BIG_FP_POINT_THRESHOLD 的 FP，按要点类型分组拆成多批，
+        # 对要点数 > 40（硬编码阈值，见下方 `len(pts) <= 40` 判断）的 FP，按要点类型分组拆成多批，
         # 每批只携带本批要点（fp_scope 机制复用），prompt 缩小、覆盖聚焦。
         from app.utils.coverage import collect_points as _collect_points
 
@@ -1439,7 +1454,7 @@ class Orchestrator:
                 shards = [fp]
             fp_cases_all: list[dict] = []   # 局部收集（并发下不直接 extend 共享列表）
             shard_total_cases = 0
-            single_shard_failed = False     # 单分片 FP 失败：跳过完成回调（原语义：续跑重试）
+            failed_shard_count = 0          # v4.1.9：失败子批计数（多分片部分失败也计入）
             async with _gen_sem:
                 for _si, shard in enumerate(shards, 1):
                     shard_name = shard.get("name", fname)
@@ -1475,19 +1490,26 @@ class Orchestrator:
                         # v3.3（修 N9）：生成通道失败会**静默减少用例数量**——
                         # done 事件只报"流水线完成"，用户不知道少了哪些功能点的用例。
                         logger.warning(
-                            "[Orchestrator] 功能点[{}]分片生成失败（不阻断，续跑将重试）: {}",
-                            fname, str(e)[:150],
+                            "[Orchestrator] 功能点[{}]子批 {}/{} 生成失败"
+                            "（不写 checkpoint，续跑将重试整 FP）: {}",
+                            fname, _si, len(shards), str(e)[:150],
                         )
                         if "fp_generate_failed" not in degraded_flags:
                             degraded_flags.append("fp_generate_failed")
                         await _emit_gen(
-                            f"功能点 [{fname}] 生成失败",
+                            f"功能点 [{shard_name}] 生成失败",
                             {"key": fid, "name": fname, "status": "failed", "cases": shard_total_cases},
                         )
                         fp_cases = []
-                        # 子批失败不阻断其它子批，但该 FP 计为失败批次（与原语义一致）
+                        # v4.1.9 修复（多分片部分失败静默丢用例）：
+                        # 原实现只在 len(shards)==1 时置位，多分片场景下该 FP 仍会走
+                        # 完成回调、被 checkpoint 记为「已完成」——而 checkpoint 里只
+                        # 有成功子批的用例，失败子批的要点永久丢失（续跑时
+                        # completed_fps 含该 FP → 永不重试）。
+                        # 现在无论几个分片，任一子批失败即整 FP 不写 checkpoint。
+                        # 单分片无需继续（break）；多分片继续跑完剩余，本次尽量多产出。
+                        failed_shard_count += 1
                         if len(shards) == 1:
-                            single_shard_failed = True
                             break
                     for c in fp_cases:
                         if not c.get("related_fp"):
@@ -1498,7 +1520,18 @@ class Orchestrator:
             # v3.5.5 守卫修复：单分片 FP 失败时不进入完成回调（与 v3.5.4 原语义一致：
             # 失败 FP 不写 checkpoint、不发 done → 续跑时 completed_fps 不含它，会重试）。
             # 若这里无条件执行，失败 FP 会被记成"完成 0 条"，续跑被跳过、永不重试。
-            if single_shard_failed:
+            if not should_write_fp_checkpoint(failed_shard_count):
+                # v4.1.9：任一子批失败的 FP —— 本次仍产出**成功子批**的用例
+                # （避免"3/4 分片成功也全丢"），但**不写 checkpoint**，让续跑重试
+                # 整 FP。续跑重生成的成功子批用例由跨子轮语义去重
+                # （0.92 阈值 + 数字护栏）合并，不会简单堆叠。
+                if fp_cases_all:
+                    resolved_cases.extend(fp_cases_all)
+                await _emit_gen(
+                    f"功能点 [{fname}] 部分子批失败：本次产出 {shard_total_cases} 条，"
+                    f"续跑将重试整 FP（{len(shards)} 子批）",
+                    {"key": fid, "name": fname, "status": "failed", "cases": shard_total_cases},
+                )
                 return
             resolved_cases.extend(fp_cases_all)
             checkpoint_groups.append({
