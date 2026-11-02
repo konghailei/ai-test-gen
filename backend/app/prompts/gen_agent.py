@@ -236,18 +236,13 @@ SYSTEM_PROMPT = """你是一位资深测试工程师。请根据以下结构化�
     ],
     "cleanup": ["退出登录", "清除浏览器缓存"],
     "related_requirement": "REQ-LOGIN-001",
-    "related_fp": "FP-用户登录验证",
+    "related_fp": "REQ-LOGIN-001-0001",
     "source_pattern": "",
     "gen_metadata": {
-      "gen_confidence": 0.95,
-      "model": "deepseek-v3",
-      "prompt_version": "v2.0"
+      "gen_confidence": 0.95
     },
     "execution": {
-      "timeout_seconds": 15,
-      "retry_count": 0,
-      "depends_on": [],
-      "skip_conditions": []
+      "depends_on": []
     }
   },
   {
@@ -271,18 +266,13 @@ SYSTEM_PROMPT = """你是一位资深测试工程师。请根据以下结构化�
     ],
     "cleanup": [],
     "related_requirement": "REQ-LOGIN-001",
-    "related_fp": "FP-用户登录验证",
+    "related_fp": "REQ-LOGIN-001-0001",
     "source_pattern": "",
     "gen_metadata": {
-      "gen_confidence": 0.90,
-      "model": "deepseek-v3",
-      "prompt_version": "v2.0"
+      "gen_confidence": 0.90
     },
     "execution": {
-      "timeout_seconds": 15,
-      "retry_count": 0,
-      "depends_on": [],
-      "skip_conditions": []
+      "depends_on": []
     }
   }
 ]
@@ -329,19 +319,20 @@ UTCF_CASE_SCHEMA = """每个用例的 JSON 结构：
   ],
   "cleanup": ["清理操作"],
   "related_requirement": "REQ-YYYY-NNN",
+  "related_fp": "关联功能点的 id（必须与「功能点清单」中该功能点的 id 完全一致；禁止填中文名称，也不要填需求 id）",
   "source_pattern": "参考的测试模式 ID（可选）",
   "gen_metadata": {
-    "gen_confidence": 0.8,
-    "model": "",
-    "prompt_version": "v1.0"
+    "gen_confidence": 0.8
   },
   "execution": {
-    "timeout_seconds": 15,
-    "retry_count": 0,
-    "depends_on": [],
-    "skip_conditions": []
+    "depends_on": []
   }
-}"""
+}
+
+上述结构里没有列出的 gen_metadata.model / prompt_version、
+execution.timeout_seconds / retry_count / skip_conditions，一律由系统在落库时
+自动填充真实值（模型名只有后端知道自己被路由到哪家），**不要在输出里写** ——
+写了也会被覆盖，只会白白增加生成耗时。"""
 
 
 # ============================================================================
@@ -868,9 +859,17 @@ def build_user_prompt(
             sanitize_srr_for_generation(srr), ensure_ascii=False, indent=2
         )
 
+    # v4.2.4：Schema 已注册进 prompt_manager，优先取管理台覆盖值；
+    # 这里用局部导入，避免 prompts 包 ↔ prompt_manager 的循环依赖。
+    try:
+        from app.core import prompt_manager as _pm
+        _utcf_schema = _pm.get("gen_agent", "UTCF_CASE_SCHEMA") or UTCF_CASE_SCHEMA
+    except Exception:  # noqa: BLE001
+        _utcf_schema = UTCF_CASE_SCHEMA
+
     return f"""请根据以下需求，生成完整的测试用例集。
 
-{UTCF_CASE_SCHEMA}
+{_utcf_schema}
 {few_shot_section}
 {patterns_section}
 {impact_section}
