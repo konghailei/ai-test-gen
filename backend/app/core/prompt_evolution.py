@@ -194,6 +194,12 @@ async def evolve_prompt(
 
     body, old_section = split_prompt(current)
 
+    # v4.2.3：三段式短事务——第 182 行 collect_accepted_issues 已开启事务，
+    # 下面的 llm_client.call_json 是同步等待 LLM（整合分析可达数十秒）。
+    # 先提交释放连接；reports / issues 均为普通 dict（见 235 行 r["id"]），
+    # 不依赖 ORM 会话；第 247 行 session.add(record) 会重新开启事务。
+    await session.commit()
+
     # 3) LLM 整合沉淀区段
     user_prompt = (
         f"【当前沉淀区段】\n{old_section or '（空，首次整合）'}\n\n"

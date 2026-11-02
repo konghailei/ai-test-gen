@@ -972,6 +972,13 @@ async def kqa_chat(
     # 3. 调用 LLM（使用 KB 专属 LLM + prompt_manager 管理的提示词）
     from app.api.knowledge import get_kb_llm_provider
     kb_provider = await get_kb_llm_provider(session)
+
+    # v4.2.3：三段式短事务——第 943 行的 select 已开启事务，而下面的 llm_client.call
+    # 是同步等待（追问回答可达数十秒）。不先提交就一直处于「事务中空闲」，连接不归还
+    # 池子；并发追问达到 PG_POOL_SIZE + 10 时会拖垮登录等普通请求。
+    # engine 配了 expire_on_commit=False，record 仍可读写；第 997 行更新
+    # conversation_history 时会自动开启新事务。
+    await session.commit()
     try:
         answer = await llm_client.call(
             prompt=chat_prompt,
