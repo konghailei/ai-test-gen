@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select
@@ -156,7 +158,11 @@ async def export_testcases(
         raise HTTPException(status_code=400, detail=f"不支持的导出格式: {req.format}")
 
     try:
-        content, media_type, filename = export_cases(
+        # v4.2.2：Excel/XMind 构建包含数百条用例与单元格样式，是 CPU 密集型同步操作。
+        # 直接在 async 路由内调用会占住事件循环，同进程的 SSE 推送、/api/health 心跳
+        # 以及其他并发请求全部被拖住，改用 to_thread 卸载到线程池。
+        content, media_type, filename = await asyncio.to_thread(
+            export_cases,
             cases, req.format, project_name=req.project_name,
             include_details=req.include_details,
         )
