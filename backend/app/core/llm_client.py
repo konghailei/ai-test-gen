@@ -1120,7 +1120,10 @@ class LLMClient:
             fallback = settings.fallback_llm_config
 
             # 主提供商
-            if primary["api_key"]:
+            # v4.2.3：必须校验 DB 禁用状态——传统字段可能残留已被删除/禁用的供应商
+            # （_apply_config_to_settings 写进去后不会自动还原，详见 settings.py 中
+            # _ENV_LLM_BASELINE 的注释）；不校验会让它「复活」继续收请求。
+            if primary["api_key"] and not _is_db_disabled(settings.LLM_PROVIDER):
                 primary_key = f"{settings.LLM_PROVIDER}:{primary['model']}"
                 if self._provider_disabled_until.get(primary_key, 0) < now:
                     candidates.append({
@@ -1136,7 +1139,11 @@ class LLMClient:
             if fallback and fallback["api_key"] and not model:
                 fallback_provider = "openai" if settings.LLM_PROVIDER == "deepseek" else "deepseek"
                 fallback_key = f"{fallback_provider}:{fallback['model']}"
-                if self._provider_disabled_until.get(fallback_key, 0) < now:
+                # v4.2.3：与主提供商同理，备用供应商也要过 DB 禁用检查
+                if (
+                    not _is_db_disabled(fallback_provider)
+                    and self._provider_disabled_until.get(fallback_key, 0) < now
+                ):
                     candidates.append({
                         "key": fallback_key,
                         "api_key": fallback["api_key"],

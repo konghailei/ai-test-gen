@@ -36,6 +36,39 @@ from app.models.api_schemas import (
 from app.utils.crypto import decrypt_api_key, encrypt_api_key
 from app.utils.logger import logger
 
+# ============================================================================
+# v4.2.3：.env 初始值快照（防 DB 配置污染传统字段后无法还原）
+# ============================================================================
+# 背景：`_apply_config_to_settings` 在供应商 is_primary 时，会把 DB 里的 Key 直接写进
+# `settings.LLM_PROVIDER` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` 等传统字段
+# （llm_client 的传统单例回退分支要读它们）。
+#
+# 问题：用户在后台把该供应商删除、或把全部供应商禁用后，`_reset_provider_configs`
+# 只清空了 `_all_provider_configs` 字典，这些传统字段仍留着 DB 的旧值；
+# 而 llm_client 的 `if not candidates:` 回退分支会直接读它们 —— 于是已删除的供应商
+# 被「复活」，继续收到请求，甚至拿着已作废的 Key 去调用。
+#
+# 因此在模块加载时把 .env 的初始值拍一份快照，全量清空时据此还原。
+_ENV_LLM_BASELINE: dict[str, Any] = {
+    "LLM_PROVIDER": settings.LLM_PROVIDER,
+    "DEEPSEEK_API_KEY": settings.DEEPSEEK_API_KEY,
+    "DEEPSEEK_BASE_URL": settings.DEEPSEEK_BASE_URL,
+    "DEEPSEEK_MODEL": settings.DEEPSEEK_MODEL,
+    "OPENAI_API_KEY": settings.OPENAI_API_KEY,
+    "OPENAI_BASE_URL": settings.OPENAI_BASE_URL,
+    "OPENAI_MODEL": settings.OPENAI_MODEL,
+}
+
+
+def _restore_env_llm_baseline() -> None:
+    """把传统 LLM 字段还原为 .env 初始值。
+
+    仅在内存配置被**全量清空**时调用（见 `_reset_provider_configs`）。
+    """
+    for field_name, value in _ENV_LLM_BASELINE.items():
+        setattr(settings, field_name, value)
+
+
 def _sanitize_error(msg: str) -> str:
     """脱敏 LLM 错误信息中的 API Key 片段（v2.2 新增）。"""
     import re as _re
@@ -384,6 +417,12 @@ def _reset_provider_configs(keep: list[str]) -> list[str]:
             ", ".join(stale),
         )
     settings._all_provider_configs = {}
+    # v4.2.3：keep 为空 = DB 中已无任何可用供应商，此时必须把传统字段一并还原到
+    # .env 基线。否则 llm_client 的 `if not candidates:` 回退分支仍会读到被
+    # _apply_config_to_settings 写进去的旧 Key，把已删除的供应商「复活」。
+    # keep 非空时不动传统字段——调用方紧接着会用 _apply_config_to_settings 重设。
+    if not keep:
+        _restore_env_llm_baseline()
     return stale
 
 
