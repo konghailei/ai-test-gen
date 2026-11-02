@@ -35,3 +35,17 @@ services:
       --port 8000
       --reload
       --reload-dir /app/app
+
+  frontend:
+    volumes:
+      # 挂载本地构建产物，替代镜像里那份 /usr/share/nginx/html。
+      #
+      # 用法：在 frontend/ 下 `npm run build`，dist 更新后 nginx 立即服务新文件，
+      # **不需要重建 web 镜像**（nginx 没开 open_file_cache，文件替换即时可见）。
+      #
+      # 限制：
+      # 1. 这是「构建后生效」而非热更新——改完 .tsx 必须 build 一次。
+      #    要真正的 HMR 得跑 vite dev server，那是另一套结构（端口/代理都要改）。
+      # 2. index.html 用 no-cache、哈希资源带 1y 缓存，浏览器可能仍拿旧文件，
+      #    开发时用硬刷新（Ctrl+Shift+R）。改了接口而页面行为没变，先怀疑缓存。
+      - ./frontend/dist:/usr/share/nginx/html:ro
