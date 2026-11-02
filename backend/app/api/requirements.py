@@ -1527,6 +1527,22 @@ async def finalize_requirement(
 
     logger.info("[API/requirements] 最终 SRR 生成: req_id={}, kb_augments={}", req_id, len(kb_augments))
 
+    # v4.2.2（P1）：三段式短事务——**先归还连接，再做 LLM 重解析**。
+    #
+    # 原实现中 session 来自 Depends(get_session)（其实现为 yield 后 commit），
+    # 整个请求共用一个连接；第 1504 行的 select 已开启事务，而紧接着的
+    # req_agent.parse() 是 LLM 调用（实测平均 200s+）。这期间事务一直空闲挂起，
+    # 连接不归还池子 —— database.py 把 idle_in_transaction_session_timeout 调到
+    # 900s 只是让 PG 别主动掐断，并没有解决「连接被占住」本身：
+    # 并发 finalize 达到 PG_POOL_SIZE + 10 时会耗尽连接池，登录、用例列表等
+    # 普通请求全部拿不到连接而超时；同时长事务阻塞相关表的 VACUUM 与行锁释放。
+    #
+    # 此处 commit 结束读事务、把连接还给池子。读取阶段需要的标量
+    # （enhanced_raw / kb_augments / srr）均已在上面取完；engine 配置了
+    # expire_on_commit=False，故 record 仍在 identity map 内可继续读/赋值，
+    # 后续 1566 行起的写回会自动开启新事务，语义不变。
+    await session.commit()
+
     # v3.4.5（缺陷 C）：先置 None，保证 parse 抛异常时下方 `if finalize_result.fps`
     # 走得到「无 FP 可更新」分支，而不是 UnboundLocalError → 全局 500。
     finalize_result = None
