@@ -255,6 +255,13 @@ async def load_db_config_to_settings(session: AsyncSession) -> None:
         )
         rows = result.scalars().all()
         if not rows:
+            # v4.2.2：DB 中已无任何供应商行（用户在后台全删）时，必须同步清空内存里的
+            # 动态配置，否则 settings._all_provider_configs 仍保留上一次加载的供应商，
+            # llm_client 的故障转移会继续调用一家 DB 里根本不存在的供应商
+            # （与 _reset_provider_configs 文档里记的那次事故同型）。
+            from app.core.llm_client import llm_client as _lc_purge
+            _reset_provider_configs([])
+            _lc_purge._db_disabled_providers.clear()
             return  # 无持久化配置，使用 .env 默认值
 
         # 迁移并加载所有供应商配置
@@ -336,7 +343,15 @@ async def load_db_config_to_settings(session: AsyncSession) -> None:
                 primary_config["provider"], primary_config["model"], len(all_configs),
             )
         else:
-            logger.info("[settings] DB 中有配置但无有效 API Key，使用 .env 默认值")
+            # v4.2.2：DB 里有行、但没有任何「启用且有 API Key」的供应商（全部禁用 /
+            # Key 被清空）时，同样必须清空内存字典。原实现只走 else 打日志，
+            # 跳过了 _reset_provider_configs，于是上一次的供应商配置继续留在
+            # settings._all_provider_configs，llm_client 仍会拿它做故障转移。
+            stale = _reset_provider_configs([])
+            logger.info(
+                "[settings] DB 中有配置但无有效 API Key，使用 .env 默认值（已清理内存残留供应商: {}）",
+                ", ".join(stale) or "无",
+            )
 
     except Exception as e:
         logger.warning("[settings] 从 DB 加载 LLM 配置失败（使用 .env 默认值）: {}", str(e)[:120])
