@@ -1,0 +1,37 @@
+# ============================================================================
+# 开发叠加层：给 offline（生产形态）加上代码热重载
+# ============================================================================
+#
+# 用法（两份必须一起指定，顺序不能反）：
+#   docker compose -f docker-compose.offline.yml -f docker-compose.dev.override.yml up -d backend
+#
+# 为什么不直接改 docker-compose.offline.yml：
+#   offline 是生产形态——backend 不挂载，代码固化在镜像里，部署结果可复现。
+#   直接给它加挂载，会让「生产跑镜像 / 开发跑工作区」两种语义混在同一份文件里，
+#   下次部署时分不清当前跑的到底是哪份代码。
+#   叠加层只补充开发便利，生产仍然单用 offline。
+#
+# ★ 已知代价（务必清楚）：
+#   1. `--reload` 在文件变动时重启 worker。**正在跑的生成任务会被中断**：
+#      SSE 断开后服务端会把任务置为 aborted，可用 resume 续跑恢复。
+#      跑长任务期间别改 .py。
+#   2. 依赖仍来自镜像。改 requirements.txt 必须重建 backend 镜像
+#      （base 镜像那层还要走 docker-compose.base.yml），热重载管不了依赖。
+#   3. 挂载 ./backend:/app 覆盖镜像内整个 /app，所以镜像里那份代码在开发态下
+#      不生效——这既是优点（改即生效），也意味着「镜像和代码不一致」时
+#      开发环境看不出问题。
+#
+# ★ 只监听 /app/app：不监听整个 /app，避免 data/、logs/、__pycache__ 写入
+#   触发无意义的重启（那会让正在跑的 LLM 调用白费）。
+
+services:
+  backend:
+    volumes:
+      # 覆盖镜像内的 /app，改 .py 立即生效
+      - ./backend:/app
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      --reload-dir /app/app
