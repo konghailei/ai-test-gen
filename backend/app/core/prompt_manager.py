@@ -15,6 +15,7 @@ from app.prompts import (
     knowledge_qa,
     fp_agent,
     vision,
+    prompt_evolution,
 )
 
 # ============================================================================
@@ -126,6 +127,33 @@ _PROMPT_REGISTRY: list[dict] = [
         "name": "USER_PROMPT_TEMPLATE",
         "default": vision.USER_PROMPT_TEMPLATE,
         "description": "多模态图片识别用户提示词模板 — 图片识别请求模板",
+    },
+    # v4.2.4：以下四项原本是「管理盲区」——要么硬编码在 core/（PromptEvolution 的系统提示词），
+    # 要么作为静态常量直接拼进 User Prompt，管理台看不到、也就无法跟着评审意见演进。
+    # 现已注册，并在各自的 build_user_prompt 里通过 prompt_manager 读取（局部导入避免循环依赖）。
+    {
+        "module": "prompt_evolution",
+        "name": "INTEGRATION_SYSTEM_PROMPT",
+        "default": prompt_evolution.INTEGRATION_SYSTEM_PROMPT,
+        "description": "PromptEvolution 系统指令 — 把评审采纳意见合并为「历史评审沉淀规则」区段",
+    },
+    {
+        "module": "gen_agent",
+        "name": "UTCF_CASE_SCHEMA",
+        "default": gen_agent.UTCF_CASE_SCHEMA,
+        "description": "用例 JSON 结构说明 — 由 build_user_prompt 拼入 User Prompt（与 SYSTEM_PROMPT 的 few-shot 互补）",
+    },
+    {
+        "module": "clarify_agent",
+        "name": "QUESTIONS_SCHEMA",
+        "default": clarify_agent.QUESTIONS_SCHEMA,
+        "description": "澄清问题 JSON 结构 — 拼入 User Prompt，与 SYSTEM_PROMPT 里的示例互补",
+    },
+    {
+        "module": "req_agent",
+        "name": "SRR_SCHEMA_GUIDE",
+        "default": req_agent.SRR_SCHEMA_GUIDE,
+        "description": "SRR 输出结构指南 — 拼入需求解析 User Prompt",
     },
 ]
 

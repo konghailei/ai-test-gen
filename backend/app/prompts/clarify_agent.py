@@ -583,9 +583,17 @@ def build_user_prompt(
     if srr.get("_raw_text"):
         from app.utils.external_content import wrap_external_content
         srr = {**srr, "_raw_text": wrap_external_content(str(srr["_raw_text"]))}
+    # v4.2.4：Schema 已注册进 prompt_manager，优先取管理台覆盖值；
+    # 局部导入避免 prompts 包 ↔ prompt_manager 的循环依赖。
+    try:
+        from app.core import prompt_manager as _pm
+        _questions_schema = _pm.get("clarify_agent", "QUESTIONS_SCHEMA") or QUESTIONS_SCHEMA
+    except Exception:  # noqa: BLE001
+        _questions_schema = QUESTIONS_SCHEMA
+
     return f"""请对以下需求（含初步结构化草稿）进行三级检测（完整性/歧义性/遗漏），识别会阻碍生成完整 SRR 的缺口与模糊点，并生成人工澄清问题列表。
 
-{QUESTIONS_SCHEMA}
+{_questions_schema}
 {kb_hint}
 {similar_hint}
 {reference_check_hint}

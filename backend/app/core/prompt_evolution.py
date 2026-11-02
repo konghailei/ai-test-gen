@@ -28,6 +28,7 @@ from sqlalchemy import select
 from app.core.llm_client import llm_client
 from app.db import prompt_store
 from app.db.models import PromptIntegrationRecord, ReviewReportRecord
+from app.prompts.prompt_evolution import INTEGRATION_SYSTEM_PROMPT as _INTEGRATION_SYSTEM_PROMPT
 from app.utils.logger import logger
 
 # ============================================================================
@@ -130,20 +131,9 @@ async def collect_accepted_issues(
 # LLM 整合
 # ============================================================================
 
-_INTEGRATION_SYSTEM_PROMPT = """你是一位提示词工程师，负责将测试评审反馈沉淀为生成提示词的改进规则。
-
-你的任务：读取【当前沉淀区段】（可能为空）和【本次新增的已采纳评审意见】，合并去重后输出新的完整沉淀区段。
-
-## 合并原则
-1. 每条意见提炼为一条可执行的生成规则（祈使句，说明生成时必须做什么/禁止什么）；
-2. 语义重复的规则合并为一条，保留更具体的表述；矛盾时以人工意见（human_comment）为准；
-3. 已有区段中未被本次意见推翻的规则原样保留，不得删改；
-4. 规则按主题分组（可用 ### 小标题），每条以 "- " 开头；
-5. 区段总长度控制在 1500 字以内，超出时合并相近规则；
-6. 人工补充意见（manual_notes）优先级最高，必须体现为明确规则。
-
-## 输出格式（严格 JSON）
-{"new_section": "合并后的完整规则文本：只包含 ### 小标题与 '- ' 规则条目，不要输出'历史评审沉淀规则'大标题（系统自动添加），不要输出任何包裹标记", "summary": "一句话概述本次整合（新增几条/合并几条/总条数）"}"""
+# v4.2.4：本段提示词已迁至 app/prompts/prompt_evolution.py 并由 prompt_manager 纳管，
+# 便于在管理台查看/调优「评审意见 → 生成规则」的合并质量。
+# 顶部 import 保留了 _INTEGRATION_SYSTEM_PROMPT 别名，下方调用点无需改动。
 
 
 def _format_issues_for_llm(issues: list[dict], manual_notes: str) -> str:
