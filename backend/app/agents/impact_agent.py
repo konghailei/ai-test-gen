@@ -806,9 +806,13 @@ class ImpactAnalysisAgent:
                 related_fp = case_json.get("related_fp", "") or case_json.get("functional_point", "") or ""
                 if not related_fp:
                     continue
-                # 按 FP 名称匹配计数
+                # v4.2.4：id / name 双口径匹配。
+                # 原实现只按 fp_name 严格相等比对；但提示词要求 related_fp 填功能点 **id**
+                # （禁止填中文名）。实测生产库：填 id 的 2896 条、填名称的仅 12 条 ——
+                # 也就是说绝大多数用例根本计不进所属功能点，影响分析页的"用例数"长期失真。
+                # 注：FP 表的 id 本身就是 REQ-xxx 形态（不是独立 FP- 前缀），无法靠前缀区分。
                 for fid, fname in fp_name_for_count.items():
-                    if related_fp == fname:
+                    if related_fp in (fid, fname):
                         case_counts[fid] = case_counts.get(fid, 0) + 1
 
         affected_fps_list = []
