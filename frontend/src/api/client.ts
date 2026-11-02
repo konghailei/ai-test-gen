@@ -41,20 +41,43 @@ const DEFAULT_TIMEOUT_MS = 30000
  *   POST /requirements/{id}/impact-analysis             → 同上（前端实际调用的是这个 POST 版本）
  *   POST /requirements/{id}/fp/{fid}/impact-description → impact_agent 单 FP 影响分析
  *
+ * v4.2.3 追加：POST /knowledge-qa/chat 与 POST /review-reports/prompt-evolution
+ * 同样是请求内同步 await LLM 的非流式接口。
+ *
  * 沿用 30s 会出现「后端仍在执行并最终入库、前端已报超时」，用户看到报错后重试，
- * 还会叠加出并发分析任务。故按路径单独给 5 分钟。
+ * 还会叠加出并发分析/追问任务。故按路径单独给 5 分钟。
  */
 const LONG_TIMEOUT_MS = 300000
-const LONG_TIMEOUT_PATTERNS: RegExp[] = [
-  /^\/requirements\/[^/]+\/finalize$/,
-  /^\/requirements\/[^/]+\/impact$/,
-  /^\/requirements\/[^/]+\/impact-analysis$/,
-  /^\/requirements\/[^/]+\/fp\/[^/]+\/impact-description$/,
+
+/** 同步 LLM 端点规则：路径 + 允许的方法（methods 缺省表示不限方法）。 */
+const LONG_TIMEOUT_RULES: Array<{ pattern: RegExp; methods?: string[] }> = [
+  // 需求侧：LLM 重解析 / 影响分析
+  { pattern: /^\/requirements\/[^/]+\/finalize$/, methods: ['POST'] },
+  { pattern: /^\/requirements\/[^/]+\/impact$/, methods: ['GET'] },
+  { pattern: /^\/requirements\/[^/]+\/impact-analysis$/, methods: ['POST'] },
+  { pattern: /^\/requirements\/[^/]+\/fp\/[^/]+\/impact-description$/, methods: ['POST'] },
+  // v4.2.3：知识库追问（非流式，后端在请求内同步 await LLM）
+  { pattern: /^\/knowledge-qa\/chat$/, methods: ['POST'] },
+  // v4.2.3：提示词演进整合（非流式同步 LLM）。
+  // 同一路径还有 GET 版本（整合历史列表，纯 DB 查询），故限定 POST，避免误伤。
+  { pattern: /^\/review-reports\/prompt-evolution$/, methods: ['POST'] },
 ]
 
-/** 按请求路径选择超时：命中同步 LLM 端点用长超时，其余保持默认 */
-function resolveTimeoutMs(url: string): number {
-  return LONG_TIMEOUT_PATTERNS.some(re => re.test(url)) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS
+/**
+ * 按请求路径 + 方法选择超时：命中同步 LLM 端点用长超时，其余保持默认。
+ *
+ * 两处细节不能省：
+ * 1. 先剥离 query string —— 部分调用（如 evolutionHistory）会拼 `?product_id=...`，
+ *    用 `$` 锚定的正则会直接匹配失败。
+ * 2. 区分 method —— 同一路径可能既有同步 LLM 的 POST，又有纯查询的 GET。
+ */
+function resolveTimeoutMs(url: string, method?: string): number {
+  const path = url.split('?')[0]
+  const verb = (method || 'GET').toUpperCase()
+  const hit = LONG_TIMEOUT_RULES.some(
+    rule => rule.pattern.test(path) && (!rule.methods || rule.methods.includes(verb)),
+  )
+  return hit ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -71,7 +94,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const doFetch = (): Promise<Response> => {
     // v3.1.2: 每次请求自带超时兜底（与调用方传入的 signal 取并集）
     // v4.2.2: 同步 LLM 端点走长超时，见 LONG_TIMEOUT_PATTERNS
-    const timeoutMs = resolveTimeoutMs(url)
+    const timeoutMs = resolveTimeoutMs(url, options?.method)
     const timeoutSignal = AbortSignal.timeout(timeoutMs)
     const signal = options?.signal
       ? AbortSignal.any([options.signal, timeoutSignal])
@@ -105,13 +128,13 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
           throw Object.assign(err2 as Error, { _aborted: true })
         }
         if ((err2 as any)?.name === 'TimeoutError') {
-          (err2 as Error).message = `请求超时（${resolveTimeoutMs(url) / 1000}s），请稍后重试`
+          (err2 as Error).message = `请求超时（${resolveTimeoutMs(url, options?.method) / 1000}s），请稍后重试`
         }
         throw err2
       }
     } else {
       if ((err as any)?.name === 'TimeoutError') {
-        (err as Error).message = `请求超时（${resolveTimeoutMs(url) / 1000}s），请稍后重试`
+        (err as Error).message = `请求超时（${resolveTimeoutMs(url, options?.method) / 1000}s），请稍后重试`
       }
       throw err
     }
