@@ -32,6 +32,31 @@ function forceLogout(): void {
 /** v3.1.2: 请求级超时兜底 — 后端连接池僵死等极端场景下请求不会永远挂起 */
 const DEFAULT_TIMEOUT_MS = 30000
 
+/**
+ * v4.2.2: 同步 LLM 端点单独放宽超时。
+ *
+ * 下面这些端点在**请求内直接 await LLM**（不是后台任务），实测可达 200s+：
+ *   POST /requirements/{id}/finalize                    → req_agent.parse 整体重解析
+ *   GET  /requirements/{id}/impact                      → impact_agent 模块 BFS + FP 依赖 BFS + KB 查询
+ *   POST /requirements/{id}/impact-analysis             → 同上（前端实际调用的是这个 POST 版本）
+ *   POST /requirements/{id}/fp/{fid}/impact-description → impact_agent 单 FP 影响分析
+ *
+ * 沿用 30s 会出现「后端仍在执行并最终入库、前端已报超时」，用户看到报错后重试，
+ * 还会叠加出并发分析任务。故按路径单独给 5 分钟。
+ */
+const LONG_TIMEOUT_MS = 300000
+const LONG_TIMEOUT_PATTERNS: RegExp[] = [
+  /^\/requirements\/[^/]+\/finalize$/,
+  /^\/requirements\/[^/]+\/impact$/,
+  /^\/requirements\/[^/]+\/impact-analysis$/,
+  /^\/requirements\/[^/]+\/fp\/[^/]+\/impact-description$/,
+]
+
+/** 按请求路径选择超时：命中同步 LLM 端点用长超时，其余保持默认 */
+function resolveTimeoutMs(url: string): number {
+  return LONG_TIMEOUT_PATTERNS.some(re => re.test(url)) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {}
   // DELETE 请求不需要 Content-Type
@@ -44,8 +69,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   }
 
   const doFetch = (): Promise<Response> => {
-    // v3.1.2: 每次请求自带 30s 超时（与调用方传入的 signal 取并集）
-    const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS)
+    // v3.1.2: 每次请求自带超时兜底（与调用方传入的 signal 取并集）
+    // v4.2.2: 同步 LLM 端点走长超时，见 LONG_TIMEOUT_PATTERNS
+    const timeoutMs = resolveTimeoutMs(url)
+    const timeoutSignal = AbortSignal.timeout(timeoutMs)
     const signal = options?.signal
       ? AbortSignal.any([options.signal, timeoutSignal])
       : timeoutSignal
@@ -78,13 +105,13 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
           throw Object.assign(err2 as Error, { _aborted: true })
         }
         if ((err2 as any)?.name === 'TimeoutError') {
-          (err2 as Error).message = `请求超时（${DEFAULT_TIMEOUT_MS / 1000}s），请稍后重试`
+          (err2 as Error).message = `请求超时（${resolveTimeoutMs(url) / 1000}s），请稍后重试`
         }
         throw err2
       }
     } else {
       if ((err as any)?.name === 'TimeoutError') {
-        (err as Error).message = `请求超时（${DEFAULT_TIMEOUT_MS / 1000}s），请稍后重试`
+        (err as Error).message = `请求超时（${resolveTimeoutMs(url) / 1000}s），请稍后重试`
       }
       throw err
     }
