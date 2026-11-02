@@ -10,6 +10,8 @@
 #   内网收到后，deploy.sh 会用已有 base 镜像缓存重建应用层。
 #   包大小通常 ~10-20MB（v4.2.1 起；此前曾因误打包 backend/models 等膨胀到 1.4GB）。
 #   体积守卫：打包后超过 300MB 会告警并列出 TOP5 大文件（防再次误打包）。
+#   v4.2.3：默认产出 **zip**（内网交付习惯）；无 zip 命令时用 python zipfile，
+#           两者都没有才回退 tar.gz 并告警。
 # ============================================================================
 set -euo pipefail
 
@@ -166,12 +168,49 @@ fi
 echo ""
 
 if [ "$COMPRESS" != "--no-compress" ]; then
-  echo "--- 压缩为 tar.gz ---"
+  echo "--- 压缩为 zip ---"
   cd "$(dirname "$OUTPUT_DIR")"
-  ARCHIVE="ai-testgen-offline-pack-update-${VERSION}.tar.gz"
-  tar czf "$ARCHIVE" "$(basename "$OUTPUT_DIR")"
-  echo "  压缩包: $(cd "$(dirname "$OUTPUT_DIR")" && pwd)/$ARCHIVE"
+  BASE_NAME="$(basename "$OUTPUT_DIR")"
+  ARCHIVE="${BASE_NAME}.zip"
+  rm -f "$ARCHIVE"
+
+  # v4.2.3：默认输出 zip（内网交付习惯）。
+  # 三种压缩器按可用性降级，避免"开发机没装 zip 就打不出包"：
+  #   1) zip 命令（Linux 服务器一般都有）
+  #   2) python zipfile（Git Bash on Windows 没有 zip，但一定有 python）
+  #   3) 都没有 → 回退 tar.gz 并明确告警
+  # ⚠️ 不用 PowerShell 的 Compress-Archive：Windows 版会把路径写成反斜杠，
+  #    在 Linux 上解压会得到 `ai-testgen-offline-pack-update-v4.2.3\code\...`
+  #    这种单层怪文件名。
+  if command -v zip >/dev/null 2>&1; then
+    zip -qr "$ARCHIVE" "$BASE_NAME"
+    COMPRESSOR="zip"
+  elif command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+    PY_BIN="$(command -v python3 2>/dev/null || command -v python)"
+    "$PY_BIN" - "$BASE_NAME" "$ARCHIVE" <<'PYEOF'
+import os
+import sys
+import zipfile
+
+base_name, archive = sys.argv[1], sys.argv[2]
+# 顶层保留目录名；路径统一正斜杠；中文名由 zipfile 自动打 UTF-8 标志位
+with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+    for root, _dirs, files in os.walk(base_name):
+        for name in files:
+            full = os.path.join(root, name)
+            zf.write(full, os.path.relpath(full, ".").replace("\\", "/"))
+PYEOF
+    COMPRESSOR="python zipfile"
+  else
+    echo "  ⚠️ 未找到 zip / python，回退 tar.gz"
+    tar czf "${BASE_NAME}.tar.gz" "$BASE_NAME"
+    ARCHIVE="${BASE_NAME}.tar.gz"
+    COMPRESSOR="tar.gz (回退)"
+  fi
+
+  echo "  压缩包: $(pwd)/$ARCHIVE"
   echo "  大小: $(du -h "$ARCHIVE" | cut -f1)"
+  echo "  压缩器: $COMPRESSOR"
 fi
 
 echo ""
