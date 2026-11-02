@@ -133,7 +133,9 @@ async def collect_accepted_issues(
 
 # v4.2.4：本段提示词已迁至 app/prompts/prompt_evolution.py 并由 prompt_manager 纳管，
 # 便于在管理台查看/调优「评审意见 → 生成规则」的合并质量。
-# 顶部 import 保留了 _INTEGRATION_SYSTEM_PROMPT 别名，下方调用点无需改动。
+# ⚠️ 顶部那个 import 只作**默认值兜底**：真正生效的取值必须走
+#    prompt_manager.get("prompt_evolution", "INTEGRATION_SYSTEM_PROMPT")（见下方调用点）。
+#    直接引用静态常量不会跟随管理台的修改——这正是本版首轮自己踩的坑。
 
 
 def _format_issues_for_llm(issues: list[dict], manual_notes: str) -> str:
@@ -195,10 +197,23 @@ async def evolve_prompt(
         f"【当前沉淀区段】\n{old_section or '（空，首次整合）'}\n\n"
         + _format_issues_for_llm(issues, manual_notes)
     )
+    # v4.2.4：必须经 prompt_manager 读取，管理台修改才会生效。
+    # 原来直接引用 _INTEGRATION_SYSTEM_PROMPT —— 那只是进程启动时绑定的默认字符串，
+    # DB 里的 override 改的是 prompt_overrides 表 + prompt_manager 的进程内缓存，
+    # 不会改变这个模块级变量，等于「注册了但永不生效」的假配置。
+    try:
+        from app.core import prompt_manager as _pm
+        _sys_prompt = (
+            _pm.get("prompt_evolution", "INTEGRATION_SYSTEM_PROMPT")
+            or _INTEGRATION_SYSTEM_PROMPT
+        )
+    except Exception:  # noqa: BLE001
+        _sys_prompt = _INTEGRATION_SYSTEM_PROMPT
+
     try:
         result = await llm_client.call_json(
             prompt=user_prompt,
-            system_prompt=_INTEGRATION_SYSTEM_PROMPT,
+            system_prompt=_sys_prompt,
             temperature=0.2,
             agent_name="PromptEvolution",
         )
