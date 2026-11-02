@@ -8,6 +8,8 @@ v2.3 新增版本管理：
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
@@ -27,10 +29,13 @@ class PromptUpdateRequest(BaseModel):
 @router.get("", response_model=ApiResponse, dependencies=[Depends(require_admin)])
 async def list_prompts():
     """列出所有可编辑的提示词（含当前值和默认值）。"""
+    # v4.2.3：prompt_manager 内部走 prompt_store 的同步 psycopg2，在 async 路由里直调
+    # 会占住事件循环；统一卸载到线程池。
+    prompts = await asyncio.to_thread(prompt_manager.list_prompts)
     return ApiResponse(
         success=True,
         message="ok",
-        data={"prompts": prompt_manager.list_prompts()},
+        data={"prompts": prompts},
     )
 
 
@@ -46,7 +51,11 @@ async def update_prompt(
     v2.3: 自动记录修改历史，含修改人、修改时间、修改前后值对比。
     """
     try:
-        prompt_manager.update(module, name, req.value, changed_by=current_user.username)
+        # v4.2.3：同步 psycopg2 写入，卸载到线程池
+        await asyncio.to_thread(
+            prompt_manager.update, module, name, req.value,
+            changed_by=current_user.username,
+        )
         logger.info("[API/prompts] 提示词已更新: {}.{} (by={})", module, name, current_user.username)
         await log_operation(
             username=current_user.username, user_id=current_user.user_id,
@@ -73,7 +82,11 @@ async def reset_prompt(
     v2.3: 自动记录恢复操作到历史表。
     """
     try:
-        prompt_manager.reset(module, name, changed_by=current_user.username)
+        # v4.2.3：同步 psycopg2 写入，卸载到线程池
+        await asyncio.to_thread(
+            prompt_manager.reset, module, name,
+            changed_by=current_user.username,
+        )
         logger.info("[API/prompts] 提示词已重置: {}.{} (by={})", module, name, current_user.username)
         await log_operation(
             username=current_user.username, user_id=current_user.user_id,
@@ -105,7 +118,10 @@ async def list_prompt_history(
     每条记录包含：修改时间、修改人、修改前后值、修改摘要。
     """
     try:
-        history = prompt_manager.list_history(module, name, limit=limit)
+        # v4.2.3：同步 psycopg2 查询，卸载到线程池
+        history = await asyncio.to_thread(
+            prompt_manager.list_history, module, name, limit=limit,
+        )
         return ApiResponse(
             success=True,
             message=f"找到 {len(history)} 条历史记录",
@@ -137,7 +153,11 @@ async def restore_prompt_from_history(
         ApiResponse: 含恢复后的提示词信息
     """
     try:
-        result = prompt_manager.restore_from_history(history_id, changed_by=current_user.username)
+        # v4.2.3：同步 psycopg2 写入，卸载到线程池
+        result = await asyncio.to_thread(
+            prompt_manager.restore_from_history, history_id,
+            changed_by=current_user.username,
+        )
         logger.info(
             "[API/prompts] 提示词已从历史恢复: {}.{} (history_id={}, by={})",
             module, name, history_id, current_user.username,
