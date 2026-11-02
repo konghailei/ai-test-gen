@@ -1204,15 +1204,23 @@ class ReqAgent:
             "preconditions": srr.get("preconditions", [])[:5],
         }, ensure_ascii=False)
 
-        prompt = pm.get("fp_agent", "FP_INTEGRATED_USER_PROMPT").format(
-            req_title=req_meta.get("title", "未知需求"),
-            modules=modules_str,
-            product_name=product_name,
-            overview_srr=overview_srr,
-            raw_text=raw_text[:96000],
-            existing_fp_hint=existing_fp_hint,
-            extra_constraint=extra_constraint,
-        )
+        # v4.2.4：不能用 str.format —— 该模板已注册到管理台（prompt_manager 第 113 行），
+        # 用户在线编辑时顺手写一段原生 JSON（如 {"fp_id": "FP-001"}）是极常见的操作，
+        # 而 format 会把 `"fp_id"` 当成字段名抛 KeyError，整个需求拆分直接失败。
+        # 改为逐占位符 replace：模板里出现任何其它花括号都不会被解析。
+        _prompt_tpl = pm.get("fp_agent", "FP_INTEGRATED_USER_PROMPT")
+        _prompt_vars = {
+            "req_title": req_meta.get("title", "未知需求"),
+            "modules": modules_str,
+            "product_name": product_name,
+            "overview_srr": overview_srr,
+            "raw_text": raw_text[:96000],
+            "existing_fp_hint": existing_fp_hint,
+            "extra_constraint": extra_constraint,
+        }
+        prompt = _prompt_tpl
+        for _key, _val in _prompt_vars.items():
+            prompt = prompt.replace("{" + _key + "}", str(_val))
 
         try:
             result = await self._llm.call_json(
